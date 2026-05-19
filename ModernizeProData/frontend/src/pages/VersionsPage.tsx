@@ -56,6 +56,9 @@ export function VersionsPage() {
     [snapshots, selectedSnapshotId],
   );
 
+  // AUDIT LOG 접기/펼치기 상태
+  const [auditLogExpanded, setAuditLogExpanded] = useState(true);
+
   // 통합된 Audit Log 상태 (프로젝트 전체)
   const [auditLogs, setAuditLogs] = useState<Array<{
     id: string;
@@ -348,10 +351,18 @@ export function VersionsPage() {
 
       {/* Version 페이지 하단 Audit Log */}
       <div style={styles.auditLogSection}>
-        <h3 style={styles.auditLogSectionTitle}>AUDIT LOG</h3>
-        <div style={styles.auditLogContainer}>
-          <AuditLogEntries auditLogs={auditLogs} />
+        <div 
+          onClick={() => setAuditLogExpanded(!auditLogExpanded)}
+          style={styles.auditLogHeader}
+        >
+          <span style={styles.auditLogArrow}>{auditLogExpanded ? '▾' : '▸'}</span>
+          <h3 style={styles.auditLogSectionTitle}>AUDIT LOG ({auditLogs.length})</h3>
         </div>
+        {auditLogExpanded && (
+          <div style={styles.auditLogContainer}>
+            <AuditLogEntries auditLogs={auditLogs} />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1024,8 +1035,21 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 16,
     paddingTop: 12,
   },
+  auditLogHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    cursor: 'pointer',
+    marginBottom: 8,
+  },
+  auditLogArrow: {
+    color: 'var(--text-4)',
+    fontSize: 10,
+    width: 10,
+    userSelect: 'none',
+  },
   auditLogSectionTitle: {
-    margin: '0 0 8px 0',
+    margin: 0,
     fontSize: 11,
     fontWeight: 700,
     color: 'var(--text-3)',
