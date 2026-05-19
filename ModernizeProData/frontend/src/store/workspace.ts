@@ -81,7 +81,10 @@ export interface Project {
   siteId: string;
   name: string;
   phase: ProjectPhase;
+  /** AS-IS 측 DDL 인포트로 채워지는 테이블 수. */
   tableCount: number;
+  /** TO-BE 측 DDL 인포트로 채워지는 테이블 수. */
+  tobeTableCount: number;
   ddlFiles: DdlFile[];
   /** 담당자 username — 작성 시 현재 로그인 사용자로 자동 설정. */
   owner: string;

@@ -39,6 +39,9 @@ public class Project {
     @Column(name = "table_count", nullable = false)
     private int tableCount;
 
+    @Column(name = "tobe_table_count", nullable = false)
+    private int tobeTableCount;
+
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "ddl_files", columnDefinition = "jsonb")
     private List<Map<String, Object>> ddlFiles;
@@ -66,6 +69,7 @@ public class Project {
         p.name = name;
         p.phase = "planning";
         p.tableCount = 0;
+        p.tobeTableCount = 0;
         p.ddlFiles = List.of();
         p.owner = owner;
         p.createdAt = OffsetDateTime.now();

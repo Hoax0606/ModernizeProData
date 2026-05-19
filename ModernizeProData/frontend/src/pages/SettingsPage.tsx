@@ -1,9 +1,14 @@
-import { useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useWorkspaceStore, type DdlFile, type Project, type ProjectPhase, type Site } from '../store/workspace';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { useWorkspaceStore, type Project, type ProjectPhase, type Site } from '../store/workspace';
 import { projectApi } from '../api/workspace';
 import { useAuthStore } from '../store/auth';
+import { DdlSchemaPanel } from '../components/DdlSchemaPanel';
 import { useT } from '../i18n';
+
+/** AppShell 의 AS-IS/TO-BE 램프 클릭 → navigate(..., { state: { highlightSide } }) 로 전달. */
+type HighlightSide = 'asis' | 'tobe';
+interface HighlightState { highlightSide?: HighlightSide }
 
 const ALL_PHASES: ProjectPhase[] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
 
@@ -20,6 +25,7 @@ type SectionKey = 'general' | 'source' | 'target' | 'schedule' | 'notify' | 'dan
  */
 export function SettingsPage() {
   const t = useT();
+  const location = useLocation();
   const projects = useWorkspaceStore((s) => s.projects);
   const sites = useWorkspaceStore((s) => s.sites);
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
@@ -27,6 +33,21 @@ export function SettingsPage() {
   const site = useMemo(() => sites.find((s) => s.id === project?.siteId) ?? null, [sites, project]);
 
   const [section, setSection] = useState<SectionKey>('general');
+  const [highlightSide, setHighlightSide] = useState<HighlightSide | null>(null);
+
+  // AppShell 의 AS-IS/TO-BE 램프에서 navigate(..., { state: { highlightSide } }) 로 들어왔을 때
+  // 해당 섹션으로 자동 이동 + 1초 amber pulse.
+  useEffect(() => {
+    const state = location.state as HighlightState | null;
+    const side = state?.highlightSide;
+    if (!side) return;
+    setSection(side === 'asis' ? 'source' : 'target');
+    setHighlightSide(side);
+    const t = window.setTimeout(() => setHighlightSide(null), 1000);
+    // location.state 를 history 에서 비워두 — 같은 페이지 재진입 시 재발 방지.
+    window.history.replaceState({}, '');
+    return () => window.clearTimeout(t);
+  }, [location.state]);
 
   if (!project) {
     return (
@@ -90,8 +111,8 @@ export function SettingsPage() {
 
       <div style={styles.content}>
         {section === 'general'  && <PSGeneral  project={project} site={site} />}
-        {section === 'source'   && <PSSource   project={project} />}
-        {section === 'target'   && <PSTarget   project={project} />}
+        {section === 'source'   && <PSSource   project={project} highlight={highlightSide === 'asis'} />}
+        {section === 'target'   && <PSTarget   project={project} highlight={highlightSide === 'tobe'} />}
         {section === 'schedule' && <PSSchedule project={project} />}
         {section === 'notify'   && <PSNotify   />}
         {section === 'danger'   && <PSDanger   project={project} />}
@@ -186,11 +207,11 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
 
 /* ─── AS-IS (Source) ─────────────────────────────────────── */
 
-function PSSource({ project }: { project: Project }) {
+function PSSource({ project, highlight }: { project: Project; highlight?: boolean }) {
   return (
     <>
       <PSHead title="AS-IS" desc="AS-IS DDL · 야간 추출 데이터 · 도구 내장 DB." />
-      <DdlCard project={project} side="asis" />
+      <DdlCard project={project} side="asis" highlight={highlight} />
       <CsvSourceCard />
       <StagingCard />
     </>
@@ -235,7 +256,7 @@ function StagingCard() {
 
 /* ─── TO-BE (Target) ─────────────────────────────────────── */
 
-function PSTarget({ project }: { project: Project }) {
+function PSTarget({ project, highlight }: { project: Project; highlight?: boolean }) {
   /* mock state — connection/credentials 는 Project 엔티티에 없음 */
   const [host, setHost] = useState('pg-core-01.kdb.internal:5432');
   const [database, setDatabase] = useState('core_banking');
@@ -282,7 +303,7 @@ function PSTarget({ project }: { project: Project }) {
 
       <CredsCard />
 
-      <DdlCard project={project} side="tobe" />
+      <DdlCard project={project} side="tobe" highlight={highlight} />
     </>
   );
 }
@@ -429,90 +450,8 @@ function CredsCard() {
 
 /* ─── DDL card — Source / Target 공용 ────────────────────── */
 
-function DdlCard({
-  project,
-  side,
-}: {
-  project: Project;
-  side: 'asis' | 'tobe';
-}) {
-  const addDdlFiles = useWorkspaceStore((s) => s.addDdlFiles);
-  const removeDdlFile = useWorkspaceStore((s) => s.removeDdlFile);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  const title = side === 'asis' ? 'AS-IS DDL' : 'TO-BE DDL';
-  const desc = side === 'asis'
-    ? 'AS-IS 시스템의 스키마. 매핑 탭의 컬럼 목록 기준이 됩니다.'
-    : '대상 스키마. 매핑·DDL 산출물 생성의 기준이 됩니다.';
-
-  /* AS-IS / TO-BE 구분 없이 한 컬렉션에 저장 — Project 엔티티가 단일 ddlFiles 필드만 가짐 */
-  const files = project.ddlFiles;
-
-  const handlePick = (filesList: FileList | null) => {
-    if (!filesList || filesList.length === 0) return;
-    const now = new Date().toISOString();
-    const incoming: DdlFile[] = Array.from(filesList).map((f) => ({
-      name: f.name,
-      size: f.size,
-      uploadedAt: now,
-    }));
-    addDdlFiles(project.id, incoming);
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  return (
-    <div style={files.length === 0 ? styles.amberCard : styles.card}>
-      <div style={styles.cardHeader}>
-        <div style={{ flex: 1 }}>
-          <div style={styles.cardTitle}>
-            {title}
-            <span style={{ marginLeft: 8 }}>
-              {files.length === 0
-                ? <span style={styles.statusBadgeWarn}>not imported</span>
-                : <span style={styles.statusBadgeOk}>imported · {files.length}</span>}
-            </span>
-          </div>
-          <div style={styles.cardDesc}>{desc}</div>
-        </div>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".sql,.ddl,.yaml,.yml,.txt"
-          multiple
-          onChange={(e) => handlePick(e.target.files)}
-          style={{ display: 'none' }}
-        />
-        <button onClick={() => fileInputRef.current?.click()} style={styles.btnPrimary}>
-          {files.length === 0 ? 'Choose DDL file' : 'Add more…'}
-        </button>
-      </div>
-
-      {files.length > 0 && (
-        <ul style={styles.ddlList}>
-          {files.map((f) => (
-            <li key={f.name} style={styles.ddlItem}>
-              <span style={styles.ddlIcon}>
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 1.5h5.5L11 4v8.5H3z" />
-                  <path d="M8.5 1.5V4H11" />
-                </svg>
-              </span>
-              <span style={styles.ddlName}>{f.name}</span>
-              <span style={styles.ddlSize}>{formatSize(f.size)}</span>
-              <span style={styles.ddlDate}>{new Date(f.uploadedAt).toLocaleDateString()}</span>
-              <button
-                onClick={() => removeDdlFile(project.id, f.name)}
-                style={styles.ddlRemoveBtn}
-                title="Remove"
-              >
-                ×
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
+function DdlCard({ project, side, highlight }: { project: Project; side: 'asis' | 'tobe'; highlight?: boolean }) {
+  return <DdlSchemaPanel project={project} side={side} highlight={highlight} />;
 }
 
 /* ─── Schedule ───────────────────────────────────────────── */

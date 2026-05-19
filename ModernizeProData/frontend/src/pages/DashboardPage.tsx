@@ -6,6 +6,7 @@ import { useUsersStore } from '../store/users';
 import { useAuthStore } from '../store/auth';
 import { CreateSiteModal } from '../components/CreateSiteModal';
 import { CreateProjectModal } from '../components/CreateProjectModal';
+import { DdlImportButton } from '../components/DdlImportButton';
 import { Toast } from '../components/Toast';
 import { useT } from '../i18n';
 
@@ -31,6 +32,7 @@ export function DashboardPage() {
   // 생성 직후 토스트 — sites/projects 수가 늘었을 때만 (삭제·전환 시엔 무음)
   const prevSitesCount = useRef(sites.length);
   const prevProjectsCount = useRef(projects.length);
+  const prevTableCount = useRef(project?.tableCount ?? 0);
   const [toast, setToast] = useState<{ msg: string } | null>(null);
 
   useEffect(() => {
@@ -47,12 +49,22 @@ export function DashboardPage() {
     prevProjectsCount.current = projects.length;
   }, [projects.length, project, t]);
 
+  // AS-IS DDL 인포트 성공 토스트 — tableCount 가 0 → 양수로 바뀐 순간 한 번만.
+  useEffect(() => {
+    const current = project?.tableCount ?? 0;
+    if (prevTableCount.current === 0 && current > 0) {
+      setToast({ msg: `${t('asisDdl.toast.success')} · ${current} tables` });
+    }
+    prevTableCount.current = current;
+  }, [project?.tableCount, t]);
+
   return (
     <>
       {!site ? <SiteOnboarding />
         : siteProjects.length === 0 ? <ProjectOnboarding siteName={site.name} />
         : !project ? <SiteOverview siteName={site.name} projects={siteProjects} />
-        : project.tableCount === 0 ? <MappingOnboarding projectName={project.name} />
+        : (project.tableCount === 0 || project.tobeTableCount === 0)
+          ? <MappingOnboarding project={project} />
         : <ProjectDashboard project={project} />}
       <Toast
         visible={!!toast}
@@ -123,12 +135,14 @@ function ProjectOnboarding({ siteName }: { siteName: string }) {
 
 /* ─── 3단계: 프로젝트 생성 직후 — DDL · 매핑 안내 ─────── */
 
-function MappingOnboarding({ projectName }: { projectName: string }) {
+function MappingOnboarding({ project }: { project: Project }) {
   const t = useT();
+  const asisDone = project.tableCount > 0;
+  const tobeDone = project.tobeTableCount > 0;
   return (
     <div style={styles.welcomeCard}>
       <div style={styles.welcomeIconWrap}><img src="/mpd.png" alt="" width={48} height={48} /></div>
-      <h1 style={styles.welcomeTitle}>{projectName} {t('onboarding.mappingTitle')}</h1>
+      <h1 style={styles.welcomeTitle}>{project.name} {t('onboarding.mappingTitle')}</h1>
       <p style={styles.welcomeDesc}>{t('onboarding.mappingDesc')}</p>
 
       <div style={styles.steps}>
@@ -137,9 +151,22 @@ function MappingOnboarding({ projectName }: { projectName: string }) {
         <Step n={3} title={t('onboarding.step.mapping')} active />
       </div>
 
-      <button style={styles.btnPrimary} disabled title="not implemented">
-        {t('onboarding.mappingCta')}
-      </button>
+      <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+        <DdlImportButton
+          projectId={project.id}
+          siteId={project.siteId}
+          side="asis"
+          disabled={asisDone}
+          label={asisDone ? t('asisDdl.button.imported') : undefined}
+        />
+        <DdlImportButton
+          projectId={project.id}
+          siteId={project.siteId}
+          side="tobe"
+          disabled={tobeDone}
+          label={tobeDone ? t('tobeDdl.button.imported') : undefined}
+        />
+      </div>
     </div>
   );
 }
