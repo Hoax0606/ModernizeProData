@@ -8,6 +8,7 @@ export interface MappingSnapshot {
   id: string;
   projectId: string;
   name: string;
+  version: string;
   description?: string;
   type: SnapshotType;
   status: SnapshotStatus;

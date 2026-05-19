@@ -1268,7 +1268,8 @@ const styles: Record<string, React.CSSProperties> = {
   content: {
     flex: 1,
     minHeight: 0,
-    overflow: 'auto',
+    overflowX: 'auto',
+    overflowY: 'auto',
     background: 'var(--bg)',
     padding: 18,
   },
