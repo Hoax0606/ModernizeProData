@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
-import { useWorkspaceStore, type Project, type ProjectPhase, type Site } from '../store/workspace';
+import { useMemo, useRef, useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useWorkspaceStore, type DdlFile, type Project, type ProjectPhase, type Site } from '../store/workspace';
+import { useSnapshotsStore, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
 import { projectApi } from '../api/workspace';
 import { useAuthStore } from '../store/auth';
 import { DdlSchemaPanel } from '../components/DdlSchemaPanel';
@@ -12,7 +13,7 @@ interface HighlightState { highlightSide?: HighlightSide }
 
 const ALL_PHASES: ProjectPhase[] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
 
-type SectionKey = 'general' | 'source' | 'target' | 'schedule' | 'notify' | 'danger';
+type SectionKey = 'general' | 'source' | 'target' | 'snapshots' | 'schedule' | 'notify' | 'danger';
 
 /**
  * Project Settings — 프로토타입의 6-section 구조.
@@ -69,6 +70,7 @@ export function SettingsPage() {
     { k: 'general',  l: 'General',       d: '프로젝트 이름·환경·생성일' },
     { k: 'source',   l: 'AS-IS',         d: 'AS-IS DDL · 추출 데이터 · 도구 내장 DB' },
     { k: 'target',   l: 'TO-BE',         d: '대상 DB · 인코딩 · 자격증명' },
+    { k: 'snapshots', l: 'Snapshots',    d: '매핑 스냅샷 버전 관리 · 승인 플로우' },
     { k: 'schedule', l: 'Schedule',      d: '야간 리허설 · 컷오버 · 외부 트리거' },
     { k: 'notify',   l: 'Notifications', d: '인앱 알림 이벤트 구독' },
     { k: 'danger',   l: 'Danger zone',   d: '프로젝트 삭제 등 위험 동작', danger: true },
@@ -110,12 +112,13 @@ export function SettingsPage() {
       </aside>
 
       <div style={styles.content}>
-        {section === 'general'  && <PSGeneral  project={project} site={site} />}
-        {section === 'source'   && <PSSource   project={project} highlight={highlightSide === 'asis'} />}
-        {section === 'target'   && <PSTarget   project={project} highlight={highlightSide === 'tobe'} />}
-        {section === 'schedule' && <PSSchedule project={project} />}
-        {section === 'notify'   && <PSNotify   />}
-        {section === 'danger'   && <PSDanger   project={project} />}
+        {section === 'general'   && <PSGeneral   project={project} site={site} />}
+        {section === 'source'    && <PSSource    project={project} />}
+        {section === 'target'    && <PSTarget    project={project} />}
+        {section === 'snapshots' && <PSSnapshots project={project} />}
+        {section === 'schedule'  && <PSSchedule  project={project} />}
+        {section === 'notify'    && <PSNotify    />}
+        {section === 'danger'    && <PSDanger    project={project} />}
       </div>
     </div>
   );
@@ -622,6 +625,253 @@ function PSNotify() {
           <PSInput value="90 days" mono width={160} />
         </PSRow>
       </PSCard>
+    </>
+  );
+}
+
+/* ─── Snapshots ─────────────────────────────────────────── */
+
+function PSSnapshots({ project }: { project: Project }) {
+  const user = useAuthStore((s) => s.user);
+  const allSnapshots = useSnapshotsStore((s) => s.snapshots);
+  const fetchByProject = useSnapshotsStore((s) => s.fetchByProject);
+  const snapshots = useMemo(
+    () => allSnapshots.filter((s) => s.projectId === project.id).slice().reverse(),
+    [allSnapshots, project.id],
+  );
+  const createSnapshot = useSnapshotsStore((s) => s.createSnapshot);
+  const requestSnapshot = useSnapshotsStore((s) => s.requestSnapshot);
+  const deleteSnapshot = useSnapshotsStore((s) => s.deleteSnapshot);
+
+  // 마운트 시 + 프로젝트 변경 시 서버에서 fetch
+  useEffect(() => {
+    if (project.id) void fetchByProject(project.id);
+  }, [project.id, fetchByProject]);
+
+  // UI 상태
+  const [selectedSnapshotId, setSelectedSnapshotId] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newDesc, setNewDesc] = useState('');
+  const [requestId, setRequestId] = useState<string | null>(null);
+
+  const selectedSnapshot = useMemo(
+    () => snapshots.find((s) => s.id === selectedSnapshotId) ?? null,
+    [snapshots, selectedSnapshotId],
+  );
+
+  // 첫 번째 스냅샷을 기본 선택
+  useEffect(() => {
+    if (snapshots.length > 0 && !selectedSnapshotId) {
+      setSelectedSnapshotId(snapshots[0].id);
+    }
+  }, [snapshots, selectedSnapshotId]);
+
+  const resetCreate = () => {
+    setCreateOpen(false);
+    setNewName('');
+    setNewDesc('');
+  };
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = newName.trim();
+    if (!name) return;
+    const newSnapshot = await createSnapshot(project.id, {
+      name,
+      description: newDesc.trim() || undefined,
+      tableCount: project.tableCount,
+      ruleCount: 0,
+    });
+    setSelectedSnapshotId(newSnapshot.id);
+    resetCreate();
+  };
+
+  const handleRequest = async (id: string) => {
+    await requestSnapshot(id);
+    setRequestId(null);
+  };
+
+  function statusTone(s: SnapshotStatus): React.CSSProperties {
+    switch (s) {
+      case 'draft':    return { background: 'var(--panel-2)', color: 'var(--text-3)', borderColor: 'var(--border-strong)' };
+      case 'pending':  return { background: 'var(--amber-50)', color: 'var(--amber)', borderColor: 'var(--amber)' };
+      case 'approved': return { background: 'var(--green-50)', color: 'var(--green)', borderColor: 'var(--green)' };
+      case 'rejected': return { background: 'var(--red-50)',   color: 'var(--red)',   borderColor: 'var(--red)' };
+    }
+  }
+
+  return (
+    <>
+      <PSHead
+        title="Snapshots"
+        desc="매핑 스냅샷 버전 관리. v1.0 부터 시작해서 자동으로 버전이 증가합니다."
+        actions={
+          <button onClick={() => setCreateOpen(!createOpen)} style={styles.btnPrimary}>
+            {createOpen ? 'Cancel' : '+ Create snapshot'}
+          </button>
+        }
+      />
+
+      {createOpen && (
+        <form onSubmit={handleCreate} style={styles.snapshotCreateForm}>
+          <div style={styles.snapshotCreateTitle}>New snapshot</div>
+          <input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            placeholder="Split customer into customer + customer_contact, unified transaction tables"
+            style={styles.snapshotCreateInput}
+            autoFocus
+            required
+          />
+          <textarea
+            value={newDesc}
+            onChange={(e) => setNewDesc(e.target.value)}
+            placeholder="Description (optional)"
+            style={styles.snapshotCreateTextarea}
+          />
+          <div style={styles.snapshotCreateActions}>
+            <button type="button" onClick={resetCreate} style={styles.btnGhost}>Cancel</button>
+            <button type="submit" style={{ ...styles.btnPrimary, ...(newName.trim() ? {} : styles.btnDisabled) }} disabled={!newName.trim()}>
+              Create
+            </button>
+          </div>
+        </form>
+      )}
+
+      <div style={styles.snapshotsContainer}>
+        {/* 왼쪽: 스냅샷 목록 */}
+        <div style={styles.snapshotsList}>
+          {snapshots.length === 0 ? (
+            <div style={styles.emptySnapshots}>
+              <div style={styles.emptySnapshotsTitle}>No snapshots yet</div>
+              <div style={styles.emptySnapshotsDesc}>
+                Create your first snapshot to start version control
+              </div>
+            </div>
+          ) : (
+            snapshots.map((s) => (
+              <div
+                key={s.id}
+                style={{
+                  ...styles.snapshotItem,
+                  ...(selectedSnapshotId === s.id ? styles.snapshotItemActive : {}),
+                }}
+                onClick={() => setSelectedSnapshotId(s.id)}
+              >
+                <div style={styles.snapshotVersion}>
+                  <span style={styles.versionText}>{s.version}</span>
+                  <span style={{ ...styles.statusBadgeSmall, ...statusTone(s.status) }}>
+                    {s.status.toUpperCase()}
+                  </span>
+                </div>
+                <div style={styles.snapshotName}>{s.name}</div>
+                <div style={styles.snapshotMeta}>
+                  {s.createdBy} · {new Date(s.createdAt).toLocaleDateString()}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* 오른쪽: 선택된 스냅샷 상세 */}
+        <div style={styles.snapshotDetail}>
+          {selectedSnapshot ? (
+            <>
+              <div style={styles.snapshotDetailHeader}>
+                <div>
+                  <h3 style={styles.snapshotDetailTitle}>
+                    {selectedSnapshot.name}
+                    <span style={styles.versionBadge}>{selectedSnapshot.version}</span>
+                  </h3>
+                  <div style={styles.snapshotDetailMeta}>
+                    created {new Date(selectedSnapshot.createdAt).toLocaleString()} by {selectedSnapshot.createdBy}
+                  </div>
+                </div>
+              </div>
+
+              {selectedSnapshot.description && (
+                <div style={styles.snapshotDescription}>
+                  {selectedSnapshot.description}
+                </div>
+              )}
+
+              <div style={styles.snapshotStats}>
+                <div style={styles.statItem}>
+                  <span style={styles.statLabel}>Tables</span>
+                  <span style={styles.statValue}>{selectedSnapshot.tableCount}</span>
+                </div>
+                <div style={styles.statItem}>
+                  <span style={styles.statLabel}>Rules</span>
+                  <span style={styles.statValue}>{selectedSnapshot.ruleCount}</span>
+                </div>
+                <div style={styles.statItem}>
+                  <span style={styles.statLabel}>Status</span>
+                  <span style={{ ...styles.statusBadge, ...statusTone(selectedSnapshot.status) }}>
+                    {selectedSnapshot.status.toUpperCase()}
+                  </span>
+                </div>
+              </div>
+
+              {/* Request/Approval 영역 */}
+              {requestId === selectedSnapshot.id ? (
+                <div style={styles.requestConfirm}>
+                  <div style={styles.requestTitle}>Request approval</div>
+                  <div style={styles.requestDesc}>
+                    Send snapshot <b>{selectedSnapshot.name}</b> for review?
+                  </div>
+                  <div style={styles.requestActions}>
+                    <button onClick={() => setRequestId(null)} style={styles.btnGhost}>Cancel</button>
+                    <button onClick={() => handleRequest(selectedSnapshot.id)} style={styles.btnPrimary}>
+                      Confirm request
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div style={styles.reviewSection}>
+                  {selectedSnapshot.status === 'draft' && (
+                    <button onClick={() => setRequestId(selectedSnapshot.id)} style={styles.btnPrimary}>
+                      Request changes
+                    </button>
+                  )}
+                  {selectedSnapshot.status === 'pending' && (
+                    <div style={styles.pendingReview}>
+                      <div style={styles.pendingIcon}>⏳</div>
+                      <div>
+                        <div style={styles.pendingTitle}>Pending review</div>
+                        <div style={styles.pendingDesc}>Waiting for coordinator approval</div>
+                      </div>
+                    </div>
+                  )}
+                  {selectedSnapshot.status === 'approved' && selectedSnapshot.approvedBy && (
+                    <div style={styles.approvedSection}>
+                      <div style={styles.approvedTitle}>✓ Approved</div>
+                      <div style={styles.approvedDesc}>
+                        by {selectedSnapshot.approvedBy} on {selectedSnapshot.approvedAt && new Date(selectedSnapshot.approvedAt).toLocaleDateString()}
+                      </div>
+                    </div>
+                  )}
+                  {selectedSnapshot.status === 'rejected' && (
+                    <div style={styles.rejectedSection}>
+                      <div style={styles.rejectedTitle}>✗ Rejected</div>
+                      <div style={styles.rejectedDesc}>
+                        {selectedSnapshot.rejectedBy && <>by {selectedSnapshot.rejectedBy}</>}
+                        {selectedSnapshot.rejectionReason && (
+                          <div style={styles.rejectionReason}>{selectedSnapshot.rejectionReason}</div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          ) : (
+            <div style={styles.noSelection}>
+              <div>Select a snapshot to view details</div>
+            </div>
+          )}
+        </div>
+      </div>
     </>
   );
 }
