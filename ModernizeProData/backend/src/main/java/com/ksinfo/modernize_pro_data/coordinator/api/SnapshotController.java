@@ -74,10 +74,16 @@ public class SnapshotController {
         if (!projectRepository.existsById(projectId)) {
             throw new ApiException("PROJECT_NOT_FOUND", "프로젝트를 찾을 수 없습니다", HttpStatus.NOT_FOUND);
         }
+        
+        // 다음 버전 자동 생성 (v1.0 -> v1.1 -> v1.2...)
+        String nextVersion = snapshotRepository.findLatestByProjectId(projectId)
+                .map(latest -> Snapshot.generateNextVersion(latest.getVersion()))
+                .orElse("v1.0");
+        
         Snapshot s = Snapshot.create(projectId, req.name(), req.description(),
-                req.type(), auth.getName(), req.tableCount(), req.ruleCount());
+                req.type(), auth.getName(), req.tableCount(), req.ruleCount(), nextVersion);
         snapshotRepository.save(s);
-        log.info("Snapshot created: {} ({}) in project {}", s.getName(), s.getType(), projectId);
+        log.info("Snapshot created: {} ({}) v{} in project {}", s.getName(), s.getType(), s.getVersion(), projectId);
         return ApiResponse.ok(s);
     }
 
