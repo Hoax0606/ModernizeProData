@@ -10,6 +10,6 @@ public interface SnapshotRepository extends JpaRepository<Snapshot, String> {
     List<Snapshot> findByProjectId(String projectId);
     List<Snapshot> findByProjectIdIn(List<String> projectIds);
     
-    @Query("SELECT s FROM Snapshot s WHERE s.projectId = ?1 ORDER BY s.version DESC LIMIT 1")
+    @Query("SELECT s FROM Snapshot s WHERE s.projectId = ?1 ORDER BY s.createdAt DESC LIMIT 1")
     Optional<Snapshot> findLatestByProjectId(String projectId);
 }

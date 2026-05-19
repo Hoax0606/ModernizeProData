@@ -75,9 +75,11 @@ public class SnapshotController {
             throw new ApiException("PROJECT_NOT_FOUND", "프로젝트를 찾을 수 없습니다", HttpStatus.NOT_FOUND);
         }
         
-        // 다음 버전 자동 생성 (v1.0 -> v1.1 -> v1.2...)
+        // 다음 버전 자동 생성:
+        //   직전 snapshot 이 approved → major bump (v1.x → v2.0)
+        //   그 외 (rejected/pending/draft) → minor bump (v1.0 → v1.1)
         String nextVersion = snapshotRepository.findLatestByProjectId(projectId)
-                .map(latest -> Snapshot.generateNextVersion(latest.getVersion()))
+                .map(latest -> Snapshot.generateNextVersion(latest.getVersion(), latest.getStatus()))
                 .orElse("v1.0");
         
         Snapshot s = Snapshot.create(projectId, req.name(), req.description(),

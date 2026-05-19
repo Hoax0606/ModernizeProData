@@ -90,28 +90,36 @@ public class Snapshot {
                                   String type, String createdBy, int tableCount, int ruleCount) {
         return create(projectId, name, description, type, createdBy, tableCount, ruleCount, "v1.0");
     }
-    
-    public static String generateNextVersion(String latestVersion) {
+
+    /**
+     * 다음 버전 번호를 결정한다.
+     *   - 직전 snapshot 이 approved 이면 major bump (v1.x → v2.0)
+     *   - 그 외 (rejected / pending / draft) 면 minor bump (v1.0 → v1.1)
+     */
+    public static String generateNextVersion(String latestVersion, String latestStatus) {
         if (latestVersion == null || latestVersion.isEmpty()) {
             return "v1.0";
         }
-        
-        // v1.2 -> 1.2 -> [1, 2] -> 1.3 -> v1.3
+
+        // v1.2 -> 1.2 -> [1, 2]
         if (latestVersion.startsWith("v")) {
             latestVersion = latestVersion.substring(1);
         }
-        
+
         String[] parts = latestVersion.split("\\.");
         if (parts.length >= 2) {
             try {
                 int major = Integer.parseInt(parts[0]);
                 int minor = Integer.parseInt(parts[1]);
+                if ("approved".equalsIgnoreCase(latestStatus)) {
+                    return String.format("v%d.0", major + 1);
+                }
                 return String.format("v%d.%d", major, minor + 1);
             } catch (NumberFormatException e) {
                 // fallback
             }
         }
-        
+
         return "v1.0";
     }
 }

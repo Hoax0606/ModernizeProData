@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useWorkspaceStore, type ProjectPhase } from '../store/workspace';
 import { useSnapshotsStore, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
 import { useAuthStore } from '../store/auth';
@@ -43,6 +43,51 @@ export function VersionsPage() {
   const [createType, setCreateType] = useState<SnapshotType>('mapping');
   const [newName, setNewName] = useState('');
   const [newDesc, setNewDesc] = useState('');
+  const [descError, setDescError] = useState('');
+  const nameRef = useRef<HTMLTextAreaElement | null>(null);
+  const descRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Snapshot name / Description 박스가 줄넘김에 따라 자동 확장
+  useEffect(() => {
+    const el = nameRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = el.scrollHeight + 'px';
+  }, [newName, createOpen]);
+
+  useEffect(() => {
+    const el = descRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = el.scrollHeight + 'px';
+  }, [newDesc, createOpen]);
+
+  // Description 입력 규칙: 같은 글자 10번 이상 연속 금지 + 첫째 줄만 20자 초과 시 자동 개행
+  const handleDescChange = (raw: string) => {
+    if (/(.)\1{9,}/.test(raw)) {
+      setDescError('같은 글자를 10번 이상 연속으로 입력할 수 없습니다.');
+      return;
+    }
+    setDescError('');
+    const nlIdx = raw.indexOf('\n');
+    if (nlIdx === -1) {
+      // 아직 한 줄. 20자 넘으면 첫 20자로 끊고 나머지를 다음 줄로
+      if (raw.length > 20) {
+        setNewDesc(raw.slice(0, 20) + '\n' + raw.slice(20));
+      } else {
+        setNewDesc(raw);
+      }
+      return;
+    }
+    // 이미 줄바꿈이 있음 — 첫 줄만 20자 제한, 그 뒤는 자유
+    const firstLine = raw.slice(0, nlIdx);
+    const rest = raw.slice(nlIdx); // '\n' 포함
+    if (firstLine.length > 20) {
+      setNewDesc(firstLine.slice(0, 20) + '\n' + firstLine.slice(20) + rest);
+    } else {
+      setNewDesc(raw);
+    }
+  };
 
   // cutover snapshot 확인 다이얼로그
   const [cutoverConfirmOpen, setCutoverConfirmOpen] = useState(false);
@@ -54,12 +99,20 @@ export function VersionsPage() {
     [snapshots, selectedSnapshotId],
   );
 
+  // 페이지 진입·snapshots fetch 완료 후, 선택된 게 없으면 최신 snapshot 자동 선택
+  useEffect(() => {
+    if (snapshots.length === 0) return;
+    if (selectedSnapshotId && snapshots.some((s) => s.id === selectedSnapshotId)) return;
+    setSelectedSnapshotId(snapshots[0].id);
+  }, [snapshots, selectedSnapshotId]);
+
   // AUDIT LOG 접기/펼치기 상태
   const [auditLogExpanded, setAuditLogExpanded] = useState(true);
 
   // Audit Log — store 에서 가져옴 (localStorage 영속, 페이지 이동에도 보존)
   const allAuditLogs = useAuditLogStore((s) => s.logs);
   const addAuditLogEntry = useAuditLogStore((s) => s.add);
+  const clearAuditLogByProject = useAuditLogStore((s) => s.clearByProject);
   const auditLogs = useMemo(
     () => allAuditLogs.filter((l) => l.projectId === activeProjectId),
     [allAuditLogs, activeProjectId],
@@ -100,6 +153,7 @@ export function VersionsPage() {
     setCreateType('mapping');
     setNewName('');
     setNewDesc('');
+    setDescError('');
   };
 
   const openCreate = (type: SnapshotType) => {
@@ -134,13 +188,19 @@ export function VersionsPage() {
       // 방금 만든 snapshot 을 자동 선택
       setSelectedSnapshotId(newSnapshot.id);
 
-      // Audit log 기록
-      addAuditLog('snapshot created', `Created new ${createType} snapshot: ${name}`, newSnapshot.version || 'v1.0');
+      // Audit log 기록 (description 이 있으면 전체 포함)
+      const actionLabel = createType === 'cutover' ? 'Cutover Snapshot created' : 'Snapshot created';
+      const desc = newDesc.trim();
+      const auditDesc = desc
+        ? `Created new ${createType} snapshot: ${name}\n${desc}`
+        : `Created new ${createType} snapshot: ${name}`;
+      addAuditLog(actionLabel, auditDesc, newSnapshot.version || 'v1.0');
 
       resetCreate();
     } catch (error) {
       console.error('Failed to create snapshot:', error);
-      addAuditLog('snapshot creation failed', `Failed to create snapshot: ${name}`);
+      const failLabel = createType === 'cutover' ? 'Cutover Snapshot creation failed' : 'Snapshot creation failed';
+      addAuditLog(failLabel, `Failed to create snapshot: ${name}`);
     }
   };
 
@@ -172,6 +232,7 @@ export function VersionsPage() {
             onClick={async () => {
               if (!confirm('Delete all snapshots in this project?')) return;
               for (const s of snapshots) await deleteSnapshot(s.id);
+              if (activeProjectId) clearAuditLogByProject(activeProjectId);
             }}
             style={{ ...styles.btnGhost, color: 'var(--red)', borderColor: 'var(--red)' }}
           >
@@ -179,7 +240,7 @@ export function VersionsPage() {
           </button>
         )}
         <div style={{ flex: 1 }} />
-        {!createOpen ? (
+        {!createOpen && (
           <>
             <button onClick={() => openCreate('mapping')} style={styles.btnPrimary}>
               {t('versions.create')}
@@ -191,10 +252,6 @@ export function VersionsPage() {
               {t('versions.createCutover')}
             </button>
           </>
-        ) : (
-          <button onClick={resetCreate} style={styles.btnGhost}>
-            {t('versions.cancelCreate')}
-          </button>
         )}
       </div>
 
@@ -211,33 +268,53 @@ export function VersionsPage() {
       )}
 
       {createOpen && (
-        <form onSubmit={handleCreate} style={styles.createForm}>
+        <form onSubmit={handleCreate} style={{
+          ...styles.createForm,
+          ...(createType === 'cutover' ? {
+            background: 'var(--red-50)',
+            borderColor: 'var(--red)',
+          } : {}),
+        }}>
           <div style={{ fontSize: 11, fontWeight: 700, fontFamily: 'var(--mono)', color: createType === 'cutover' ? 'var(--red)' : 'var(--navy)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
             {createType === 'cutover' ? t('versions.type.cutover') : t('versions.type.mapping')} snapshot
           </div>
           <div style={styles.createRow}>
             <Field label={t('versions.create.name')}>
-              <input
+              <textarea
+                ref={nameRef}
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
                 placeholder={t('versions.create.namePh')}
                 style={styles.input}
                 autoFocus
                 required
+                rows={1}
               />
             </Field>
             <Field label={t('versions.create.desc')}>
-              <input
-                value={newDesc}
-                onChange={(e) => setNewDesc(e.target.value)}
-                placeholder={t('versions.create.descPh')}
-                style={styles.input}
-              />
+              <div style={{ position: 'relative', width: '100%' }}>
+                <textarea
+                  ref={descRef}
+                  value={newDesc}
+                  onChange={(e) => handleDescChange(e.target.value)}
+                  style={styles.textareaDesc}
+                  rows={1}
+                />
+                {!newDesc && (
+                  <div style={styles.textareaPlaceholder}>
+                    {t('versions.create.descPh')}
+                  </div>
+                )}
+                {descError && <div style={styles.descError}>{descError}</div>}
+              </div>
             </Field>
           </div>
           <div style={styles.createActions}>
             <button type="submit" style={{ ...styles.btnPrimary, ...(newName.trim() ? {} : styles.btnDisabled) }} disabled={!newName.trim()}>
               {t('versions.create.submit')}
+            </button>
+            <button type="button" onClick={resetCreate} style={styles.btnGhost}>
+              {t('versions.cancelCreate')}
             </button>
           </div>
         </form>
@@ -275,18 +352,21 @@ export function VersionsPage() {
                     <div style={styles.snapshotItemHeader}>
                       <div style={styles.snapshotVersion}>
                         {s.version || `v1.${snapshots.length - snapshots.indexOf(s) - 1}`}
+                        {s.type === 'cutover' && (
+                          <span style={styles.cutoverTag}>Cutover snapshot</span>
+                        )}
+                        {s.status !== 'draft' && (
+                          <span style={{ ...styles.statusBadgeSmall, ...statusTone(s.status) }}>
+                            {s.status.toUpperCase()}
+                          </span>
+                        )}
                       </div>
-                      {s.status !== 'draft' && (
-                        <span style={{ ...styles.statusBadgeSmall, ...statusTone(s.status) }}>
-                          {s.status.toUpperCase()}
-                        </span>
-                      )}
                     </div>
                     
                     <div style={styles.snapshotItemName}>{s.name}</div>
                     
                     {s.description && (
-                      <div style={styles.snapshotItemDesc}>{s.description}</div>
+                      <div style={styles.snapshotItemDesc}>{s.description.split('\n')[0]}</div>
                     )}
                     
                     <div style={styles.snapshotItemMeta}>
@@ -307,7 +387,6 @@ export function VersionsPage() {
             <SnapshotDetailView snapshot={selectedSnapshot} onRequest={() => handleRequest(selectedSnapshot.id)} />
           ) : (
             <div style={styles.noSelectionMessage}>
-              <div style={styles.noSelectionIcon}>📋</div>
               <div style={styles.noSelectionTitle}>Select a snapshot</div>
               <div style={styles.noSelectionDesc}>Choose a snapshot from the list to view its details and current status</div>
             </div>
@@ -363,24 +442,49 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function SnapshotDetailView({ snapshot, onRequest }: { 
-  snapshot: { 
-    id: string; 
-    name: string; 
-    version?: string; 
-    description?: string; 
-    status: SnapshotStatus; 
-    createdBy: string; 
-    createdAt: string; 
-    approvedBy?: string; 
-    approvedAt?: string; 
-    rejectedBy?: string; 
-    rejectedAt?: string; 
-    rejectionReason?: string; 
-    tableCount: number; 
-    ruleCount: number; 
-  }; 
-  onRequest: () => void; 
+function ChangeRow({ kind, table, detail }: { kind: 'added' | 'modified'; table: string; detail: string }) {
+  const isAdded = kind === 'added';
+  return (
+    <div style={{
+      ...styles.changeRow,
+      borderLeft: `3px solid ${isAdded ? 'var(--green)' : 'var(--amber)'}`,
+    }}>
+      <span style={{ ...styles.changeSymbol, color: isAdded ? 'var(--green)' : 'var(--amber)' }}>
+        {isAdded ? '+' : '~'}
+      </span>
+      <span style={{
+        ...styles.changeBadgePill,
+        background: isAdded ? 'var(--green-50)' : 'var(--amber-50)',
+        color: isAdded ? 'var(--green)' : 'var(--amber)',
+        borderColor: isAdded ? 'var(--green)' : 'var(--amber)',
+      }}>
+        {isAdded ? 'ADDED' : 'MODIFIED'}
+      </span>
+      <span style={styles.changeTable}>{table}</span>
+      <span style={styles.changeDetailInline}>{detail}</span>
+    </div>
+  );
+}
+
+function SnapshotDetailView({ snapshot, onRequest }: {
+  snapshot: {
+    id: string;
+    name: string;
+    version?: string;
+    description?: string;
+    status: SnapshotStatus;
+    type?: SnapshotType;
+    createdBy: string;
+    createdAt: string;
+    approvedBy?: string;
+    approvedAt?: string;
+    rejectedBy?: string;
+    rejectedAt?: string;
+    rejectionReason?: string;
+    tableCount: number;
+    ruleCount: number;
+  };
+  onRequest: () => void;
 }) {
   const t = useT();
   const user = useAuthStore((s) => s.user);
@@ -395,8 +499,9 @@ function SnapshotDetailView({ snapshot, onRequest }: {
           <div style={styles.detailVersion}>
             {snapshot.version || 'v1.0'}
           </div>
-        </div>
-        <div style={styles.detailStatus}>
+          {snapshot.type === 'cutover' && (
+            <span style={styles.cutoverTagLarge}>Cutover snapshot</span>
+          )}
           {snapshot.status !== 'draft' && (
             <span style={{ ...styles.statusBadge, ...statusTone(snapshot.status) }}>
               {snapshot.status.toUpperCase()}
@@ -428,7 +533,7 @@ function SnapshotDetailView({ snapshot, onRequest }: {
         </div>
       </div>
 
-      {/* 설명 */}
+      {/* 설명 — 전체 표시 */}
       {snapshot.description && (
         <div style={styles.detailSection}>
           <h3 style={styles.detailSectionTitle}>Description</h3>
@@ -441,14 +546,18 @@ function SnapshotDetailView({ snapshot, onRequest }: {
         <h3 style={styles.detailSectionTitle}>Approval Status</h3>
         <div style={styles.approvalSection}>
           {snapshot.status === 'draft' && (
-            <div style={styles.statusCard}>
-              <div style={styles.statusIcon}>📝</div>
+            <div style={{
+              ...styles.statusCard,
+              ...(confirmingRequest ? {
+                background: 'var(--green-50)',
+                borderColor: 'var(--green)',
+              } : {}),
+            }}>
               <div style={styles.statusContent}>
-                <div style={styles.statusTitle}>Draft</div>
                 <div style={styles.statusDesc}>
                   {confirmingRequest
-                    ? <>Request approval for <b>{snapshot.name}</b>?</>
-                    : 'This snapshot is ready to be submitted for review'}
+                    ? <><b>{snapshot.name}</b> 스냅샷에 대해 승인을 요청하시겠습니까?</>
+                    : '이 스냅샷은 승인 요청 준비가 되었습니다.'}
                 </div>
               </div>
               {confirmingRequest ? (
@@ -476,40 +585,37 @@ function SnapshotDetailView({ snapshot, onRequest }: {
           
           {snapshot.status === 'pending' && (
             <div style={styles.statusCard}>
-              <div style={styles.statusIcon}>⏳</div>
               <div style={styles.statusContent}>
-                <div style={styles.statusTitle}>Pending Review</div>
-                <div style={styles.statusDesc}>Waiting for coordinator approval</div>
+                <div style={styles.statusTitle}>승인 대기 중</div>
+                <div style={styles.statusDesc}>코디네이터의 승인을 기다리고 있습니다.</div>
               </div>
             </div>
           )}
-          
+
           {snapshot.status === 'approved' && (
             <div style={styles.statusCard}>
-              <div style={styles.statusIcon}>✅</div>
               <div style={styles.statusContent}>
-                <div style={styles.statusTitle}>Approved</div>
+                <div style={styles.statusTitle}>승인됨</div>
                 <div style={styles.statusDesc}>
                   {snapshot.approvedBy && snapshot.approvedAt && (
-                    <>Approved by {snapshot.approvedBy} on {new Date(snapshot.approvedAt).toLocaleDateString()}</>
+                    <>{new Date(snapshot.approvedAt).toLocaleDateString()}에 {snapshot.approvedBy}님이 승인했습니다.</>
                   )}
                 </div>
               </div>
             </div>
           )}
-          
+
           {snapshot.status === 'rejected' && (
             <div style={styles.statusCard}>
-              <div style={styles.statusIcon}>❌</div>
               <div style={styles.statusContent}>
-                <div style={styles.statusTitle}>Rejected</div>
+                <div style={styles.statusTitle}>반려됨</div>
                 <div style={styles.statusDesc}>
                   {snapshot.rejectedBy && snapshot.rejectedAt && (
-                    <>Rejected by {snapshot.rejectedBy} on {new Date(snapshot.rejectedAt).toLocaleDateString()}</>
+                    <>{new Date(snapshot.rejectedAt).toLocaleDateString()}에 {snapshot.rejectedBy}님이 반려했습니다.</>
                   )}
                   {snapshot.rejectionReason && (
                     <div style={styles.rejectionReason}>
-                      Reason: {snapshot.rejectionReason}
+                      사유: {snapshot.rejectionReason}
                     </div>
                   )}
                 </div>
@@ -522,7 +628,10 @@ function SnapshotDetailView({ snapshot, onRequest }: {
       {/* 변경사항 vs 이전 버전 */}
       <div style={styles.detailSection}>
         <div style={styles.changesSectionHeader}>
-          <h3 style={styles.detailSectionTitle}>Changes vs Previous (7)</h3>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <h3 style={{ ...styles.detailSectionTitle, margin: 0 }}>Changes (7)</h3>
+            <span style={styles.changeUiOnlyBadge}>UI only</span>
+          </div>
           <div style={styles.changesSummary}>
             <span style={styles.summaryBadgeAdded}>4 ADDED</span>
             <span style={styles.summaryBadgeModified}>3 MODIFIED</span>
@@ -530,68 +639,13 @@ function SnapshotDetailView({ snapshot, onRequest }: {
         </div>
         
         <div style={styles.changesContainer}>
-          <div style={styles.changeEntry}>
-            <div style={styles.changeHeader}>
-              <span style={styles.changeTypeAdded}>+</span>
-              <span style={styles.changeStatus}>ADDED</span>
-              <span style={styles.changeTable}>public.transaction_all</span>
-            </div>
-            <div style={styles.changeDetail}>New UNION target (t23 to t24)</div>
-          </div>
-
-          <div style={styles.changeEntry}>
-            <div style={styles.changeHeader}>
-              <span style={styles.changeTypeModified}>~</span>
-              <span style={styles.changeStatus}>MODIFIED</span>
-              <span style={styles.changeTable}>public.customer bindings</span>
-            </div>
-            <div style={styles.changeDetail}>op CUST_PROFILE → cc CUST_CONTACT (was single-source)</div>
-          </div>
-
-          <div style={styles.changeEntry}>
-            <div style={styles.changeHeader}>
-              <span style={styles.changeTypeModified}>~</span>
-              <span style={styles.changeStatus}>MODIFIED</span>
-              <span style={styles.changeTable}>public.customer.phone_e164</span>
-            </div>
-            <div style={styles.changeDetail}>source: op.TEL_NO → cc.TEL_NO</div>
-          </div>
-
-          <div style={styles.changeEntry}>
-            <div style={styles.changeHeader}>
-              <span style={styles.changeTypeAdded}>+</span>
-              <span style={styles.changeStatus}>ADDED</span>
-              <span style={styles.changeTable}>public.customer.email</span>
-            </div>
-            <div style={styles.changeDetail}>source: cc.EMAIL_ADDR, confidence 95%</div>
-          </div>
-
-          <div style={styles.changeEntry}>
-            <div style={styles.changeHeader}>
-              <span style={styles.changeTypeAdded}>+</span>
-              <span style={styles.changeStatus}>ADDED</span>
-              <span style={styles.changeTable}>public.customer.preferred_channel</span>
-            </div>
-            <div style={styles.changeDetail}>source: cc.PREF_CHANNEL, confidence 80%</div>
-          </div>
-
-          <div style={styles.changeEntry}>
-            <div style={styles.changeHeader}>
-              <span style={styles.changeTypeAdded}>+</span>
-              <span style={styles.changeStatus}>ADDED</span>
-              <span style={styles.changeTable}>public.customer.marketing_opt_in</span>
-            </div>
-            <div style={styles.changeDetail}>source: cc.OPT_IN_FLG</div>
-          </div>
-
-          <div style={styles.changeEntry}>
-            <div style={styles.changeHeader}>
-              <span style={styles.changeTypeModified}>~</span>
-              <span style={styles.changeStatus}>MODIFIED</span>
-              <span style={styles.changeTable}>public.transaction_2024.direction</span>
-            </div>
-            <div style={styles.changeDetail}>source confidence lowered 0.75 → 0.65</div>
-          </div>
+          <ChangeRow kind="added" table="public.transaction_all" detail="New UNION target (t23 ∪ t24)" />
+          <ChangeRow kind="modified" table="public.customer bindings" detail="cp CUST_PROFILE ⋈ cc CUST_CONTACT (was single-source)" />
+          <ChangeRow kind="modified" table="public.customer.phone_e164" detail="source: cp.TEL_NO → cc.TEL_NO" />
+          <ChangeRow kind="added" table="public.customer.email" detail="source: cc.EMAIL_ADDR, confidence 95%" />
+          <ChangeRow kind="added" table="public.customer.preferred_channel" detail="source: cc.PREF_CHANNEL, confidence 80%" />
+          <ChangeRow kind="added" table="public.customer.marketing_opt_in" detail="source: cc.OPT_IN_FLG" />
+          <ChangeRow kind="modified" table="public.transaction_2024.direction" detail="source confidence lowered 0.75 → 0.65" />
         </div>
       </div>
 
@@ -644,12 +698,12 @@ function AuditLogEntries({ auditLogs }: { auditLogs: Array<{
                   {log.user}
                 </td>
                 <td style={styles.auditLogTd}>
-                  {log.action}
+                  {log.action.replace(/\b\w/g, (c) => c.toUpperCase())}
                 </td>
                 <td style={styles.auditLogTd}>
                   {log.snapshotName || '—'}
                 </td>
-                <td style={styles.auditLogTd}>
+                <td style={{ ...styles.auditLogTd, whiteSpace: 'pre-wrap' }}>
                   {log.description}
                 </td>
               </tr>
@@ -731,9 +785,9 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     transition: 'background-color 0.15s ease',
   },
-  snapshotItemSelected: { 
-    background: 'var(--navy-50)', 
-    borderLeft: '3px solid var(--navy)' 
+  snapshotItemSelected: {
+    background: 'var(--navy-50)',
+    borderLeft: '3px solid var(--navy)'
   },
   snapshotItemHeader: { 
     display: 'flex', 
@@ -741,11 +795,40 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'space-between', 
     marginBottom: 6 
   },
-  snapshotVersion: { 
-    fontSize: 11, 
-    fontWeight: 700, 
-    color: 'var(--text)', 
-    fontFamily: 'var(--mono)' 
+  snapshotVersion: {
+    fontSize: 11,
+    fontWeight: 700,
+    color: 'var(--text)',
+    fontFamily: 'var(--mono)',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+  },
+  cutoverTag: {
+    fontSize: 8.5,
+    fontWeight: 600,
+    color: 'var(--red)',
+    fontFamily: 'var(--mono)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+    background: 'var(--red-50)',
+    border: '1px solid var(--red)',
+    borderRadius: 3,
+    padding: '0 4px',
+    lineHeight: 1.3,
+  },
+  cutoverTagLarge: {
+    display: 'inline-block',
+    padding: '2px 8px',
+    fontSize: 10.5,
+    fontWeight: 700,
+    fontFamily: 'var(--mono)',
+    border: '1px solid var(--red)',
+    borderRadius: 3,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+    background: 'var(--red-50)',
+    color: 'var(--red)',
   },
   snapshotItemName: { 
     fontSize: 12, 
@@ -880,13 +963,16 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1.45,
     background: 'var(--panel-2)',
     padding: 10,
-    borderRadius: 4
+    borderRadius: 4,
+    whiteSpace: 'pre-wrap',
+    overflowWrap: 'break-word',
+    wordBreak: 'break-word',
   },
 
   approvalSection: {},
   statusCard: {
     display: 'flex',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: 10,
     padding: '11px 12px',
     background: 'var(--panel-2)',
@@ -894,7 +980,7 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid var(--border)',
   },
   statusIcon: { fontSize: 16 },
-  statusContent: { flex: 1 },
+  statusContent: { flex: 1, minWidth: 0 },
   statusTitle: {
     fontSize: 11,
     fontWeight: 600,
@@ -904,15 +990,21 @@ const styles: Record<string, React.CSSProperties> = {
   statusDesc: {
     fontSize: 10,
     color: 'var(--text-3)',
-    lineHeight: 1.35
+    lineHeight: 1.35,
+    overflowWrap: 'break-word',
+    wordBreak: 'break-word',
+    whiteSpace: 'pre-wrap',
   },
-  rejectionReason: { 
-    marginTop: 6, 
-    padding: 8, 
-    background: 'var(--red-50)', 
-    borderRadius: 4, 
-    fontSize: 11, 
-    color: 'var(--red)' 
+  rejectionReason: {
+    marginTop: 6,
+    padding: 8,
+    background: 'var(--red-50)',
+    borderRadius: 4,
+    fontSize: 11,
+    color: 'var(--red)',
+    overflowWrap: 'break-word',
+    wordBreak: 'break-word',
+    whiteSpace: 'pre-wrap',
   },
 
   changesSectionHeader: {
@@ -926,10 +1018,11 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 6
   },
   summaryBadgeAdded: {
-    padding: '1px 7px',
+    padding: '1px 9px',
     background: 'var(--green-50)',
     color: 'var(--green)',
-    borderRadius: 12,
+    border: '1px solid var(--green)',
+    borderRadius: 999,
     fontSize: 9,
     fontWeight: 700,
     fontFamily: 'var(--mono)',
@@ -937,10 +1030,11 @@ const styles: Record<string, React.CSSProperties> = {
     letterSpacing: 0.3,
   },
   summaryBadgeModified: {
-    padding: '1px 7px',
+    padding: '1px 9px',
     background: 'var(--amber-50)',
     color: 'var(--amber)',
-    borderRadius: 12,
+    border: '1px solid var(--amber)',
+    borderRadius: 999,
     fontSize: 9,
     fontWeight: 700,
     fontFamily: 'var(--mono)',
@@ -951,70 +1045,74 @@ const styles: Record<string, React.CSSProperties> = {
   changesContainer: {
     display: 'flex',
     flexDirection: 'column',
-    gap: 1,
     border: '1px solid var(--border)',
     borderRadius: 6,
-    overflow: 'hidden'
-  },
-  changeEntry: {
+    overflow: 'hidden',
     background: 'var(--panel)',
+  },
+  changeRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    padding: '6px 12px 6px 10px',
     borderBottom: '1px solid var(--border)',
+    background: 'var(--panel)',
+    fontFamily: 'var(--mono)',
   },
-  changeHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 6,
-    padding: '3px 8px',
-    fontSize: 9,
-    fontFamily: 'var(--mono)'
+  changeSymbol: {
+    width: 12,
+    textAlign: 'center',
+    fontSize: 12,
+    fontWeight: 700,
+    fontFamily: 'var(--mono)',
+    flexShrink: 0,
   },
-  changeTypeAdded: {
-    width: 10,
-    height: 10,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    background: 'var(--green-50)',
-    color: 'var(--green)',
-    borderRadius: 2,
+  changeBadgePill: {
+    display: 'inline-block',
+    padding: '1px 10px',
     fontSize: 9,
     fontWeight: 700,
-    fontFamily: 'var(--mono)'
-  },
-  changeTypeModified: {
-    width: 10,
-    height: 10,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    background: 'var(--amber-50)',
-    color: 'var(--amber)',
-    borderRadius: 2,
-    fontSize: 9,
-    fontWeight: 700,
-    fontFamily: 'var(--mono)'
-  },
-  changeStatus: {
-    fontSize: 8,
-    fontWeight: 700,
-    color: 'var(--text-3)',
+    fontFamily: 'var(--mono)',
+    border: '1px solid',
+    borderRadius: 999,
     textTransform: 'uppercase',
-    letterSpacing: 0.3,
-    minWidth: 44
+    letterSpacing: 0.4,
+    minWidth: 70,
+    textAlign: 'center',
+    flexShrink: 0,
   },
   changeTable: {
-    fontSize: 9,
-    fontWeight: 600,
+    fontSize: 11,
+    fontWeight: 500,
     color: 'var(--text)',
     fontFamily: 'var(--mono)',
-    flex: 1
+    flexShrink: 0,
   },
-  changeDetail: {
-    padding: '1px 8px 4px 26px',
-    fontSize: 9,
+  changeDetailInline: {
+    flex: 1,
+    fontSize: 10,
     color: 'var(--text-3)',
-    lineHeight: 1.3,
-    fontFamily: 'var(--mono)'
+    fontFamily: 'var(--mono)',
+    textAlign: 'right',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  changeUiOnlyBadge: {
+    display: 'inline-block',
+    padding: '1px 7px',
+    fontSize: 9,
+    fontFamily: 'var(--mono)',
+    fontWeight: 700,
+    background: 'var(--amber-50)',
+    color: 'var(--amber)',
+    border: '1px solid var(--amber)',
+    borderRadius: 3,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+    lineHeight: 1.4,
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
   },
 
   // Audit Log 섹션 (페이지 하단)
@@ -1172,8 +1270,8 @@ const styles: Record<string, React.CSSProperties> = {
   cutoverConfirmActions: { display: 'flex', justifyContent: 'flex-end', gap: 6 },
 
   createForm: {
-    background: 'var(--panel-2)',
-    border: '1px solid var(--border)',
+    background: 'var(--green-50)',
+    border: '1px solid var(--green)',
     borderRadius: 5,
     padding: 12,
     marginBottom: 12,
@@ -1189,8 +1287,51 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--panel)',
     color: 'var(--text)',
     fontSize: 12.5,
+    lineHeight: 1.4,
     outline: 'none',
     width: '100%',
+    minHeight: 35,
+    boxSizing: 'border-box',
+    fontFamily: 'inherit',
+    resize: 'none',
+    overflow: 'hidden',
+    display: 'block',
+  },
+  textareaDesc: {
+    padding: '7px 10px',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 4,
+    background: 'var(--panel)',
+    color: 'var(--text)',
+    fontSize: 12.5,
+    outline: 'none',
+    width: '100%',
+    minHeight: 35,
+    boxSizing: 'border-box',
+    fontFamily: 'inherit',
+    resize: 'none',
+    lineHeight: 1.4,
+    display: 'block',
+    overflow: 'hidden',
+  },
+  descError: {
+    position: 'absolute',
+    top: '100%',
+    left: 0,
+    marginTop: 2,
+    fontSize: 10.5,
+    color: 'var(--red)',
+    whiteSpace: 'nowrap',
+  },
+  textareaPlaceholder: {
+    position: 'absolute',
+    top: 8,
+    left: 11,
+    fontSize: 12.5,
+    lineHeight: 1.4,
+    color: '#9ca3af',
+    pointerEvents: 'none',
+    fontFamily: 'inherit',
   },
 
 

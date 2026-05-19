@@ -363,7 +363,7 @@ const styles: Record<string, React.CSSProperties> = {
     minWidth: 160,
   },
 
-  tableWrap: { background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 5, overflow: 'hidden' },
+  tableWrap: { background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 5, overflowX: 'auto' },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: 12 },
   th: {
     padding: '7px 12px', textAlign: 'left', fontSize: 10, fontWeight: 600, color: 'var(--text-3)',
