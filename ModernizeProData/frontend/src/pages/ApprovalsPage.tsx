@@ -4,6 +4,7 @@ import { useWorkspaceStore, type ProjectPhase } from '../store/workspace';
 import { useSnapshotsStore, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
 import { projectApi } from '../api/workspace';
 import { useAuthStore } from '../store/auth';
+import { useAuditLogStore } from '../store/auditLog';
 import { useT, type TranslationKey } from '../i18n';
 
 type StatusFilter = 'all' | SnapshotStatus;
@@ -26,6 +27,7 @@ export function ApprovalsPage() {
   const fetchBySite = useSnapshotsStore((s) => s.fetchBySite);
   const approveSnapshot = useSnapshotsStore((s) => s.approveSnapshot);
   const rejectSnapshot = useSnapshotsStore((s) => s.rejectSnapshot);
+  const addAuditLog = useAuditLogStore((s) => s.add);
 
   // 마운트 시 사이트 전체 스냅샷 fetch
   useEffect(() => {
@@ -83,6 +85,13 @@ export function ApprovalsPage() {
           await projectApi.update(proj.id, { phase: newPhase, runStatus: 'idle' });
         } catch { /* polling 에서 동기화 */ }
       }
+      addAuditLog({
+        projectId: snap.projectId,
+        user: user?.username || 'Unknown',
+        action: 'approved',
+        description: `Approved snapshot: ${snap.name}`,
+        snapshotName: snap.version,
+      });
     }
     setApproveId(null);
   };
@@ -90,7 +99,17 @@ export function ApprovalsPage() {
   const handleReject = async (id: string) => {
     const reason = rejectReason.trim();
     if (!reason) return;
+    const snap = allSnapshots.find((s) => s.id === id);
     await rejectSnapshot(id, reason);
+    if (snap) {
+      addAuditLog({
+        projectId: snap.projectId,
+        user: user?.username || 'Unknown',
+        action: 'rejected',
+        description: `Rejected snapshot: ${snap.name} — ${reason}`,
+        snapshotName: snap.version,
+      });
+    }
     setRejectId(null);
     setRejectReason('');
   };
@@ -168,8 +187,8 @@ export function ApprovalsPage() {
                             {t('versions.confirmApprovePre')}<b>{s.name}</b>{t('versions.confirmApprovePost')}
                           </span>
                           <div style={{ flex: 1 }} />
-                          <button onClick={() => setApproveId(null)} style={styles.miniBtn}>{t('common.cancel')}</button>
                           <button onClick={() => handleApprove(s.id)} style={styles.miniBtnApprove}>{t('versions.confirmApprove')}</button>
+                          <button onClick={() => setApproveId(null)} style={styles.miniBtn}>{t('common.cancel')}</button>
                         </div>
                       </td>
                     </tr>
@@ -191,15 +210,15 @@ export function ApprovalsPage() {
                             autoFocus
                           />
                           <div style={styles.rejectActions}>
-                            <button onClick={() => { setRejectId(null); setRejectReason(''); }} style={styles.miniBtn}>
-                              {t('common.cancel')}
-                            </button>
                             <button
                               onClick={() => handleReject(s.id)}
                               disabled={!rejectReason.trim()}
                               style={{ ...styles.miniBtnDanger, ...(rejectReason.trim() ? {} : styles.btnDisabled) }}
                             >
                               {t('versions.rejectSubmit')}
+                            </button>
+                            <button onClick={() => { setRejectId(null); setRejectReason(''); }} style={styles.miniBtn}>
+                              {t('common.cancel')}
                             </button>
                           </div>
                         </div>

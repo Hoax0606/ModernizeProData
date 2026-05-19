@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useWorkspaceStore, type ProjectPhase } from '../store/workspace';
 import { useSnapshotsStore, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
 import { useAuthStore } from '../store/auth';
+import { useAuditLogStore } from '../store/auditLog';
 import { useT, type TranslationKey } from '../i18n';
 
 /**
@@ -46,9 +47,6 @@ export function VersionsPage() {
   // cutover snapshot 확인 다이얼로그
   const [cutoverConfirmOpen, setCutoverConfirmOpen] = useState(false);
 
-  // request 확인
-  const [requestId, setRequestId] = useState<string | null>(null);
-  
   // 선택된 스냅샷
   const [selectedSnapshotId, setSelectedSnapshotId] = useState<string | null>(null);
   const selectedSnapshot = useMemo(
@@ -59,15 +57,13 @@ export function VersionsPage() {
   // AUDIT LOG 접기/펼치기 상태
   const [auditLogExpanded, setAuditLogExpanded] = useState(true);
 
-  // 통합된 Audit Log 상태 (프로젝트 전체)
-  const [auditLogs, setAuditLogs] = useState<Array<{
-    id: string;
-    timestamp: string;
-    user: string;
-    action: string;
-    description: string;
-    snapshotName?: string;
-  }>>([]);
+  // Audit Log — store 에서 가져옴 (localStorage 영속, 페이지 이동에도 보존)
+  const allAuditLogs = useAuditLogStore((s) => s.logs);
+  const addAuditLogEntry = useAuditLogStore((s) => s.add);
+  const auditLogs = useMemo(
+    () => allAuditLogs.filter((l) => l.projectId === activeProjectId),
+    [allAuditLogs, activeProjectId],
+  );
 
   // rehearsal 이후 phase 에서만 cutover snapshot 생성 가능
   const POST_REHEARSAL: ProjectPhase[] = ['rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
@@ -75,15 +71,14 @@ export function VersionsPage() {
 
   // Audit Log 추가 함수
   const addAuditLog = (action: string, description: string, snapshotName?: string) => {
-    const newLog = {
-      id: Date.now().toString(),
-      timestamp: new Date().toISOString(),
+    if (!activeProjectId) return;
+    addAuditLogEntry({
+      projectId: activeProjectId,
       user: user?.username || 'Unknown',
       action,
       description,
-      snapshotName
-    };
-    setAuditLogs(prev => [newLog, ...prev]);
+      snapshotName,
+    });
   };
 
   if (!project) {
@@ -135,10 +130,13 @@ export function VersionsPage() {
         tableCount: project.tableCount,
         ruleCount: 0,
       });
-      
+
+      // 방금 만든 snapshot 을 자동 선택
+      setSelectedSnapshotId(newSnapshot.id);
+
       // Audit log 기록
       addAuditLog('snapshot created', `Created new ${createType} snapshot: ${name}`, newSnapshot.version || 'v1.0');
-      
+
       resetCreate();
     } catch (error) {
       console.error('Failed to create snapshot:', error);
@@ -149,17 +147,15 @@ export function VersionsPage() {
   const handleRequest = async (id: string) => {
     try {
       await requestSnapshot(id);
-      
+
       // Audit log 기록
       const snapshot = snapshots.find(s => s.id === id);
       addAuditLog('approval requested', `Requested approval for snapshot: ${snapshot?.name}`, snapshot?.version);
-      
+
       // Phase 전환은 approve 시점에 처리 (ApprovalsPage)
-      setRequestId(null);
     } catch (error) {
       console.error('Failed to request approval:', error);
       addAuditLog('request failed', `Failed to request approval for snapshot: ${snapshots.find(s => s.id === id)?.name}`);
-      setRequestId(null);
     }
   };
 
@@ -208,8 +204,8 @@ export function VersionsPage() {
           <div style={styles.cutoverConfirmTitle}>{t('versions.cutoverConfirm.title')}</div>
           <div style={styles.cutoverConfirmDesc}>{t('versions.cutoverConfirm.desc')}</div>
           <div style={styles.cutoverConfirmActions}>
-            <button onClick={() => setCutoverConfirmOpen(false)} style={styles.btnGhost}>{t('common.cancel')}</button>
             <button onClick={handleCutoverConfirm} style={styles.btnCutover}>{t('versions.cutoverConfirm.proceed')}</button>
+            <button onClick={() => setCutoverConfirmOpen(false)} style={styles.btnGhost}>{t('common.cancel')}</button>
           </div>
         </div>
       )}
@@ -264,22 +260,7 @@ export function VersionsPage() {
             <div style={styles.snapshotsContainer}>
               {snapshots.map((s) => {
                 const isSelected = selectedSnapshotId === s.id;
-                
-                /* ── request 확인 바 ── */
-                if (requestId === s.id) {
-                  return (
-                    <div key={s.id} style={styles.requestConfirmItem}>
-                      <div style={styles.requestConfirmContent}>
-                        <span>Request approval for <b>{s.name}</b>?</span>
-                        <div style={styles.requestConfirmActions}>
-                          <button onClick={() => setRequestId(null)} style={styles.btnCancel}>Cancel</button>
-                          <button onClick={() => handleRequest(s.id)} style={styles.btnConfirm}>Confirm</button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                }
-                
+
                 return (
                   <div 
                     key={s.id} 
@@ -295,9 +276,11 @@ export function VersionsPage() {
                       <div style={styles.snapshotVersion}>
                         {s.version || `v1.${snapshots.length - snapshots.indexOf(s) - 1}`}
                       </div>
-                      <span style={{ ...styles.statusBadgeSmall, ...statusTone(s.status) }}>
-                        {s.status.toUpperCase()}
-                      </span>
+                      {s.status !== 'draft' && (
+                        <span style={{ ...styles.statusBadgeSmall, ...statusTone(s.status) }}>
+                          {s.status.toUpperCase()}
+                        </span>
+                      )}
                     </div>
                     
                     <div style={styles.snapshotItemName}>{s.name}</div>
@@ -311,23 +294,6 @@ export function VersionsPage() {
                       <span>·</span>
                       <span>{new Date(s.createdAt).toLocaleDateString()}</span>
                     </div>
-                    
-                    <div style={styles.snapshotItemActions}>
-                      {s.status === 'draft' && (
-                        <button 
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setRequestId(s.id);
-                          }} 
-                          style={styles.btnRequest}
-                        >
-                          Request
-                        </button>
-                      )}
-                      {s.status === 'pending' && (
-                        <span style={styles.pendingBadge}>Pending</span>
-                      )}
-                    </div>
                   </div>
                 );
               })}
@@ -338,7 +304,7 @@ export function VersionsPage() {
         {/* 오른쪽: 선택된 스냅샷 상세 정보 */}
         <div style={styles.detailPanel}>
           {selectedSnapshot ? (
-            <SnapshotDetailView snapshot={selectedSnapshot} onRequest={() => setRequestId(selectedSnapshot.id)} />
+            <SnapshotDetailView snapshot={selectedSnapshot} onRequest={() => handleRequest(selectedSnapshot.id)} />
           ) : (
             <div style={styles.noSelectionMessage}>
               <div style={styles.noSelectionIcon}>📋</div>
@@ -418,11 +384,8 @@ function SnapshotDetailView({ snapshot, onRequest }: {
 }) {
   const t = useT();
   const user = useAuthStore((s) => s.user);
-  
-  const handleRequestClick = () => {
-    onRequest();
-  };
-  
+  const [confirmingRequest, setConfirmingRequest] = useState(false);
+
   return (
     <div style={styles.detailContent}>
       {/* 헤더 */}
@@ -434,9 +397,11 @@ function SnapshotDetailView({ snapshot, onRequest }: {
           </div>
         </div>
         <div style={styles.detailStatus}>
-          <span style={{ ...styles.statusBadge, ...statusTone(snapshot.status) }}>
-            {snapshot.status.toUpperCase()}
-          </span>
+          {snapshot.status !== 'draft' && (
+            <span style={{ ...styles.statusBadge, ...statusTone(snapshot.status) }}>
+              {snapshot.status.toUpperCase()}
+            </span>
+          )}
         </div>
       </div>
 
@@ -480,11 +445,32 @@ function SnapshotDetailView({ snapshot, onRequest }: {
               <div style={styles.statusIcon}>📝</div>
               <div style={styles.statusContent}>
                 <div style={styles.statusTitle}>Draft</div>
-                <div style={styles.statusDesc}>This snapshot is ready to be submitted for review</div>
+                <div style={styles.statusDesc}>
+                  {confirmingRequest
+                    ? <>Request approval for <b>{snapshot.name}</b>?</>
+                    : 'This snapshot is ready to be submitted for review'}
+                </div>
               </div>
-              <button onClick={handleRequestClick} style={styles.btnPrimary}>
-                Request Review
-              </button>
+              {confirmingRequest ? (
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    onClick={() => {
+                      setConfirmingRequest(false);
+                      onRequest();
+                    }}
+                    style={styles.btnPrimary}
+                  >
+                    Confirm
+                  </button>
+                  <button onClick={() => setConfirmingRequest(false)} style={styles.btnGhost}>
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button onClick={() => setConfirmingRequest(true)} style={styles.btnPrimary}>
+                  Request Review
+                </button>
+              )}
             </div>
           )}
           
@@ -620,6 +606,7 @@ function AuditLogEntries({ auditLogs }: { auditLogs: Array<{
   action: string;
   description: string;
   snapshotName?: string;
+  projectId?: string;
 }> }) {
 
 
@@ -818,106 +805,106 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 6,
     overflow: 'hidden'
   },
-  detailContent: { 
-    padding: '36px 40px', 
-    height: '100%', 
-    overflow: 'auto' 
+  detailContent: {
+    padding: '24px 28px',
+    height: '100%',
+    overflow: 'auto'
   },
-  detailHeader: { 
-    display: 'flex', 
-    alignItems: 'center', 
-    justifyContent: 'space-between', 
-    marginBottom: 32, 
-    paddingBottom: 20, 
-    borderBottom: '1px solid var(--border)' 
+  detailHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 22,
+    paddingBottom: 14,
+    borderBottom: '1px solid var(--border)'
   },
-  detailTitleSection: { 
-    display: 'flex', 
-    alignItems: 'center', 
-    gap: 12 
+  detailTitleSection: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10
   },
-  detailTitle: { 
-    margin: 0, 
-    fontSize: 20, 
-    fontWeight: 600, 
-    color: 'var(--text)' 
+  detailTitle: {
+    margin: 0,
+    fontSize: 16,
+    fontWeight: 600,
+    color: 'var(--text)'
   },
-  detailVersion: { 
-    background: 'var(--navy-50)', 
-    color: 'var(--navy)', 
-    padding: '4px 8px', 
-    borderRadius: 4, 
-    fontSize: 11, 
-    fontWeight: 700, 
-    fontFamily: 'var(--mono)' 
+  detailVersion: {
+    background: 'var(--navy-50)',
+    color: 'var(--navy)',
+    padding: '3px 7px',
+    borderRadius: 4,
+    fontSize: 10,
+    fontWeight: 700,
+    fontFamily: 'var(--mono)'
   },
   detailStatus: {},
 
-  detailSection: { 
-    marginBottom: 32 
+  detailSection: {
+    marginBottom: 22
   },
-  detailSectionTitle: { 
-    margin: '0 0 12px', 
-    fontSize: 13, 
-    fontWeight: 600, 
-    color: 'var(--text-2)', 
-    textTransform: 'uppercase', 
-    letterSpacing: 0.5, 
-    fontFamily: 'var(--mono)' 
+  detailSectionTitle: {
+    margin: '0 0 9px',
+    fontSize: 11,
+    fontWeight: 600,
+    color: 'var(--text-2)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    fontFamily: 'var(--mono)'
   },
-  detailGrid: { 
-    display: 'grid', 
-    gridTemplateColumns: '1fr 1fr 1fr 1fr', 
-    gap: 16 
+  detailGrid: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr 1fr 1fr',
+    gap: 12
   },
-  detailGridItem: { 
-    display: 'flex', 
-    flexDirection: 'column', 
-    gap: 4 
+  detailGridItem: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 3
   },
-  detailLabel: { 
-    fontSize: 11, 
-    fontWeight: 600, 
-    color: 'var(--text-3)', 
-    textTransform: 'uppercase', 
-    letterSpacing: 0.5 
+  detailLabel: {
+    fontSize: 9,
+    fontWeight: 600,
+    color: 'var(--text-3)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4
   },
-  detailValue: { 
-    fontSize: 12, 
-    color: 'var(--text)', 
-    fontFamily: 'var(--mono)' 
+  detailValue: {
+    fontSize: 11,
+    color: 'var(--text)',
+    fontFamily: 'var(--mono)'
   },
-  detailDescription: { 
-    fontSize: 12, 
-    color: 'var(--text-2)', 
-    lineHeight: 1.5, 
-    background: 'var(--panel-2)', 
-    padding: 12, 
-    borderRadius: 4 
+  detailDescription: {
+    fontSize: 11,
+    color: 'var(--text-2)',
+    lineHeight: 1.45,
+    background: 'var(--panel-2)',
+    padding: 10,
+    borderRadius: 4
   },
 
   approvalSection: {},
   statusCard: {
     display: 'flex',
     alignItems: 'center',
-    gap: 12,
-    padding: '16px',
+    gap: 10,
+    padding: '11px 12px',
     background: 'var(--panel-2)',
     borderRadius: 6,
     border: '1px solid var(--border)',
   },
-  statusIcon: { fontSize: 20 },
+  statusIcon: { fontSize: 16 },
   statusContent: { flex: 1 },
-  statusTitle: { 
-    fontSize: 13, 
-    fontWeight: 600, 
-    color: 'var(--text)', 
-    marginBottom: 4 
+  statusTitle: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: 'var(--text)',
+    marginBottom: 3
   },
-  statusDesc: { 
-    fontSize: 11, 
-    color: 'var(--text-3)', 
-    lineHeight: 1.4 
+  statusDesc: {
+    fontSize: 10,
+    color: 'var(--text-3)',
+    lineHeight: 1.35
   },
   rejectionReason: { 
     marginTop: 6, 
@@ -932,29 +919,29 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 16
+    marginBottom: 10
   },
   changesSummary: {
     display: 'flex',
-    gap: 8
+    gap: 6
   },
   summaryBadgeAdded: {
-    padding: '2px 8px',
+    padding: '1px 7px',
     background: 'var(--green-50)',
     color: 'var(--green)',
     borderRadius: 12,
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: 700,
     fontFamily: 'var(--mono)',
     textTransform: 'uppercase',
     letterSpacing: 0.3,
   },
   summaryBadgeModified: {
-    padding: '2px 8px',
+    padding: '1px 7px',
     background: 'var(--amber-50)',
     color: 'var(--amber)',
     borderRadius: 12,
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: 700,
     fontFamily: 'var(--mono)',
     textTransform: 'uppercase',
@@ -976,57 +963,57 @@ const styles: Record<string, React.CSSProperties> = {
   changeHeader: {
     display: 'flex',
     alignItems: 'center',
-    gap: 12,
-    padding: '8px 12px',
-    fontSize: 11,
+    gap: 6,
+    padding: '3px 8px',
+    fontSize: 9,
     fontFamily: 'var(--mono)'
   },
   changeTypeAdded: {
-    width: 16,
-    height: 16,
+    width: 10,
+    height: 10,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
     background: 'var(--green-50)',
     color: 'var(--green)',
     borderRadius: 2,
-    fontSize: 12,
+    fontSize: 9,
     fontWeight: 700,
     fontFamily: 'var(--mono)'
   },
   changeTypeModified: {
-    width: 16,
-    height: 16,
+    width: 10,
+    height: 10,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
     background: 'var(--amber-50)',
     color: 'var(--amber)',
     borderRadius: 2,
-    fontSize: 12,
+    fontSize: 9,
     fontWeight: 700,
     fontFamily: 'var(--mono)'
   },
   changeStatus: {
-    fontSize: 10,
+    fontSize: 8,
     fontWeight: 700,
     color: 'var(--text-3)',
     textTransform: 'uppercase',
-    letterSpacing: 0.5,
-    minWidth: 60
+    letterSpacing: 0.3,
+    minWidth: 44
   },
   changeTable: {
-    fontSize: 11,
+    fontSize: 9,
     fontWeight: 600,
     color: 'var(--text)',
     fontFamily: 'var(--mono)',
     flex: 1
   },
   changeDetail: {
-    padding: '4px 12px 8px 40px',
-    fontSize: 11,
+    padding: '1px 8px 4px 26px',
+    fontSize: 9,
     color: 'var(--text-3)',
-    lineHeight: 1.4,
+    lineHeight: 1.3,
     fontFamily: 'var(--mono)'
   },
 
