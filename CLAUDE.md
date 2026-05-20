@@ -1,6 +1,6 @@
 # Modernize Pro Data — AI context
 
-5명 팀(BE 3 / FE 2)이 각자 PC 에서 작업할 때, 모든 AI 세션이 같은 출발점을 갖도록 하는 파일이다. 새 세션을 시작했다면 **이 파일을 먼저 읽고**, 이어서 `docs/handoff/` 의 가장 최근 파일을 읽어라.
+5명 팀(BE 3 / FE 2)이 각자 PC 에서 작업할 때, 모든 AI 세션이 같은 출발점을 갖도록 하는 파일이다. 새 세션을 시작했다면 **이 파일 → `docs/ONBOARDING.md` → `docs/handoff/` 의 가장 최근 파일** 순으로 읽어라. `ONBOARDING.md` 는 파이프라인·룰 엔진·DDL 인포트 등 설계 상세를 누적 기록한 영문 문서 (다국적 팀 공통어로 영어 채택).
 
 ## 프로젝트 한 줄
 일본 금융권용 데이터 이행 도구. 대상 사이트는 완전 폐쇄망(망연계·본사 모니터링 없음), 본사 ↔ 현장은 사람이 USB 로만 자료를 옮긴다. PoC 1차 마감 **2026-05-31**.
@@ -37,7 +37,8 @@ ModernizeProData/
 │   └── src/main/
 │       ├── java/com/ksinfo/modernize_pro_data/
 │       │   ├── common/         # config, dto, exception
-│       │   └── coordinator/    # api, auth, site, ...
+│       │   └── coordinator/    # api, auth, site, ddl, ...
+│       │                       # ddl/ = DDL import (entity / repository / service / parser)
 │       └── resources/
 │           ├── application.yml
 │           └── db/migration/   # V{N}__*.sql — Flyway
@@ -64,7 +65,8 @@ docs/                            # 매뉴얼·아키텍처·handoff (.docx/.pdf 
 
 ### Backend 마이그레이션
 - 새 테이블/필드는 반드시 Flyway `V{N}__name.sql` 로. 엔티티만 수정해서 Hibernate auto-DDL 에 맡기지 말 것.
-- 기존 패턴: `V4__sites_projects.sql` · `V5__project_run_status.sql` · `V6__snapshots.sql`.
+- 기존 패턴: `V4__sites_projects.sql` · `V5__project_run_status.sql` · `V6__snapshots.sql` · `V7__ddl_schema.sql` · `V9__project_tobe_table_count.sql`.
+- **번호 할당 주의**: 다른 멤버 브랜치에서 같은 번호를 쓰고 있을 수 있다. 기계적으로 master 의 최신 + 1 을 잡지 말고, 큰 번호 (V20+) 를 잡는 것도 고려.
 
 ### Phase 모델
 - 9 단계: `planning · analysis · test · sign-off · rehearsal · ready · cutover · hypercare · done`
@@ -121,12 +123,14 @@ cd ModernizeProData/frontend; npx tsc --noEmit
 ## 세션 시작 시 권장 동작
 
 1. 이 파일(CLAUDE.md) 을 처음에 한 번 읽음.
-2. `docs/handoff/` 폴더의 가장 최근 파일을 읽음 (가장 최근 = 파일명 sort desc).
-3. 작업 시작 전 사용자에게 "방금 본 handoff 노트가 X 였는데 이걸 이어받으면 되나?" 식으로 한 줄 확인.
-4. 작업이 끝났을 때 `/handoff` slash command 로 다음 사람용 노트 작성.
+2. `docs/ONBOARDING.md` 를 한 번 훑음 (이미 같은 세션에서 본 적 없다면).
+3. `docs/handoff/` 폴더의 가장 최근 파일을 읽음 (가장 최근 = 파일명 sort desc).
+4. 작업 시작 전 사용자에게 "방금 본 handoff 노트가 X 였는데 이걸 이어받으면 되나?" 식으로 한 줄 확인.
+5. 작업이 끝났을 때 `/handoff` slash command 로 다음 사람용 노트 작성.
 
 ## 외부 참조 (이 파일에 적지 말 것)
 
+- 누적 설계 디테일 (파이프라인 · 룰 엔진 · DDL 인포트 등) 은 `docs/ONBOARDING.md` (영문).
 - 개인 선호·기억은 `~/.claude/projects/.../memory/` 에 (각자 따로).
 - 진행 중 작업의 상세 컨텍스트는 `docs/handoff/YYYY-MM-DD-{slug}.md` 에.
 - 슬래시 명령어는 `.claude/commands/*.md` 에.
