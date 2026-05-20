@@ -503,7 +503,48 @@ The feature that lets the tool ingest AS-IS / TO-BE database DDL files and persi
 
 ---
 
-## 16. Further Reading
+## 16. Frontend Pitfalls (added 2026-05-20)
+
+### 16.1 Never return a fresh array/object from a zustand selector
+
+Under React 18, `zustand` uses `useSyncExternalStore` internally. React re-runs
+`getSnapshot` on every render to detect tearing. If the selector returns a new
+reference each call — typically because of `.filter()`, `.map()`, or an object
+literal inline — React decides the store "changed" mid-render and either burns
+CPU on infinite re-renders or unmounts the tree (white screen).
+
+Symptom: works in VS Code's Simple Browser (whose localStorage often hasn't
+reached the affected page), but a real Chrome window flashes the page and goes
+blank a moment later.
+
+Bad:
+
+```ts
+const snapshots = useSnapshotsStore((s) => s.snapshots.filter(...));   // ❌
+```
+
+Good — pull the raw slice and derive in `useMemo` (or use `useShallow`):
+
+```ts
+const all       = useSnapshotsStore((s) => s.snapshots);                 // ✅
+const snapshots = useMemo(() => all.filter(...), [all, projectId]);
+```
+
+Applies to every zustand store in this repo (`useWorkspaceStore`,
+`useSnapshotsStore`, `useUsersStore`, etc.).
+
+### 16.2 Don't validate behavior in VS Code's Simple Browser alone
+
+Simple Browser is convenient but has a different localStorage / cookie state
+from the user's actual Chrome session. Some routes (notably
+`DashboardPage` → `ProjectDashboard`, which only renders once a site +
+project + TO-BE DDL exist) are unreachable in a freshly-opened Simple Browser.
+Bugs that surface only past those gates will look fine there. Verify in real
+Chrome before declaring "it works."
+
+---
+
+## 17. Further Reading
 
 - `CLAUDE.md` — stack, conventions, domain glossary, local run.
 - `docs/handoff/` — time-stamped handoff notes (read the most recent first).
