@@ -443,15 +443,33 @@ export function AppShell() {
             );
           })()}
 
-          {/* AS-IS / TO-BE 인디케이터 (placeholder) */}
-          <button title="AS-IS status (placeholder)" style={styles.statusPill}>
-            <span style={{ ...styles.dot, background: 'var(--text-4)' }} />
-            <span>AS-IS</span>
-          </button>
-          <button title="TO-BE status (placeholder)" style={styles.statusPill}>
-            <span style={{ ...styles.dot, background: 'var(--text-4)' }} />
-            <span>TO-BE</span>
-          </button>
+          {/* AS-IS / TO-BE 인포트 상태 램프 — 클릭하면 Settings 의 해당 섹션 + amber pulse. */}
+          {activeProject && (
+            <>
+              <button
+                title={activeProject.tableCount > 0 ? t('shell.lamp.asis.imported') : t('shell.lamp.asis.notImported')}
+                onClick={() => navigate('/settings', { state: { highlightSide: 'asis' } })}
+                style={styles.statusPill}
+              >
+                <span style={{
+                  ...styles.dot,
+                  background: activeProject.tableCount > 0 ? 'var(--green)' : 'var(--red)',
+                }} />
+                <span>AS-IS</span>
+              </button>
+              <button
+                title={activeProject.tobeTableCount > 0 ? t('shell.lamp.tobe.imported') : t('shell.lamp.tobe.notImported')}
+                onClick={() => navigate('/settings', { state: { highlightSide: 'tobe' } })}
+                style={styles.statusPill}
+              >
+                <span style={{
+                  ...styles.dot,
+                  background: activeProject.tobeTableCount > 0 ? 'var(--green)' : 'var(--red)',
+                }} />
+                <span>TO-BE</span>
+              </button>
+            </>
+          )}
         </div>
 
         {/* 탭바 — 사이트만 있고 프로젝트 없을 땐 site tab, 프로젝트 활성 시 project tab */}

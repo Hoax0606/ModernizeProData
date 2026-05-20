@@ -1,124 +1,124 @@
 # Modernize Pro Data — Team Onboarding (Pipeline & Rule Engine)
 
-데이터 이행 파이프라인 및 룰 엔진 설계의 누적 결정 사항을 정리한 팀 공유본. 새 팀원이 진입할 때 또는 새 AI 세션을 시작할 때 `CLAUDE.md` 와 함께 읽어두면 설계 의도와 함정을 빠르게 따라잡을 수 있다.
+A team-shared digest of the accumulated design decisions for the migration pipeline and rule engine. Read this together with `CLAUDE.md` when onboarding a new teammate or starting a new AI session.
 
-**전제** — 프로젝트 한 줄 소개·기술 스택·디렉터리 맵·도메인 용어는 repo 루트 `CLAUDE.md` 참조. 본 문서는 거기 안 적힌 (또는 한 줄로만 적힌) 설계 디테일을 다룬다.
+**Prerequisites** — One-line project summary, tech stack, directory map, and domain glossary live in `CLAUDE.md` at the repo root. This document covers what isn't there (or is only one line there): **the pipeline, the rule engine, supporting SPIs, and workflow conventions**.
 
-업데이트: 2026-05-20
+Last updated: 2026-05-20
 
 ---
 
-## 1. Phase / Stage 모델 (확정 2026-05-15)
+## 1. Phase / Stage model (confirmed 2026-05-15)
 
-### 1.1 9단계 Phase
+### 1.1 Nine phases
 ```
 planning → analysis → test → sign-off → rehearsal → ready → cutover → hypercare → done
 ```
 
-### 1.2 4단계 Stage (환경 라벨)
+### 1.2 Four stages (environment label)
 ```
 dev → test → staging → production
 ```
-- dev 가 첫번째 (순서 고정).
-- **cutover Phase 는 Stage=production 에서만 실행 가능**. 코드에 prod 가드 필수.
+- `dev` is always first (fixed order).
+- **The `cutover` phase can only run in `production` stage.** Enforce with a code-level guard.
 
-### 1.3 Snapshot 두 종류 + 승인 흐름
-| Snapshot | 승인 시 전환되는 Phase | 생성 가능 시점 |
+### 1.3 Two snapshot types + approval flow
+| Snapshot | Phase it advances on approve | When can it be created |
 |---|---|---|
-| mapping snapshot | → sign-off | 언제든 |
-| cutover snapshot | → ready | **rehearsal 이후 phase 한정** (`rehearsal · ready · cutover · hypercare · done`) |
+| mapping snapshot | → sign-off | any time |
+| cutover snapshot | → ready | **post-rehearsal phases only** (`rehearsal · ready · cutover · hypercare · done`) |
 
-- **Phase 전환은 approve 시점만** 일어남. request 시점에는 Phase 안 바뀜.
-- cutover snapshot 생성 시 UI 에서 **빨간 strong 확인 다이얼로그** 한 번 더 표시 (production 가드와 별개).
+- **Phase transitions happen only on `approve`** — never at request time.
+- When creating a cutover snapshot the UI shows an extra **red strong-confirm dialog** (separate from the production-stage guard).
 
-### 1.4 Snapshot version 채번 (확정 2026-05-19)
+### 1.4 Snapshot version assignment (confirmed 2026-05-19)
 
-각 snapshot 은 `version VARCHAR(16)` 컬럼을 가지며 서버가 자동 채번. 사용자 수동 편집 없음. 채번 로직은 `Snapshot.generateNextVersion(latestVersion, latestStatus)`.
+Each snapshot carries a `version VARCHAR(16)` column auto-assigned by the server. No manual editing. The logic lives in `Snapshot.generateNextVersion(latestVersion, latestStatus)`.
 
-| 직전 snapshot 상태 | 다음 버전 | 의미 |
+| Previous snapshot status | Next version | Meaning |
 |---|---|---|
-| (없음, 첫 생성) | `v1.0` | 초기값 |
-| `approved` | major bump (`v1.3 → v2.0`) | 승인본 이후 새 매핑 사이클 시작 |
-| `draft` / `pending` / `rejected` | minor bump (`v1.2 → v1.3`) | 같은 사이클 안의 재작업 |
+| (none, first creation) | `v1.0` | initial value |
+| `approved` | major bump (`v1.3 → v2.0`) | new mapping cycle after a signed-off baseline |
+| `draft` / `pending` / `rejected` | minor bump (`v1.2 → v1.3`) | rework within the same cycle |
 
-- 채번 트리거는 **새 snapshot create 시점**만. status 전환 (request·approve·reject) 은 version 안 바꿈.
-- "직전" = `created_at DESC` 기준 1건 (`SnapshotRepository.findLatestByProjectId`).
-- `VARCHAR` 저장이라 lexicographic 정렬 시 `v10.0 < v2.0`. 현재 UI 는 `created_at` 으로만 정렬하므로 문제 없음 — 버전 기준 정렬 UI 추가 시 별도 파서 필요.
-- 같은 프로젝트에서 동시에 여러 사용자가 snapshot 만드는 시나리오는 폐쇄망 운영 특성상 거의 없다고 가정 (별도 락 없음).
+- Versioning is triggered **only when a new snapshot is created**. Status transitions (request / approve / reject) do not change the version.
+- "Previous" = the single row with the latest `created_at DESC` (`SnapshotRepository.findLatestByProjectId`).
+- Stored as `VARCHAR`, so lexicographic ordering gives `v10.0 < v2.0`. The current UI sorts by `created_at`, so this is fine — if a version-based sort UI is added later, a dedicated parser is required.
+- Concurrent creation of snapshots for the same project by multiple users is assumed not to occur (air-gapped, single-operator usage); no lock.
 
-### 1.5 AUDIT LOG (현재 상태)
+### 1.5 AUDIT LOG (current state)
 
-- 프론트 `store/auditLog.ts` 가 zustand `persist` 로 **클라이언트 localStorage 영속**. 프로젝트 단위 누적, UI 에 count + collapse.
-- 시점 한계: PC 마다 기록이 다름. PoC 데모는 단일 PC 에서 진행되므로 수용.
-- 서버 `audit_log` 테이블 (§9) 이 들어오면 store 인터페이스 그대로 두고 구현만 API 로 교체.
+- The frontend `store/auditLog.ts` persists entries to **client-side localStorage** via zustand `persist`. Accumulated per project, with count + collapse in the UI.
+- Limitation: the record differs per PC. Acceptable for the PoC demo, which runs on a single PC.
+- Once the server `audit_log` table (§9) lands, keep the store interface as-is and swap only the implementation to call the API.
 
-### 1.4 runStatus sub-status (test / rehearsal / cutover 한정)
-| 값 | 의미 | UI |
+### 1.4 `runStatus` sub-status (test / rehearsal / cutover only)
+| Value | Meaning | UI |
 |---|---|---|
-| `idle` | 시작 전 | 기본 |
-| `running` | 진행 중 | 진행 표시 |
-| `completed` | 완료 | **뱃지 회색** (UI 약속) |
+| `idle` | not started | default |
+| `running` | in progress | progress shown |
+| `completed` | done | **gray badge** (UI convention) |
 
 ---
 
-## 2. 파이프라인 4단계 (확정 2026-05-18)
+## 2. Pipeline — 4 stages (confirmed 2026-05-18)
 
 ```
 Source Reader SPI → DuckDB Appender → Rule Engine (SQL + UDF) → Loader Adapter SPI
                        ↓ writes              ↓ writes
-                     CP1 Raw Parquet        CP2 Transformed Parquet
-                     (체크포인트 ①)         (체크포인트 ② — rehearsal 만)
+                     CP1 Raw Parquet       CP2 Transformed Parquet
+                     (checkpoint ①)        (checkpoint ② — rehearsal only)
 ```
 
-각 단계는 SPI 로 추상화돼 입력 형식·TO-BE DB 종류에 따라 어댑터가 교체된다. **단일 writer 정책** — DuckDB 인스턴스는 워커별 독립.
+Every stage is SPI-abstracted: adapters swap based on input format or TO-BE DB type. **Single-writer policy** — one DuckDB instance per worker.
 
-### 2.1 두 체크포인트
-- **CP1** = 소스 파일 1개당 별도 Parquet (`cp1_emp.parquet`, `cp1_dept.parquet` ...). 모든 컬럼 VARCHAR. **JOIN/타입변환 절대 금지** — 원본 보존.
-- **CP2** = JOIN/UNION + 변환룰 적용 후 Parquet. rehearsal 만 생성. cutover 는 생략 (속도 우선).
+### 2.1 Two checkpoints
+- **CP1** = one Parquet per source file (`cp1_emp.parquet`, `cp1_dept.parquet`...). All columns VARCHAR. **No JOINs and no type conversion** — raw preservation only.
+- **CP2** = after JOIN/UNION + transform rules. Generated for rehearsal only; cutover skips it for speed.
 
-### 2.2 4 케이스
-| 케이스 | 입력 | Phase | CP2 | 비고 |
+### 2.2 Four cases
+| Case | Input | Phase | CP2 | Notes |
 |---|---|---|---|---|
-| 1 | CSV | rehearsal | O | 기본 |
-| 2 | CSV | cutover | X | Rule Engine 결과 → Loader 직행 |
-| 3 | 비CSV (EBCDIC 등) | rehearsal | O | Source Reader 가 언패킹 |
-| 4 | 비CSV | cutover | X | JOIN 없으면 DuckDB 우회 (Java 직접). JOIN 필요하면 케이스 2 로 강등 |
+| 1 | CSV | rehearsal | yes | default path |
+| 2 | CSV | cutover | no | Rule Engine output → Loader directly |
+| 3 | non-CSV (EBCDIC, etc.) | rehearsal | yes | Source Reader unpacks before Appender |
+| 4 | non-CSV | cutover | no | If no JOINs needed, bypass DuckDB (Java direct). If JOINs needed, fall back to case 2 |
 
-### 2.3 재시작 매트릭스
-| 실패 지점 | 재시작 위치 |
+### 2.3 Restart matrix
+| Failure point | Restart from |
 |---|---|
-| Source / CP1 생성 | 처음부터 |
-| Rule Engine | CP1 부터 |
-| Rehearsal 적재 | CP2 부터 |
-| Cutover 적재 | CP1 부터 (CP2 없음) |
+| Source / CP1 generation | start |
+| Rule Engine | CP1 (no need to re-read CSV) |
+| Rehearsal load | CP2 |
+| Cutover load | CP1 (CP2 doesn't exist) |
 
-### 2.4 디렉터리
+### 2.4 Directory layout
 ```
 data/
-├── incoming/             ← AS-IS 파일 도착
+├── incoming/             ← AS-IS files land here
 ├── staging/cp1/          ← Raw Parquet
 ├── staging/cp2/          ← Transformed Parquet
-├── staging/quarantine/   ← UDF NULL 행
-├── drivers/              ← TO-BE JDBC JAR (사이트별 배치)
-└── runs/                 ← Run 산출물
+├── staging/quarantine/   ← UDF-null rows
+├── drivers/              ← TO-BE JDBC JARs (per-site)
+└── runs/                 ← run artifacts
 ```
 
 ---
 
 ## 3. Rule Engine — DuckDB SQL + Java UDF
 
-CP1 → CP2 단계 변환 엔진. **DuckDB 위에 얹는 얇은 룰 엔진**.
+The CP1 → CP2 transform engine: **a thin rule engine on top of DuckDB**.
 
-### 3.1 처리 순서 (한 SQL 안에서, 반드시 이 순서)
-1. **JOIN / UNION** — CP1 Parquet 끼리. 원본 키 (예: `dept_code`) 기준.
-2. **변환 룰 적용** — SQL (`CAST`, `CASE WHEN`) + Java UDF.
-3. **Quarantine 분리** — UDF NULL 행을 별도 COPY 로.
+### 3.1 Execution order (within a single SQL statement)
+1. **JOIN / UNION** — combine CP1 Parquets by raw keys (e.g., `dept_code`).
+2. **Apply transforms** — SQL (`CAST`, `CASE WHEN`) + Java UDFs.
+3. **Split quarantine** — same JOIN/UNION shape, inverted WHERE, separate COPY.
 
-**JOIN 을 변환보다 먼저 하는 이유**: 변환 전 원본 키로 JOIN 해야 키 불일치 방지.
+**Why JOIN first**: raw keys must match before any transform changes them.
 
-### 3.2 SQL 패턴
+### 3.2 SQL pattern
 ```sql
--- 정상 행 → CP2
+-- Good rows → CP2
 COPY (
     SELECT
         apply_scale(e.salary_raw, 2)    AS salary,
@@ -131,9 +131,9 @@ COPY (
       AND convert_era(e.hire_date_raw) IS NOT NULL
 ) TO 'cp2_001.parquet' (FORMAT PARQUET);
 
--- 실패 행 → Quarantine (동일 JOIN 구조, WHERE 반전)
+-- Failed rows → Quarantine (same JOIN, inverted WHERE)
 COPY (
-    SELECT e.*, d.dept_name, 'UDF 변환 실패' AS reason
+    SELECT e.*, d.dept_name, 'UDF transform failed' AS reason
     FROM read_parquet('cp1_emp.parquet') e
     JOIN read_parquet('cp1_dept.parquet') d ON e.dept_code = d.dept_code
     WHERE apply_scale(e.salary_raw, 2) IS NULL
@@ -141,287 +141,366 @@ COPY (
 ) TO 'quarantine.parquet' (FORMAT PARQUET);
 ```
 
-### 3.3 등록 UDF (초기 3개)
-| 이름 | 입력 | 출력 | 종류 | 비고 |
+### 3.3 Initial UDFs (3)
+| Name | Input | Output | Kind | Notes |
 |---|---|---|---|---|
-| `apply_scale` | VARCHAR, int | BigDecimal | scalar | COMP-3 추출 후 소수점 적용. 실패 → null |
-| `convert_era` | VARCHAR | LocalDate | vectorized (2048행) | 일본 연호 ("令和8年5月16日"). 실패 → null |
-| `assign_seq` | VARCHAR | long | scalar + **withVolatile() 필수** | 채번. 누락 시 DuckDB 캐싱 |
+| `apply_scale` | VARCHAR, int | BigDecimal | scalar | COMP-3 unpack + scale. Fail → null. |
+| `convert_era` | VARCHAR | LocalDate | vectorized (2048 rows) | Japanese era (`"令和8年5月16日"`). Fail → null. |
+| `assign_seq` | VARCHAR | long | scalar + **`withVolatile()` required** | Sequence numbering. Without volatile, DuckDB caches. |
 
-### 3.4 UDF 4 함정 (가장 잘 까먹는 것)
-1. **null 입력 = null 반환** 으로 반드시 설계. 미처리 시 NPE → Job 전체 실패.
-2. **withVolatile()** — 호출마다 다른 값 반환하는 UDF 필수.
-3. **Connection 종속** — 새 Connection 마다 `registerAllUdfs()`.
-4. **벡터화 UDF 의 DuckDBDataChunkReader 는 콜백 실행 중에만 유효** — 콜백 밖 저장 금지.
+### 3.4 UDF gotchas (most-forgotten)
+1. **NULL in → NULL out** by design. Otherwise NPE → whole job fails.
+2. **`withVolatile()`** for any UDF whose return varies between calls.
+3. **Connection scope** — `registerAllUdfs()` per new `Connection`.
+4. **Vectorized UDF's `DuckDBDataChunkReader`** is only valid inside the callback — never store outside.
 
-### 3.5 청크 분할 (대용량)
-- LIMIT/OFFSET 으로 CP1 청크 단위 처리
-- 임시 테이블 TRUNCATE 재사용 (CREATE 는 1회만)
-- 청크마다: Appender 삽입 → `COPY TO cp2_NNN.parquet` → TRUNCATE
-- 최종 적재: `read_parquet(['cp2_*.parquet'])` 통합 읽기
-- JOIN 대용량: 작은 테이블 전체 유지 + 큰 테이블 청크 JOIN
+### 3.5 Chunking (large tables)
+- LIMIT/OFFSET over CP1.
+- Reuse temp table via TRUNCATE (CREATE once).
+- Per chunk: Appender insert → `COPY TO cp2_NNN.parquet` → TRUNCATE.
+- Final load: `read_parquet(['cp2_*.parquet'])`.
+- Large JOIN: keep small side full in memory, chunk only the large side.
 
 ---
 
-## 4. 룰 입력 모델 — 3층 구조 (확정 2026-05-19)
+## 4. Rule input model — 3-layer toolbox (refined 2026-05-20)
 
-사용자가 컬럼별 변환 룰을 입력하는 방식. **자동 → 위저드 → 자유 SQL** 의 3층 사다리.
+Three ways the user defines a column's transform. Originally framed as a fallback **cascade** (1 → 2 → 3 when the previous fails). Refinement on 2026-05-20: in practice users **select by business intent, not by complexity**, so expose all three as a toolbox. Layer 1 is suggested by default; the user can jump to any layer directly.
 
-### 4.1 1층 — 타입 기반 자동 매핑
-AS-IS DDL + TO-BE DDL 보고 엔진이 기본값 자동 결정.
+### 4.1 Layer 1 — Type-based auto-mapping
+Backend has explicit Java functions for each `(source DB, target DB, source type, target type)` rule — written as testable units, not a generic matrix. Examples:
 
-| AS-IS | TO-BE | 자동 결과 |
+| AS-IS | TO-BE | Result | Risk flag |
+|---|---|---|---|
+| Oracle `CHAR(N)` | PG `VARCHAR(N)` | `strategy=copy` | — |
+| Oracle `CHAR(N)` | PG `VARCHAR(M < N)` | `strategy=cast` | **length truncation** |
+| Oracle `NUMBER(p,s)` | PG `NUMERIC(p,s)` | `strategy=copy` | — |
+| Oracle `NUMBER` | PG `INTEGER` | `strategy=cast` | **overflow** |
+| Oracle `DATE` | PG `TIMESTAMP` | `strategy=copy` | — |
+| Oracle `BLOB` | PG `BYTEA` | `strategy=copy` | — |
+
+Unknown/unmapped pairs land as `strategy=unmapped` → user must choose in Layer 2.
+
+**UI:** `source=auto` badge on the column row. Risk-flagged rows get an amber indicator.
+
+### 4.2 Layer 2 — Strategy library
+
+**Critical split (added 2026-05-20):** Layer 2 is two things with different governance.
+
+#### 4.2a — Parameterized SQL templates (pure SQL, no Java)
+| strategy | params | compiled_expr | Notes |
+|---|---|---|---|
+| `copy` | `{}` | `src.col AS tgt_col` | |
+| `constant` | `{"value":"X"}` | `'X' AS tgt_col` | |
+| `cast` | `{"type":"INTEGER"}` | `CAST(src.col AS INTEGER) AS tgt_col` | |
+| `case_when` | `{"map":{"1":"M","2":"F"}, "default":null}` | `CASE src.col WHEN ... END AS tgt_col` | |
+| `lookup` | `{"table":"code_map","key":"src.col"}` | `lkp.value AS tgt_col` + auto LEFT JOIN | Triggers `binding_source` insert |
+
+DuckDB version upgrades rarely affect these. Vectorized automatically.
+
+#### 4.2b — Java UDF wrappers
+| strategy | UDF called | params |
 |---|---|---|
-| Oracle `CHAR(10)` | PG `VARCHAR(10)` | `strategy=copy` |
-| Oracle `CHAR(10)` | PG `VARCHAR(8)` | `strategy=cast` + 위험 플래그 (길이 줄어듦) |
-| Oracle `NUMBER(10,2)` | PG `NUMERIC(10,2)` | `strategy=copy` |
-| Oracle `DATE` | PG `TIMESTAMP` | `strategy=copy` |
-| Oracle `NUMBER` | PG `INTEGER` | `strategy=cast` + 오버플로 위험 플래그 |
-| Oracle `BLOB` | PG `BYTEA` | `strategy=copy` |
+| `comp3_decimal` | `apply_scale` | `{"scale":2}` |
+| `era_to_date` | `convert_era` | `{}` |
+| `seq` | `assign_seq` | `{"key":"dept_code"}` |
 
-### 4.2 2층 — 구조화된 룰 (strategy + params)
-자동이 안 되거나 사용자가 거부하면 드롭다운으로 선택.
+UDF signature changes affect 2b only (compiler is the single point of update). Surface usage stats for 2a and 2b separately — different risk profiles.
 
-| strategy | 컴파일 결과 (예) |
+### 4.3 Layer 3 — Custom user-input code (deferred to PoC 2nd round)
+For cases not covered by 1, 2a, or 2b.
+
+**Decided 2026-05-20:**
+- **Out of scope for PoC 1st round** (deadline 2026-05-31). Security (arbitrary code execution), performance (per-row interpret), debuggability cannot be designed safely in remaining time.
+- For 1st round, the fallback when Layer 1/2 doesn't suffice is the **table-scoped Java mode** (escape ladder 2 in §5) — a coded escape, not a user-input one.
+- When introduced in 2nd round, use a **safe expression language** (MVEL / JEXL / Janino with strict whitelist). Never raw Java.
+
+**Correct mechanism (for 2nd-round implementation):** dynamic UDFs registered per snapshot at run start. Snapshot stores the code text once; SQL calls the dynamic UDF by name. Not "user code passed as a per-row string argument".
+
+```json
+"dynamic_udfs": {
+  "udf_proj42_col_foo_v3": {
+    "language": "mvel",
+    "source": "<user code>",
+    "compiled_sha": "abc123"
+  }
+}
+```
+
+### 4.4 UDF visibility policy
+| Layer | UDFs in user-visible text? |
 |---|---|
-| `copy` | `src.col AS tgt_col` |
-| `constant` | `'X' AS tgt_col` |
-| `cast` | `CAST(src.col AS T) AS tgt_col` |
-| `case_when` | `CASE src.col WHEN ... END AS tgt_col` |
-| `comp3_decimal` | `apply_scale(src.col_raw, 2) AS tgt_col` |
-| `era_to_date` | `convert_era(src.col_raw) AS tgt_col` |
-| `seq` | `assign_seq(src.key) AS tgt_col` |
-| `lookup` | `lkp.v AS tgt_col` + auto LEFT JOIN |
-| `unmapped` | (컴파일 안 됨 — preflight 차단) |
-| `custom_expr` | 사용자 입력 그대로 |
+| 1 | Never (auto-generated SQL uses no UDFs) |
+| 2 | Hidden behind strategy name (`comp3_decimal`, not `apply_scale(...)`) |
+| 3 | Forbidden in user code; engine registers dynamic UDFs |
 
-### 4.3 3층 — 자유 SQL (`custom_expr`)
-1·2 층으로 표현 못 하는 1~5% 케이스. DuckDB SQL fragment 직접 입력.
+**Why:** UDF signature changes (`apply_scale(v,s)` → `apply_scale(v,s,mode)`) become trivial when no snapshot stores the call text. If UDFs were callable in user-typed text, every signature change would require migrating every site's frozen snapshots — operationally impossible.
 
-### 4.4 핵심 규칙 — UDF 는 strategy 경로 only
-**`custom_expr` 에서 UDF (`apply_scale` 등) 직접 호출 금지.** 모든 UDF 는 strategy 로 감싼다.
-
-이유:
-1. UDF 시그니처 변경 시 일괄 마이그레이션 지옥 회피
-2. Sign-off 감사 시 strategy 컬럼만 SELECT 하면 변환 종류 파악 가능
-3. 신규 변환 = 코드리뷰·테스트 통과한 strategy 만 사용 (감사·통제)
-
-신규 UDF 도입 = 백엔드 코드 변경 (compiler 분기 추가). PoC 범위에서 변환 종류는 한정적이라 비용 작음.
-
-### 4.5 `column_override` 스키마 (예정)
+### 4.5 `column_override` schema (planned)
 ```
 strategy        enum
 params          jsonb
-compiled_expr   text   -- 엔진이 채움 (custom_expr 일 때만 사용자 입력)
-source          enum   -- auto | manual (1층 vs 2·3층 구분)
+compiled_expr   text   -- engine-filled (user-filled only when strategy=custom_expr)
+source          enum   -- auto | manual (auto recalc never overwrites manual)
 ```
 
 ---
 
-## 5. DuckDB 로 못 푸는 케이스 — Escape 사다리
+## 5. Escape ladder — when DuckDB doesn't suffice
 
-### 5.1 사다리 1 — 새 UDF 추가 (90%+)
-"DuckDB 가 못 한다" 의 실제 의미는 대개 "DuckDB 표준 함수에 그게 없다". → 새 Java UDF 추가. 같은 패턴.
+### 5.1 Ladder 1 — add a new UDF (90%+)
+"DuckDB can't do X" almost always means "DuckDB stdlib doesn't have X". Add a Java UDF. Same pattern as `apply_scale` / `convert_era` / `assign_seq`.
 
-실제 후보:
-- 사내 AES 암호화 (key wheel 정책)
-- 인증된 Java 라이브러리 호출 (예: `KsBankCheckDigit.validate()`)
-- MeCab 형태소 분석 후 변환
-- 회사 표준 정규화 알고리즘
+Real candidates:
+- In-house AES encryption with key-wheel policy
+- Calls to certified Java libraries (e.g., `KsBankCheckDigit.validate()`)
+- MeCab tokenization + transform
+- Company-standard normalization
 
-### 5.2 사다리 2 — Java 전용 테이블 모드 (1~2%)
-UDF 로도 안 되는 케이스 (상태 필요·다중 패스·인증된 row-by-row 라이브러리). **그 테이블만 DuckDB 우회**:
+### 5.2 Ladder 2 — Java-only table mode (1–2%)
+For cases UDF can't cover either (cross-row state, multi-pass, certified row-by-row libraries). **Only that table** bypasses DuckDB:
 
 ```
-[일반]  Source Reader → DuckDB Appender → Rule Engine → Loader
-[전용]  Source Reader → Java 처리기 → Loader
+[normal] Source Reader → DuckDB Appender → Rule Engine → Loader
+[bypass] Source Reader → Java row processor → Loader
 ```
 
-테이블 단위 플래그 `engine: duckdb | java`. snapshot 에 Java 클래스명 + 버전 동결 → deterministic replay 보장.
+Per-table flag `engine: duckdb | java`. Snapshot freezes the Java class name + version → deterministic replay.
 
-**비용**: DuckDB 의 벡터화 병렬 처리 포기. 정말 막힐 때만 사용.
+**Cost:** lose DuckDB's vectorized parallelism. Use only when truly stuck.
 
 ---
 
-## 6. 매핑 스냅샷 — 감사·재현성
+## 6. Validation rules — parallel track (OPEN, raised 2026-05-20)
 
-승인된 매핑은 **`compiled_expr` 를 동결** 한다 (params 만 동결 X).
+The rule engine as modeled today only expresses **transformations**. Real migration also needs **assertions** that `column_override` can't express:
 
-이유: 엔진/UDF 를 업그레이드해도 이미 sign-off 받은 snapshot 의 *의미* 가 변하면 안 됨 — 일본 금융권 감사 위반.
+- **Pre-conditions** — before transform, `salary` must be in `[0, 1e9]`
+- **Post-conditions** — after transform, `email` must match `\S+@\S+`
+- **Cross-row invariants** — sum of `amount` equals batch report total
+- **Cross-table invariants** — every `emp.dept_code` exists in `dept` (beyond FK)
 
-흐름:
-```
-사용자 룰 편집
-  → 엔진이 compiled_expr 다시 채움 (column_override)
-  → 승인 버튼 누름
-  → compiled_expr 들을 mapping_snapshot.payload_json 에 복사 = 얼림
-  → 이후 실행은 snapshot 의 얼린 SQL 만 사용 (column_override 안 봄)
-```
+Recommendation: a parallel **Validation Rules** track, same `strategy + params + compiled_expr` shape, evaluated separately, with failures going to quarantine with a validation-specific `reason`.
 
-전문용어: **deterministic replay**, **immutable snapshot**.
+**Status: open as of 2026-05-20.** Not yet modeled in `column_override` or any other meta table. Decide before V7 Flyway migration is written.
 
 ---
 
-## 7. Source Reader SPI
+## 7. Mapping snapshot — audit & reproducibility
 
-| 어댑터 | 처리 |
+Approved mappings **freeze the `compiled_expr`** (not just params).
+
+Reason: engine/UDF upgrades must not change the semantics of an already-signed-off snapshot — Japanese financial audit failure mode.
+
+Lifecycle:
+```
+user edits rules
+  → engine refills compiled_expr (column_override)
+  → user clicks "approve mapping snapshot"
+  → compiled_expr values copied into mapping_snapshot.payload_json (frozen)
+  → subsequent runs read ONLY the snapshot (column_override is ignored)
+```
+
+Terms: **deterministic replay**, **immutable snapshot**.
+
+---
+
+## 8. Source Reader SPI
+
+| Adapter | Handling |
 |---|---|
-| `CsvReaderAdapter` | DuckDB `read_csv()` 위임. Shift-JIS 는 `encoding='shift_jis'` (encodings 확장) |
-| `EbcdicReaderAdapter` | FileInputStream 바이너리 모드 + COMP-3 비트 연산 언패킹 (상위/하위 니블, 마지막 니블 부호 `0xC`=양, `0xD`=음) + EBCDIC→UTF-8 |
-| `FixedWidthReaderAdapter` | 레코드 길이 + 컬럼 offset·length 기반 |
+| `CsvReaderAdapter` | Delegates to DuckDB `read_csv()`. Shift-JIS via `encoding='shift_jis'` (encodings extension). |
+| `EbcdicReaderAdapter` | FileInputStream binary mode + COMP-3 nibble unpack (`0xC` = positive, `0xD` = negative) + EBCDIC → UTF-8 |
+| `FixedWidthReaderAdapter` | Record length + per-column `{offset, length}` |
 
-폐쇄망: DuckDB encodings 확장 파일 인스톨러 번들 필수.
+Air-gapped requirement: bundle DuckDB `encodings` extension in installer.
 
 ---
 
-## 8. Loader Adapter SPI
+## 9. Loader Adapter SPI
 
-| 어댑터 | TO-BE | 방식 |
+| Adapter | TO-BE | Method |
 |---|---|---|
 | `PostgresLoaderAdapter` | PostgreSQL | `COPY FROM STDIN` (`CopyManager`) |
 | `OracleLoaderAdapter` | Oracle | OCI Direct Path |
 | `MySqlLoaderAdapter` | MySQL | JDBC + `reWriteBatchedInserts=true` |
 | `SqlServerLoaderAdapter` | SQL Server | BulkCopy (TDS) |
-| `JdbcFallbackAdapter` | 기타 | 일반 JDBC 배치 INSERT |
+| `JdbcFallbackAdapter` | other | plain JDBC batch INSERT |
 
-선택: `driverId` 기반 `AdapterFactory` 자동 선택.
-
-TO-BE JDBC 드라이버 JAR: `data/drivers/` 디렉터리에 사이트별 배치. 동적 ClassLoader 로딩.
+Selection: `AdapterFactory` chooses by `driverId`. TO-BE JDBC driver JARs live in `data/drivers/`, loaded dynamically per site.
 
 ---
 
-## 9. 메타DB 추가 테이블 (Flyway V7~ 예정)
+## 10. Meta DB — new tables (Flyway V7+ planned)
 
-기존 `site`·`project` (V4~V6) 위에:
+On top of existing `site` / `project` (V4–V6):
 
-| 테이블 | 역할 |
+| Table | Role |
 |---|---|
-| `connection` | TO-BE DB JDBC 자격증명 (AES-GCM 암호화) |
-| `parsing_source` | AS-IS 파일 메타 (인코딩·구분자·어댑터 종류) |
-| `asis_db` | DuckDB store 메타 (워커별 식별) |
-| `schema_diff` | TO-BE 테이블별 매핑 정의 (컬럼 차이 + 룰 헤더) |
-| `column_override` | 컬럼 단위 변환 룰 (strategy, params, compiled_expr) |
-| `binding_source` | JOIN/UNION 소스 바인딩 (PRIMARY / JOIN / UNION) |
-| `mapping_snapshot` | 승인된 매핑 동결본 (`payload_json`) |
-| `migration_run` | 실행 이력 |
-| `run_quarantine` | 격리 행 로그 (run_id, stage, severity, reason, ...) |
-| `audit_log` | 변경 이력 |
+| `connection` | TO-BE DB JDBC credentials (AES-GCM encrypted) |
+| `parsing_source` | AS-IS file meta (encoding, delimiter, adapter type) |
+| `asis_db` | DuckDB store meta (per worker) |
+| `schema_diff` | per-target-table mapping header (column diff + rule header) |
+| `column_override` | per-column transform rule (`strategy, params, compiled_expr, source`) |
+| `binding_source` | JOIN/UNION source bindings (`PRIMARY / JOIN / UNION`) |
+| `mapping_snapshot` | approved frozen mapping (`payload_json`) |
+| `migration_run` | run history |
+| `run_quarantine` | quarantined rows (`run_id, stage, severity, reason, ...`) |
+| `audit_log` | change history |
 
-**원칙**: 엔티티만 만들고 Hibernate auto-DDL 금지. 반드시 Flyway `V{N}__*.sql`.
+**Rule:** never rely on Hibernate auto-DDL. New tables go in `V{N}__*.sql`.
 
 ---
 
-## 10. Coordinator / Worker 운영 모델
+## 11. Coordinator / Worker operational model
 
-- **Worker → Coordinator** 연결: REST + WebSocket 만. **PG JDBC 접속 절대 없음.**
-- **메타 PG bind**: `127.0.0.1` only — 외부 노출 금지. Coordinator 프로세스만 접속.
+- **Worker → Coordinator** over REST + WebSocket only. **No direct PG JDBC.**
+- **Meta PG bind**: `127.0.0.1` only — Coordinator process is the only client.
 
-### 10.1 Worker 등록 흐름
-1. Coordinator 설치 완료 시 화면에 표시:
-   - Coordinator URL (예: `http://10.20.30.40:8080`)
-   - Worker 등록 토큰 (예: `WK-7HQ3-2X5L-8MNP`)
-2. Worker 설치 시 두 값 입력 → Coordinator API 등록 요청 → 토큰 검증 후 노드 추가
-3. 토큰 형식: UUID 기반 + 사람이 옮겨치기 가능한 짧은 4-4-4 hex
+### 11.1 Worker registration flow
+1. After Coordinator install, the screen shows:
+   - Coordinator URL (e.g., `http://10.20.30.40:8080`)
+   - Worker registration token (e.g., `WK-7HQ3-2X5L-8MNP`)
+2. Worker install asks for both values → POSTs to Coordinator API → token validated → node added.
+3. Token format: UUID-derived, short 4-4-4 hex segments (human-transcribable).
 
-### 10.2 통신 비대칭
-| 방향 | 채널 | 용도 |
+### 11.2 Asymmetric channels
+| Direction | Channel | Use |
 |---|---|---|
-| Coordinator → Worker | WebSocket push | 작업 지시 |
-| Worker → Coordinator | REST | 결과 보고, 상태 업데이트 |
+| Coordinator → Worker | WebSocket push | task dispatch |
+| Worker → Coordinator | REST | result/status report |
 
-### 10.3 Heartbeat
-- Worker 가 Coordinator 에 30 초 간격 ping
-- 일정 시간 미응답 시 노드 비활성 표시
-
----
-
-## 11. 인스톨러 정책
-
-- **동봉 PG 버전**: PostgreSQL (※ 미결 항목 6번 참조 — 문서 간 16/18 불일치 정리 중)
-- **기존 PG 처리**: 사용자에게 "기존 사용 / 별도 인스턴스 새로 설치" 선택지 제공
-
-### 11.1 인스톨러 책임 (순서)
-1. PG 설치 여부 감지
-2. 없으면 동봉 PG 자동 설치 (Windows Service 등록, 별도 포트·데이터 디렉터리·OS 계정)
-3. 있으면 선택지 표시
-4. 초기 DB·계정 생성 → Flyway 자동 마이그레이션 적용
-5. Coordinator 시작 후 **URL + Worker 등록 토큰** 화면 표시
-
-### 11.2 격리 원칙
-- **TO-BE PG 와 격리 필수**: 같은 서버라도 다른 포트·다른 데이터 디렉터리·다른 OS 계정
-- 인스톨러 자체는 jpackage 또는 WiX/NSIS (추후 결정)
+### 11.3 Heartbeat
+- Worker pings Coordinator every 30 seconds.
+- Missed beats beyond a threshold → node marked inactive.
 
 ---
 
-## 12. 테스트 전략 (BE 필수)
+## 12. Installer policy
 
-### 12.1 H2 완전 폐기
-- 의존성에서 제거. test scope 도 X.
-- 이유: H2 PG-mode 가 진짜 PG 와 미묘하게 다름 (JSONB, ARRAY, 함수 등). "테스트는 통과했는데 prod 에서 깨짐" 사고는 일본 금융권 절대 금지.
+- **Bundled PG version**: PostgreSQL (see §16 item 6 — version discrepancy between docs being resolved)
+- **Existing PG**: user picks "use existing" vs "install separate instance"
 
-### 12.2 Testcontainers + @ServiceConnection (Spring Boot 3.1+)
-- `TestcontainersConfiguration` 빈에서 `PostgreSQLContainer<>("postgres:16-alpine")` 반환
-- 표준 통합 테스트 패턴: `@SpringBootTest` + `@Import(TestcontainersConfiguration.class)`
-- **개발자 PC 에 Docker 필수** (팀 정책 2026-05-14). Docker 없으면 자동 테스트 못 돌림.
+### 12.1 Installer responsibilities (in order)
+1. Detect whether PG is installed.
+2. If not: install bundled PG (Windows Service, separate port + data dir + OS account).
+3. If yes: present the choice.
+4. Create initial DB + account → Flyway applies migrations.
+5. After Coordinator starts, screen shows URL + Worker registration token.
 
-### 12.3 Flyway 가 스키마 단일 책임
-- Spring Batch 스크립트도 `V1__spring_batch_schema.sql` 로 직접 포함
-- `spring.batch.jdbc.initialize-schema: never`
-- Hibernate auto-DDL 절대 금지. 엔티티 추가 시 반드시 Flyway `V{N}__*.sql`
+### 12.2 Isolation
+- **TO-BE PG must be isolated**: even on the same server, separate port, data dir, OS account.
+- Installer tech: jpackage or WiX/NSIS (TBD).
 
-### 12.4 테스트 비중 가이드
-| 분류 | 비중 | 예시 |
+---
+
+## 13. Test strategy (mandatory reading for BE)
+
+### 13.1 H2 fully dropped
+- Removed from dependencies, including test scope.
+- Why: H2's PG-mode is subtly different (JSONB, ARRAY, functions). "Tests passed but prod broke" is unacceptable for Japanese finance.
+
+### 13.2 Testcontainers + `@ServiceConnection` (Spring Boot 3.1+)
+- `TestcontainersConfiguration` bean returns `PostgreSQLContainer<>("postgres:16-alpine")`.
+- Standard integration test setup: `@SpringBootTest` + `@Import(TestcontainersConfiguration.class)`.
+- **Docker required on every dev PC** (team policy 2026-05-14). No Docker → can't run automated tests.
+
+### 13.3 Flyway owns the schema
+- Spring Batch schema included as `V1__spring_batch_schema.sql`.
+- `spring.batch.jdbc.initialize-schema: never`.
+- Hibernate auto-DDL forbidden. New entity = new `V{N}__*.sql`.
+
+### 13.4 Test mix guideline
+| Category | Share | Examples |
 |---|---|---|
-| PG 필요 (Testcontainers) | 20-30% | JPA Repository, 통합 테스트, 마이그레이션 검증, audit log |
-| PG 불필요 | 70-80% | 변환 엔진 (DuckDB 임베디드), 매핑 로직, 인증 로직, DTO 변환 |
+| PG required (Testcontainers) | 20–30% | JPA repos, integration tests, migration checks, audit log |
+| PG not required | 70–80% | Transform engine (embedded DuckDB), mapping logic, auth, DTO mapping |
 
-### 12.5 사내 공유 PG 는 자동 테스트 부적합
-- 테스트 격리·동시성·CI 접근 문제
-- 단 `mvn spring-boot:run` 으로 도구 직접 켜서 클릭하는 dev 용도엔 OK
+### 13.5 Shared in-house PG not suitable for tests
+- Isolation, concurrency, CI access issues.
+- OK for running the tool locally via `mvn spring-boot:run` (dev clicking through UI).
 
 ---
 
-## 13. 12-factor 배포 원칙
+## 14. 12-factor deployment habits
 
-**현재 배포 모델** = jpackage 스탠드얼론 + 인스톨러 동봉 PG. K8s/Helm 은 현 단계 비용 과대 (일본 금융권 도입 결재 + 폐쇄망 운반 부담).
+**Current model** = jpackage standalone + installer-bundled PG. K8s/Helm is over-cost (Japanese finance procurement + air-gapped image distribution overhead).
 
-단, 미래 이전 가능성을 위해 12-factor 코드 습관 유지:
+But keep code 12-factor-friendly for future portability:
 
-### 13.1 외부 주입 항목
-| 항목 | 방식 |
+### 14.1 External injection
+| Item | How |
 |---|---|
-| 설정 | 환경 변수 / 외부 파일 (하드코딩 X) |
-| 메타 DB 접속 | host/port/user/pass 환경 변수 |
-| 라이센스 (.lic) 경로 | path 외부 주입 |
-| Coordinator URL (Worker 용) | 외부 주입 |
-| 데이터 디렉터리 | 외부 주입 |
+| Config | env vars / external files (no hardcoding) |
+| Meta DB connection | host/port/user/pass env vars |
+| License (.lic) path | injected |
+| Coordinator URL (for Workers) | injected |
+| Data directory | injected |
 
-### 13.2 로그
-- **stdout** 전용. 파일 X.
+### 14.2 Logs
+- **stdout only.** No file logging.
 
-### 13.3 배포 형태 종속 코드 금지
-- jpackage → docker → K8s 어디로 가도 코드 변경 0 이 목표
-- docker-compose 는 **dev/test 한정** (운영 배포 아님)
+### 14.3 No deployment-shape coupling
+- jpackage → docker → K8s: same code, zero changes is the goal.
+- docker-compose is **dev/test only**, never operational.
 
-### 13.4 K8s 는 세컨드 패스
-- 고객 인터뷰에서 "K8s 클러스터 있어요, 거기 올리고 싶어요" 같은 명확한 요구가 나오면 추가 채널로 붙임
-
----
-
-## 14. 미결 항목 (회의 필요)
-
-1. **strategy enum 최종 목록 확정** — 4.2 표가 후보. 추가·통폐합 여부.
-2. **`custom_expr` 에서 UDF 호출 금지 정책 공식화** — 4.4 결정 합의 필요.
-3. **`unmapped` 를 정식 strategy 로 둘지 vs row 부재로 처리할지** — 진행률 계산 단순성 vs 테이블 사이즈 트레이드오프.
-4. **compile-preview 엔드포인트 (DuckDB `EXPLAIN` 으로 design-time 검증)** PoC 범위 포함 여부.
-5. **drop/ignore strategy** 를 `unmapped` 와 구분할지.
-6. **PG 버전 문서 간 불일치** — `CLAUDE.md` 는 "PG 18 동봉", memory 와 `compose.yaml` 은 PG 16. 추정: dev local PG 18 / 인스톨러 동봉 PG 16 (안정성). 문서 정리 필요.
+### 14.4 K8s as a second-pass
+- If a customer explicitly asks "we have K8s, deploy there", add it as a second channel — not the primary.
 
 ---
 
-## 15. 더 읽을 곳
+## 15. Git workflow (added 2026-05-20)
 
-- `CLAUDE.md` — 스택·컨벤션·도메인 용어·로컬 실행
-- `docs/handoff/` — 시점별 작업 인계 노트 (최근 파일 먼저 권장)
-- `docs/DESIGN.md` — 초기 설계 (일부 outdated — 본 문서가 우선)
-- `docs/USER_MANUAL.md` / `DEVELOPER_MANUAL.md` — UI·운영 매뉴얼
+### 15.1 Commit format — Conventional Commits
+`<type>(<scope>): <description>` — e.g., `fix(settings): restore useLocation import lost in PR #3 merge`.
+
+Types: `feat | fix | chore | docs | refactor | test | perf | build | ci`. Scope optional but narrow when used.
+
+Anti-pattern: `fix: (settings) restore ...` (scope after colon) — breaks Conventional Commits parsers.
+
+### 15.2 Merge conflicts — never resolve in GitHub UI
+GitHub's web conflict editor is a plain textarea with **no typecheck or build**. PR #3 lost a `useLocation` import that way, breaking SettingsPage at runtime.
+
+Mandatory workflow: PR author (not reviewer) merges `dev` into the feature branch locally, runs `npx tsc --noEmit` + build, then pushes.
+
+### 15.3 Import conflicts — always union, never pick
+When both sides modify the same `import` line, take the union of additions. Picking one side is how symbols silently disappear.
+
+Example:
+```typescript
+// Side A
+import { useEffect, useMemo } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+
+// Side B
+import { useMemo, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+
+// Correct — union
+import { useEffect, useMemo } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+```
+
+### 15.4 Branch protection — pending
+On `dev` and `master`: require PR, require status checks (CI typecheck + build), no force push. Until CI workflow exists in `.github/workflows/`, manual discipline is the only safeguard.
+
+---
+
+## 16. Open items (decisions needed)
+
+1. **Final `strategy` enum list** — §4.2 lists the current candidates. Add/merge/remove?
+2. **Codify "no UDF calls in `custom_expr`"** as a compiler-enforced check (whitelist).
+3. **`unmapped` as a first-class strategy** vs row absence — pick one (impacts progress counting).
+4. **`compile-preview` endpoint** (DuckDB `EXPLAIN` for design-time SQL validation) — include in PoC 1st round, or defer?
+5. **`drop` / `ignore` strategy** — distinguish from `unmapped` (preflight passes vs blocks)?
+6. **PG version doc discrepancy** — `CLAUDE.md` says "PG 18", memory `installer-pg-bundle` and `compose.yaml` say PG 16. Best guess: dev local = PG 18, installer bundle = PG 16. Reconcile.
+7. **Validation rules track** (§6) — model in V7 schema? Or defer to V8+?
+
+---
+
+## 17. Further reading
+
+- `CLAUDE.md` — stack, conventions, glossary, local dev commands
+- `docs/handoff/` — point-in-time work handoff notes (read the most recent first)
+- `docs/DESIGN.md` — initial design (some parts outdated; this document takes precedence)
+- `docs/USER_MANUAL.md` / `DEVELOPER_MANUAL.md` — UI/operations manuals
