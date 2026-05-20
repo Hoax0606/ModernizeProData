@@ -144,6 +144,7 @@ cd ModernizeProData/frontend; npx tsc --noEmit
 | Cutover | 본운영 전환. production 환경에서만, 승인된 snapshot 필요. |
 | Rehearsal | dry-run. test 환경에서 cutover 시나리오 검증. |
 | AS-IS DB (도구 내장) | 운영팀 야간 CSV 추출 파일을 도구가 받아 DuckDB 로 적재 — 외부 DB 직접 접속 X. |
+| Artifact | 프로젝트가 생성하는 산출물 (DDL · Migration SQL · Mapping spec · Schema diff · Validation report · Dashboard snapshot). `/artifacts` 페이지에서 Excel-style 워크북 미리보기 + 다운로드. |
 
 ## 세션 시작 시 권장 동작
 

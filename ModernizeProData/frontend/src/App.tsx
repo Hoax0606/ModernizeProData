@@ -12,6 +12,7 @@ import { VersionsPage } from './pages/VersionsPage';
 import { ApprovalsPage } from './pages/ApprovalsPage';
 import { ExecutionPage } from './pages/ExecutionPage';
 import { ExecutionOverviewPage } from './pages/ExecutionOverviewPage';
+import { ArtifactsPage } from './pages/ArtifactsPage';
 import { AppShell } from './layout/AppShell';
 import { ProtectedRoute } from './routes/ProtectedRoute';
 import { useSettingsStore } from './store/settings';
@@ -49,7 +50,7 @@ function App() {
               <Route path="/mapping" element={<PlaceholderPage title="Mapping" description="AS-IS → TO-BE 컬럼 매핑 정의" />} />
               <Route path="/versions" element={<VersionsPage />} />
               <Route path="/execution" element={<ExecutionPage />} />
-              <Route path="/artifacts" element={<PlaceholderPage title="Artifacts" description="검증 리포트·매핑 스냅샷 export" />} />
+              <Route path="/artifacts" element={<ArtifactsPage />} />
               <Route path="/logs" element={<PlaceholderPage title="Log viewer" description="Audit log 조회·필터·검색·export" />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Route>
