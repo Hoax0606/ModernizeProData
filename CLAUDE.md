@@ -39,6 +39,8 @@ ModernizeProData/
 │       │   ├── common/         # config, dto, exception
 │       │   └── coordinator/    # api, auth, site, ddl, ...
 │       │                       # ddl/ = DDL import (entity / repository / service / parser)
+│       │   └── coordinator/    # api, auth, site, ddl, ...
+│       │                       # ddl/ = DDL import (entity / repository / service / parser)
 │       └── resources/
 │           ├── application.yml
 │           └── db/migration/   # V{N}__*.sql — Flyway

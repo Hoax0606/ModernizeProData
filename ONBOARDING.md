@@ -23,12 +23,34 @@ dev → test → staging → production
 - **The `cutover` phase can only run in `production` stage.** Enforce with a code-level guard.
 
 ### 1.3 Two snapshot types + approval flow
-| Snapshot | Phase it advances on approve |
-|---|---|
-| mapping snapshot | → sign-off |
-| cutover snapshot | → ready |
+| Snapshot | Phase it advances on approve | When can it be created |
+|---|---|---|
+| mapping snapshot | → sign-off | any time |
+| cutover snapshot | → ready | **post-rehearsal phases only** (`rehearsal · ready · cutover · hypercare · done`) |
 
 - **Phase transitions happen only on `approve`** — never at request time.
+- When creating a cutover snapshot the UI shows an extra **red strong-confirm dialog** (separate from the production-stage guard).
+
+### 1.4 Snapshot version assignment (confirmed 2026-05-19)
+
+Each snapshot carries a `version VARCHAR(16)` column auto-assigned by the server. No manual editing. The logic lives in `Snapshot.generateNextVersion(latestVersion, latestStatus)`.
+
+| Previous snapshot status | Next version | Meaning |
+|---|---|---|
+| (none, first creation) | `v1.0` | initial value |
+| `approved` | major bump (`v1.3 → v2.0`) | new mapping cycle after a signed-off baseline |
+| `draft` / `pending` / `rejected` | minor bump (`v1.2 → v1.3`) | rework within the same cycle |
+
+- Versioning is triggered **only when a new snapshot is created**. Status transitions (request / approve / reject) do not change the version.
+- "Previous" = the single row with the latest `created_at DESC` (`SnapshotRepository.findLatestByProjectId`).
+- Stored as `VARCHAR`, so lexicographic ordering gives `v10.0 < v2.0`. The current UI sorts by `created_at`, so this is fine — if a version-based sort UI is added later, a dedicated parser is required.
+- Concurrent creation of snapshots for the same project by multiple users is assumed not to occur (air-gapped, single-operator usage); no lock.
+
+### 1.5 AUDIT LOG (current state)
+
+- The frontend `store/auditLog.ts` persists entries to **client-side localStorage** via zustand `persist`. Accumulated per project, with count + collapse in the UI.
+- Limitation: the record differs per PC. Acceptable for the PoC demo, which runs on a single PC.
+- Once the server `audit_log` table (§9) lands, keep the store interface as-is and swap only the implementation to call the API.
 
 ### 1.4 `runStatus` sub-status (test / rehearsal / cutover only)
 | Value | Meaning | UI |
