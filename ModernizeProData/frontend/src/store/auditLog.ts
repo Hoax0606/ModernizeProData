@@ -9,6 +9,8 @@ export interface AuditLogEntry {
   action: string;
   description: string;
   snapshotName?: string;
+  snapshotId?: string;
+  snapshotType?: 'mapping' | 'cutover';
 }
 
 interface AuditLogState {

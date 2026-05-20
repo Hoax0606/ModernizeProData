@@ -2,12 +2,15 @@ import { useMemo, useRef, useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useWorkspaceStore, type DdlFile, type Project, type ProjectPhase, type Site } from '../store/workspace';
 import { useSnapshotsStore, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
+import { useNotificationPrefsStore } from '../store/notificationPreferences';
+import { useSettingsStore } from '../store/settings';
 import { projectApi } from '../api/workspace';
 import { ApiError } from '../api/client';
 import { useAuthStore } from '../store/auth';
 import { DdlSchemaPanel } from '../components/DdlSchemaPanel';
 import { LockIcon } from '../components/LockIcon';
 import { CsvPathField } from '../components/CsvPathField';
+import { Toast } from '../components/Toast';
 import { useT } from '../i18n';
 
 /** AppShell 의 AS-IS/TO-BE 램프 클릭 → navigate(..., { state: { highlightSide } }) 로 전달. */
@@ -126,7 +129,7 @@ export function SettingsPage() {
         {section === 'source'    && <PSSource    project={project} site={site} highlight={highlightSide === 'asis'} />}
         {section === 'target'    && <PSTarget    project={project} highlight={highlightSide === 'tobe'} />}
         {section === 'schedule'  && <PSSchedule  project={project} />}
-        {section === 'notify'    && <PSNotify    />}
+        {section === 'notify'    && <PSNotify    project={project} />}
         {section === 'danger'    && <PSDanger    project={project} />}
       </div>
     </div>
@@ -434,8 +437,10 @@ migrate rollback --project ${project.id} --to pre-cutover`}
 
 /* ─── Notifications ──────────────────────────────────────── */
 
-function PSNotify() {
+function PSNotify({ project }: { project: Project }) {
   const t = useT();
+  // Solution settings 의 Enable notifications. false 면 Event subscriptions 토글 일괄 비활성.
+  const globalNotifEnabled = useSettingsStore((s) => s.notifications);
   const events = [
     { k: 'run.failed',       l: t('projectSettings.notify.event.runFailed.label'),       d: t('projectSettings.notify.event.runFailed.desc') },
     { k: 'snapshot.pending', l: t('projectSettings.notify.event.snapPending.label'),     d: t('projectSettings.notify.event.snapPending.desc') },
@@ -445,25 +450,58 @@ function PSNotify() {
     { k: 'cutover.finished', l: t('projectSettings.notify.event.cutoverFinished.label'), d: t('projectSettings.notify.event.cutoverFinished.desc') },
   ];
 
-  const [subs, setSubs] = useState<Record<string, boolean>>(() => {
-    const o: Record<string, boolean> = {};
-    events.forEach((e) => { o[e.k] = true; });
-    return o;
-  });
+  const subsMap          = useNotificationPrefsStore((s) => s.subs);
+  const setSubscription  = useNotificationPrefsStore((s) => s.setSubscription);
+
+  // store 에 저장된 현재 값
+  const savedSubs = subsMap[project.id] ?? {};
+
+  // 로컬 draft — Save 누르기 전까지는 store 에 반영 안 됨
+  const [draftSubs, setDraftSubs] = useState<Record<string, boolean>>(savedSubs);
+  const [savedToast, setSavedToast] = useState(false);
+
+  // 프로젝트가 바뀌면 draft 를 저장값으로 재초기화
+  useEffect(() => {
+    setDraftSubs(subsMap[project.id] ?? {});
+    // 프로젝트 변경 시에만 초기화 — store map 변화로 인한 재초기화는 원치 않음 (자기가 저장한 직후 깜박임 방지)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.id]);
+
+  const isOn = (k: string) => draftSubs[k] ?? true;
+
+  const isDirty = useMemo(() => {
+    for (const e of events) {
+      const d = draftSubs[e.k] ?? true;
+      const s = savedSubs[e.k] ?? true;
+      if (d !== s) return true;
+    }
+    return false;
+  }, [draftSubs, savedSubs, events]);
+
+  const handleSave = () => {
+    if (!isDirty) return;
+    for (const e of events) {
+      const v = draftSubs[e.k] ?? true;
+      setSubscription(project.id, e.k, v);
+    }
+    setSavedToast(true);
+  };
 
   return (
     <>
       <PSHead
         title="Notifications"
         desc={t('projectSettings.head.notify.desc')}
-        actions={<button style={styles.btnPrimary} disabled>{t('projectSettings.action.saveChanges')}</button>}
-        mock
+        actions={
+          <button
+            onClick={handleSave}
+            disabled={!isDirty}
+            style={{ ...styles.btnPrimary, ...(!isDirty ? styles.btnDisabled : {}) }}
+          >
+            {t('projectSettings.action.saveChanges')}
+          </button>
+        }
       />
-
-      <div style={styles.infoBox}>
-        <div style={{ fontWeight: 600, marginBottom: 4 }}>{t('projectSettings.notify.inbox.title')}</div>
-        {t('projectSettings.notify.inbox.body')}
-      </div>
 
       <PSCard title={t('projectSettings.notify.subscriptions.title')} desc={t('projectSettings.notify.subscriptions.desc')}>
         {events.map((e, i) => (
@@ -478,40 +516,17 @@ function PSNotify() {
               <div style={{ fontSize: 12, fontWeight: 500 }}>{e.l}</div>
               <div style={{ fontSize: 10.5, color: 'var(--text-3)', marginTop: 2 }}>{e.d}</div>
             </div>
-            <Toggle on={subs[e.k]} onChange={() => setSubs((s) => ({ ...s, [e.k]: !s[e.k] }))} label="" />
+            <Toggle
+              on={globalNotifEnabled && isOn(e.k)}
+              onChange={() => setDraftSubs((cur) => ({ ...cur, [e.k]: !(cur[e.k] ?? true) }))}
+              disabled={!globalNotifEnabled}
+              label=""
+            />
           </div>
         ))}
       </PSCard>
 
-      <PSCard title={t('projectSettings.notify.recipients.title')} desc={t('projectSettings.notify.recipients.desc')}>
-        <PSRow label={t('projectSettings.notify.recipients.scope')} hint={t('projectSettings.notify.recipients.scopeHint')}>
-          <div style={{ display: 'flex', gap: 5 }}>
-            {[
-              { k: 'mine-only',   l: t('projectSettings.notify.scope.mine') },
-              { k: 'all-project', l: t('projectSettings.notify.scope.all') },
-            ].map((opt) => {
-              const active = opt.k === 'all-project';
-              return (
-                <button
-                  key={opt.k}
-                  style={{
-                    padding: '3px 12px', fontSize: 11, fontFamily: 'var(--mono)',
-                    border: `1px solid ${active ? 'var(--navy)' : 'var(--border)'}`,
-                    background: active ? 'var(--navy)' : 'var(--panel)',
-                    color: active ? '#fff' : 'var(--text-2)',
-                    borderRadius: 3, cursor: 'pointer',
-                  }}
-                >
-                  {opt.l}
-                </button>
-              );
-            })}
-          </div>
-        </PSRow>
-        <PSRow label={t('projectSettings.notify.recipients.retention')} hint={t('projectSettings.notify.recipients.retentionHint')}>
-          <PSInput value="90 days" mono width={160} />
-        </PSRow>
-      </PSCard>
+      <Toast visible={savedToast} message={t('projectSettings.action.savedToast')} onHide={() => setSavedToast(false)} />
     </>
   );
 }
@@ -985,7 +1000,16 @@ function PSCard({ title, desc, children, mock }: { title?: string; desc?: string
   );
 }
 
-function PSRow({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+function PSRow({ label, hint, children, vertical }: { label: string; hint?: string; children: React.ReactNode; vertical?: boolean }) {
+  if (vertical) {
+    return (
+      <div style={styles.rowVertical}>
+        <div style={styles.rowLabelText}>{label}</div>
+        {hint && <div style={styles.rowHint}>{hint}</div>}
+        <div style={{ ...styles.rowControl, marginTop: 8 }}>{children}</div>
+      </div>
+    );
+  }
   return (
     <div style={styles.row}>
       <div style={styles.rowLabel}>
@@ -1031,23 +1055,25 @@ function PSInput({
   );
 }
 
-function Toggle({ on, onChange, label }: { on: boolean; onChange: (v: boolean) => void; label?: string }) {
+function Toggle({ on, onChange, label, disabled }: { on: boolean; onChange: (v: boolean) => void; label?: string; disabled?: boolean }) {
   return (
     <button
-      onClick={() => onChange(!on)}
+      onClick={() => { if (!disabled) onChange(!on); }}
+      disabled={disabled}
       style={{
         display: 'inline-flex', alignItems: 'center', gap: 8,
-        padding: '3px 8px',
-        background: on ? 'var(--navy-50)' : 'var(--panel)',
-        border: `1px solid ${on ? 'var(--navy)' : 'var(--border)'}`,
-        borderRadius: 3, cursor: 'pointer',
-        fontSize: 11.5, color: on ? 'var(--navy)' : 'var(--text-3)',
+        padding: 0,
+        background: 'transparent',
+        border: 'none',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        fontSize: 11.5, color: on ? 'var(--text)' : 'var(--text-3)',
         fontFamily: 'var(--mono)',
+        opacity: disabled ? 0.45 : 1,
       }}
     >
       <span style={{
         width: 22, height: 12, borderRadius: 7,
-        background: on ? 'var(--navy)' : 'var(--border-strong)',
+        background: on ? 'var(--text-2)' : 'var(--border-strong)',
         position: 'relative', display: 'inline-block',
       }}>
         <span style={{
@@ -1178,6 +1204,12 @@ const styles: Record<string, React.CSSProperties> = {
   rowLabelText: { fontSize: 11.5, fontWeight: 500, color: 'var(--text)' },
   rowHint: { fontSize: 10.5, color: 'var(--text-3)', marginTop: 2, fontFamily: 'var(--mono)' },
   rowControl: { display: 'flex', alignItems: 'center', gap: 8 },
+  rowVertical: {
+    display: 'flex',
+    flexDirection: 'column',
+    padding: '7px 0',
+    borderBottom: '1px dashed var(--border)',
+  },
 
   /* input */
   input: {

@@ -85,7 +85,7 @@ export const ja: Record<TranslationKey, string> = {
   'solution.theme.light': 'Light',
   'solution.theme.dark': 'Dark',
   'solution.notifications': 'Notifications',
-  'solution.notifications.desc': 'アプリ内通知(🔔)の使用可否。受信イベントは Project Settings › Notifications で管理。',
+  'solution.notifications.desc': 'アプリ内通知の使用可否。受信イベントは Project Settings › Notifications で管理。',
   'solution.notifications.enable': 'Enable notifications',
   'solution.notifications.enableDesc': 'オフにすると全プロジェクトのアプリ内通知が一括無効化されます。',
   'solution.external': 'External integrations',
@@ -557,6 +557,7 @@ export const ja: Record<TranslationKey, string> = {
   'notifications.clearAll': 'Clear all',
   'notifications.empty.title': 'No notifications',
   'notifications.empty.hint': '実行・承認・システムイベントがここに表示されます。',
+  'notifications.empty.unread': '未読のメッセージはありません。',
   'notifications.viewAll': 'Approvals で全件表示 →',
 
   'projectEnv.test':       'Test',
@@ -621,6 +622,7 @@ export const ja: Record<TranslationKey, string> = {
   'projectSettings.action.save':                'Save',
   'projectSettings.action.saving':              'Saving…',
   'projectSettings.action.saveChanges':         'Save changes',
+  'projectSettings.action.savedToast':          '設定を保存しました。',
   'projectSettings.action.testConnection':      'Test connection',
   'projectSettings.action.testing':             'Testing connection…',
 

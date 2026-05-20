@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useWorkspaceStore, type ProjectPhase } from '../store/workspace';
 import { useSnapshotsStore, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
 import { useAuthStore } from '../store/auth';
@@ -62,7 +63,8 @@ export function VersionsPage() {
     const el = descRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = el.scrollHeight + 'px';
+    // textareaDesc.maxHeight (160) 까지만 자라고, 그 이후는 내부 스크롤
+    el.style.height = Math.min(el.scrollHeight, 160) + 'px';
   }, [newDesc, createOpen]);
 
   // Description 입력 규칙: 같은 글자 10번 이상 연속 금지 + 첫째 줄만 20자 초과 시 자동 개행
@@ -109,6 +111,18 @@ export function VersionsPage() {
     setSelectedSnapshotId(snapshots[0].id);
   }, [snapshots, selectedSnapshotId]);
 
+  // 알림 클릭으로 들어왔을 때 location.state.selectSnapshotId 로 지정된 스냅샷을 자동 선택
+  const location = useLocation();
+  useEffect(() => {
+    const st = location.state as { selectSnapshotId?: string | null } | null;
+    const targetId = st?.selectSnapshotId;
+    if (!targetId) return;
+    // snapshot 이 아직 fetch 안 됐을 수 있으니, 도착하면 선택
+    if (snapshots.some((s) => s.id === targetId)) {
+      setSelectedSnapshotId(targetId);
+    }
+  }, [location.key, snapshots]);
+
   // AUDIT LOG 접기/펼치기 상태
   const [auditLogExpanded, setAuditLogExpanded] = useState(true);
 
@@ -126,7 +140,13 @@ export function VersionsPage() {
   const canCreateCutover = project ? POST_REHEARSAL.includes(project.phase) : false;
 
   // Audit Log 추가 함수
-  const addAuditLog = (action: string, description: string, snapshotName?: string) => {
+  const addAuditLog = (
+    action: string,
+    description: string,
+    snapshotName?: string,
+    snapshotId?: string,
+    snapshotType?: 'mapping' | 'cutover',
+  ) => {
     if (!activeProjectId) return;
     addAuditLogEntry({
       projectId: activeProjectId,
@@ -134,6 +154,8 @@ export function VersionsPage() {
       action,
       description,
       snapshotName,
+      snapshotId,
+      snapshotType,
     });
   };
 
@@ -193,7 +215,7 @@ export function VersionsPage() {
       const auditDesc = desc
         ? `Created new ${createType} snapshot: ${name}\n${desc}`
         : `Created new ${createType} snapshot: ${name}`;
-      addAuditLog(actionLabel, auditDesc, newSnapshot.version || 'v1.0');
+      addAuditLog(actionLabel, auditDesc, newSnapshot.version || 'v1.0', newSnapshot.id, createType);
 
       resetCreate();
     } catch (error) {
@@ -209,7 +231,13 @@ export function VersionsPage() {
 
       // Audit log 기록
       const snapshot = snapshots.find(s => s.id === id);
-      addAuditLog('approval requested', `Requested approval for snapshot: ${snapshot?.name}`, snapshot?.version);
+      addAuditLog(
+        'approval requested',
+        `Requested approval for snapshot: ${snapshot?.name}`,
+        snapshot?.version,
+        snapshot?.id,
+        snapshot?.type ?? 'mapping',
+      );
 
       // Phase 전환은 approve 시점에 처리 (ApprovalsPage)
     } catch (error) {
@@ -269,10 +297,20 @@ export function VersionsPage() {
             borderColor: 'var(--red)',
           } : {}),
         }}>
-          <div style={{ fontSize: 11, fontWeight: 700, fontFamily: 'var(--mono)', color: createType === 'cutover' ? 'var(--red)' : 'var(--navy)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-            {createType === 'cutover' ? t('versions.type.cutover') : t('versions.type.mapping')} snapshot
+          <div style={styles.createHeader}>
+            <div style={{ fontSize: 11, fontWeight: 700, fontFamily: 'var(--mono)', color: createType === 'cutover' ? 'var(--red)' : 'var(--navy)', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              {createType === 'cutover' ? t('versions.type.cutover') : t('versions.type.mapping')} snapshot
+            </div>
+            <div style={styles.createActions}>
+              <button type="submit" style={{ ...styles.btnPrimary, ...(newName.trim() ? {} : styles.btnDisabled) }} disabled={!newName.trim()}>
+                {t('versions.create.submit')}
+              </button>
+              <button type="button" onClick={resetCreate} style={styles.btnGhost}>
+                {t('versions.cancelCreate')}
+              </button>
+            </div>
           </div>
-          <div style={styles.createRow}>
+          <div style={styles.createStack}>
             <Field label={t('versions.create.name')}>
               <textarea
                 ref={nameRef}
@@ -292,7 +330,7 @@ export function VersionsPage() {
                   value={newDesc}
                   onChange={(e) => handleDescChange(e.target.value)}
                   style={styles.textareaDesc}
-                  rows={1}
+                  rows={2}
                 />
                 {!newDesc && (
                   <div style={styles.textareaPlaceholder}>
@@ -302,14 +340,6 @@ export function VersionsPage() {
                 {descError && <div style={styles.descError}>{descError}</div>}
               </div>
             </Field>
-          </div>
-          <div style={styles.createActions}>
-            <button type="submit" style={{ ...styles.btnPrimary, ...(newName.trim() ? {} : styles.btnDisabled) }} disabled={!newName.trim()}>
-              {t('versions.create.submit')}
-            </button>
-            <button type="button" onClick={resetCreate} style={styles.btnGhost}>
-              {t('versions.cancelCreate')}
-            </button>
           </div>
         </form>
       )}
@@ -810,6 +840,8 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 3,
     padding: '0 4px',
     lineHeight: 1.3,
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
   },
   cutoverTagLarge: {
     display: 'inline-block',
@@ -1271,7 +1303,15 @@ const styles: Record<string, React.CSSProperties> = {
     marginBottom: 12,
   },
   createRow: { display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 10, alignItems: 'end' },
-  createActions: { display: 'flex', justifyContent: 'flex-end', gap: 6, marginTop: 10 },
+  createHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 10,
+  },
+  createStack: { display: 'flex', flexDirection: 'column', gap: 8 },
+  createActions: { display: 'flex', justifyContent: 'flex-end', gap: 6 },
   field: { display: 'flex', flexDirection: 'column', gap: 4 },
   fieldLabel: { fontSize: 11.5, fontWeight: 600, color: 'var(--text)' },
   input: {
@@ -1300,13 +1340,14 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12.5,
     outline: 'none',
     width: '100%',
-    minHeight: 35,
+    minHeight: 56,
+    maxHeight: 160,
     boxSizing: 'border-box',
     fontFamily: 'inherit',
     resize: 'none',
     lineHeight: 1.4,
     display: 'block',
-    overflow: 'hidden',
+    overflow: 'auto',
   },
   descError: {
     position: 'absolute',
