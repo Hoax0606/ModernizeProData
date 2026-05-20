@@ -103,7 +103,7 @@ export const ko = {
   'solution.savedToast': '설정이 저장되었습니다.',
 
   'solution.license':            'License',
-  'solution.license.desc':       '본 사이트 Coordinator 의 라이선스 상태. 만료 전 갱신 필요.',
+  'solution.license.desc':       '본 사이트 Coordinator 의 라이선스 상태입니다. 만료 전 갱신이 필요합니다.',
   'solution.license.licensedTo': 'Licensed to',
   'solution.license.edition':    'Edition',
   'solution.license.issued':     'Issued',
@@ -282,12 +282,12 @@ export const ko = {
   'execution.rehearsal.title':        '전체 데이터 이행 리허설',
   'execution.ready.title':            'Cutover 준비 완료 — production stage 대기 중',
   'execution.cutover.title':          'Cutover',
-  'execution.cutover.desc':           'TO-BE 시스템으로 데이터를 실제 이행하는 단계. 승인된 스냅샷으로만 시작 가능.',
+  'execution.cutover.desc':           'TO-BE 시스템으로 데이터를 실제 이행하는 단계입니다. 승인된 스냅샷으로만 시작할 수 있습니다.',
   'execution.cutover.coordOnly':      'Coordinator only — start / abort / finish',
   'execution.cutover.snapshot':       'Snapshot',
   'execution.cutover.selectSnapshot': 'Select target snapshot',
   'execution.cutover.noApproved':     '승인된 스냅샷이 없습니다. Versions 또는 Approvals 탭에서 먼저 승인하세요.',
-  'execution.cutover.notReady':       '아직 cutover 단계가 아닙니다. Phase 가 rehearsal 일 때만 시작 가능.',
+  'execution.cutover.notReady':       '아직 cutover 단계가 아닙니다. Phase 가 rehearsal 일 때만 시작할 수 있습니다.',
   'execution.cutover.currentPhase':   '현재 단계: {phase}',
 
   'execution.cutover.ready.title':    'Ready for cutover',
@@ -317,7 +317,7 @@ export const ko = {
   'execution.cutover.movedToSite':    'cutover 시작·중단·완료는 All Projects → Cutover 탭에서 관리합니다.',
 
   'cutover.title':            'Cutover',
-  'cutover.subtitle':         '사이트 내 모든 프로젝트의 cutover 상태. rehearsal + 승인 스냅샷 + 담당자가 갖춰지면 시작 가능.',
+  'cutover.subtitle':         '사이트 내 모든 프로젝트의 cutover 상태입니다. rehearsal + 승인 스냅샷 + 담당자가 갖춰지면 시작할 수 있습니다.',
   'cutover.empty':            '프로젝트가 없습니다.',
   'cutover.col.project':      'Project',
   'cutover.col.phase':        'Phase',
@@ -362,7 +362,7 @@ export const ko = {
   'asisDdl.modal.title':              'AS-IS schema',
   'asisDdl.modal.loading':            '로딩 중…',
   'asisDdl.modal.empty':              'AS-IS DDL이 아직 임포트되지 않았습니다.',
-  'asisDdl.modal.selectTable':        '왼쪽에서 테이블을 선택하세요',
+  'asisDdl.modal.selectTable':        '왼쪽에서 테이블을 선택하세요.',
   'asisDdl.modal.columnsUnit':        'columns',
   'asisDdl.modal.summary.file':       'FILE',
   'asisDdl.modal.summary.tables':     'TABLES',
@@ -419,7 +419,7 @@ export const ko = {
   'siteSettings.tobeEncoding': 'TO-BE encoding',
   'siteSettings.encodingHint': '비표준 인코딩(EBCDIC 등)은 Java 전처리로 별도 처리',
   'siteSettings.csvPath': 'AS-IS CSV path',
-  'siteSettings.csvPathHint': '이 경로의 CSV 를 도구가 자동으로 Parquet 으로 변환합니다. 별도 import 불필요.',
+  'siteSettings.csvPathHint': '이 경로의 CSV 를 도구가 자동으로 Parquet 으로 변환합니다. 별도 import 는 필요하지 않습니다.',
   'siteSettings.csvPathPlaceholder': 'D:\\migration\\csv 또는 \\\\server\\share\\csv',
   'siteSettings.csvPathBrowse': 'Browse',
   'siteSettings.notes': 'Notes',
@@ -488,12 +488,12 @@ export const ko = {
   'projectSettings.empty.hint': '좌측 사이드바에서 프로젝트를 만들거나 선택한 뒤 설정에 진입하세요.',
   'projectSettings.empty.note': '(도구 전역 설정은 좌측 하단 사용자 메뉴 → Solution settings 에서)',
 
-  'placeholder.subtitle': '이 화면은 추후 구현 예정.',
+  'placeholder.subtitle': '이 화면은 추후 구현 예정입니다.',
   'placeholder.empty.title': 'Not yet implemented',
-  'placeholder.empty.hint': '개발 진행 중. 팀원에게 분배되어 작업 예정.',
+  'placeholder.empty.hint': '개발 진행 중입니다. 팀원에게 분배되어 작업 예정입니다.',
 
   'shell.siteEmpty.name': 'Create site',
-  'shell.siteEmpty.sub': '먼저 사이트를 설정하세요',
+  'shell.siteEmpty.sub': '먼저 사이트를 설정하세요.',
   'shell.sites': 'Sites',
   'shell.menu.newSite': 'New site',
   'shell.menu.siteSettings': 'Site settings',
@@ -504,7 +504,7 @@ export const ko = {
   'shell.projectsEmpty.withSite.after': ' 클릭으로 만드세요.',
   'shell.projectsEmpty.noSite': '먼저 사이트를 만드세요.',
   'shell.newProject.title': 'New project',
-  'shell.newProject.noSite': '사이트를 먼저 만드세요',
+  'shell.newProject.noSite': '사이트를 먼저 만드세요.',
   'shell.top.noProject': 'No project selected',
   'shell.top.noSite': 'A site needs to be configured',
   'shell.user.localAccount': 'local account',
@@ -537,7 +537,7 @@ export const ko = {
   'siteSettings.unlockCoordOnly':'Coordinator only',
   'siteSettings.prodCoordOnly':  'Switching to production is Coordinator only',
   'createProject.ddl':         'DDL files (optional)',
-  'createProject.ddlHint':     'AS-IS · TO-BE 스키마. 비워두면 나중에 Project Settings 에서 추가 가능.',
+  'createProject.ddlHint':     'AS-IS · TO-BE 스키마입니다. 비워두면 나중에 Project Settings 에서 추가할 수 있습니다.',
   'createProject.ddlPick':     'Choose files',
   'createProject.ddlEmpty':    'No files selected',
   'createProject.ddlRemove':   'Remove',
@@ -581,7 +581,7 @@ export const ko = {
   'projectSettings.row.envHint':                '사이트의 운영 단계 (Site settings 에서 변경).',
   'projectSettings.row.createdAt':              '생성일',
   'projectSettings.phase.title':                'Phase (dev/test only)',
-  'projectSettings.phase.desc':                 '테스트용 phase 수동 변경. 운영 시 제거 예정.',
+  'projectSettings.phase.desc':                 '테스트용 phase 수동 변경입니다. 운영 시 제거 예정입니다.',
   'projectSettings.phase.row':                  'Current phase',
 
   // Project Settings — AS-IS / Source
@@ -628,7 +628,7 @@ export const ko = {
   'projectSettings.creds.change':               'Change…',
   'projectSettings.creds.principal':            'Principal',
   'projectSettings.creds.privateKey':           'Private key',
-  'projectSettings.creds.privateKeyHint':       '대화형 발급 흐름은 추후 구현 예정',
+  'projectSettings.creds.privateKeyHint':       '대화형 발급 흐름은 추후 구현 예정입니다.',
   'projectSettings.creds.cert':                 'Certificate',
 
   // Schedule — nightly rehearsal
@@ -695,7 +695,7 @@ export const ko = {
   'projectSettings.notify.recipients.retentionHint': '알림이 inbox 에 유지되는 기간',
 
   'projectSettings.ddl.title':  'DDL files',
-  'projectSettings.ddl.desc':   'AS-IS · TO-BE 스키마 정의. 다중 업로드 가능.',
+  'projectSettings.ddl.desc':   'AS-IS · TO-BE 스키마 정의입니다. 다중 업로드가 가능합니다.',
   'projectSettings.ddl.add':    '+ Add DDL file',
   'projectSettings.ddl.empty':  'No DDL files uploaded yet',
 

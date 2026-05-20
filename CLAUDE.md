@@ -1,35 +1,35 @@
 # Modernize Pro Data — AI context
 
-This file ensures every AI session starts from the same baseline when our 5-person team (3 BE / 2 FE) works on separate PCs. When you start a new session, **read this file first**, then read the most recent file under `docs/handoff/`.
+5명 팀(BE 3 / FE 2)이 각자 PC 에서 작업할 때, 모든 AI 세션이 같은 출발점을 갖도록 하는 파일이다. 새 세션을 시작했다면 **이 파일 → `docs/ONBOARDING.md` → `docs/handoff/` 의 가장 최근 파일** 순으로 읽어라. `ONBOARDING.md` 는 파이프라인·룰 엔진·DDL 인포트 등 설계 상세를 누적 기록한 영문 문서 (다국적 팀 공통어로 영어 채택).
 
-## Project in one line
-Data migration tool for the Japanese financial sector. Customer sites are fully air-gapped (no network bridge, no HQ telemetry); HQ ↔ field transfers happen by hand via USB. PoC 1st-round deadline: **2026-05-31**.
+## 프로젝트 한 줄
+일본 금융권용 데이터 이행 도구. 대상 사이트는 완전 폐쇄망(망연계·본사 모니터링 없음), 본사 ↔ 현장은 사람이 USB 로만 자료를 옮긴다. PoC 1차 마감 **2026-05-31**.
 
-## Stack
+## 스택
 
 ### Backend (BE)
 - Java + Spring Boot 3 + Spring Batch
-- JPA / Hibernate, meta DB is PostgreSQL 18
-- Flyway migrations (`V{N}__{name}.sql`)
-- Arrow Java, DuckDB JDBC (the tool's embedded AS-IS DB)
-- PostgreSQL `COPY` via `PgCopyManager`
-- Build: Maven (`./mvnw` wrapper, `pom.xml`)
-- IDE: **VSCode + Extension Pack for Java** (not IntelliJ)
-- Deployment: jpackage — no K8s during PoC
-- Testing: Testcontainers + Flyway. **H2 forbidden** (too different from production PG)
+- JPA / Hibernate, 메타 DB 는 PostgreSQL 18
+- Flyway 마이그레이션 (`V{N}__{name}.sql`)
+- Arrow Java, DuckDB JDBC (도구 내장 AS-IS DB)
+- PostgreSQL `COPY` 는 `PgCopyManager` 로
+- 빌드: Maven (`./mvnw` wrapper, `pom.xml`)
+- IDE: **VSCode + Extension Pack for Java** (IntelliJ 아님)
+- 배포: jpackage — K8s 는 PoC 단계에선 도입 안 함
+- 테스트: Testcontainers + Flyway. **H2 금지** (운영 PG 와 차이 너무 큼)
 
 ### Frontend (FE)
 - React 18 + Vite + TypeScript
-- State management: zustand (persist middleware)
-- Routing: react-router-dom v6
-- Server communication: in-house `api/client.ts` (fetch wrapper)
-- i18n: in-house (`src/i18n/{ko,ja,en}.ts` + `useT` hook)
+- 상태관리: zustand (persist middleware)
+- 라우팅: react-router-dom v6
+- 서버 통신: 자체 `api/client.ts` (fetch wrapper)
+- i18n: 자체 구현 (`src/i18n/{ko,ja,en}.ts` + `useT` 훅)
 
-### Operational model
-- **Coordinator (HQ)** ↔ **Worker (field)** split. Worker talks to Coordinator over REST + WebSocket only. No direct meta-DB access. Registration via URL + token.
-- Installer bundles PG 18; if an existing PG is present, the user picks "use existing" or "install separate".
+### 운영 형태
+- **Coordinator (본사)** ↔ **Worker (현장)** 분리. Worker 는 Coordinator 의 REST + WebSocket 으로만 통신. 메타 DB 직접 접속 금지. 등록은 URL + 토큰으로.
+- 인스톨러: PG 18 동봉, 기존 PG 가 있으면 그것을 사용하거나 별도 설치 선택.
 
-## Directory map
+## 디렉터리 맵
 
 ```
 ModernizeProData/
@@ -37,65 +37,87 @@ ModernizeProData/
 │   └── src/main/
 │       ├── java/com/ksinfo/modernize_pro_data/
 │       │   ├── common/         # config, dto, exception
-│       │   └── coordinator/    # api, auth, site, ...
+│       │   └── coordinator/    # api, auth, site, ddl, ...
+│       │                       # ddl/ = DDL import (entity / repository / service / parser)
 │       └── resources/
 │           ├── application.yml
 │           └── db/migration/   # V{N}__*.sql — Flyway
 └── frontend/                   # React + Vite
     └── src/
         ├── api/                # client + endpoint wrappers
-        ├── components/         # reusable components / modals
+        ├── components/         # 재사용 컴포넌트·모달
         ├── i18n/               # ko/ja/en
-        ├── layout/             # AppShell (sidebar, topbar, tabbar)
-        ├── pages/              # page components
+        ├── layout/             # AppShell (사이드바·탑바·탭바)
+        ├── pages/              # 페이지 컴포넌트
         ├── routes/             # ProtectedRoute
         └── store/              # zustand stores
 
-Prototype/                       # HTML/JSX prototype — reference only. Do not modify.
-docs/                            # manuals, architecture, handoff (.docx/.pdf are ignored)
+Prototype/                       # HTML/JSX 프로토타입 — 참고 전용. 수정 금지.
+docs/                            # 매뉴얼·아키텍처·handoff (.docx/.pdf 는 ignore)
 ```
 
-## Conventions
+## 컨벤션
 
-### i18n policy (FE)
-- `menu.*` / `tab.*` / `*.title` / `*.status.*` → **identical English across ko/ja/en**
-- `*.subtitle` / `*.desc` / `*.hint` / error messages / placeholders → translated per language
-- The user-issuing/management screen is always called **"User Management"**. Internal variable names (`ClusterAdminModal`, etc.) may stay as-is.
+### i18n 정책 (FE)
+- `menu.*` / `tab.*` / `*.title` / `*.status.*` → **ko/ja/en 모두 동일 영문**
+- `*.subtitle` / `*.desc` / `*.hint` / 에러 메시지 / 플레이스홀더 → 언어별 번역
+- 사용자 발급/관리 화면은 항상 **"User Management"** 라고 부른다. 내부 변수명(`ClusterAdminModal` 등)은 그대로 둬도 됨.
 
-### Backend migrations
-- New tables/columns must go through Flyway `V{N}__name.sql`. Do not rely on Hibernate auto-DDL by just editing entities.
-- Existing pattern: `V4__sites_projects.sql` · `V5__project_run_status.sql` · `V6__snapshots.sql`.
+### Backend 마이그레이션
+- 새 테이블/필드는 반드시 Flyway `V{N}__name.sql` 로. 엔티티만 수정해서 Hibernate auto-DDL 에 맡기지 말 것.
+- 기존 패턴: `V4__sites_projects.sql` · `V5__project_run_status.sql` · `V6__snapshots.sql` · `V7__ddl_schema.sql` · `V9__project_tobe_table_count.sql`.
 
-### Phase model
-- 9 phases: `planning · analysis · test · sign-off · rehearsal · ready · cutover · hypercare · done`
-- `cutover` can run **only in production environments**.
-- Two snapshot types: mapping snapshot and cutover snapshot.
-- `runStatus` (`idle | running | completed`) is a sub-status of test/rehearsal/cutover.
+**Timestamp-based versioning (convention from 2026-05-20):**
 
-### Git workflow
-- Commit format: Conventional Commits — `<type>(<scope>): <description>`.
-- **Never resolve merge conflicts in the GitHub web UI.** PR author resolves locally; runs `npx tsc --noEmit` and build before pushing.
-- For import-line conflicts, always take the **union** of both sides — never pick one side.
+To eliminate version collisions between parallel feature branches, **all new
+Flyway migrations MUST use a timestamp instead of a small sequential integer**:
 
-### Response style (user preference)
-- When discussing tool direction, **do not split answers into V1/V2/Phase tiers**. Present one recommended approach.
-- Without an explicit request, **do not create new .md files**. Do not correct outdated existing docs without a user request either.
-- Weekly work reports should be in a **KakaoTalk-friendly short form** — 3–5 bullets, Korean, no emojis.
+```
+V{YYYYMMDDHHmmss}__{name}.sql
+```
 
-## Local development
+Example: `V20260520143052__add_audit_table.sql`.
+
+Rules:
+
+- Use the wall-clock local time at the moment you create the file. Resolution is
+  seconds; if two team members happen to create files within the same second,
+  bump the trailing digits by hand.
+- Flyway compares versions lexicographically left-to-right, so a 14-digit
+  timestamp always sorts after the legacy short numbers (`V1`…`V9`). **Do not
+  renumber the existing `V1`…`V9` files** — they stay as historical records.
+- Why this matters: with sequential integers, two developers on different
+  branches both pick "the next integer" (e.g. V8), and the second PR to merge
+  has to be renumbered and re-baselined. Timestamps make this collision
+  effectively impossible.
+- The local wall-clock timezone is the developer's PC; the absolute ordering
+  within the team's working window is what matters, not strict UTC.
+
+### Phase 모델
+- 9 단계: `planning · analysis · test · sign-off · rehearsal · ready · cutover · hypercare · done`
+- `cutover` 는 **production 환경에서만** 실행 가능.
+- 스냅샷은 mapping snapshot 과 cutover snapshot 두 갈래.
+- `runStatus` (`idle | running | completed`) 는 test/rehearsal/cutover 의 sub-status.
+
+### 답변 스타일 (사용자 선호)
+- 도구 방향성 논의에서 **V1/V2/Phase 단계로 답을 나누지 말 것**. 한 가지 권장안을 제시.
+- 명시 요청이 없으면 **새 .md 파일을 만들지 말 것**. 기존 outdated 문서도 사용자 요청 없이는 정정하지 말 것.
+- 매주 작업 보고는 **카톡용 간단 형태** — 3-5 bullet, 한국어, emoji 없음.
+
+## 로컬 실행
 
 ### Backend
 ```powershell
-# First run: bring up the PG 18 container (compose.yaml is OFF by default)
-docker compose up -d postgres   # port 5433
+# 첫 실행: PG 18 컨테이너 띄움 (compose.yaml 가 기본 OFF 상태)
+docker compose up -d postgres   # 포트 5433
 
-# Run the app
+# 실행
 $env:SPRING_PROFILES_ACTIVE = "local"
 cd ModernizeProData/backend
 ./mvnw spring-boot:run
 ```
-- Local config: `application-local.yml` (gitignored — each developer writes their own).
-- Meta DB: `localhost:5433`, db `modernize`, user `modernize`.
+- 로컬 설정: `application-local.yml` (gitignore 됨 — 각자 작성)
+- 메타 DB: `localhost:5433`, db `modernize`, user `modernize`
 
 ### Frontend
 ```powershell
@@ -104,35 +126,36 @@ npm install
 npm run dev   # Vite proxy /api → localhost:8080
 ```
 
-### Type check
+### 타입체크
 ```powershell
 cd ModernizeProData/frontend; npx tsc --noEmit
 ```
 
-## Domain glossary
+## 도메인 용어
 
-| Term | Meaning |
+| 용어 | 의미 |
 |---|---|
-| Coordinator | HQ management node. Owns the meta DB. The single point of authority. |
-| Worker | Execution node installed on the air-gapped field network. Communicates over REST/WS only. |
-| Site | One operating environment of one customer. Holds AS-IS / TO-BE / environment label (dev/test/stg/prod). |
-| Project | A migration unit inside a Site. One AS-IS → TO-BE mapping job. |
-| Phase | A Project's progression phase (the 9 above). |
-| Snapshot | The approval unit for a mapping definition. Two kinds: mapping snapshot, cutover snapshot. |
-| Cutover | Real-production cutover. Only in production environment, requires an approved snapshot. |
-| Rehearsal | Dry-run. Validates cutover scenarios in the test environment. |
-| AS-IS DB (tool-embedded) | The tool ingests the ops team's nightly CSV extracts into DuckDB — no direct connection to the source DB. |
+| Coordinator | 본사 관리 노드. 메타 DB 소유. 모든 권한 행사 지점. |
+| Worker | 현장 격리망에 설치되는 실행 노드. REST/WS 로만 통신. |
+| Site | 한 고객사의 한 운영 환경 단위. AS-IS / TO-BE / 환경 라벨(dev/test/stg/prod) 보유. |
+| Project | Site 안의 이행 단위. 하나의 AS-IS → TO-BE 매핑 작업. |
+| Phase | Project 의 진행 단계 (위 9단계). |
+| Snapshot | 매핑 정의의 승인 단위. mapping snapshot / cutover snapshot 두 종. |
+| Cutover | 본운영 전환. production 환경에서만, 승인된 snapshot 필요. |
+| Rehearsal | dry-run. test 환경에서 cutover 시나리오 검증. |
+| AS-IS DB (도구 내장) | 운영팀 야간 CSV 추출 파일을 도구가 받아 DuckDB 로 적재 — 외부 DB 직접 접속 X. |
 
-## Recommended session-start workflow
+## 세션 시작 시 권장 동작
 
-1. Read this file (CLAUDE.md) once at the start.
-2. Read the most recent file under `docs/handoff/` (most recent = filename sorted descending).
-3. Before starting work, confirm with the user in one line: "The latest handoff was X — should I continue from there?"
-4. When work is done, write a note for the next person via the `/handoff` slash command.
+1. 이 파일(CLAUDE.md) 을 처음에 한 번 읽음.
+2. `docs/ONBOARDING.md` 를 한 번 훑음 (이미 같은 세션에서 본 적 없다면).
+3. `docs/handoff/` 폴더의 가장 최근 파일을 읽음 (가장 최근 = 파일명 sort desc).
+4. 작업 시작 전 사용자에게 "방금 본 handoff 노트가 X 였는데 이걸 이어받으면 되나?" 식으로 한 줄 확인.
+5. 작업이 끝났을 때 `/handoff` slash command 로 다음 사람용 노트 작성.
 
-## External references (do not put here)
+## 외부 참조 (이 파일에 적지 말 것)
 
-- Personal preferences / memory live in `~/.claude/projects/.../memory/` (per developer, separate).
-- Detailed context for in-progress work goes to `docs/handoff/YYYY-MM-DD-{slug}.md`.
-- Slash commands live in `.claude/commands/*.md`.
-- Accumulated design decisions (pipeline, rule engine, SPIs, etc.) live in `ONBOARDING.md` at the repo root.
+- 누적 설계 디테일 (파이프라인 · 룰 엔진 · DDL 인포트 등) 은 `docs/ONBOARDING.md` (영문).
+- 개인 선호·기억은 `~/.claude/projects/.../memory/` 에 (각자 따로).
+- 진행 중 작업의 상세 컨텍스트는 `docs/handoff/YYYY-MM-DD-{slug}.md` 에.
+- 슬래시 명령어는 `.claude/commands/*.md` 에.
