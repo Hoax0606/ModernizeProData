@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware';
 
 export type Theme = 'light' | 'dark';
 export type Language = 'ko' | 'ja' | 'en';
+export type ProjectSort = 'created-asc' | 'created-desc' | 'name-asc' | 'name-desc' | 'tables-desc';
 export type NotificationScope = 'mine-only' | 'all-project';
 
 export interface ExternalConfig {
@@ -21,6 +22,7 @@ interface SettingsState {
   notificationRetention: string;
   externalIntegrations: boolean;
   externalConfig: ExternalConfig;
+  projectSort: ProjectSort;
 
   setTheme: (theme: Theme) => void;
   setLanguage: (language: Language) => void;
@@ -29,6 +31,7 @@ interface SettingsState {
   setNotificationRetention: (retention: string) => void;
   setExternalIntegrations: (on: boolean) => void;
   setExternalConfig: (config: Partial<ExternalConfig>) => void;
+  setProjectSort: (sort: ProjectSort) => void;
 }
 
 /**
@@ -51,6 +54,7 @@ export const useSettingsStore = create<SettingsState>()(
         apiToken: 'mig_****************_a9f3',
         syslog: 'syslog.kdb.internal:514 · facility local4',
       },
+      projectSort: 'created-asc',
 
       setTheme: (theme) => set({ theme }),
       setLanguage: (language) => set({ language }),
@@ -60,6 +64,7 @@ export const useSettingsStore = create<SettingsState>()(
       setExternalIntegrations: (on) => set({ externalIntegrations: on }),
       setExternalConfig: (config) =>
         set((s) => ({ externalConfig: { ...s.externalConfig, ...config } })),
+      setProjectSort: (projectSort) => set({ projectSort }),
     }),
     { name: 'modernize-settings' },
   ),

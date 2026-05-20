@@ -378,7 +378,7 @@ On top of existing `site` / `project` (V4–V6):
 
 ## 12. Installer policy
 
-- **Bundled PG version**: PostgreSQL (see §16 item 6 — version discrepancy between docs being resolved)
+- **Bundled PG version**: PostgreSQL (see §17 item 6 — version discrepancy between docs being resolved)
 - **Existing PG**: user picks "use existing" vs "install separate instance"
 
 ### 12.1 Installer responsibilities (in order)
@@ -486,7 +486,60 @@ On `dev` and `master`: require PR, require status checks (CI typecheck + build),
 
 ---
 
-## 16. Open items (decisions needed)
+## 16. Artifacts UI — preview & export shell (added 2026-05-20)
+
+`/artifacts` is the read-only view layer for everything the migration pipeline produces. It does **not** generate anything itself — it visualizes outputs from DDL imports, mapping definitions, snapshots, and runs.
+
+### 16.1 Six categories
+
+| Category | Backing data (when wired) | Visual unit |
+|---|---|---|
+| **Dashboard snapshot** | Project-wide mapping progress + run stats aggregation | One file per project (`dashboard-snapshot.dashboard.xlsx`) |
+| **Schema diff** | AS-IS DDL ↔ TO-BE DDL diff (added / removed / typed / renamed) | One per TO-BE table |
+| **DDL scripts** | TO-BE DDL — `CREATE TABLE` text generated from imported schema | One per TO-BE table |
+| **Migration SQL** | `INSERT … SELECT` rendered from mapping rules | One per TO-BE table |
+| **Mapping** | Mapping rules + lookup tables — workbook with Overview / Rules / Lookups sheets | One per TO-BE table |
+| **Validation** | Run-result checks: row count, checksum, SUM reconciliation, NULL parity, range/overflow | One per TO-BE table |
+
+### 16.2 Backend data availability (as of 2026-05-20)
+
+| Category | Available now | Blocker |
+|---|---|---|
+| DDL scripts | ✅ AS-IS / TO-BE DDL imports already loaded into `asisDdl` / `tobeDdl` stores | — |
+| Schema diff | ✅ partial — name-based diff when both sides imported (added/removed/typed) | rename/merge detection blocked on mapping module |
+| Migration SQL | ❌ | mapping rules don't exist yet |
+| Mapping | ❌ | mapping module not started |
+| Validation | ❌ | run module not wired |
+| Dashboard | ❌ | mapping-progress aggregation not computed |
+
+→ DDL is the first wiring target. Diff is the natural second once both DDLs are commonly present.
+
+### 16.3 UI shape
+
+The page intentionally mimics Excel — title bar → ribbon (`File … View`, no active tab) → Name Box (`A1 ▾`) + gray separator with `⋮` + `✕ ✓ fx` + formula content → sheet area → sheet tabs. The ribbon and Name Box are **decorative**. Real interactivity is on the sidebar (toggle / select), the sheet tabs (switch active sheet when populated), and the `Download` button.
+
+The formula bar shows a single-line summary in the format documented in `~/.claude/projects/.../memory/project_artifacts_formula_bar.md`:
+
+```
+Diff       Schema diff: {ASIS} → {TOBE} · +n added · -n removed · ~n typed
+DDL        DDL: {table} · {n} columns · {n} primary key
+SQL        Migration SQL: {ASIS} → {TOBE} · {n} lines
+Mapping    Mapping: {ASIS} → {TOBE} · {n} rules · {n} lookups
+Validation Validation: {table} · {n} checks · PASS/FAIL
+Dashboard  Snapshot: {project} · {n} tables · {n.n}% migrated
+```
+
+While empty, the summary slot shows the format itself (italic gray), so reviewers see what will appear when data arrives.
+
+### 16.4 Out of scope on the UI side
+
+- **Real `.xlsx` generation** — this can be added per category when each backend output starts flowing. A demo using `xlsx-js-style` was built during the porting session and removed before commit (see handoff `2026-05-20-artifacts-page.md`). If/when reintroduced, keep the dependency in `frontend/package.json` only after it's used in committed code, not for review-only previews.
+- **Cumulative bundle export** (`Export all` button) — placeholder only; will be defined once at least two categories have data.
+- **Editing** — none of the views permit edits. Diff/mapping authoring lives in the upcoming Mapping module, not here.
+
+---
+
+## 17. Open items (decisions needed)
 
 1. **Final `strategy` enum list** — §4.2 lists the current candidates. Add/merge/remove?
 2. **Codify "no UDF calls in `custom_expr`"** as a compiler-enforced check (whitelist).
@@ -498,7 +551,7 @@ On `dev` and `master`: require PR, require status checks (CI typecheck + build),
 
 ---
 
-## 17. Further reading
+## 18. Further reading
 
 - `CLAUDE.md` — stack, conventions, glossary, local dev commands
 - `docs/handoff/` — point-in-time work handoff notes (read the most recent first)

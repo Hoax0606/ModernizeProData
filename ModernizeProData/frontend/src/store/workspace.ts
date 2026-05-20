@@ -26,6 +26,7 @@ export interface SiteDbConnection {
   version: string;
   host: string;
   port: string;
+  database: string;
   username: string;
   password: string; // prototype 한정. 실제는 vault 로 교체.
 }
@@ -139,6 +140,7 @@ export const emptyDbConnection = (): SiteDbConnection => ({
   version: '',
   host: '',
   port: '',
+  database: '',
   username: '',
   password: '',
 });

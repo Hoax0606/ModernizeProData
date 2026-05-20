@@ -1,7 +1,9 @@
 import { useMemo, useRef, useState } from 'react';
 import { Modal } from './Modal';
-import { useWorkspaceStore, type DdlFile } from '../store/workspace';
+import { useWorkspaceStore } from '../store/workspace';
 import { useAuthStore } from '../store/auth';
+import { asisDdlApi } from '../api/asisDdl';
+import { tobeDdlApi } from '../api/tobeDdl';
 import { ApiError } from '../api/client';
 import { useT } from '../i18n';
 
@@ -19,41 +21,61 @@ export function CreateProjectModal({ open, onClose }: Props) {
   const currentUser = useAuthStore((s) => s.user);
 
   const [name, setName] = useState('');
-  const [ddlFiles, setDdlFiles] = useState<DdlFile[]>([]);
+  const [asisFile, setAsisFile] = useState<File | null>(null);
+  const [tobeFile, setTobeFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const asisInputRef = useRef<HTMLInputElement | null>(null);
+  const tobeInputRef = useRef<HTMLInputElement | null>(null);
 
   const reset = () => {
     setName('');
-    setDdlFiles([]);
+    setAsisFile(null);
+    setTobeFile(null);
     setError(null);
-  };
-
-  const handleFilesPicked = (filesList: FileList | null) => {
-    if (!filesList) return;
-    const now = new Date().toISOString();
-    const incoming: DdlFile[] = Array.from(filesList).map((f) => ({
-      name: f.name,
-      size: f.size,
-      uploadedAt: now,
-    }));
-    // 같은 이름은 새 항목으로 덮어쓰기
-    setDdlFiles((cur) => [...cur.filter((f) => !incoming.some((nf) => nf.name === f.name)), ...incoming]);
-    if (fileInputRef.current) fileInputRef.current.value = '';
+    setSubmitting(false);
+    if (asisInputRef.current) asisInputRef.current.value = '';
+    if (tobeInputRef.current) tobeInputRef.current.value = '';
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !activeSite) return;
+    if (!name.trim() || !activeSite || submitting) return;
     setError(null);
+    setSubmitting(true);
     try {
-      await createProject({
+      const project = await createProject({
         name: name.trim(),
         phase: 'planning',
         tableCount: 0,
-        ddlFiles,
+        ddlFiles: [],
         owner: currentUser?.username ?? '—',
       });
+
+      if (asisFile) {
+        try {
+          await asisDdlApi.import(project.id, asisFile);
+        } catch (err) {
+          console.error('[createProject] AS-IS DDL import failed', err);
+          setError(t('createProject.error.asisDdl'));
+          setSubmitting(false);
+          return;
+        }
+      }
+      if (tobeFile) {
+        try {
+          await tobeDdlApi.import(project.id, tobeFile);
+        } catch (err) {
+          console.error('[createProject] TO-BE DDL import failed', err);
+          setError(t('createProject.error.tobeDdl'));
+          setSubmitting(false);
+          return;
+        }
+      }
+
+      // 양쪽 DDL 임포트가 끝났으면 백엔드가 phase 를 analysis 로 자동 전환했을 수 있다.
+      // workspace store 의 다음 fetch 에서 갱신되므로 여기선 별도 처리 불필요.
+
       reset();
       onClose();
     } catch (err) {
@@ -62,6 +84,7 @@ export function CreateProjectModal({ open, onClose }: Props) {
       } else {
         setError(t('createProject.error.generic'));
       }
+      setSubmitting(false);
     }
   };
 
@@ -71,7 +94,7 @@ export function CreateProjectModal({ open, onClose }: Props) {
     <Modal
       open={open}
       onClose={onClose}
-      width={480}
+      width={520}
       title={
         <div>
           <div>{t('createProject.title')}</div>
@@ -87,57 +110,115 @@ export function CreateProjectModal({ open, onClose }: Props) {
             style={styles.input}
             autoFocus
             required
+            disabled={submitting}
           />
         </Field>
 
-        <Field label={t('createProject.ddl')} hint={t('createProject.ddlHint')}>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".sql,.ddl,.txt"
-            multiple
-            onChange={(e) => handleFilesPicked(e.target.files)}
-            style={{ display: 'none' }}
-          />
-          <div style={styles.ddlBox}>
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              style={styles.btnGhostSmall}
-            >
-              {t('createProject.ddlPick')}
-            </button>
-            {ddlFiles.length === 0 ? (
-              <span style={styles.ddlEmpty}>{t('createProject.ddlEmpty')}</span>
-            ) : (
-              <ul style={styles.ddlList}>
-                {ddlFiles.map((f) => (
-                  <li key={f.name} style={styles.ddlItem}>
-                    <span style={styles.ddlName}>{f.name}</span>
-                    <span style={styles.ddlSize}>{formatSize(f.size)}</span>
-                    <button
-                      type="button"
-                      onClick={() => setDdlFiles((cur) => cur.filter((x) => x.name !== f.name))}
-                      style={styles.ddlRemoveBtn}
-                      title={t('createProject.ddlRemove')}
-                    >
-                      ×
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
+        <Field label={t('createProject.ddl')} hint={t('createProject.ddl.optional')}>
+          <div style={styles.ddlPairs}>
+            <DdlPicker
+              labelText={t('createProject.ddl.asisLabel')}
+              file={asisFile}
+              onPick={setAsisFile}
+              inputRef={asisInputRef}
+              chooseLabel={t('createProject.ddl.choose')}
+              emptyLabel={t('createProject.ddl.noFile')}
+              removeLabel={t('createProject.ddlRemove')}
+              disabled={submitting}
+            />
+            <DdlPicker
+              labelText={t('createProject.ddl.tobeLabel')}
+              file={tobeFile}
+              onPick={setTobeFile}
+              inputRef={tobeInputRef}
+              chooseLabel={t('createProject.ddl.choose')}
+              emptyLabel={t('createProject.ddl.noFile')}
+              removeLabel={t('createProject.ddlRemove')}
+              disabled={submitting}
+            />
           </div>
         </Field>
 
         {error && <div style={styles.errorBox}>{error}</div>}
 
         <div style={styles.actions}>
-          <button type="button" onClick={onClose} style={styles.btnGhost}>{t('common.cancel')}</button>
-          <button type="submit" style={styles.btnPrimary}>{t('createProject.submit')}</button>
+          <button
+            type="button"
+            onClick={onClose}
+            style={styles.btnGhost}
+            disabled={submitting}
+          >
+            {t('common.cancel')}
+          </button>
+          <button
+            type="submit"
+            style={{ ...styles.btnPrimary, ...(submitting ? styles.btnDisabled : {}) }}
+            disabled={submitting}
+          >
+            {t('createProject.submit')}
+          </button>
         </div>
       </form>
     </Modal>
+  );
+}
+
+interface DdlPickerProps {
+  labelText: string;
+  file: File | null;
+  onPick: (f: File | null) => void;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  chooseLabel: string;
+  emptyLabel: string;
+  removeLabel: string;
+  disabled: boolean;
+}
+
+function DdlPicker({
+  labelText, file, onPick, inputRef,
+  chooseLabel, emptyLabel, removeLabel, disabled,
+}: DdlPickerProps) {
+  return (
+    <div style={styles.ddlSide}>
+      <div style={styles.ddlSideLabel}>{labelText}</div>
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".sql,.ddl,.txt"
+        onChange={(e) => onPick(e.target.files?.[0] ?? null)}
+        style={{ display: 'none' }}
+      />
+      <div style={styles.ddlSideBody}>
+        {file ? (
+          <div style={styles.ddlChip}>
+            <span style={styles.ddlChipName}>{file.name}</span>
+            <span style={styles.ddlChipSize}>{formatSize(file.size)}</span>
+            <button
+              type="button"
+              onClick={() => {
+                onPick(null);
+                if (inputRef.current) inputRef.current.value = '';
+              }}
+              style={styles.ddlChipRemove}
+              title={removeLabel}
+              disabled={disabled}
+            >
+              ×
+            </button>
+          </div>
+        ) : (
+          <div style={styles.ddlChipEmpty}>{emptyLabel}</div>
+        )}
+        <button
+          type="button"
+          onClick={() => inputRef.current?.click()}
+          style={styles.btnGhostSmall}
+          disabled={disabled}
+        >
+          {chooseLabel}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -178,39 +259,27 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 13,
     outline: 'none',
   },
-  pillRow: { display: 'flex', flexWrap: 'wrap', gap: 4, border: '1px solid var(--border-strong)', borderRadius: 4, padding: 2, background: 'var(--panel)' },
-  pill: {
-    flex: 1,
-    minWidth: 0,
-    padding: '6px 10px',
-    background: 'transparent',
-    border: 'none',
-    color: 'var(--text-2)',
-    fontSize: 12,
-    fontWeight: 500,
-    cursor: 'pointer',
-    borderRadius: 3,
-    whiteSpace: 'nowrap',
-  },
-  pillActive: {
-    background: 'var(--navy-50)',
-    color: 'var(--navy)',
-    fontWeight: 600,
-  },
 
-  /* DDL file picker */
-  ddlBox: {
-    border: '1px dashed var(--border-strong)',
+  /* DDL pickers — AS-IS / TO-BE side-by-side as two distinct chips */
+  ddlPairs: { display: 'flex', flexDirection: 'column', gap: 8 },
+  ddlSide: {
+    border: '1px solid var(--border-strong)',
     borderRadius: 4,
-    padding: 10,
+    padding: '8px 10px',
     background: 'var(--panel)',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 6,
   },
-  ddlEmpty: { fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
-  ddlList: { margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 4 },
-  ddlItem: {
+  ddlSideLabel: {
+    fontSize: 10.5,
+    fontWeight: 700,
+    color: 'var(--navy)',
+    fontFamily: 'var(--mono)',
+    letterSpacing: 0.4,
+    marginBottom: 6,
+    textTransform: 'uppercase',
+  },
+  ddlSideBody: { display: 'flex', alignItems: 'center', gap: 8 },
+  ddlChip: {
+    flex: 1,
     display: 'flex',
     alignItems: 'center',
     gap: 8,
@@ -220,9 +289,16 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 3,
     fontSize: 11.5,
   },
-  ddlName: { flex: 1, color: 'var(--text)', fontFamily: 'var(--mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  ddlSize: { fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
-  ddlRemoveBtn: {
+  ddlChipName: {
+    flex: 1,
+    color: 'var(--text)',
+    fontFamily: 'var(--mono)',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  ddlChipSize: { fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
+  ddlChipRemove: {
     width: 18,
     height: 18,
     background: 'transparent',
@@ -232,6 +308,12 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 14,
     lineHeight: 1,
     padding: 0,
+  },
+  ddlChipEmpty: {
+    flex: 1,
+    fontSize: 11,
+    color: 'var(--text-3)',
+    fontFamily: 'var(--mono)',
   },
 
   errorBox: {
@@ -243,6 +325,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12,
     fontWeight: 500,
   },
+
   actions: { display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 4 },
   btnGhost: {
     padding: '7px 14px',
@@ -261,7 +344,7 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 3,
     fontSize: 11.5,
     cursor: 'pointer',
-    alignSelf: 'flex-start',
+    whiteSpace: 'nowrap',
   },
   btnPrimary: {
     padding: '7px 14px',
@@ -273,4 +356,5 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     cursor: 'pointer',
   },
+  btnDisabled: { opacity: 0.5, cursor: 'not-allowed' },
 };

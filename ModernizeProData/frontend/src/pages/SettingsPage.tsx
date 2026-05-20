@@ -8,6 +8,8 @@ import { projectApi } from '../api/workspace';
 import { ApiError } from '../api/client';
 import { useAuthStore } from '../store/auth';
 import { DdlSchemaPanel } from '../components/DdlSchemaPanel';
+import { LockIcon } from '../components/LockIcon';
+import { CsvPathField } from '../components/CsvPathField';
 import { Toast } from '../components/Toast';
 import { useT } from '../i18n';
 
@@ -16,6 +18,13 @@ type HighlightSide = 'asis' | 'tobe';
 interface HighlightState { highlightSide?: HighlightSide }
 
 const ALL_PHASES: ProjectPhase[] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
+
+function isSiteDbConfigured(s: Site | null): boolean {
+  if (!s) return false;
+  const db = s.tobeDbByEnv?.[s.environment];
+  if (!db) return false;
+  return !!db.type?.trim() && !!db.host?.trim() && !!db.database?.trim() && !!db.username?.trim();
+}
 
 type SectionKey = 'general' | 'source' | 'target' | 'schedule' | 'notify' | 'danger';
 
@@ -89,6 +98,7 @@ export function SettingsPage() {
             <div
               key={s.k}
               onClick={() => setSection(s.k)}
+              title={s.d}
               style={{
                 ...styles.asideItem,
                 background: active ? (s.danger ? 'var(--red-50)' : 'var(--navy-50)') : 'transparent',
@@ -116,7 +126,7 @@ export function SettingsPage() {
 
       <div style={styles.content}>
         {section === 'general'   && <PSGeneral   project={project} site={site} />}
-        {section === 'source'    && <PSSource    project={project} highlight={highlightSide === 'asis'} />}
+        {section === 'source'    && <PSSource    project={project} site={site} highlight={highlightSide === 'asis'} />}
         {section === 'target'    && <PSTarget    project={project} highlight={highlightSide === 'tobe'} />}
         {section === 'schedule'  && <PSSchedule  project={project} />}
         {section === 'notify'    && <PSNotify    project={project} />}
@@ -133,7 +143,13 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
   const [name, setName] = useState(project.name);
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const [unlocked, setUnlocked] = useState(false);
   const dirty = name !== project.name;
+
+  // unlock 취소 시 이름 원복
+  useEffect(() => {
+    if (!unlocked) setName(project.name);
+  }, [unlocked, project.name]);
 
   const handleSave = async () => {
     if (!dirty) return;
@@ -144,6 +160,7 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
       const siteId = useWorkspaceStore.getState().activeSiteId;
       if (siteId) await useWorkspaceStore.getState().fetchProjects(siteId);
       setSavedMsg('Saved');
+      setUnlocked(false);
       setTimeout(() => setSavedMsg(null), 1500);
     } catch (e) {
       console.error('[settings] save name failed', e);
@@ -178,16 +195,26 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
       />
       <PSCard>
         <PSRow label={t('projectSettings.row.name')}>
-          <PSInput value={name} onChange={setName} />
+          <PSInput value={name} onChange={unlocked ? setName : undefined} readOnly={!unlocked} />
+          <button
+            type="button"
+            onClick={() => setUnlocked((u) => !u)}
+            style={styles.btnLockIcon}
+            disabled={saving}
+            title={unlocked ? t('projectSettings.general.lock') : t('projectSettings.general.unlock')}
+            aria-label={unlocked ? t('projectSettings.general.lock') : t('projectSettings.general.unlock')}
+          >
+            <LockIcon open={unlocked} color="var(--green)" size={16} />
+          </button>
         </PSRow>
-        <PSRow label={t('projectSettings.row.site')} hint={t('projectSettings.row.siteHint')}>
-          <PSInput value={site?.name ?? '—'} readOnly mono />
+        <PSRow label={t('projectSettings.row.site')}>
+          <span style={styles.staticText}>{site?.name ?? '—'}</span>
         </PSRow>
-        <PSRow label={t('projectSettings.row.env')} hint={t('projectSettings.row.envHint')}>
-          <span style={styles.envChip}>{site?.environment ?? '—'}</span>
+        <PSRow label={t('projectSettings.row.env')}>
+          <span style={isSiteDbConfigured(site) ? styles.envChip : styles.envChipOff}>{site?.environment ?? '—'}</span>
         </PSRow>
         <PSRow label={t('projectSettings.row.createdAt')}>
-          <PSInput value={new Date(project.createdAt).toLocaleString()} readOnly mono />
+          <span style={styles.staticText}>{new Date(project.createdAt).toLocaleString()}</span>
         </PSRow>
       </PSCard>
 
@@ -217,30 +244,63 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
 
 /* ─── AS-IS (Source) ─────────────────────────────────────── */
 
-function PSSource({ project, highlight }: { project: Project; highlight?: boolean }) {
+function PSSource({ project, site, highlight }: { project: Project; site: Site | null; highlight?: boolean }) {
   const t = useT();
   return (
     <>
       <PSHead title="AS-IS" desc={t('projectSettings.head.source.desc')} />
       <DdlCard project={project} side="asis" highlight={highlight} />
-      <CsvSourceCard />
-      <StagingCard />
+      <CsvSourceCard site={site} />
     </>
   );
 }
 
-function CsvSourceCard() {
+function CsvSourceCard({ site }: { site: Site | null }) {
   const t = useT();
+  const [csvPath, setCsvPath] = useState(site?.csvPath ?? '');
+  const [saving, setSaving] = useState(false);
+  const [savedMsg, setSavedMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    setCsvPath(site?.csvPath ?? '');
+  }, [site?.id, site?.csvPath]);
+
+  const dirty = !!site && csvPath !== (site.csvPath ?? '');
+
+  const handleSave = async () => {
+    if (!site || !dirty) return;
+    setSaving(true);
+    try {
+      await useWorkspaceStore.getState().updateSite(site.id, { csvPath: csvPath.trim() });
+      setSavedMsg('Saved');
+      setTimeout(() => setSavedMsg(null), 1500);
+    } catch (e) {
+      console.error('[settings] save csv path failed', e);
+      setSavedMsg('Failed');
+      setTimeout(() => setSavedMsg(null), 2500);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
-    <div style={styles.amberCard}>
-      <div style={styles.amberCardTitle}>
-        {t('projectSettings.csv.title')}
-        <span style={{ ...styles.uiOnlyBadge, marginLeft: 8 }}>UI only</span>
+    <PSCard
+      title={t('projectSettings.csv.title')}
+      desc={t('projectSettings.csv.desc')}
+    >
+      <div style={styles.csvPathRowLabel}>{t('projectSettings.csv.path')}</div>
+      <CsvPathField value={csvPath} onChange={setCsvPath} />
+      <div style={styles.csvPathActions}>
+        {savedMsg && <span style={styles.savedMsg}>{savedMsg}</span>}
+        <button
+          onClick={handleSave}
+          disabled={!dirty || saving}
+          style={{ ...styles.btnPrimary, ...((!dirty || saving) ? styles.btnDisabled : {}) }}
+        >
+          {saving ? t('projectSettings.action.saving') : t('projectSettings.action.save')}
+        </button>
       </div>
-      <div style={styles.amberCardDesc}>
-        {t('projectSettings.csv.desc')}
-      </div>
-    </div>
+    </PSCard>
   );
 }
 
@@ -271,196 +331,11 @@ function StagingCard() {
 
 function PSTarget({ project, highlight }: { project: Project; highlight?: boolean }) {
   const t = useT();
-  /* mock state — connection/credentials 는 Project 엔티티에 없음 */
-  const [host, setHost] = useState('pg-core-01.kdb.internal:5432');
-  const [database, setDatabase] = useState('core_banking');
-  const [schema, setSchema] = useState('public');
-  const [encoding, setEncoding] = useState('UTF-8');
-  const [collation, setCollation] = useState('ko_KR.UTF-8');
-  const [connStatus, setConnStatus] = useState<'untested' | 'testing' | 'ok' | 'failed'>('untested');
-  const [lastTestedAt, setLastTestedAt] = useState<string | null>(null);
-
-  const handleTest = async () => {
-    setConnStatus('testing');
-    /* mock — 실제론 Worker 노드로 위임할 endpoint */
-    await new Promise((r) => setTimeout(r, 900));
-    setConnStatus('ok');
-    setLastTestedAt(new Date().toLocaleTimeString());
-  };
-
   return (
     <>
-      <PSHead
-        title="TO-BE"
-        desc={t('projectSettings.head.target.desc')}
-        actions={
-          <button
-            onClick={handleTest}
-            disabled={connStatus === 'testing'}
-            style={{ ...styles.btnSecondary, ...(connStatus === 'testing' ? styles.btnDisabled : {}) }}
-          >
-            {connStatus === 'testing' ? t('projectSettings.action.testing') : t('projectSettings.action.testConnection')}
-          </button>
-        }
-      />
+      <PSHead title={t('projectSettings.section.target.label')} />
       <DdlCard project={project} side="tobe" highlight={highlight} />
-
-      <PSCard title={t('projectSettings.target.connection.title')} desc={t('projectSettings.target.connection.desc')} mock>
-        <PSRow label={t('projectSettings.target.row.dbType')}><PSInput value="PostgreSQL 18" readOnly mono /></PSRow>
-        <PSRow label={t('projectSettings.target.row.host')}><PSInput value={host} onChange={setHost} mono /></PSRow>
-        <PSRow label={t('projectSettings.target.row.database')}><PSInput value={database} onChange={setDatabase} mono /></PSRow>
-        <PSRow label={t('projectSettings.target.row.schema')}><PSInput value={schema} onChange={setSchema} mono /></PSRow>
-        <PSRow label={t('projectSettings.target.row.encoding')}><PSInput value={encoding} onChange={setEncoding} mono /></PSRow>
-        <PSRow label={t('projectSettings.target.row.collation')}><PSInput value={collation} onChange={setCollation} mono /></PSRow>
-        <PSRow label={t('projectSettings.target.row.sslMode')}><PSInput value="verify-full · corp-ca-2024" readOnly mono /></PSRow>
-      </PSCard>
-
-      <ConnectionStatusCard status={connStatus} lastTestedAt={lastTestedAt} onRetry={handleTest} />
-
-      <CredsCard />
     </>
-  );
-}
-
-function ConnectionStatusCard({
-  status,
-  lastTestedAt,
-  onRetry,
-}: {
-  status: 'untested' | 'testing' | 'ok' | 'failed';
-  lastTestedAt: string | null;
-  onRetry: () => void;
-}) {
-  const t = useT();
-  const tone =
-    status === 'ok' ? 'green' :
-    status === 'failed' ? 'red' :
-    status === 'testing' ? 'amber' : 'gray';
-  const palette =
-    tone === 'green' ? { bg: 'var(--green-50)', bd: 'var(--green)', fg: 'var(--green)' } :
-    tone === 'red'   ? { bg: 'var(--red-50)',   bd: 'var(--red)',   fg: 'var(--red)' } :
-    tone === 'amber' ? { bg: 'var(--amber-50)', bd: 'var(--amber)', fg: 'var(--amber)' } :
-                       { bg: 'var(--panel-2)',  bd: 'var(--border)', fg: 'var(--text-3)' };
-  const label =
-    status === 'ok' ? t('projectSettings.connStatus.connected') :
-    status === 'failed' ? t('projectSettings.connStatus.failed') :
-    status === 'testing' ? t('projectSettings.connStatus.testing') : t('projectSettings.connStatus.untested');
-
-  return (
-    <div style={{ ...styles.statusCard, background: palette.bg, borderColor: palette.bd }}>
-      <span style={{ ...styles.statusDot, background: palette.fg }} />
-      <span style={{ fontSize: 12, fontWeight: 600, color: palette.fg }}>{label}</span>
-      <span style={styles.uiOnlyBadge}>UI only</span>
-      <div style={{ flex: 1, fontSize: 11.5, color: 'var(--text-2)', fontFamily: 'var(--mono)' }}>
-        {status === 'ok' && lastTestedAt && <>{t('projectSettings.connStatus.lastTested', { time: lastTestedAt })}</>}
-        {status === 'untested' && <>{t('projectSettings.connStatus.untestedHint')}</>}
-        {status === 'testing' && <>{t('projectSettings.connStatus.testingHint')}</>}
-        {status === 'failed' && <>{t('projectSettings.connStatus.failedHint')}</>}
-      </div>
-      {status === 'failed' && (
-        <button onClick={onRetry} style={styles.btnSecondary}>{t('projectSettings.connStatus.retry')}</button>
-      )}
-    </div>
-  );
-}
-
-function CredsCard() {
-  const t = useT();
-  const [username, setUsername] = useState('app_ops');
-  const [authMethod, setAuthMethod] = useState<'password' | 'kerberos' | 'ssh_key' | 'cert'>('password');
-  const [passwordSet, setPasswordSet] = useState(true);
-  const [showPw, setShowPw] = useState(false);
-  const [editingPw, setEditingPw] = useState(false);
-  const [newPw, setNewPw] = useState('');
-
-  const commitPw = () => {
-    if (newPw) setPasswordSet(true);
-    setEditingPw(false);
-    setNewPw('');
-  };
-
-  return (
-    <div style={styles.card}>
-      <div style={styles.cardHeader}>
-        <div style={{ flex: 1 }}>
-          <div style={styles.cardTitle}>
-            {t('projectSettings.creds.title')}
-            <span style={{ ...styles.uiOnlyBadge, marginLeft: 8 }}>UI only</span>
-          </div>
-          <div style={styles.cardDesc}>
-            {t('projectSettings.creds.desc')}
-          </div>
-        </div>
-        <button
-          onClick={() => setPasswordSet(true)}
-          style={styles.btnGhost}
-        >
-          {t('projectSettings.creds.rotate')}
-        </button>
-      </div>
-
-      <div style={styles.cardBody}>
-        <PSRow label={t('projectSettings.creds.username')}><PSInput value={username} onChange={setUsername} mono /></PSRow>
-        <PSRow label={t('projectSettings.creds.authMethod')}>
-          <select
-            value={authMethod}
-            onChange={(e) => setAuthMethod(e.target.value as typeof authMethod)}
-            style={styles.select}
-          >
-            <option value="password">Password</option>
-            <option value="kerberos">Kerberos</option>
-            <option value="ssh_key">SSH key</option>
-            <option value="cert">Certificate</option>
-          </select>
-        </PSRow>
-        {authMethod === 'password' && (
-          <PSRow label={t('projectSettings.creds.password')} hint={passwordSet ? t('projectSettings.creds.passwordSet') : t('projectSettings.creds.passwordNotSet')}>
-            {editingPw ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <input
-                  autoFocus
-                  type={showPw ? 'text' : 'password'}
-                  value={newPw}
-                  onChange={(e) => setNewPw(e.target.value)}
-                  onBlur={commitPw}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') commitPw();
-                    if (e.key === 'Escape') { setEditingPw(false); setNewPw(''); }
-                  }}
-                  placeholder={t('projectSettings.creds.passwordPlaceholder')}
-                  style={{ ...styles.inputInline, borderColor: 'var(--navy)' }}
-                />
-                <button onClick={() => setShowPw((s) => !s)} style={styles.btnXs}>{showPw ? t('projectSettings.creds.hide') : t('projectSettings.creds.show')}</button>
-              </div>
-            ) : (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={styles.pwDisplay}>
-                  {passwordSet ? (showPw ? '(mock) ops-pw-23f!' : '••••••••••') : <span style={{ color: 'var(--text-4)' }}>{t('projectSettings.creds.passwordNotSet')}</span>}
-                </span>
-                <button onClick={() => setShowPw((s) => !s)} style={styles.btnXs}>{showPw ? t('projectSettings.creds.hide') : t('projectSettings.creds.show')}</button>
-                <button
-                  onClick={() => { setEditingPw(true); setNewPw(''); setShowPw(false); }}
-                  style={styles.btnLink}
-                >
-                  {t('projectSettings.creds.change')}
-                </button>
-              </div>
-            )}
-          </PSRow>
-        )}
-        {authMethod === 'kerberos' && (
-          <PSRow label={t('projectSettings.creds.principal')}><PSInput value="app_ops@KDB.CORP" mono /></PSRow>
-        )}
-        {authMethod === 'ssh_key' && (
-          <PSRow label={t('projectSettings.creds.privateKey')} hint={t('projectSettings.creds.privateKeyHint')}>
-            <PSInput value="~/.ssh/mig-ops.key" mono readOnly />
-          </PSRow>
-        )}
-        {authMethod === 'cert' && (
-          <PSRow label={t('projectSettings.creds.cert')}><PSInput value="/etc/mig/certs/app_ops.pem" mono readOnly /></PSRow>
-        )}
-      </div>
-    </div>
   );
 }
 
@@ -1089,7 +964,7 @@ function PSDanger({ project }: { project: Project }) {
 
 /* ─── Reusable primitives ────────────────────────────────── */
 
-function PSHead({ title, desc, actions, mock }: { title: string; desc: string; actions?: React.ReactNode; mock?: boolean }) {
+function PSHead({ title, desc, actions, mock }: { title: string; desc?: string; actions?: React.ReactNode; mock?: boolean }) {
   return (
     <div style={styles.head}>
       <div style={{ flex: 1 }}>
@@ -1097,7 +972,7 @@ function PSHead({ title, desc, actions, mock }: { title: string; desc: string; a
           {title}
           {mock && <span style={{ ...styles.uiOnlyBadge, marginLeft: 10, verticalAlign: 'middle' }}>UI only</span>}
         </h2>
-        <div style={styles.headDesc}>{desc}</div>
+        {desc && <div style={styles.headDesc}>{desc}</div>}
       </div>
       {actions && <div style={styles.headActions}>{actions}</div>}
     </div>
@@ -1238,13 +1113,15 @@ const emptyStyles: Record<string, React.CSSProperties> = {
 
 const styles: Record<string, React.CSSProperties> = {
   /* layout */
-  wrap: { display: 'flex', height: '100%', minHeight: 0, margin: -18, background: 'var(--bg)' },
+  wrap: { display: 'flex', minHeight: '100%', height: '100%', margin: -18, background: 'var(--bg)', alignItems: 'stretch' },
   aside: {
     width: 220, minWidth: 220,
     borderRight: '1px solid var(--border)',
     background: 'var(--panel)',
     padding: '10px 0',
     overflow: 'auto',
+    alignSelf: 'stretch',
+    minHeight: 'calc(100vh - 122px)',
   },
   asideHeader: {
     padding: '4px 14px 6px',
@@ -1256,8 +1133,16 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     transition: 'background .08s',
   },
-  asideItemLabel: { fontSize: 12 },
-  asideItemDesc: { fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: 2 },
+  asideItemLabel: { fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  asideItemDesc: {
+    fontSize: 10,
+    color: 'var(--text-3)',
+    fontFamily: 'var(--mono)',
+    marginTop: 2,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
   content: { flex: 1, minWidth: 0, overflow: 'auto', padding: '18px 26px 40px' },
 
   /* head */
@@ -1291,6 +1176,8 @@ const styles: Record<string, React.CSSProperties> = {
   cardTitle: { fontSize: 12, fontWeight: 600, color: 'var(--text)' },
   cardDesc: { fontSize: 10.5, color: 'var(--text-3)', marginTop: 2 },
   cardBody: { padding: '12px 14px' },
+  csvPathRowLabel: { fontSize: 11.5, fontWeight: 500, color: 'var(--text)', marginBottom: 6 },
+  csvPathActions: { display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 10 },
 
   /* collapse card */
   collapseCard: {
@@ -1351,9 +1238,22 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'inline-block',
     padding: '2px 10px',
     fontSize: 11, fontFamily: 'var(--mono)',
-    background: 'var(--navy-50)', color: 'var(--navy)',
-    border: '1px solid var(--navy)', borderRadius: 3,
+    background: 'var(--green-50)', color: 'var(--green)',
+    border: '1px solid var(--green)', borderRadius: 3,
     textTransform: 'uppercase', letterSpacing: 0.4,
+  },
+  envChipOff: {
+    display: 'inline-block',
+    padding: '2px 10px',
+    fontSize: 11, fontFamily: 'var(--mono)',
+    background: 'var(--red-50)', color: 'var(--red)',
+    border: '1px solid var(--red)', borderRadius: 3,
+    textTransform: 'uppercase', letterSpacing: 0.4,
+  },
+  staticText: {
+    fontSize: 11.5,
+    color: 'var(--text-2)',
+    fontFamily: 'var(--mono)',
   },
   phaseSelect: {
     padding: '4px 10px',
@@ -1402,6 +1302,14 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--text-2)', cursor: 'pointer',
     fontSize: 10.5, fontFamily: 'var(--mono)',
     padding: '0 8px', height: 24, borderRadius: 3,
+  },
+  btnLockIcon: {
+    width: 26, height: 26,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    border: '1px solid var(--green)', background: 'var(--panel)',
+    cursor: 'pointer', borderRadius: 3,
+    padding: 0,
+    flexShrink: 0,
   },
   btnLink: {
     border: 'none', background: 'transparent',

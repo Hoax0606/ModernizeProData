@@ -18,7 +18,7 @@ import { useSnapshotsStore } from '../store/snapshots';
 import { useAuditLogStore } from '../store/auditLog';
 import { useNotificationStore } from '../store/notifications';
 import { useNotificationPrefsStore, isEventEnabled, actionToEventKey } from '../store/notificationPreferences';
-import { useSettingsStore } from '../store/settings';
+import { useSettingsStore, type ProjectSort } from '../store/settings';
 import { useT } from '../i18n';
 
 /**
@@ -118,7 +118,40 @@ export function AppShell() {
 
   const activeSite = useMemo(() => sites.find((s) => s.id === activeSiteId) ?? null, [sites, activeSiteId]);
   const activeProject = useMemo(() => allProjects.find((p) => p.id === activeProjectId) ?? null, [allProjects, activeProjectId]);
-  const projects = useMemo(() => allProjects.filter((p) => p.siteId === activeSiteId), [allProjects, activeSiteId]);
+
+  const siteDbConfigured = (s: typeof sites[number]) => {
+    const db = s.tobeDbByEnv?.[s.environment] as Partial<{ type: string; host: string; database: string; username: string }> | undefined;
+    return !!db
+      && !!db.type?.trim()
+      && !!db.host?.trim()
+      && !!db.database?.trim()
+      && !!db.username?.trim();
+  };
+
+  const STAGE_SHORT: Record<string, string> = {
+    dev: 'DEV',
+    test: 'TEST',
+    staging: 'STG',
+    production: 'PROD',
+  };
+  const stageShort = (env: string) => STAGE_SHORT[env] ?? env.slice(0, 4).toUpperCase();
+
+  const projectSort = useSettingsStore((s) => s.projectSort);
+  const setProjectSort = useSettingsStore((s) => s.setProjectSort);
+  const projects = useMemo(() => {
+    const list = allProjects.filter((p) => p.siteId === activeSiteId).slice();
+    list.sort((a, b) => {
+      switch (projectSort) {
+        case 'created-asc':  return a.createdAt.localeCompare(b.createdAt);
+        case 'created-desc': return b.createdAt.localeCompare(a.createdAt);
+        case 'name-asc':     return a.name.localeCompare(b.name);
+        case 'name-desc':    return b.name.localeCompare(a.name);
+        case 'tables-desc':  return b.tableCount - a.tableCount;
+        default:             return 0;
+      }
+    });
+    return list;
+  }, [allProjects, activeSiteId, projectSort]);
 
   const notifItems = useMemo(() => {
     // Solution settings 에서 Enable notifications 가 OFF 면 모든 프로젝트의 알림 일괄 비활성.
@@ -240,7 +273,15 @@ export function AppShell() {
               >
                 <div style={styles.siteBadge}>{siteBadge(activeSite.name)}</div>
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <div style={styles.siteName}>{activeSite.name}</div>
+                  <div style={styles.siteNameRow}>
+                    <span style={styles.siteName}>{activeSite.name}</span>
+                    <span
+                      style={siteDbConfigured(activeSite) ? styles.siteStageChip : styles.siteStageChipOff}
+                      title={siteDbConfigured(activeSite) ? t('shell.site.dbConfigured') : t('shell.site.dbNotConfigured')}
+                    >
+                      {stageShort(activeSite.environment)}
+                    </span>
+                  </div>
                   <div style={styles.siteSub}>{activeSite.asisEnv} → {activeSite.tobeEnv} · {sites.length} {sites.length === 1 ? t('shell.siteCountSuffix') : t('shell.siteCountSuffixPlural')}</div>
                 </div>
                 <span style={{ ...styles.siteChevron, transform: siteMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}>▼</span>
@@ -270,7 +311,15 @@ export function AppShell() {
                   >
                     <div style={styles.siteMenuItemBadge}>{siteBadge(s.name)}</div>
                     <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={styles.siteMenuItemName}>{s.name}</div>
+                      <div style={styles.siteMenuItemNameRow}>
+                        <span style={styles.siteMenuItemName}>{s.name}</span>
+                        <span
+                          style={siteDbConfigured(s) ? styles.siteStageChip : styles.siteStageChipOff}
+                          title={siteDbConfigured(s) ? t('shell.site.dbConfigured') : t('shell.site.dbNotConfigured')}
+                        >
+                          {stageShort(s.environment)}
+                        </span>
+                      </div>
                       <div style={styles.siteMenuItemSub}>{s.asisEnv} → {s.tobeEnv}</div>
                     </div>
                     {s.id === activeSite.id && <span style={styles.siteMenuCheck}>✓</span>}
@@ -329,6 +378,19 @@ export function AppShell() {
           {/* Projects section */}
           <div style={styles.sectionHeader}>
             <span>{t('shell.projects')} <span style={styles.muted}>{projects.length}</span></span>
+            <div style={{ flex: 1 }} />
+            <select
+              value={projectSort}
+              onChange={(e) => setProjectSort(e.target.value as ProjectSort)}
+              title={t('shell.projects.sortTitle')}
+              style={styles.sortSelect}
+            >
+              <option value="created-asc">{t('shell.projects.sort.createdAsc')}</option>
+              <option value="created-desc">{t('shell.projects.sort.createdDesc')}</option>
+              <option value="name-asc">{t('shell.projects.sort.nameAsc')}</option>
+              <option value="name-desc">{t('shell.projects.sort.nameDesc')}</option>
+              <option value="tables-desc">{t('shell.projects.sort.tables')}</option>
+            </select>
             <button
               title={activeSite ? t('shell.newProject.title') : t('shell.newProject.noSite')}
               onClick={() => activeSite && setCreateProjectOpen(true)}
@@ -886,6 +948,13 @@ const styles: Record<string, React.CSSProperties> = {
     letterSpacing: 0.4,
     flexShrink: 0,
   },
+  siteNameRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    minWidth: 0,
+    lineHeight: 1.2,
+  },
   siteName: {
     fontSize: 12,
     fontWeight: 600,
@@ -893,6 +962,8 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
+    flex: '0 1 auto',
+    minWidth: 0,
   },
   siteSub: {
     fontSize: 10,
@@ -950,6 +1021,13 @@ const styles: Record<string, React.CSSProperties> = {
     letterSpacing: 0.4,
     flexShrink: 0,
   },
+  siteMenuItemNameRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    minWidth: 0,
+    lineHeight: 1.2,
+  },
   siteMenuItemName: {
     fontSize: 11.5,
     fontWeight: 600,
@@ -958,6 +1036,8 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
+    flex: '0 1 auto',
+    minWidth: 0,
   },
   siteMenuItemSub: { fontSize: 9.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
   siteMenuCheck: { color: 'var(--navy)', fontSize: 11, marginLeft: 4 },
@@ -1141,6 +1221,49 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
   },
   muted: { color: 'var(--text-4)' },
+  siteStageChip: {
+    display: 'inline-block',
+    padding: '1px 5px',
+    fontSize: 9,
+    fontWeight: 700,
+    fontFamily: 'var(--mono)',
+    letterSpacing: 0.4,
+    color: 'var(--green)',
+    background: 'var(--green-50)',
+    border: '1px solid var(--green)',
+    borderRadius: 3,
+    lineHeight: 1.3,
+    flexShrink: 0,
+  },
+  siteStageChipOff: {
+    display: 'inline-block',
+    padding: '1px 5px',
+    fontSize: 9,
+    fontWeight: 700,
+    fontFamily: 'var(--mono)',
+    letterSpacing: 0.4,
+    color: 'var(--red)',
+    background: 'var(--red-50)',
+    border: '1px solid var(--red)',
+    borderRadius: 3,
+    lineHeight: 1.3,
+    flexShrink: 0,
+  },
+  sortSelect: {
+    height: 20,
+    padding: '0 4px',
+    marginRight: 4,
+    border: '1px solid var(--border)',
+    borderRadius: 3,
+    background: 'var(--panel)',
+    color: 'var(--text-2)',
+    fontSize: 10,
+    fontFamily: 'var(--mono)',
+    cursor: 'pointer',
+    textTransform: 'none',
+    letterSpacing: 0,
+    maxWidth: 110,
+  },
   iconBtn: {
     width: 18,
     height: 18,
