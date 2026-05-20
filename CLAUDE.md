@@ -37,7 +37,8 @@ ModernizeProData/
 │   └── src/main/
 │       ├── java/com/ksinfo/modernize_pro_data/
 │       │   ├── common/         # config, dto, exception
-│       │   └── coordinator/    # api, auth, site, ...
+│       │   └── coordinator/    # api, auth, site, ddl, ...
+│       │                       # ddl/ = DDL import (entity / repository / service / parser)
 │       └── resources/
 │           ├── application.yml
 │           └── db/migration/   # V{N}__*.sql — Flyway
