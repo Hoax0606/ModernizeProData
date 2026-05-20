@@ -4,7 +4,7 @@
 
 **전제** — 프로젝트 한 줄 소개·기술 스택·디렉터리 맵·도메인 용어는 repo 루트 `CLAUDE.md` 참조. 본 문서는 거기 안 적힌 (또는 한 줄로만 적힌) 설계 디테일을 다룬다.
 
-업데이트: 2026-05-19
+업데이트: 2026-05-20
 
 ---
 
@@ -23,12 +23,34 @@ dev → test → staging → production
 - **cutover Phase 는 Stage=production 에서만 실행 가능**. 코드에 prod 가드 필수.
 
 ### 1.3 Snapshot 두 종류 + 승인 흐름
-| Snapshot | 승인 시 전환되는 Phase |
-|---|---|
-| mapping snapshot | → sign-off |
-| cutover snapshot | → ready |
+| Snapshot | 승인 시 전환되는 Phase | 생성 가능 시점 |
+|---|---|---|
+| mapping snapshot | → sign-off | 언제든 |
+| cutover snapshot | → ready | **rehearsal 이후 phase 한정** (`rehearsal · ready · cutover · hypercare · done`) |
 
 - **Phase 전환은 approve 시점만** 일어남. request 시점에는 Phase 안 바뀜.
+- cutover snapshot 생성 시 UI 에서 **빨간 strong 확인 다이얼로그** 한 번 더 표시 (production 가드와 별개).
+
+### 1.4 Snapshot version 채번 (확정 2026-05-19)
+
+각 snapshot 은 `version VARCHAR(16)` 컬럼을 가지며 서버가 자동 채번. 사용자 수동 편집 없음. 채번 로직은 `Snapshot.generateNextVersion(latestVersion, latestStatus)`.
+
+| 직전 snapshot 상태 | 다음 버전 | 의미 |
+|---|---|---|
+| (없음, 첫 생성) | `v1.0` | 초기값 |
+| `approved` | major bump (`v1.3 → v2.0`) | 승인본 이후 새 매핑 사이클 시작 |
+| `draft` / `pending` / `rejected` | minor bump (`v1.2 → v1.3`) | 같은 사이클 안의 재작업 |
+
+- 채번 트리거는 **새 snapshot create 시점**만. status 전환 (request·approve·reject) 은 version 안 바꿈.
+- "직전" = `created_at DESC` 기준 1건 (`SnapshotRepository.findLatestByProjectId`).
+- `VARCHAR` 저장이라 lexicographic 정렬 시 `v10.0 < v2.0`. 현재 UI 는 `created_at` 으로만 정렬하므로 문제 없음 — 버전 기준 정렬 UI 추가 시 별도 파서 필요.
+- 같은 프로젝트에서 동시에 여러 사용자가 snapshot 만드는 시나리오는 폐쇄망 운영 특성상 거의 없다고 가정 (별도 락 없음).
+
+### 1.5 AUDIT LOG (현재 상태)
+
+- 프론트 `store/auditLog.ts` 가 zustand `persist` 로 **클라이언트 localStorage 영속**. 프로젝트 단위 누적, UI 에 count + collapse.
+- 시점 한계: PC 마다 기록이 다름. PoC 데모는 단일 PC 에서 진행되므로 수용.
+- 서버 `audit_log` 테이블 (§9) 이 들어오면 store 인터페이스 그대로 두고 구현만 API 로 교체.
 
 ### 1.4 runStatus sub-status (test / rehearsal / cutover 한정)
 | 값 | 의미 | UI |

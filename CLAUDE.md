@@ -71,6 +71,8 @@ docs/                            # 매뉴얼·아키텍처·handoff (.docx/.pdf 
 - `cutover` 는 **production 환경에서만** 실행 가능.
 - 스냅샷은 mapping snapshot 과 cutover snapshot 두 갈래.
 - `runStatus` (`idle | running | completed`) 는 test/rehearsal/cutover 의 sub-status.
+- 스냅샷 `version` 은 코드가 자동 채번 (`v1.0` 시작). **직전 snapshot 이 approved → major bump** (`v1.x → v2.0`), 그 외 (`draft/pending/rejected`) → **minor bump** (`v1.0 → v1.1`). 수동 편집 없음. 채번 로직은 `Snapshot.generateNextVersion`.
+- `cutover` snapshot 생성 버튼은 **rehearsal 이후 phase** 에서만 활성 (`rehearsal · ready · cutover · hypercare · done`).
 
 ### 답변 스타일 (사용자 선호)
 - 도구 방향성 논의에서 **V1/V2/Phase 단계로 답을 나누지 말 것**. 한 가지 권장안을 제시.
@@ -113,7 +115,7 @@ cd ModernizeProData/frontend; npx tsc --noEmit
 | Site | 한 고객사의 한 운영 환경 단위. AS-IS / TO-BE / 환경 라벨(dev/test/stg/prod) 보유. |
 | Project | Site 안의 이행 단위. 하나의 AS-IS → TO-BE 매핑 작업. |
 | Phase | Project 의 진행 단계 (위 9단계). |
-| Snapshot | 매핑 정의의 승인 단위. mapping snapshot / cutover snapshot 두 종. |
+| Snapshot | 매핑 정의의 승인 단위. mapping snapshot / cutover snapshot 두 종. `version` 자동 채번 (`v1.0 → v1.1`, 승인 후 → `v2.0`). |
 | Cutover | 본운영 전환. production 환경에서만, 승인된 snapshot 필요. |
 | Rehearsal | dry-run. test 환경에서 cutover 시나리오 검증. |
 | AS-IS DB (도구 내장) | 운영팀 야간 CSV 추출 파일을 도구가 받아 DuckDB 로 적재 — 외부 DB 직접 접속 X. |
