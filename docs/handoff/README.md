@@ -1,56 +1,57 @@
-# docs/handoff/ — 작업 인수인계 노트
+# docs/handoff/ — work handoff notes
 
-5명 팀이 각자 PC 에서 작업하므로, 작업 단위로 이 폴더에 노트를 남긴다. 다음에 그 코드를 만질 사람(나 자신 포함) 의 AI 가 0 컨텍스트로 시작하지 않도록.
+The 5-person team works from separate PCs, so we drop a per-unit-of-work note in this folder. The goal: the next person to touch that code (which may be your future self) doesn't start their AI session with zero context.
 
-## 언제 작성하나
+## When to write one
 
-- PR 을 올리기 전 — 마지막 commit 에 handoff 파일 포함
-- 또는 하루 작업을 멈출 때 — "내일의 나" 를 위해서도
+- Before opening a PR — include the handoff file in the last commit.
+- Or when you stop work for the day — for "tomorrow's you" as well.
 
-## 파일명 규칙
+## Filename convention
 
 ```
 docs/handoff/YYYY-MM-DD-{slug}.md
 ```
 
-- `slug` 는 짧은 영문 kebab-case. 예: `project-settings`, `flyway-v7-connection`, `worker-bootstrap`.
-- 같은 날 여러 개여도 OK — slug 만 구분되면 됨.
-- 월 단위로 `docs/handoff/archive/YYYY-MM/` 로 옮긴다 (분기별로 한 번씩 정리).
+- `slug` is short English kebab-case. Examples: `project-settings`, `flyway-v7-connection`, `worker-bootstrap`.
+- Multiple files on the same day are fine — just keep slugs distinct.
+- Move files to `docs/handoff/archive/YYYY-MM/` monthly (clean up once a quarter).
 
-## 템플릿
+## Template
 
-새 파일은 아래 형식으로:
+New files follow this shape:
 
 ```markdown
-# YYYY-MM-DD — {slug} ({작성자})
+# YYYY-MM-DD — {slug} ({author})
 
-## 한 일
-- 어떤 기능/버그/리팩터링을 했는지 1-3 bullet.
+## What was done
+- 1–3 bullets — the feature, bug fix, or refactor.
 
-## 다음 사람이 할 일
-- 이어받을 사람이 손대야 할 가장 구체적인 다음 액션.
-- 알면 파일 경로/함수명까지.
+## What the next person should do
+- The most specific next action for whoever picks this up.
+- Include file paths and function names if you know them.
 
-## 함정 / 결정 이력
-- "이건 왜 이렇게 했나" — 코드만 봐선 모를 결정.
-- 막힌 점, 우회한 점, 의도적으로 안 한 것.
+## Pitfalls / decision history
+- "Why this was done this way" — context the code alone doesn't reveal.
+- Where you got stuck, what you worked around, what you intentionally didn't do.
 
-## 안 한 것 (의도적으로)
-- 범위에서 뺀 것. 다음 PR 에서 다룰 것.
+## Intentionally not done
+- Out-of-scope items. To be addressed in a later PR.
 ```
 
-자동 생성하려면 슬래시 명령어 `/handoff` 를 쓰면 된다 — git status/diff 를 보고 위 템플릿을 채워준다.
+To auto-generate, use the `/handoff` slash command — it inspects `git status` / `git diff` and fills in the template.
 
-## 작성 가이드
+## Writing guidelines
 
-- **WHY 위주로 쓰기** — WHAT 은 git log/diff 가 이미 보여준다. "왜 그렇게 했는지" 가 가치 있다.
-- 200 단어 안쪽이면 충분. 일기가 아니라 인수인계.
-- 코드 식별자(파일·함수·테이블명) 는 ` 로 감싸기 — 후속 AI 가 grep 하기 좋게.
-- 부정형 ("X 하지 않음") 도 적자. "안 한 것" 이 후속 작업의 출발점이 된다.
+- **Write the WHY** — the WHAT is already in `git log` / `git diff`. The "why" is what's valuable.
+- Under 200 words is usually enough. This is a handoff, not a diary.
+- Wrap code identifiers (file, function, table names) in backticks — so follow-up AI sessions can grep them.
+- Negative statements ("did NOT do X") matter too. "Not done" is often the next person's starting point.
 
-## 읽는 쪽
+## How to read
 
-새 세션 시작 시 (그리고 `CLAUDE.md` 에 명시된 대로):
-1. `docs/handoff/` 의 파일을 이름 desc 정렬 → 최신부터 1-3 개 훑기.
-2. 사용자에게 "방금 본 handoff 가 X · Y 였는데 이걸 이어서 작업하면 되나?" 확인.
-3. 이어받으면 다음 사람이 할 일 부터 시작.
+When starting a new session (and per `CLAUDE.md`):
+
+1. List `docs/handoff/` sorted by name descending → skim the most recent 1–3 files.
+2. Confirm with the user in one line: "The recent handoffs were X and Y — should I continue from there?"
+3. Once confirmed, start from the "what the next person should do" section.
