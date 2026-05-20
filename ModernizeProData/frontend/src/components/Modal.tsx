@@ -7,12 +7,14 @@ interface Props {
   title?: React.ReactNode;
   children: React.ReactNode;
   width?: number;
+  /** 헤더 오른쪽 영역. 지정하면 기본 X 버튼 대신 이것이 렌더된다. */
+  headerRight?: React.ReactNode;
 }
 
 /**
  * 공통 모달 — Prototype 의 OverlayShell 패턴.
  */
-export function Modal({ open, onClose, title, children, width = 440 }: Props) {
+export function Modal({ open, onClose, title, children, width = 440, headerRight }: Props) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -33,7 +35,9 @@ export function Modal({ open, onClose, title, children, width = 440 }: Props) {
         {title && (
           <div style={styles.header}>
             <div style={styles.title}>{title}</div>
-            <button onClick={onClose} style={styles.closeBtn} aria-label="Close">✕</button>
+            {headerRight !== undefined
+              ? headerRight
+              : <button onClick={onClose} style={styles.closeBtn} aria-label="Close">✕</button>}
           </div>
         )}
         <div style={styles.body}>{children}</div>
