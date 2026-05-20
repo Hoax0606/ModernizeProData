@@ -116,11 +116,6 @@ export function ApprovalsPage() {
 
   return (
     <div>
-      <div style={styles.header}>
-        <h1 style={styles.h1}>{t('approvals.title')}</h1>
-        <p style={styles.subtitle}>{site.name} · {t('approvals.subtitle')}</p>
-      </div>
-
       {/* Filter bar */}
       <div style={styles.filterBar}>
         <Filter label={t('approvals.filter.status')}>

@@ -386,12 +386,6 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
 
   return (
     <div>
-      {/* Header — Execution overview 와 동일한 스타일 (plain h1 + subtitle) */}
-      <div style={styles.pageHeader}>
-        <h1 style={styles.pageH1}>{t('siteOverview.title')}</h1>
-        <p style={styles.pageSubtitle}>{siteName} · {t('siteOverview.subtitle')}</p>
-      </div>
-
       <div style={styles.overviewWrap}>
         {/* Left column — KPI · Overall progress · Filter · Table */}
         <div style={styles.overviewLeft}>

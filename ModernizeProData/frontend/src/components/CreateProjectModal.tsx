@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from 'react';
 import { Modal } from './Modal';
 import { useWorkspaceStore, type DdlFile } from '../store/workspace';
 import { useAuthStore } from '../store/auth';
+import { ApiError } from '../api/client';
 import { useT } from '../i18n';
 
 interface Props {
@@ -19,11 +20,13 @@ export function CreateProjectModal({ open, onClose }: Props) {
 
   const [name, setName] = useState('');
   const [ddlFiles, setDdlFiles] = useState<DdlFile[]>([]);
+  const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const reset = () => {
     setName('');
     setDdlFiles([]);
+    setError(null);
   };
 
   const handleFilesPicked = (filesList: FileList | null) => {
@@ -42,15 +45,24 @@ export function CreateProjectModal({ open, onClose }: Props) {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !activeSite) return;
-    await createProject({
-      name: name.trim(),
-      phase: 'planning',
-      tableCount: 0,
-      ddlFiles,
-      owner: currentUser?.username ?? '—',
-    });
-    reset();
-    onClose();
+    setError(null);
+    try {
+      await createProject({
+        name: name.trim(),
+        phase: 'planning',
+        tableCount: 0,
+        ddlFiles,
+        owner: currentUser?.username ?? '—',
+      });
+      reset();
+      onClose();
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'PROJECT_NAME_DUPLICATE') {
+        setError(t('createProject.error.duplicate'));
+      } else {
+        setError(t('createProject.error.generic'));
+      }
+    }
   };
 
   if (!activeSite) return null;
@@ -117,6 +129,8 @@ export function CreateProjectModal({ open, onClose }: Props) {
             )}
           </div>
         </Field>
+
+        {error && <div style={styles.errorBox}>{error}</div>}
 
         <div style={styles.actions}>
           <button type="button" onClick={onClose} style={styles.btnGhost}>{t('common.cancel')}</button>
@@ -220,6 +234,15 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 0,
   },
 
+  errorBox: {
+    padding: '8px 10px',
+    background: 'var(--red-50)',
+    border: '1px solid var(--red)',
+    borderRadius: 4,
+    color: 'var(--red)',
+    fontSize: 12,
+    fontWeight: 500,
+  },
   actions: { display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 4 },
   btnGhost: {
     padding: '7px 14px',

@@ -131,11 +131,6 @@ export function ExecutionOverviewPage() {
 
   return (
     <div>
-      <div style={styles.header}>
-        <h1 style={styles.h1}>{t('executionOverview.title')}</h1>
-        <p style={styles.subtitle}>{site.name} · {t('executionOverview.subtitle')}</p>
-      </div>
-
       {/* KPI row — Phase Mix 없음 */}
       <div style={styles.kpiRow}>
         <Kpi label={t('executionOverview.kpi.projects')} value={`${status.done} / ${siteProjects.length}`} tone="info" />

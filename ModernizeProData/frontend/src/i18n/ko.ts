@@ -346,7 +346,7 @@ export const ko = {
   'onboarding.welcomeDesc': '시작하려면 먼저 사이트를 만드세요. 사이트는 이행 작업이 진행될 고객 환경 (은행·증권 등) 단위입니다.',
   'onboarding.siteCta': '+ Create site',
   'onboarding.projectTitle': '— create your first project',
-  'onboarding.projectDesc': '프로젝트는 단일 업무 (예: 계정원장 · 카드승인 · 외환) 단위 이행입니다. 한 사이트에 여러 프로젝트를 만들 수 있습니다.',
+  'onboarding.projectDesc': '프로젝트는 DDL 단위입니다. 한 사이트에 여러 프로젝트를 만들 수 있습니다.',
   'onboarding.projectCta': '+ Create project',
   'onboarding.step.site': 'Create site',
   'onboarding.step.project': 'Create project',
@@ -541,6 +541,10 @@ export const ko = {
   'createProject.ddlPick':     'Choose files',
   'createProject.ddlEmpty':    'No files selected',
   'createProject.ddlRemove':   'Remove',
+  'createProject.error.duplicate': '같은 이름의 프로젝트가 이미 존재합니다.',
+  'createProject.error.generic':   '프로젝트 생성에 실패했습니다.',
+  'createSite.error.duplicate':    '같은 이름의 사이트가 이미 존재합니다.',
+  'createSite.error.generic':      '사이트 생성에 실패했습니다.',
 
   // Project Settings — sidebar + section headers
   'projectSettings.sidebar.header':            'Project settings',
@@ -698,6 +702,15 @@ export const ko = {
   'projectSettings.ddl.desc':   'AS-IS · TO-BE 스키마 정의입니다. 다중 업로드가 가능합니다.',
   'projectSettings.ddl.add':    '+ Add DDL file',
   'projectSettings.ddl.empty':  'No DDL files uploaded yet',
+
+  'projectSettings.danger.duplicate.label':  'Duplicate project',
+  'projectSettings.danger.duplicate.desc':   '매핑 규칙과 DDL 파일을 새 프로젝트로 복사합니다. 산출물과 로그는 복사되지 않습니다.',
+  'projectSettings.danger.duplicate.cta':    'Duplicate…',
+  'projectSettings.duplicate.title':         'Duplicate project?',
+  'projectSettings.duplicate.desc':          '"{name}" 의 매핑 규칙과 DDL 파일이 새 프로젝트로 복사됩니다. 산출물과 로그는 복사되지 않습니다.',
+  'projectSettings.duplicate.confirmBtn':    'Duplicate',
+  'projectSettings.duplicate.error.duplicate': '같은 이름의 프로젝트가 이미 존재합니다. 먼저 기존 복제본을 정리하거나 이름을 변경해 주세요.',
+  'projectSettings.duplicate.error.generic': '프로젝트 복제에 실패했습니다.',
 
   'projectSettings.dangerZone':         'Danger zone',
   'projectSettings.delete.title':       'Delete project',

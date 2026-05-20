@@ -347,7 +347,7 @@ export const ja: Record<TranslationKey, string> = {
   'onboarding.welcomeDesc': '開始するにはまずサイトを作成してください。サイトは移行作業が行われる顧客環境 (銀行・証券など) の単位です。',
   'onboarding.siteCta': '+ Create site',
   'onboarding.projectTitle': '— create your first project',
-  'onboarding.projectDesc': 'プロジェクトは単一業務 (例: 勘定元帳・カード承認・外為) 単位の移行です。1つのサイトに複数のプロジェクトを作成できます。',
+  'onboarding.projectDesc': 'プロジェクトは DDL 単位です。1つのサイトに複数のプロジェクトを作成できます。',
   'onboarding.projectCta': '+ Create project',
   'onboarding.step.site': 'Create site',
   'onboarding.step.project': 'Create project',
@@ -542,6 +542,10 @@ export const ja: Record<TranslationKey, string> = {
   'createProject.ddlPick':     'Choose files',
   'createProject.ddlEmpty':    'No files selected',
   'createProject.ddlRemove':   'Remove',
+  'createProject.error.duplicate': '同じ名前のプロジェクトが既に存在します。',
+  'createProject.error.generic':   'プロジェクトの作成に失敗しました。',
+  'createSite.error.duplicate':    '同じ名前のサイトが既に存在します。',
+  'createSite.error.generic':      'サイトの作成に失敗しました。',
 
   // Project Settings — sidebar + section headers
   'projectSettings.sidebar.header':            'Project settings',
@@ -699,6 +703,15 @@ export const ja: Record<TranslationKey, string> = {
   'projectSettings.ddl.desc':   'AS-IS · TO-BE スキーマ定義。複数アップロード可能。',
   'projectSettings.ddl.add':    '+ Add DDL file',
   'projectSettings.ddl.empty':  'No DDL files uploaded yet',
+
+  'projectSettings.danger.duplicate.label':  'Duplicate project',
+  'projectSettings.danger.duplicate.desc':   'マッピング規則と DDL ファイルを新しいプロジェクトにコピーします。成果物とログはコピーされません。',
+  'projectSettings.danger.duplicate.cta':    'Duplicate…',
+  'projectSettings.duplicate.title':         'Duplicate project?',
+  'projectSettings.duplicate.desc':          '"{name}" のマッピング規則と DDL ファイルが新しいプロジェクトにコピーされます。成果物とログはコピーされません。',
+  'projectSettings.duplicate.confirmBtn':    'Duplicate',
+  'projectSettings.duplicate.error.duplicate': '同じ名前のプロジェクトが既に存在します。既存の複製をリネームまたは削除してから再試行してください。',
+  'projectSettings.duplicate.error.generic': 'プロジェクトの複製に失敗しました。',
 
   'projectSettings.dangerZone':         'Danger zone',
   'projectSettings.delete.title':       'Delete project',

@@ -7,4 +7,6 @@ import java.util.List;
 public interface ProjectRepository extends JpaRepository<Project, String> {
     List<Project> findBySiteId(String siteId);
     void deleteBySiteId(String siteId);
+    boolean existsBySiteIdAndName(String siteId, String name);
+    boolean existsBySiteIdAndNameAndIdNot(String siteId, String name, String id);
 }

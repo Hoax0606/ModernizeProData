@@ -23,11 +23,6 @@ export function SiteExportPage() {
 
   return (
     <div>
-      <div style={styles.header}>
-        <h1 style={styles.h1}>{t('siteExport.title')}</h1>
-        <p style={styles.subtitle}>{site.name} · {t('siteExport.subtitle')}</p>
-      </div>
-
       <section style={styles.card}>
         <div style={styles.cardHeader}>
           <div>

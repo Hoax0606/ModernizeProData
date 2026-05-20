@@ -25,10 +25,7 @@ export function AuditLogPage() {
   return (
     <div>
       <div style={styles.header}>
-        <div style={{ flex: 1 }}>
-          <h1 style={styles.h1}>{t('auditLog.title')}</h1>
-          <p style={styles.subtitle}>{site.name} · {t('auditLog.subtitle')}</p>
-        </div>
+        <div style={{ flex: 1 }} />
         <button disabled title={t('auditLog.empty.title')} style={styles.btnGhostDisabled}>
           {t('auditLog.export')}
         </button>

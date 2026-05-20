@@ -78,6 +78,10 @@ public class ProjectController {
         if (!siteRepository.existsById(siteId)) {
             throw new ApiException("SITE_NOT_FOUND", "사이트를 찾을 수 없습니다", HttpStatus.NOT_FOUND);
         }
+        if (projectRepository.existsBySiteIdAndName(siteId, req.name())) {
+            throw new ApiException("PROJECT_NAME_DUPLICATE",
+                    "같은 이름의 프로젝트가 이미 존재합니다", HttpStatus.CONFLICT);
+        }
         Project p = Project.create(siteId, req.name(), auth.getName());
         if (req.phase() != null)    p.setPhase(req.phase());
         p.setTableCount(req.tableCount());
@@ -102,6 +106,11 @@ public class ProjectController {
         Project p = projectRepository.findById(id)
                 .orElseThrow(() -> new ApiException("PROJECT_NOT_FOUND", "프로젝트를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
 
+        if (req.name() != null && !req.name().equals(p.getName())
+                && projectRepository.existsBySiteIdAndNameAndIdNot(p.getSiteId(), req.name(), id)) {
+            throw new ApiException("PROJECT_NAME_DUPLICATE",
+                    "같은 이름의 프로젝트가 이미 존재합니다", HttpStatus.CONFLICT);
+        }
         if (req.name() != null)       p.setName(req.name());
         if (req.phase() != null)      p.setPhase(req.phase());
         if (req.tableCount() != null) p.setTableCount(req.tableCount());

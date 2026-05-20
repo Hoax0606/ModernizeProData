@@ -342,7 +342,7 @@ export const en: Record<TranslationKey, string> = {
   'onboarding.welcomeDesc': 'To get started, first create a site. A site represents the customer environment (bank, brokerage, etc.) where migration work takes place.',
   'onboarding.siteCta': '+ Create site',
   'onboarding.projectTitle': '— create your first project',
-  'onboarding.projectDesc': 'A project is a single business-unit migration (e.g., GL, Card auth, FX). You can have multiple projects per site.',
+  'onboarding.projectDesc': 'A project is a DDL unit. You can have multiple projects per site.',
   'onboarding.projectCta': '+ Create project',
   'onboarding.step.site': 'Create site',
   'onboarding.step.project': 'Create project',
@@ -537,6 +537,10 @@ export const en: Record<TranslationKey, string> = {
   'createProject.ddlPick':     'Choose files',
   'createProject.ddlEmpty':    'No files selected',
   'createProject.ddlRemove':   'Remove',
+  'createProject.error.duplicate': 'A project with the same name already exists.',
+  'createProject.error.generic':   'Failed to create the project.',
+  'createSite.error.duplicate':    'A site with the same name already exists.',
+  'createSite.error.generic':      'Failed to create the site.',
 
   // Project Settings — sidebar + section headers
   'projectSettings.sidebar.header':            'Project settings',
@@ -694,6 +698,15 @@ export const en: Record<TranslationKey, string> = {
   'projectSettings.ddl.desc':   'AS-IS and TO-BE schema definitions. Multiple files are supported.',
   'projectSettings.ddl.add':    '+ Add DDL file',
   'projectSettings.ddl.empty':  'No DDL files uploaded yet',
+
+  'projectSettings.danger.duplicate.label':  'Duplicate project',
+  'projectSettings.danger.duplicate.desc':   'Copy mapping rules and DDL files to a new project. Artifacts and logs are not copied.',
+  'projectSettings.danger.duplicate.cta':    'Duplicate…',
+  'projectSettings.duplicate.title':         'Duplicate project?',
+  'projectSettings.duplicate.desc':          'Mapping rules and DDL files of "{name}" will be copied to a new project. Artifacts and logs are not copied.',
+  'projectSettings.duplicate.confirmBtn':    'Duplicate',
+  'projectSettings.duplicate.error.duplicate': 'A project with the same name already exists. Please rename or delete the existing copy first.',
+  'projectSettings.duplicate.error.generic': 'Failed to duplicate the project.',
 
   'projectSettings.dangerZone':         'Danger zone',
   'projectSettings.delete.title':       'Delete project',

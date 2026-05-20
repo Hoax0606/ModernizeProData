@@ -18,10 +18,6 @@ export function ExecutionPage() {
   if (!project) {
     return (
       <div>
-        <div style={styles.header}>
-          <h1 style={styles.h1}>{t('execution.title')}</h1>
-          <p style={styles.subtitle}>{t('execution.subtitle')}</p>
-        </div>
         <div style={styles.empty}>
           <div style={styles.emptyTitle}>{t('execution.empty.noProject')}</div>
         </div>
@@ -31,11 +27,6 @@ export function ExecutionPage() {
 
   return (
     <div>
-      <div style={styles.header}>
-        <h1 style={styles.h1}>{t('execution.title')}</h1>
-        <p style={styles.subtitle}>{project.name} · {t('execution.subtitle')}</p>
-      </div>
-
       <section style={styles.card}>
         <div style={styles.cardHeader}>
           <div>

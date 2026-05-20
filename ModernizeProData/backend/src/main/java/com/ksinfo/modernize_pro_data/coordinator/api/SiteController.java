@@ -81,6 +81,10 @@ public class SiteController {
     @PreAuthorize("hasAnyRole('MASTER','ADMIN')")
     @Transactional
     public ApiResponse<Site> create(@Valid @RequestBody CreateSiteRequest req, Authentication auth) {
+        if (siteRepository.existsByName(req.name())) {
+            throw new ApiException("SITE_NAME_DUPLICATE",
+                    "같은 이름의 사이트가 이미 존재합니다", HttpStatus.CONFLICT);
+        }
         Site site = Site.create(
                 req.name(), req.asisEnv(), req.tobeEnv(),
                 req.asisEncoding(), req.tobeEncoding(),
@@ -100,6 +104,11 @@ public class SiteController {
         Site site = siteRepository.findById(id)
                 .orElseThrow(() -> new ApiException("SITE_NOT_FOUND", "사이트를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
 
+        if (req.name() != null && !req.name().equals(site.getName())
+                && siteRepository.existsByNameAndIdNot(req.name(), id)) {
+            throw new ApiException("SITE_NAME_DUPLICATE",
+                    "같은 이름의 사이트가 이미 존재합니다", HttpStatus.CONFLICT);
+        }
         if (req.name() != null)         site.setName(req.name());
         if (req.asisEnv() != null)      site.setAsisEnv(req.asisEnv());
         if (req.tobeEnv() != null)      site.setTobeEnv(req.tobeEnv());

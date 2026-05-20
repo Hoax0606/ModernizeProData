@@ -12,6 +12,7 @@ import {
   type TobeDbLocks,
 } from '../store/workspace';
 import { useAuthStore } from '../store/auth';
+import { ApiError } from '../api/client';
 import { useT, type TranslationKey } from '../i18n';
 import { CsvPathField } from './CsvPathField';
 
@@ -61,6 +62,7 @@ export function CreateSiteModal({ open, onClose }: Props) {
   // 운영 단계 + 단계별 DB drafts.
   const [stage, setStage] = useState<ProjectEnvironment>('dev');
   const [tobeDbByEnv, setTobeDbByEnv] = useState<TobeDbByEnv>({});
+  const [error, setError] = useState<string | null>(null);
   // 현재 단계의 DB 폼 — tobeDbByEnv 에서 가져오거나 빈 connection.
   const tobeDb: SiteDbConnection = tobeDbByEnv[stage] ?? emptyDbConnection();
   const patchTobeDb = (patch: Partial<SiteDbConnection>) =>
@@ -76,6 +78,7 @@ export function CreateSiteModal({ open, onClose }: Props) {
     setNotes('');
     setStage('dev');
     setTobeDbByEnv({});
+    setError(null);
   };
 
   const blockedByProd = stage === 'production' && !isMaster;
@@ -94,20 +97,29 @@ export function CreateSiteModal({ open, onClose }: Props) {
     for (const env of PROJECT_ENVIRONMENTS) {
       if (finalByEnv[env]) finalLocks[env] = true;
     }
-    await createSite({
-      name: name.trim(),
-      asisEnv,
-      tobeEnv,
-      asisEncoding,
-      tobeEncoding,
-      csvPath: csvPath.trim(),
-      notes: notes.trim() || undefined,
-      environment: stage,
-      tobeDbByEnv: finalByEnv,
-      tobeDbLocks: finalLocks,
-    });
-    reset();
-    onClose();
+    setError(null);
+    try {
+      await createSite({
+        name: name.trim(),
+        asisEnv,
+        tobeEnv,
+        asisEncoding,
+        tobeEncoding,
+        csvPath: csvPath.trim(),
+        notes: notes.trim() || undefined,
+        environment: stage,
+        tobeDbByEnv: finalByEnv,
+        tobeDbLocks: finalLocks,
+      });
+      reset();
+      onClose();
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'SITE_NAME_DUPLICATE') {
+        setError(t('createSite.error.duplicate'));
+      } else {
+        setError(t('createSite.error.generic'));
+      }
+    }
   };
 
   const canTestConnection = !!tobeDb.host.trim() && !!tobeDb.username.trim();
@@ -211,6 +223,8 @@ export function CreateSiteModal({ open, onClose }: Props) {
             </button>
           </div>
         </div>
+
+        {error && <div style={styles.errorBox}>{error}</div>}
 
         <div style={styles.actions}>
           {blockedByProd && <span style={styles.saveBlockMsg}>{t('siteSettings.prodCoordOnly')}</span>}
@@ -386,6 +400,15 @@ const styles: Record<string, React.CSSProperties> = {
   dbTestRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 2 },
   dbTestHint: { fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
 
+  errorBox: {
+    padding: '8px 10px',
+    background: 'var(--red-50)',
+    border: '1px solid var(--red)',
+    borderRadius: 4,
+    color: 'var(--red)',
+    fontSize: 12,
+    fontWeight: 500,
+  },
   actions: { display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 4 },
   btnGhost: {
     padding: '7px 14px',

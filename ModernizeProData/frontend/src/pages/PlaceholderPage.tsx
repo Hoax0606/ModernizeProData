@@ -13,13 +13,6 @@ export function PlaceholderPage({ title, description }: Props) {
   const t = useT();
   return (
     <div>
-      <div style={styles.header}>
-        <h1 style={styles.h1}>{title}</h1>
-        <p style={styles.subtitle}>
-          {description ?? t('placeholder.subtitle')}
-        </p>
-      </div>
-
       <div style={styles.empty}>
         <div style={styles.emptyTitle}>{t('placeholder.empty.title')}</div>
         <div style={styles.emptyHint}>

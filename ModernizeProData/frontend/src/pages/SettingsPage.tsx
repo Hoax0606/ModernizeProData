@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useWorkspaceStore, type DdlFile, type Project, type ProjectPhase, type Site } from '../store/workspace';
 import { useSnapshotsStore, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
 import { projectApi } from '../api/workspace';
+import { ApiError } from '../api/client';
 import { useAuthStore } from '../store/auth';
 import { DdlSchemaPanel } from '../components/DdlSchemaPanel';
 import { useT } from '../i18n';
@@ -13,7 +14,7 @@ interface HighlightState { highlightSide?: HighlightSide }
 
 const ALL_PHASES: ProjectPhase[] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
 
-type SectionKey = 'general' | 'source' | 'target' | 'snapshots' | 'schedule' | 'notify' | 'danger';
+type SectionKey = 'general' | 'source' | 'target' | 'schedule' | 'notify' | 'danger';
 
 /**
  * Project Settings — 프로토타입의 6-section 구조.
@@ -70,7 +71,6 @@ export function SettingsPage() {
     { k: 'general',   l: t('projectSettings.section.general.label'),   d: t('projectSettings.sidebar.general.desc') },
     { k: 'source',    l: t('projectSettings.section.source.label'),    d: t('projectSettings.sidebar.source.desc') },
     { k: 'target',    l: t('projectSettings.section.target.label'),    d: t('projectSettings.sidebar.target.desc') },
-    { k: 'snapshots', l: t('projectSettings.section.snapshots.label'), d: t('projectSettings.sidebar.snapshots.desc') },
     { k: 'schedule',  l: t('projectSettings.section.schedule.label'),  d: t('projectSettings.sidebar.schedule.desc') },
     { k: 'notify',    l: t('projectSettings.section.notify.label'),    d: t('projectSettings.sidebar.notify.desc') },
     { k: 'danger',    l: t('projectSettings.section.danger.label'),    d: t('projectSettings.sidebar.danger.desc'), danger: true },
@@ -113,9 +113,8 @@ export function SettingsPage() {
 
       <div style={styles.content}>
         {section === 'general'   && <PSGeneral   project={project} site={site} />}
-        {section === 'source'    && <PSSource    project={project} />}
-        {section === 'target'    && <PSTarget    project={project} />}
-        {section === 'snapshots' && <PSSnapshots project={project} />}
+        {section === 'source'    && <PSSource    project={project} highlight={highlightSide === 'asis'} />}
+        {section === 'target'    && <PSTarget    project={project} highlight={highlightSide === 'tobe'} />}
         {section === 'schedule'  && <PSSchedule  project={project} />}
         {section === 'notify'    && <PSNotify    />}
         {section === 'danger'    && <PSDanger    project={project} />}
@@ -145,8 +144,12 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
       setTimeout(() => setSavedMsg(null), 1500);
     } catch (e) {
       console.error('[settings] save name failed', e);
-      setSavedMsg('Failed');
-      setTimeout(() => setSavedMsg(null), 1800);
+      if (e instanceof ApiError && e.code === 'PROJECT_NAME_DUPLICATE') {
+        setSavedMsg('Name already used');
+      } else {
+        setSavedMsg('Failed');
+      }
+      setTimeout(() => setSavedMsg(null), 2500);
     } finally {
       setSaving(false);
     }
@@ -900,6 +903,15 @@ function PSDanger({ project }: { project: Project }) {
   const [confirmText, setConfirmText] = useState('');
   const canDelete = confirmText === project.name;
 
+  const [duplicateOpen, setDuplicateOpen] = useState(false);
+  const [duplicateError, setDuplicateError] = useState<string | null>(null);
+  const [duplicating, setDuplicating] = useState(false);
+
+  const closeDuplicate = () => {
+    setDuplicateOpen(false);
+    setDuplicateError(null);
+  };
+
   const handleDelete = async () => {
     if (!isMaster || !canDelete) return;
     try {
@@ -912,8 +924,10 @@ function PSDanger({ project }: { project: Project }) {
     }
   };
 
-  const handleDuplicate = async () => {
-    if (!isMaster) return;
+  const confirmDuplicate = async () => {
+    if (!isMaster || duplicating) return;
+    setDuplicating(true);
+    setDuplicateError(null);
     try {
       await createProject({
         name: `${project.name} (copy)`,
@@ -922,26 +936,36 @@ function PSDanger({ project }: { project: Project }) {
         ddlFiles: project.ddlFiles,
         owner: project.owner,
       });
+      closeDuplicate();
       navigate('/');
     } catch (e) {
       console.error('[settings] duplicate project failed', e);
+      if (e instanceof ApiError && e.code === 'PROJECT_NAME_DUPLICATE') {
+        setDuplicateError(t('projectSettings.duplicate.error.duplicate'));
+      } else {
+        setDuplicateError(t('projectSettings.duplicate.error.generic'));
+      }
+    } finally {
+      setDuplicating(false);
     }
   };
 
   return (
     <>
-      <PSHead title="Danger zone" desc={t('projectSettings.head.danger.desc')} />
+      <PSHead title={t('projectSettings.section.danger.label')} desc={t('projectSettings.head.danger.desc')} />
 
       <div style={styles.dangerCard}>
         <div style={styles.dangerRow}>
           <div style={{ flex: 1 }}>
-            <div style={styles.dangerTitle}>Duplicate project</div>
+            <div style={styles.dangerTitle}>{t('projectSettings.danger.duplicate.label')}</div>
             <div style={styles.dangerDesc}>
-              Copy mapping rules and DDL files to a new project. Artifacts and logs are not copied.
+              {t('projectSettings.danger.duplicate.desc')}
             </div>
           </div>
           {isMaster ? (
-            <button onClick={handleDuplicate} style={styles.btnSecondary}>Duplicate…</button>
+            <button onClick={() => setDuplicateOpen(true)} style={styles.btnSecondary}>
+              {t('projectSettings.danger.duplicate.cta')}
+            </button>
           ) : (
             <span style={styles.coordOnlyTag} title="Coordinator only">Coordinator only</span>
           )}
@@ -961,6 +985,49 @@ function PSDanger({ project }: { project: Project }) {
           )}
         </div>
       </div>
+
+      {duplicateOpen && (
+        <div onClick={closeDuplicate} style={styles.modalOverlay}>
+          <div onClick={(e) => e.stopPropagation()} style={styles.modal}>
+            <div style={{ ...styles.modalHeader, background: 'var(--panel-2)' }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>
+                {t('projectSettings.duplicate.title')}
+              </div>
+              <div style={{ fontSize: 11.5, color: 'var(--text-2)', marginTop: 6, lineHeight: 1.5 }}>
+                {t('projectSettings.duplicate.desc', { name: project.name })}
+              </div>
+            </div>
+            {duplicateError && (
+              <div style={{
+                padding: '10px 18px',
+                background: 'var(--red-50)',
+                borderTop: '1px solid var(--red)',
+                color: 'var(--red)',
+                fontSize: 12,
+                fontWeight: 500,
+              }}>
+                {duplicateError}
+              </div>
+            )}
+            <div style={styles.modalFooter}>
+              <button
+                onClick={closeDuplicate}
+                style={styles.btnGhost}
+                disabled={duplicating}
+              >
+                {t('common.cancel')}
+              </button>
+              <button
+                onClick={confirmDuplicate}
+                disabled={duplicating}
+                style={{ ...styles.btnPrimary, ...(duplicating ? styles.btnDisabled : {}) }}
+              >
+                {t('projectSettings.duplicate.confirmBtn')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {confirmOpen && (
         <div onClick={() => setConfirmOpen(false)} style={styles.modalOverlay}>

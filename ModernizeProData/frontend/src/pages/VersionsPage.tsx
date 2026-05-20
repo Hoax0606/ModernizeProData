@@ -25,7 +25,10 @@ export function VersionsPage() {
   const allSnapshots = useSnapshotsStore((s) => s.snapshots);
   const fetchByProject = useSnapshotsStore((s) => s.fetchByProject);
   const snapshots = useMemo(
-    () => allSnapshots.filter((s) => s.projectId === activeProjectId).slice().reverse(),
+    () => allSnapshots
+      .filter((s) => s.projectId === activeProjectId)
+      .slice()
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
     [allSnapshots, activeProjectId],
   );
   const createSnapshot = useSnapshotsStore((s) => s.createSnapshot);
@@ -137,10 +140,6 @@ export function VersionsPage() {
   if (!project) {
     return (
       <div>
-        <div style={styles.header}>
-          <h1 style={styles.h1}>{t('versions.title')}</h1>
-          <p style={styles.subtitle}>{t('versions.subtitle')}</p>
-        </div>
         <div style={styles.empty}>
           <div style={styles.emptyTitle}>{t('versions.empty.noProject')}</div>
         </div>
@@ -221,24 +220,7 @@ export function VersionsPage() {
 
   return (
     <div>
-      <div style={styles.header}>
-        <h1 style={styles.h1}>{t('versions.title')}</h1>
-        <p style={styles.subtitle}>{project.name} · {t('versions.subtitle')}</p>
-      </div>
-
       <div style={styles.toolbar}>
-        {snapshots.length > 0 && (
-          <button
-            onClick={async () => {
-              if (!confirm('Delete all snapshots in this project?')) return;
-              for (const s of snapshots) await deleteSnapshot(s.id);
-              if (activeProjectId) clearAuditLogByProject(activeProjectId);
-            }}
-            style={{ ...styles.btnGhost, color: 'var(--red)', borderColor: 'var(--red)' }}
-          >
-            Delete all ({snapshots.length})
-          </button>
-        )}
         <div style={{ flex: 1 }} />
         {!createOpen && (
           <>
@@ -251,6 +233,18 @@ export function VersionsPage() {
             >
               {t('versions.createCutover')}
             </button>
+            {snapshots.length > 0 && (
+              <button
+                onClick={async () => {
+                  if (!confirm('Delete all snapshots in this project?')) return;
+                  for (const s of snapshots) await deleteSnapshot(s.id);
+                  if (activeProjectId) clearAuditLogByProject(activeProjectId);
+                }}
+                style={{ ...styles.btnGhost, color: 'var(--red)', borderColor: 'var(--red)' }}
+              >
+                Delete all ({snapshots.length})
+              </button>
+            )}
           </>
         )}
       </div>
