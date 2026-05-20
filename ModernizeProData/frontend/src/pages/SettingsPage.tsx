@@ -1,7 +1,6 @@
-import { useMemo, useRef, useState, useEffect } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useWorkspaceStore, type DdlFile, type Project, type ProjectPhase, type Site } from '../store/workspace';
-import { useSnapshotsStore, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
+import { useWorkspaceStore, type Project, type ProjectPhase, type Site } from '../store/workspace';
 import { useNotificationPrefsStore } from '../store/notificationPreferences';
 import { useSettingsStore } from '../store/settings';
 import { projectApi } from '../api/workspace';
@@ -9,7 +8,6 @@ import { ApiError } from '../api/client';
 import { useAuthStore } from '../store/auth';
 import { DdlSchemaPanel } from '../components/DdlSchemaPanel';
 import { LockIcon } from '../components/LockIcon';
-import { CsvPathField } from '../components/CsvPathField';
 import { Toast } from '../components/Toast';
 import { useT } from '../i18n';
 
@@ -26,7 +24,7 @@ function isSiteDbConfigured(s: Site | null): boolean {
   return !!db.type?.trim() && !!db.host?.trim() && !!db.database?.trim() && !!db.username?.trim();
 }
 
-type SectionKey = 'general' | 'source' | 'target' | 'schedule' | 'notify' | 'danger';
+type SectionKey = 'general' | 'ddl' | 'schedule' | 'notify' | 'danger';
 
 /**
  * Project Settings — 프로토타입의 6-section 구조.
@@ -50,15 +48,14 @@ export function SettingsPage() {
   const [highlightSide, setHighlightSide] = useState<HighlightSide | null>(null);
 
   // AppShell 의 AS-IS/TO-BE 램프에서 navigate(..., { state: { highlightSide } }) 로 들어왔을 때
-  // 해당 섹션으로 자동 이동 + 1초 amber pulse.
+  // DDL 섹션으로 이동 + 1초 highlight pulse.
   useEffect(() => {
     const state = location.state as HighlightState | null;
     const side = state?.highlightSide;
     if (!side) return;
-    setSection(side === 'asis' ? 'source' : 'target');
+    setSection('ddl');
     setHighlightSide(side);
     const t = window.setTimeout(() => setHighlightSide(null), 1000);
-    // location.state 를 history 에서 비워두 — 같은 페이지 재진입 시 재발 방지.
     window.history.replaceState({}, '');
     return () => window.clearTimeout(t);
   }, [location.state]);
@@ -81,8 +78,7 @@ export function SettingsPage() {
 
   const sections: { k: SectionKey; l: string; d: string; danger?: boolean }[] = [
     { k: 'general',   l: t('projectSettings.section.general.label'),   d: t('projectSettings.sidebar.general.desc') },
-    { k: 'source',    l: t('projectSettings.section.source.label'),    d: t('projectSettings.sidebar.source.desc') },
-    { k: 'target',    l: t('projectSettings.section.target.label'),    d: t('projectSettings.sidebar.target.desc') },
+    { k: 'ddl',       l: t('projectSettings.section.ddl.label'),       d: t('projectSettings.sidebar.ddl.desc') },
     { k: 'schedule',  l: t('projectSettings.section.schedule.label'),  d: t('projectSettings.sidebar.schedule.desc') },
     { k: 'notify',    l: t('projectSettings.section.notify.label'),    d: t('projectSettings.sidebar.notify.desc') },
     { k: 'danger',    l: t('projectSettings.section.danger.label'),    d: t('projectSettings.sidebar.danger.desc'), danger: true },
@@ -126,8 +122,7 @@ export function SettingsPage() {
 
       <div style={styles.content}>
         {section === 'general'   && <PSGeneral   project={project} site={site} />}
-        {section === 'source'    && <PSSource    project={project} site={site} highlight={highlightSide === 'asis'} />}
-        {section === 'target'    && <PSTarget    project={project} highlight={highlightSide === 'tobe'} />}
+        {section === 'ddl'       && <PSDdl       project={project} highlightSide={highlightSide} />}
         {section === 'schedule'  && <PSSchedule  project={project} />}
         {section === 'notify'    && <PSNotify    project={project} />}
         {section === 'danger'    && <PSDanger    project={project} />}
@@ -242,107 +237,17 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
   );
 }
 
-/* ─── AS-IS (Source) ─────────────────────────────────────── */
+/* ─── DDL Import (AS-IS + TO-BE) ─────────────────────────── */
 
-function PSSource({ project, site, highlight }: { project: Project; site: Site | null; highlight?: boolean }) {
+function PSDdl({ project, highlightSide }: { project: Project; highlightSide: HighlightSide | null }) {
   const t = useT();
   return (
     <>
-      <PSHead title="AS-IS" desc={t('projectSettings.head.source.desc')} />
-      <DdlCard project={project} side="asis" highlight={highlight} />
-      <CsvSourceCard site={site} />
+      <PSHead title={t('projectSettings.section.ddl.label')} />
+      <DdlSchemaPanel project={project} side="asis" highlight={highlightSide === 'asis'} />
+      <DdlSchemaPanel project={project} side="tobe" highlight={highlightSide === 'tobe'} />
     </>
   );
-}
-
-function CsvSourceCard({ site }: { site: Site | null }) {
-  const t = useT();
-  const [csvPath, setCsvPath] = useState(site?.csvPath ?? '');
-  const [saving, setSaving] = useState(false);
-  const [savedMsg, setSavedMsg] = useState<string | null>(null);
-
-  useEffect(() => {
-    setCsvPath(site?.csvPath ?? '');
-  }, [site?.id, site?.csvPath]);
-
-  const dirty = !!site && csvPath !== (site.csvPath ?? '');
-
-  const handleSave = async () => {
-    if (!site || !dirty) return;
-    setSaving(true);
-    try {
-      await useWorkspaceStore.getState().updateSite(site.id, { csvPath: csvPath.trim() });
-      setSavedMsg('Saved');
-      setTimeout(() => setSavedMsg(null), 1500);
-    } catch (e) {
-      console.error('[settings] save csv path failed', e);
-      setSavedMsg('Failed');
-      setTimeout(() => setSavedMsg(null), 2500);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <PSCard
-      title={t('projectSettings.csv.title')}
-      desc={t('projectSettings.csv.desc')}
-    >
-      <div style={styles.csvPathRowLabel}>{t('projectSettings.csv.path')}</div>
-      <CsvPathField value={csvPath} onChange={setCsvPath} />
-      <div style={styles.csvPathActions}>
-        {savedMsg && <span style={styles.savedMsg}>{savedMsg}</span>}
-        <button
-          onClick={handleSave}
-          disabled={!dirty || saving}
-          style={{ ...styles.btnPrimary, ...((!dirty || saving) ? styles.btnDisabled : {}) }}
-        >
-          {saving ? t('projectSettings.action.saving') : t('projectSettings.action.save')}
-        </button>
-      </div>
-    </PSCard>
-  );
-}
-
-function StagingCard() {
-  const t = useT();
-  return (
-    <div style={styles.card}>
-      <div style={styles.cardHeader}>
-        <div style={{ flex: 1 }}>
-          <div style={styles.cardTitle}>
-            <span style={{ marginRight: 6 }}>📦</span>
-            {t('projectSettings.staging.title')}
-            <span style={{ ...styles.uiOnlyBadge, marginLeft: 8 }}>UI only</span>
-          </div>
-          <div style={styles.cardDesc}>
-            {t('projectSettings.staging.desc')}
-          </div>
-        </div>
-      </div>
-      <div style={{ padding: '14px 16px', fontSize: 11.5, color: 'var(--text-3)' }}>
-        {t('projectSettings.staging.notInitialized')}
-      </div>
-    </div>
-  );
-}
-
-/* ─── TO-BE (Target) ─────────────────────────────────────── */
-
-function PSTarget({ project, highlight }: { project: Project; highlight?: boolean }) {
-  const t = useT();
-  return (
-    <>
-      <PSHead title={t('projectSettings.section.target.label')} />
-      <DdlCard project={project} side="tobe" highlight={highlight} />
-    </>
-  );
-}
-
-/* ─── DDL card — Source / Target 공용 ────────────────────── */
-
-function DdlCard({ project, side, highlight }: { project: Project; side: 'asis' | 'tobe'; highlight?: boolean }) {
-  return <DdlSchemaPanel project={project} side={side} highlight={highlight} />;
 }
 
 /* ─── Schedule ───────────────────────────────────────────── */
@@ -531,253 +436,6 @@ function PSNotify({ project }: { project: Project }) {
   );
 }
 
-/* ─── Snapshots ─────────────────────────────────────────── */
-
-function PSSnapshots({ project }: { project: Project }) {
-  const t = useT();
-  const user = useAuthStore((s) => s.user);
-  const allSnapshots = useSnapshotsStore((s) => s.snapshots);
-  const fetchByProject = useSnapshotsStore((s) => s.fetchByProject);
-  const snapshots = useMemo(
-    () => allSnapshots.filter((s) => s.projectId === project.id).slice().reverse(),
-    [allSnapshots, project.id],
-  );
-  const createSnapshot = useSnapshotsStore((s) => s.createSnapshot);
-  const requestSnapshot = useSnapshotsStore((s) => s.requestSnapshot);
-  const deleteSnapshot = useSnapshotsStore((s) => s.deleteSnapshot);
-
-  // 마운트 시 + 프로젝트 변경 시 서버에서 fetch
-  useEffect(() => {
-    if (project.id) void fetchByProject(project.id);
-  }, [project.id, fetchByProject]);
-
-  // UI 상태
-  const [selectedSnapshotId, setSelectedSnapshotId] = useState<string | null>(null);
-  const [createOpen, setCreateOpen] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [newDesc, setNewDesc] = useState('');
-  const [requestId, setRequestId] = useState<string | null>(null);
-
-  const selectedSnapshot = useMemo(
-    () => snapshots.find((s) => s.id === selectedSnapshotId) ?? null,
-    [snapshots, selectedSnapshotId],
-  );
-
-  // 첫 번째 스냅샷을 기본 선택
-  useEffect(() => {
-    if (snapshots.length > 0 && !selectedSnapshotId) {
-      setSelectedSnapshotId(snapshots[0].id);
-    }
-  }, [snapshots, selectedSnapshotId]);
-
-  const resetCreate = () => {
-    setCreateOpen(false);
-    setNewName('');
-    setNewDesc('');
-  };
-
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const name = newName.trim();
-    if (!name) return;
-    const newSnapshot = await createSnapshot(project.id, {
-      name,
-      description: newDesc.trim() || undefined,
-      tableCount: project.tableCount,
-      ruleCount: 0,
-    });
-    setSelectedSnapshotId(newSnapshot.id);
-    resetCreate();
-  };
-
-  const handleRequest = async (id: string) => {
-    await requestSnapshot(id);
-    setRequestId(null);
-  };
-
-  function statusTone(s: SnapshotStatus): React.CSSProperties {
-    switch (s) {
-      case 'draft':    return { background: 'var(--panel-2)', color: 'var(--text-3)', borderColor: 'var(--border-strong)' };
-      case 'pending':  return { background: 'var(--amber-50)', color: 'var(--amber)', borderColor: 'var(--amber)' };
-      case 'approved': return { background: 'var(--green-50)', color: 'var(--green)', borderColor: 'var(--green)' };
-      case 'rejected': return { background: 'var(--red-50)',   color: 'var(--red)',   borderColor: 'var(--red)' };
-    }
-  }
-
-  return (
-    <>
-      <PSHead
-        title="Snapshots"
-        desc={t('projectSettings.head.snapshots.desc')}
-        actions={
-          <button onClick={() => setCreateOpen(!createOpen)} style={styles.btnPrimary}>
-            {createOpen ? 'Cancel' : '+ Create snapshot'}
-          </button>
-        }
-      />
-
-      {createOpen && (
-        <form onSubmit={handleCreate} style={styles.snapshotCreateForm}>
-          <div style={styles.snapshotCreateTitle}>New snapshot</div>
-          <input
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            placeholder="Split customer into customer + customer_contact, unified transaction tables"
-            style={styles.snapshotCreateInput}
-            autoFocus
-            required
-          />
-          <textarea
-            value={newDesc}
-            onChange={(e) => setNewDesc(e.target.value)}
-            placeholder="Description (optional)"
-            style={styles.snapshotCreateTextarea}
-          />
-          <div style={styles.snapshotCreateActions}>
-            <button type="button" onClick={resetCreate} style={styles.btnGhost}>Cancel</button>
-            <button type="submit" style={{ ...styles.btnPrimary, ...(newName.trim() ? {} : styles.btnDisabled) }} disabled={!newName.trim()}>
-              Create
-            </button>
-          </div>
-        </form>
-      )}
-
-      <div style={styles.snapshotsContainer}>
-        {/* 왼쪽: 스냅샷 목록 */}
-        <div style={styles.snapshotsList}>
-          {snapshots.length === 0 ? (
-            <div style={styles.emptySnapshots}>
-              <div style={styles.emptySnapshotsTitle}>No snapshots yet</div>
-              <div style={styles.emptySnapshotsDesc}>
-                Create your first snapshot to start version control
-              </div>
-            </div>
-          ) : (
-            snapshots.map((s) => (
-              <div
-                key={s.id}
-                style={{
-                  ...styles.snapshotItem,
-                  ...(selectedSnapshotId === s.id ? styles.snapshotItemActive : {}),
-                }}
-                onClick={() => setSelectedSnapshotId(s.id)}
-              >
-                <div style={styles.snapshotVersion}>
-                  <span style={styles.versionText}>{s.version}</span>
-                  <span style={{ ...styles.statusBadgeSmall, ...statusTone(s.status) }}>
-                    {s.status.toUpperCase()}
-                  </span>
-                </div>
-                <div style={styles.snapshotName}>{s.name}</div>
-                <div style={styles.snapshotMeta}>
-                  {s.createdBy} · {new Date(s.createdAt).toLocaleDateString()}
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-
-        {/* 오른쪽: 선택된 스냅샷 상세 */}
-        <div style={styles.snapshotDetail}>
-          {selectedSnapshot ? (
-            <>
-              <div style={styles.snapshotDetailHeader}>
-                <div>
-                  <h3 style={styles.snapshotDetailTitle}>
-                    {selectedSnapshot.name}
-                    <span style={styles.versionBadge}>{selectedSnapshot.version}</span>
-                  </h3>
-                  <div style={styles.snapshotDetailMeta}>
-                    created {new Date(selectedSnapshot.createdAt).toLocaleString()} by {selectedSnapshot.createdBy}
-                  </div>
-                </div>
-              </div>
-
-              {selectedSnapshot.description && (
-                <div style={styles.snapshotDescription}>
-                  {selectedSnapshot.description}
-                </div>
-              )}
-
-              <div style={styles.snapshotStats}>
-                <div style={styles.statItem}>
-                  <span style={styles.statLabel}>Tables</span>
-                  <span style={styles.statValue}>{selectedSnapshot.tableCount}</span>
-                </div>
-                <div style={styles.statItem}>
-                  <span style={styles.statLabel}>Rules</span>
-                  <span style={styles.statValue}>{selectedSnapshot.ruleCount}</span>
-                </div>
-                <div style={styles.statItem}>
-                  <span style={styles.statLabel}>Status</span>
-                  <span style={{ ...styles.statusBadge, ...statusTone(selectedSnapshot.status) }}>
-                    {selectedSnapshot.status.toUpperCase()}
-                  </span>
-                </div>
-              </div>
-
-              {/* Request/Approval 영역 */}
-              {requestId === selectedSnapshot.id ? (
-                <div style={styles.requestConfirm}>
-                  <div style={styles.requestTitle}>Request approval</div>
-                  <div style={styles.requestDesc}>
-                    Send snapshot <b>{selectedSnapshot.name}</b> for review?
-                  </div>
-                  <div style={styles.requestActions}>
-                    <button onClick={() => setRequestId(null)} style={styles.btnGhost}>Cancel</button>
-                    <button onClick={() => handleRequest(selectedSnapshot.id)} style={styles.btnPrimary}>
-                      Confirm request
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div style={styles.reviewSection}>
-                  {selectedSnapshot.status === 'draft' && (
-                    <button onClick={() => setRequestId(selectedSnapshot.id)} style={styles.btnPrimary}>
-                      Request changes
-                    </button>
-                  )}
-                  {selectedSnapshot.status === 'pending' && (
-                    <div style={styles.pendingReview}>
-                      <div style={styles.pendingIcon}>⏳</div>
-                      <div>
-                        <div style={styles.pendingTitle}>Pending review</div>
-                        <div style={styles.pendingDesc}>Waiting for coordinator approval</div>
-                      </div>
-                    </div>
-                  )}
-                  {selectedSnapshot.status === 'approved' && selectedSnapshot.approvedBy && (
-                    <div style={styles.approvedSection}>
-                      <div style={styles.approvedTitle}>✓ Approved</div>
-                      <div style={styles.approvedDesc}>
-                        by {selectedSnapshot.approvedBy} on {selectedSnapshot.approvedAt && new Date(selectedSnapshot.approvedAt).toLocaleDateString()}
-                      </div>
-                    </div>
-                  )}
-                  {selectedSnapshot.status === 'rejected' && (
-                    <div style={styles.rejectedSection}>
-                      <div style={styles.rejectedTitle}>✗ Rejected</div>
-                      <div style={styles.rejectedDesc}>
-                        {selectedSnapshot.rejectedBy && <>by {selectedSnapshot.rejectedBy}</>}
-                        {selectedSnapshot.rejectionReason && (
-                          <div style={styles.rejectionReason}>{selectedSnapshot.rejectionReason}</div>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </>
-          ) : (
-            <div style={styles.noSelection}>
-              <div>Select a snapshot to view details</div>
-            </div>
-          )}
-        </div>
-      </div>
-    </>
-  );
-}
 
 /* ─── Danger zone ────────────────────────────────────────── */
 
@@ -964,7 +622,7 @@ function PSDanger({ project }: { project: Project }) {
 
 /* ─── Reusable primitives ────────────────────────────────── */
 
-function PSHead({ title, desc, actions, mock }: { title: string; desc?: string; actions?: React.ReactNode; mock?: boolean }) {
+function PSHead({ title, actions, mock }: { title: string; desc?: string; actions?: React.ReactNode; mock?: boolean }) {
   return (
     <div style={styles.head}>
       <div style={{ flex: 1 }}>
@@ -972,7 +630,6 @@ function PSHead({ title, desc, actions, mock }: { title: string; desc?: string; 
           {title}
           {mock && <span style={{ ...styles.uiOnlyBadge, marginLeft: 10, verticalAlign: 'middle' }}>UI only</span>}
         </h2>
-        {desc && <div style={styles.headDesc}>{desc}</div>}
       </div>
       {actions && <div style={styles.headActions}>{actions}</div>}
     </div>
@@ -1085,12 +742,6 @@ function Toggle({ on, onChange, label, disabled }: { on: boolean; onChange: (v: 
       {label && <span>{label}</span>}
     </button>
   );
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 /* ─── Styles ─────────────────────────────────────────────── */

@@ -28,8 +28,12 @@ export function ExecutionOverviewPage() {
   const setProjectAssignee = useWorkspaceStore((s) => s.setProjectAssignee);
 
   const site = useMemo(() => sites.find((s) => s.id === activeSiteId) ?? null, [sites, activeSiteId]);
+  // assignee 변경에도 행 순서가 바뀌지 않도록 createdAt asc 로 명시 정렬.
   const siteProjects = useMemo(
-    () => projects.filter((p) => p.siteId === activeSiteId),
+    () => projects
+      .filter((p) => p.siteId === activeSiteId)
+      .slice()
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
     [projects, activeSiteId],
   );
 
@@ -64,8 +68,12 @@ export function ExecutionOverviewPage() {
   });
 
   // 체크박스 활성 기준: prod stage → ready 만, non-prod → rehearsal / test.
+  // 추가로 non-master 는 본인에게 분배된 행만 선택 가능 (Unassigned 포함 read-only).
   const isProd = site?.environment === 'production';
+  const isMine = (p: Project) => !!user?.username && p.assignee === user.username;
+  const canEditRow = (p: Project) => isMaster || isMine(p);
   const isSelectable = (p: Project) => {
+    if (!canEditRow(p)) return false;
     if (isProd) return p.phase === 'ready';
     return p.phase === 'rehearsal' || p.phase === 'test';
   };
@@ -265,7 +273,7 @@ export function ExecutionOverviewPage() {
                       <span style={{ ...styles.phaseChip, ...phaseChipColor(p.phase, p.runStatus) }}>{p.phase}</span>
                     </td>
                     <td style={styles.td}>
-                      {isMaster ? (
+                      {canEditRow(p) ? (
                         <select
                           value={p.assignee ?? ''}
                           onChange={(e) => setProjectAssignee(p.id, e.target.value || undefined)}

@@ -79,8 +79,8 @@ export function DdlSchemaPanel({ project, side, highlight }: Props) {
     }
   };
 
-  // 외곽 카드 — 인포트 유무로 빨강/초록을 강조, highlight 면 teal pulse + 굵은 테두리.
-  // 빨강/초록 어느 쪽과도 색상이 겹치지 않게 차분한 teal 계열로. body 배경까지 통일.
+  // imported = green, not imported = red.
+  // highlight (램프 클릭으로 들어왔을 때) 는 양쪽과 겹치지 않도록 teal pulse.
   const HIGHLIGHT_BORDER = '#0E7C7B'; // deep teal
   const HIGHLIGHT_BG = '#D0EAEA';     // 薄 teal
   const outer: React.CSSProperties = {
@@ -178,7 +178,7 @@ export function DdlSchemaPanel({ project, side, highlight }: Props) {
           <div style={styles.emptyState}>
             <div style={styles.emptyTitle}>{t(emptyTitleKey)}</div>
             <div style={{ marginTop: 10 }}>
-              <DdlImportButton projectId={project.id} siteId={project.siteId} side={side} />
+              <DdlImportButton projectId={project.id} siteId={project.siteId} side={side} tone="red" />
             </div>
           </div>
         )}

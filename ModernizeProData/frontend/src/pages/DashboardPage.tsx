@@ -482,11 +482,44 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
   const users = useUsersStore((s) => s.users);
+  // non-master 는 본인에게 분배된 행만 편집 가능. Unassigned 포함 다른 행은 read-only.
+  const canEditRow = (p: Project) => isMaster || (!!user?.username && p.assignee === user.username);
+
+  // ProjectDashboard 와 동일한 TO-BE schema 가 source of truth.
+  // 프로젝트마다 tobeDdlApi.get 으로 받아 tables/columns 카운트를 모아둔다.
+  const [schemaCounts, setSchemaCounts] = useState<Record<string, { tables: number; columns: number }>>({});
+  const projectIdsKey = useMemo(() => projects.map((p) => p.id).sort().join(','), [projects]);
+  useEffect(() => {
+    let alive = true;
+    Promise.all(
+      projects.map(async (p) => {
+        try {
+          const schema = await tobeDdlApi.get(p.id);
+          const tables = schema.tables.length;
+          const columns = schema.tables.reduce((s, tw) => s + tw.columns.length, 0);
+          return [p.id, { tables, columns }] as const;
+        } catch {
+          return [p.id, { tables: 0, columns: 0 }] as const;
+        }
+      }),
+    ).then((entries) => {
+      if (!alive) return;
+      setSchemaCounts(Object.fromEntries(entries));
+    });
+    return () => { alive = false; };
+    // projects 객체 reference 가 자주 바뀌므로 id key 만 dep 로.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectIdsKey]);
 
   // 필터 — 그리드 위에 표시. KPI · phase mix 는 전체 기준.
   const [phaseFilter, setPhaseFilter] = useState<string>('');
   const [userFilter, setUserFilter] = useState<string>('');
-  const filteredProjects = projects.filter((p) => {
+  // assignee 변경에도 행 순서가 바뀌지 않도록 createdAt asc 로 명시 정렬.
+  const sortedProjects = useMemo(
+    () => projects.slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    [projects],
+  );
+  const filteredProjects = sortedProjects.filter((p) => {
     if (phaseFilter && p.phase !== phaseFilter) return false;
     if (userFilter === '__unassigned') return !p.assignee;
     if (userFilter && p.assignee !== userFilter) return false;
@@ -497,13 +530,13 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
   const phaseCounts: Record<string, number> = {};
   for (const p of projects) phaseCounts[p.phase] = (phaseCounts[p.phase] ?? 0) + 1;
 
-  // KPI — placeholder (mapping UI 연결 전): tableCount 는 실데이터, mapped 는 0.
+  // KPI — TO-BE schema 기준. mapping engine 미연결 → mapped 는 0.
   const doneProjects = projects.filter((p) => p.phase === 'done').length;
-  const totalTables = projects.reduce((a, p) => a + p.tableCount, 0);
+  const totalTables = projects.reduce((a, p) => a + (schemaCounts[p.id]?.tables ?? 0), 0);
   const mappedTables = 0;
-  const totalRows = 0;
-  const mappedRows = 0;
-  const overallPct = totalRows > 0 ? (mappedRows / totalRows) * 100 : 0;
+  const totalColumns = projects.reduce((a, p) => a + (schemaCounts[p.id]?.columns ?? 0), 0);
+  const mappedColumns = 0;
+  const overallPct = totalColumns > 0 ? (mappedColumns / totalColumns) * 100 : 0;
 
   const openProject = (id: string) => {
     setActiveProject(id);
@@ -519,7 +552,7 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
           <div style={styles.kpiRow}>
             <KpiTile label={t('siteOverview.kpi.projects')} value={`${doneProjects} / ${projects.length}`} tone="info" />
             <KpiTile label={t('siteOverview.kpi.tables')}   value={`${mappedTables} / ${totalTables}`} />
-            <KpiTile label={t('siteOverview.kpi.rows')}     value={`${mappedRows.toLocaleString()} / ${totalRows.toLocaleString()}`} />
+            <KpiTile label={t('siteOverview.kpi.rows')}     value={`${mappedColumns.toLocaleString()} / ${totalColumns.toLocaleString()}`} />
           </div>
 
           {/* Overall mapping progress — Execution overview 와 같은 크기 */}
@@ -577,8 +610,10 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
                   <tr><td colSpan={7} style={styles.emptyRow}>{t('siteOverview.empty')}</td></tr>
                 ) : (
                   filteredProjects.map((p, i) => {
-                    const rowTotal = 0;   // placeholder — 매핑 UI 연결 전
-                    const rowMapped = 0;
+                    // TO-BE schema 기준 — Dashboard 와 동일한 source.
+                    const rowTotal = schemaCounts[p.id]?.columns ?? 0;
+                    const rowMapped = 0; // mapping engine 미연결
+                    const rowTableCount = schemaCounts[p.id]?.tables ?? 0;
                     const pct = rowTotal > 0 ? (rowMapped / rowTotal) * 100 : 0;
                     const pf = preflightStatus(p);
                     return (
@@ -599,7 +634,7 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
                           <span style={{ ...styles.phaseChip, ...phaseChipColor(p.phase, p.runStatus) }}>{p.phase}</span>
                         </td>
                         <td style={styles.td} onClick={(e) => e.stopPropagation()}>
-                          {isMaster ? (
+                          {canEditRow(p) ? (
                             <select
                               value={p.assignee ?? ''}
                               onChange={(e) => setProjectAssignee(p.id, e.target.value || undefined)}
@@ -616,7 +651,7 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
                             </span>
                           )}
                         </td>
-                        <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--mono)' }}>{p.tableCount}</td>
+                        <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--mono)' }}>{rowTableCount}</td>
                         <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text-4)' }}>
                           {rowMapped.toLocaleString()} / {rowTotal.toLocaleString()}
                         </td>

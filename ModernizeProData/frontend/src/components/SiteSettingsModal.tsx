@@ -24,6 +24,14 @@ function isDbConfigured(c: SiteDbConnection | undefined): boolean {
   return !!c.type?.trim() && !!c.host?.trim() && !!c.database?.trim() && !!c.username?.trim();
 }
 
+function siteInitials(name: string): string {
+  if (!name) return '·';
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '·';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -236,11 +244,15 @@ export function SiteSettingsModal({ open, onClose }: Props) {
 
   const titleNode = (
     <div style={styles.titleWrap}>
-      <div style={styles.titleMain}>{t('siteSettings.title')}{site.name ? ` — ${site.name}` : ''}</div>
+      <div style={styles.eyebrow}>{t('siteSettings.title')}</div>
+      <div style={styles.siteNameRow}>
+        <span style={styles.siteBadge}>{siteInitials(site.name)}</span>
+        <span style={styles.siteName} title={site.name}>{site.name || '—'}</span>
+      </div>
       <div style={styles.titleMeta}>
         <span style={styles.titleMetaChip}>
-          <span style={styles.titleMetaLabel}>{t('siteSettings.projectCount')}</span>
           <span style={styles.titleMetaValue}>{projectCount}</span>
+          <span style={styles.titleMetaLabel}>{t('siteSettings.projectCount')}</span>
         </span>
         <span style={styles.titleMetaSep}>·</span>
         <span style={styles.titleMetaChip}>
@@ -317,7 +329,7 @@ export function SiteSettingsModal({ open, onClose }: Props) {
         <EnvPills value={tobeEnv} onChange={setTobeEnv} t={t} />
       </Field>
 
-      <Field label={t('siteSettings.asisEncoding')} hint={t('siteSettings.encodingHint')}>
+      <Field label={t('siteSettings.asisEncoding')}>
         <select value={asisEncoding} onChange={(e) => setAsisEncoding(e.target.value as SourceEncoding)} style={styles.input}>
           {ENCODING_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>{t(o.key)}</option>
@@ -333,11 +345,11 @@ export function SiteSettingsModal({ open, onClose }: Props) {
         </select>
       </Field>
 
-      <Field label={t('siteSettings.csvPath')} hint={t('siteSettings.csvPathHint')}>
+      <Field label={t('siteSettings.csvPath')}>
         <CsvPathField value={csvPath} onChange={setCsvPath} />
       </Field>
 
-      <Field label={t('siteSettings.notes')} hint={t('siteSettings.notesHint')}>
+      <Field label={t('siteSettings.notes')}>
         <textarea
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
@@ -346,8 +358,7 @@ export function SiteSettingsModal({ open, onClose }: Props) {
         />
       </Field>
 
-      {/* 운영 단계 — TO-BE DB 바로 위 */}
-      <Field label={t('siteSettings.stage')} hint={t('siteSettings.stageHint')}>
+      <Field label={t('siteSettings.stage')}>
         <StagePills value={stage} onChange={setStage} byEnv={tobeDbByEnv} locks={tobeDbLocks} t={t} />
       </Field>
 
@@ -380,9 +391,6 @@ export function SiteSettingsModal({ open, onClose }: Props) {
               </span>
             )
           )}
-        </div>
-        <div style={styles.dbDesc}>
-          {t('siteSettings.tobeDb.desc')}
         </div>
 
         <div style={styles.dbGrid2}>
@@ -749,12 +757,47 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
   },
   dbTestHint: { fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
-  titleWrap: { display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0, flex: 1 },
-  titleMain: { fontSize: 13, fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  titleMeta: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
-  titleMetaChip: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text-3)' },
+  titleWrap: { display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, flex: 1 },
+  eyebrow: {
+    fontSize: 9.5,
+    fontWeight: 700,
+    fontFamily: 'var(--mono)',
+    color: 'var(--text-3)',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  siteNameRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    minWidth: 0,
+  },
+  siteBadge: {
+    display: 'inline-grid',
+    placeItems: 'center',
+    width: 22, height: 22,
+    borderRadius: 4,
+    background: 'var(--navy)',
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: 700,
+    fontFamily: 'var(--mono)',
+    letterSpacing: 0.4,
+    flexShrink: 0,
+  },
+  siteName: {
+    fontSize: 16,
+    fontWeight: 700,
+    color: 'var(--text)',
+    letterSpacing: -0.2,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  titleMeta: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 2 },
+  titleMetaChip: { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text-3)' },
   titleMetaLabel: { textTransform: 'uppercase', letterSpacing: 0.6, fontWeight: 600 },
-  titleMetaValue: { color: 'var(--text-2)', fontWeight: 600 },
+  titleMetaValue: { color: 'var(--text-2)', fontWeight: 700 },
   titleMetaSep: { color: 'var(--text-4)', fontSize: 10 },
 
   headerActions: { display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 },
