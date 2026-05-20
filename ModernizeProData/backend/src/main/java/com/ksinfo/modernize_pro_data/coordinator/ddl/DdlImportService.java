@@ -98,11 +98,26 @@ public class DdlImportService {
         }
 
         applyTableCountToProject(project, side, parsed.getTables().size());
+        autoAdvancePhaseIfBothDdlImported(project);
         projectRepo.save(project);
 
         log.info("DDL imported: project={}, side={}, file={}, tables={}, columns={}",
                 projectId, side, filename, parsed.getTables().size(), parsed.totalColumnCount());
         return ddlImport;
+    }
+
+    /**
+     * AS-IS と TO-BE の DDL がそろった瞬間に phase が 'planning' であれば 'analysis' に進める.
+     * planning より進んだ phase は触らない (test/sign-off/... を巻き戻さない).
+     */
+    private void autoAdvancePhaseIfBothDdlImported(Project project) {
+        if ("planning".equals(project.getPhase())
+                && project.getTableCount() > 0
+                && project.getTobeTableCount() > 0) {
+            project.setPhase("analysis");
+            log.info("Project {} auto-advanced phase: planning → analysis (both DDLs imported)",
+                    project.getId());
+        }
     }
 
     @Transactional(readOnly = true)
