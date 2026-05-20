@@ -95,15 +95,10 @@ export function CreateProjectModal({ open, onClose }: Props) {
       open={open}
       onClose={onClose}
       width={520}
-      title={
-        <div>
-          <div>{t('createProject.title')}</div>
-          <div style={styles.subtitle}>{activeSite.name} · {t('createProject.subtitle')}</div>
-        </div>
-      }
+      title={t('createProject.title')}
     >
       <form onSubmit={handleSubmit} style={styles.form}>
-        <Field label={t('createProject.name')} hint={t('createProject.nameHint')}>
+        <Field label={t('createProject.name')}>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -114,25 +109,31 @@ export function CreateProjectModal({ open, onClose }: Props) {
           />
         </Field>
 
-        <Field label={t('createProject.ddl')} hint={t('createProject.ddl.optional')}>
+        <Field label={t('createProject.ddl')}>
           <div style={styles.ddlPairs}>
             <DdlPicker
+              side="asis"
               labelText={t('createProject.ddl.asisLabel')}
               file={asisFile}
               onPick={setAsisFile}
               inputRef={asisInputRef}
-              chooseLabel={t('createProject.ddl.choose')}
-              emptyLabel={t('createProject.ddl.noFile')}
+              importLabel={t('asisDdl.button.import')}
+              changeLabel={t('createProject.ddl.change')}
+              selectedLabel={t('createProject.ddl.selected')}
+              notSelectedLabel={t('createProject.ddl.notSelected')}
               removeLabel={t('createProject.ddlRemove')}
               disabled={submitting}
             />
             <DdlPicker
+              side="tobe"
               labelText={t('createProject.ddl.tobeLabel')}
               file={tobeFile}
               onPick={setTobeFile}
               inputRef={tobeInputRef}
-              chooseLabel={t('createProject.ddl.choose')}
-              emptyLabel={t('createProject.ddl.noFile')}
+              importLabel={t('tobeDdl.button.import')}
+              changeLabel={t('createProject.ddl.change')}
+              selectedLabel={t('createProject.ddl.selected')}
+              notSelectedLabel={t('createProject.ddl.notSelected')}
               removeLabel={t('createProject.ddlRemove')}
               disabled={submitting}
             />
@@ -164,60 +165,81 @@ export function CreateProjectModal({ open, onClose }: Props) {
 }
 
 interface DdlPickerProps {
+  side: 'asis' | 'tobe';
   labelText: string;
   file: File | null;
   onPick: (f: File | null) => void;
   inputRef: React.RefObject<HTMLInputElement | null>;
-  chooseLabel: string;
-  emptyLabel: string;
+  importLabel: string;
+  changeLabel: string;
+  selectedLabel: string;
+  notSelectedLabel: string;
   removeLabel: string;
   disabled: boolean;
 }
 
 function DdlPicker({
-  labelText, file, onPick, inputRef,
-  chooseLabel, emptyLabel, removeLabel, disabled,
+  side, labelText, file, onPick, inputRef,
+  importLabel, changeLabel, selectedLabel, notSelectedLabel,
+  removeLabel, disabled,
 }: DdlPickerProps) {
+  const isSelected = !!file;
+  void side;
   return (
-    <div style={styles.ddlSide}>
-      <div style={styles.ddlSideLabel}>{labelText}</div>
-      <input
-        ref={inputRef}
-        type="file"
-        accept=".sql,.ddl,.txt"
-        onChange={(e) => onPick(e.target.files?.[0] ?? null)}
-        style={{ display: 'none' }}
-      />
-      <div style={styles.ddlSideBody}>
-        {file ? (
-          <div style={styles.ddlChip}>
-            <span style={styles.ddlChipName}>{file.name}</span>
-            <span style={styles.ddlChipSize}>{formatSize(file.size)}</span>
-            <button
-              type="button"
-              onClick={() => {
-                onPick(null);
-                if (inputRef.current) inputRef.current.value = '';
-              }}
-              style={styles.ddlChipRemove}
-              title={removeLabel}
-              disabled={disabled}
-            >
-              ×
-            </button>
+    <div style={isSelected ? styles.ddlPickerSelected : styles.ddlPickerEmpty}>
+      <div style={{ ...styles.ddlPickerHeader, borderBottom: isSelected ? '1px solid var(--border)' : 'none' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={styles.ddlPickerTitleRow}>
+            <span style={styles.ddlPickerTitle}>{labelText}</span>
+            {isSelected
+              ? <span style={styles.ddlPickerBadgeOk}>{selectedLabel}</span>
+              : <span style={styles.ddlPickerBadgeWarn}>{notSelectedLabel}</span>}
           </div>
-        ) : (
-          <div style={styles.ddlChipEmpty}>{emptyLabel}</div>
+        </div>
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".sql,.ddl,.txt"
+          onChange={(e) => onPick(e.target.files?.[0] ?? null)}
+          style={{ display: 'none' }}
+        />
+        {!isSelected && (
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            style={styles.btnImportNavy}
+            disabled={disabled}
+          >
+            {importLabel}
+          </button>
         )}
-        <button
-          type="button"
-          onClick={() => inputRef.current?.click()}
-          style={styles.btnGhostSmall}
-          disabled={disabled}
-        >
-          {chooseLabel}
-        </button>
       </div>
+      {isSelected && file && (
+        <div style={styles.ddlPickerBody}>
+          <span style={styles.ddlFileName}>{file.name}</span>
+          <span style={styles.ddlFileSize}>{formatSize(file.size)}</span>
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            style={styles.btnChangeNavy}
+            disabled={disabled}
+          >
+            {changeLabel}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onPick(null);
+              if (inputRef.current) inputRef.current.value = '';
+            }}
+            style={styles.ddlRemoveBtn}
+            title={removeLabel}
+            disabled={disabled}
+          >
+            ×
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -260,60 +282,95 @@ const styles: Record<string, React.CSSProperties> = {
     outline: 'none',
   },
 
-  /* DDL pickers — AS-IS / TO-BE side-by-side as two distinct chips */
-  ddlPairs: { display: 'flex', flexDirection: 'column', gap: 8 },
-  ddlSide: {
-    border: '1px solid var(--border-strong)',
+  /* DDL pickers — DdlSchemaPanel 과 동일한 헤더 + 배지 + 우측 버튼 패턴 */
+  ddlPairs: { display: 'flex', flexDirection: 'column', gap: 10 },
+  ddlPickerEmpty: {
+    border: '1px solid var(--red)',
+    background: 'var(--red-50)',
     borderRadius: 4,
-    padding: '8px 10px',
-    background: 'var(--panel)',
   },
-  ddlSideLabel: {
-    fontSize: 10.5,
-    fontWeight: 700,
-    color: 'var(--navy)',
-    fontFamily: 'var(--mono)',
-    letterSpacing: 0.4,
-    marginBottom: 6,
-    textTransform: 'uppercase',
+  ddlPickerSelected: {
+    border: '1px solid var(--green)',
+    background: 'var(--green-50)',
+    borderRadius: 4,
   },
-  ddlSideBody: { display: 'flex', alignItems: 'center', gap: 8 },
-  ddlChip: {
-    flex: 1,
+  ddlPickerHeader: {
+    padding: '10px 14px 9px',
     display: 'flex',
     alignItems: 'center',
-    gap: 8,
-    padding: '4px 8px',
-    background: 'var(--panel-2)',
-    border: '1px solid var(--border)',
-    borderRadius: 3,
-    fontSize: 11.5,
+    gap: 10,
   },
-  ddlChipName: {
+  ddlPickerTitleRow: { display: 'flex', alignItems: 'center', gap: 8 },
+  ddlPickerTitle: { fontSize: 12, fontWeight: 600, color: 'var(--text)' },
+  ddlPickerBadgeOk: {
+    padding: '1px 6px',
+    fontSize: 10,
+    fontWeight: 600,
+    background: 'var(--green-50)',
+    color: 'var(--green)',
+    border: '1px solid var(--green)',
+    borderRadius: 3,
+  },
+  ddlPickerBadgeWarn: {
+    padding: '1px 6px',
+    fontSize: 10,
+    fontWeight: 600,
+    background: 'var(--red-50)',
+    color: 'var(--red)',
+    border: '1px solid var(--red)',
+    borderRadius: 3,
+  },
+  ddlPickerBody: {
+    padding: '8px 14px',
+    background: 'var(--panel)',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+  },
+  ddlFileName: {
     flex: 1,
     color: 'var(--text)',
     fontFamily: 'var(--mono)',
+    fontSize: 11.5,
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
   },
-  ddlChipSize: { fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
-  ddlChipRemove: {
-    width: 18,
-    height: 18,
+  ddlFileSize: { fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
+  ddlRemoveBtn: {
+    width: 22,
+    height: 22,
     background: 'transparent',
     border: 'none',
     color: 'var(--text-3)',
     cursor: 'pointer',
-    fontSize: 14,
+    fontSize: 16,
     lineHeight: 1,
     padding: 0,
   },
-  ddlChipEmpty: {
-    flex: 1,
-    fontSize: 11,
-    color: 'var(--text-3)',
-    fontFamily: 'var(--mono)',
+  btnImportNavy: {
+    padding: '6px 12px',
+    minWidth: 148,
+    background: 'var(--navy)',
+    color: '#fff',
+    border: '1px solid var(--navy)',
+    borderRadius: 4,
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+    textAlign: 'center',
+  },
+  btnChangeNavy: {
+    padding: '4px 10px',
+    background: 'var(--panel)',
+    color: 'var(--navy)',
+    border: '1px solid var(--navy)',
+    borderRadius: 3,
+    fontSize: 11.5,
+    fontWeight: 600,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
   },
 
   errorBox: {

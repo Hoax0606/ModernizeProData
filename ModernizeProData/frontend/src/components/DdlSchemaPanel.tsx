@@ -43,7 +43,6 @@ export function DdlSchemaPanel({ project, side, highlight }: Props) {
   const deleteKey = side === 'asis' ? 'asisDdl.panel.delete' : 'tobeDdl.panel.delete';
   const deletingKey = side === 'asis' ? 'asisDdl.panel.deleting' : 'tobeDdl.panel.deleting';
   const loadingKey = side === 'asis' ? 'asisDdl.panel.loading' : 'tobeDdl.panel.loading';
-  const emptyTitleKey = side === 'asis' ? 'asisDdl.panel.empty.title' : 'tobeDdl.panel.empty.title';
   const confirmPreKey = side === 'asis' ? 'asisDdl.confirmDeletePre' : 'tobeDdl.confirmDeletePre';
   const confirmPostKey = side === 'asis' ? 'asisDdl.confirmDeletePost' : 'tobeDdl.confirmDeletePost';
 
@@ -93,16 +92,28 @@ export function DdlSchemaPanel({ project, side, highlight }: Props) {
     transition: 'border-color 0.4s ease, background-color 0.4s ease, box-shadow 0.4s ease',
     marginBottom: 14,
   };
+  // not-imported 상태에선 body 도 외곽 빨간 패널과 같은 red-50 으로 통일.
+  // imported 상태(상세 정보 표시)는 가독성을 위해 패널 화이트 그대로.
   const bodyStyle: React.CSSProperties = {
     ...styles.body,
-    background: highlight ? HIGHLIGHT_BG : 'var(--panel)',
+    background: highlight
+      ? HIGHLIGHT_BG
+      : hasSchema ? 'var(--panel)' : 'var(--red-50)',
     transition: 'background-color 0.4s ease',
+  };
+
+  // not-imported 상태에선 body 박스를 그리지 않고 헤더만 단일 행으로.
+  // imported / loading 일 때만 body 표시.
+  const showBody = hasSchema;
+  const headerStyle: React.CSSProperties = {
+    ...styles.header,
+    borderBottom: showBody ? '1px solid var(--border)' : 'none',
   };
 
   return (
     <div ref={panelRef} style={outer}>
-      <div style={styles.header}>
-        <div style={{ flex: 1 }}>
+      <div style={headerStyle}>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <div style={styles.titleRow}>
             <span style={styles.title}>{t(titleKey)}</span>
             {hasSchema
@@ -111,78 +122,80 @@ export function DdlSchemaPanel({ project, side, highlight }: Props) {
           </div>
           <div style={styles.desc}>{t(descKey)}</div>
         </div>
-      </div>
-
-      <div style={bodyStyle}>
-        {hasSchema && imported ? (
-          <>
-            <div style={styles.row}>
-              <div style={styles.label}>{t('asisDdl.panel.file')}</div>
-              <div style={styles.mono}>{imported.filename}</div>
-            </div>
-            <div style={styles.row}>
-              <div style={styles.label}>{t('asisDdl.panel.detected')}</div>
-              <div style={styles.mono}>
-                {imported.tableCount} tables · {imported.columnCount} columns
-              </div>
-            </div>
-            <div style={styles.row}>
-              <div style={styles.label}>{t('asisDdl.panel.importedAt')}</div>
-              <div style={styles.mono}>{new Date(imported.importedAt).toLocaleString()}</div>
-            </div>
-
-            {confirmDelete ? (
-              <div style={styles.confirmBar}>
-                <span style={styles.confirmText}>
-                  {t(confirmPreKey)}<b>{imported.filename}</b>{t(confirmPostKey)}
-                </span>
-                <div style={{ flex: 1 }} />
-                <button
-                  type="button"
-                  onClick={() => setConfirmDelete(false)}
-                  disabled={deleting}
-                  style={styles.miniBtn}
-                >
-                  {t('common.cancel')}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleConfirmedDelete}
-                  disabled={deleting}
-                  style={styles.miniBtnDanger}
-                >
-                  {deleting ? t(deletingKey) : t(deleteKey)}
-                </button>
-              </div>
-            ) : (
-              <div style={styles.actions}>
-                <DdlImportButton
-                  projectId={project.id}
-                  siteId={project.siteId}
-                  side={side}
-                  label={t(reimportKey)}
-                />
-                <button
-                  type="button"
-                  onClick={() => setConfirmDelete(true)}
-                  style={styles.deleteBtn}
-                >
-                  {t(deleteKey)}
-                </button>
-              </div>
-            )}
-          </>
-        ) : hasSchema && loading ? (
-          <div style={styles.emptyHint}>{t(loadingKey)}</div>
-        ) : (
-          <div style={styles.emptyState}>
-            <div style={styles.emptyTitle}>{t(emptyTitleKey)}</div>
-            <div style={{ marginTop: 10 }}>
-              <DdlImportButton projectId={project.id} siteId={project.siteId} side={side} tone="red" />
-            </div>
-          </div>
+        {!hasSchema && (
+          <DdlImportButton
+            projectId={project.id}
+            siteId={project.siteId}
+            side={side}
+          />
         )}
       </div>
+
+      {showBody && (
+        <div style={bodyStyle}>
+          {imported ? (
+            <>
+              <div style={styles.row}>
+                <div style={styles.label}>{t('asisDdl.panel.file')}</div>
+                <div style={styles.mono}>{imported.filename}</div>
+              </div>
+              <div style={styles.row}>
+                <div style={styles.label}>{t('asisDdl.panel.detected')}</div>
+                <div style={styles.mono}>
+                  {imported.tableCount} tables · {imported.columnCount} columns
+                </div>
+              </div>
+              <div style={styles.row}>
+                <div style={styles.label}>{t('asisDdl.panel.importedAt')}</div>
+                <div style={styles.mono}>{new Date(imported.importedAt).toLocaleString()}</div>
+              </div>
+
+              {confirmDelete ? (
+                <div style={styles.confirmBar}>
+                  <span style={styles.confirmText}>
+                    {t(confirmPreKey)}<b>{imported.filename}</b>{t(confirmPostKey)}
+                  </span>
+                  <div style={{ flex: 1 }} />
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDelete(false)}
+                    disabled={deleting}
+                    style={styles.miniBtn}
+                  >
+                    {t('common.cancel')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmedDelete}
+                    disabled={deleting}
+                    style={styles.miniBtnDanger}
+                  >
+                    {deleting ? t(deletingKey) : t(deleteKey)}
+                  </button>
+                </div>
+              ) : (
+                <div style={styles.actions}>
+                  <DdlImportButton
+                    projectId={project.id}
+                    siteId={project.siteId}
+                    side={side}
+                    label={t(reimportKey)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDelete(true)}
+                    style={styles.deleteBtn}
+                  >
+                    {t(deleteKey)}
+                  </button>
+                </div>
+              )}
+            </>
+          ) : loading ? (
+            <div style={styles.emptyHint}>{t(loadingKey)}</div>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }
@@ -236,8 +249,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 500,
     cursor: 'pointer',
   },
-  emptyState: { padding: '12px 4px', textAlign: 'center' as const },
-  emptyTitle: { fontSize: 12, color: 'var(--text-2)', marginBottom: 4 },
   emptyHint: { fontSize: 10.5, color: 'var(--text-3)' },
   confirmBar: {
     marginTop: 12,

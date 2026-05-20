@@ -166,15 +166,10 @@ export function CreateSiteModal({ open, onClose }: Props) {
       open={open}
       onClose={onClose}
       width={560}
-      title={
-        <div>
-          <div>{t('createSite.title')}</div>
-          <div style={styles.subtitle}>{t('createSite.subtitle')}</div>
-        </div>
-      }
+      title={t('createSite.title')}
     >
       <form onSubmit={handleSubmit} style={styles.form}>
-        <Field label={t('siteSettings.name')} hint={t('createSite.nameHint')}>
+        <Field label={t('siteSettings.name')}>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -192,7 +187,7 @@ export function CreateSiteModal({ open, onClose }: Props) {
           <EnvPills value={tobeEnv} onChange={setTobeEnv} t={t} />
         </Field>
 
-        <Field label={t('siteSettings.asisEncoding')} hint={t('siteSettings.encodingHint')}>
+        <Field label={t('siteSettings.asisEncoding')}>
           <select value={asisEncoding} onChange={(e) => setAsisEncoding(e.target.value as SourceEncoding)} style={styles.input}>
             {ENCODING_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>{t(o.key)}</option>
@@ -208,11 +203,11 @@ export function CreateSiteModal({ open, onClose }: Props) {
           </select>
         </Field>
 
-        <Field label={t('siteSettings.csvPath')} hint={t('siteSettings.csvPathHint')}>
+        <Field label={t('siteSettings.csvPath')}>
           <CsvPathField value={csvPath} onChange={setCsvPath} />
         </Field>
 
-        <Field label={t('siteSettings.notes')} hint={t('siteSettings.notesHint')}>
+        <Field label={t('siteSettings.notes')}>
           <textarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
@@ -221,8 +216,7 @@ export function CreateSiteModal({ open, onClose }: Props) {
           />
         </Field>
 
-        {/* 운영 단계 — TO-BE DB 바로 위 */}
-        <Field label={t('siteSettings.stage')} hint={t('siteSettings.stageHint')}>
+        <Field label={t('siteSettings.stage')}>
           <StagePills value={stage} onChange={setStage} byEnv={tobeDbByEnv} t={t} />
         </Field>
 
@@ -231,7 +225,6 @@ export function CreateSiteModal({ open, onClose }: Props) {
           <div style={styles.dbHeader}>
             {t('siteSettings.tobeDb')}
           </div>
-          <div style={styles.dbDesc}>{t('siteSettings.tobeDb.desc')}</div>
 
           <div style={styles.dbGrid2}>
             <select value={tobeDb.type} onChange={(e) => patchTobeDb({ type: e.target.value })} style={styles.input}>

@@ -590,8 +590,11 @@ export const ja: Record<TranslationKey, string> = {
   'createProject.ddl.asisLabel':   'AS-IS DDL',
   'createProject.ddl.tobeLabel':   'TO-BE DDL',
   'createProject.ddl.choose':      'Choose file',
+  'createProject.ddl.change':      'Change file',
   'createProject.ddl.noFile':      'No file selected',
   'createProject.ddl.optional':    'DDL は任意です。後で Project Settings から取り込めます。',
+  'createProject.ddl.selected':    'selected',
+  'createProject.ddl.notSelected': 'not selected',
   'createSite.error.duplicate':    '同じ名前のサイトが既に存在します。',
   'createSite.error.generic':      'サイトの作成に失敗しました。',
 

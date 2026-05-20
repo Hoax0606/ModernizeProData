@@ -585,8 +585,11 @@ export const en: Record<TranslationKey, string> = {
   'createProject.ddl.asisLabel':   'AS-IS DDL',
   'createProject.ddl.tobeLabel':   'TO-BE DDL',
   'createProject.ddl.choose':      'Choose file',
+  'createProject.ddl.change':      'Change file',
   'createProject.ddl.noFile':      'No file selected',
   'createProject.ddl.optional':    'DDL is optional. You can import it later in Project Settings.',
+  'createProject.ddl.selected':    'selected',
+  'createProject.ddl.notSelected': 'not selected',
   'createSite.error.duplicate':    'A site with the same name already exists.',
   'createSite.error.generic':      'Failed to create the site.',
 

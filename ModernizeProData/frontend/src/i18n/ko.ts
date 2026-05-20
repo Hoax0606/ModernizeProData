@@ -589,8 +589,11 @@ export const ko = {
   'createProject.ddl.asisLabel':   'AS-IS DDL',
   'createProject.ddl.tobeLabel':   'TO-BE DDL',
   'createProject.ddl.choose':      'Choose file',
+  'createProject.ddl.change':      'Change file',
   'createProject.ddl.noFile':      'No file selected',
   'createProject.ddl.optional':    'DDL 은 선택 사항입니다. 나중에 Project Settings 에서 추가할 수 있습니다.',
+  'createProject.ddl.selected':    'selected',
+  'createProject.ddl.notSelected': 'not selected',
   'createSite.error.duplicate':    '같은 이름의 사이트가 이미 존재합니다.',
   'createSite.error.generic':      '사이트 생성에 실패했습니다.',
 

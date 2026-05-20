@@ -11,8 +11,8 @@ interface Props {
   side: 'asis' | 'tobe';
   label?: string;
   disabled?: boolean;
-  /** 'navy' (default) for Dashboard / re-import; 'red' for the not-imported panel state. */
-  tone?: 'navy' | 'red';
+  /** 'navy' (default) for Dashboard / re-import; 'red' / 'green' for panel emphasis. */
+  tone?: 'navy' | 'red' | 'green';
   onSuccess?: (result: DdlImport) => void;
 }
 
@@ -53,7 +53,9 @@ export function DdlImportButton({ projectId, siteId, side, label, disabled, tone
   };
 
   const isDisabled = !!disabled || loading;
-  const accent = tone === 'red' ? 'var(--red)' : 'var(--navy)';
+  const accent = tone === 'red'   ? 'var(--red)'
+                : tone === 'green' ? 'var(--green)'
+                : 'var(--navy)';
 
   return (
     <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'stretch' }}>
@@ -69,7 +71,8 @@ export function DdlImportButton({ projectId, siteId, side, label, disabled, tone
         disabled={isDisabled}
         onClick={() => fileInputRef.current?.click()}
         style={{
-          padding: '8px 16px',
+          padding: '6px 12px',
+          minWidth: 148,
           background: isDisabled ? 'var(--panel-2)' : accent,
           color: isDisabled ? 'var(--text-3)' : '#fff',
           border: '1px solid ' + (isDisabled ? 'var(--border)' : accent),
@@ -77,6 +80,8 @@ export function DdlImportButton({ projectId, siteId, side, label, disabled, tone
           fontSize: 12,
           fontWeight: 600,
           cursor: isDisabled ? 'not-allowed' : 'pointer',
+          whiteSpace: 'nowrap',
+          textAlign: 'center',
         }}
       >
         {loading ? loadingLabel : label ?? defaultLabel}
