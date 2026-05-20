@@ -67,19 +67,19 @@ export function SettingsPage() {
   }
 
   const sections: { k: SectionKey; l: string; d: string; danger?: boolean }[] = [
-    { k: 'general',  l: 'General',       d: '프로젝트 이름·환경·생성일' },
-    { k: 'source',   l: 'AS-IS',         d: 'AS-IS DDL · 추출 데이터 · 도구 내장 DB' },
-    { k: 'target',   l: 'TO-BE',         d: '대상 DB · 인코딩 · 자격증명' },
-    { k: 'snapshots', l: 'Snapshots',    d: '매핑 스냅샷 버전 관리 · 승인 플로우' },
-    { k: 'schedule', l: 'Schedule',      d: '야간 리허설 · 컷오버 · 외부 트리거' },
-    { k: 'notify',   l: 'Notifications', d: '인앱 알림 이벤트 구독' },
-    { k: 'danger',   l: 'Danger zone',   d: '프로젝트 삭제 등 위험 동작', danger: true },
+    { k: 'general',   l: t('projectSettings.section.general.label'),   d: t('projectSettings.sidebar.general.desc') },
+    { k: 'source',    l: t('projectSettings.section.source.label'),    d: t('projectSettings.sidebar.source.desc') },
+    { k: 'target',    l: t('projectSettings.section.target.label'),    d: t('projectSettings.sidebar.target.desc') },
+    { k: 'snapshots', l: t('projectSettings.section.snapshots.label'), d: t('projectSettings.sidebar.snapshots.desc') },
+    { k: 'schedule',  l: t('projectSettings.section.schedule.label'),  d: t('projectSettings.sidebar.schedule.desc') },
+    { k: 'notify',    l: t('projectSettings.section.notify.label'),    d: t('projectSettings.sidebar.notify.desc') },
+    { k: 'danger',    l: t('projectSettings.section.danger.label'),    d: t('projectSettings.sidebar.danger.desc'), danger: true },
   ];
 
   return (
     <div style={styles.wrap}>
       <aside style={styles.aside}>
-        <div style={styles.asideHeader}>Project settings</div>
+        <div style={styles.asideHeader}>{t('projectSettings.sidebar.header')}</div>
         {sections.map((s) => {
           const active = s.k === section;
           return (
@@ -127,6 +127,7 @@ export function SettingsPage() {
 /* ─── General ────────────────────────────────────────────── */
 
 function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
+  const t = useT();
   const [name, setName] = useState(project.name);
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
@@ -155,7 +156,7 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
     <>
       <PSHead
         title="General"
-        desc="이 프로젝트의 기본 메타정보."
+        desc={t('projectSettings.head.general.desc')}
         actions={
           <>
             {savedMsg && <span style={styles.savedMsg}>{savedMsg}</span>}
@@ -164,28 +165,28 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
               disabled={!dirty || saving}
               style={{ ...styles.btnPrimary, ...((!dirty || saving) ? styles.btnDisabled : {}) }}
             >
-              {saving ? '저장 중…' : '저장'}
+              {saving ? t('projectSettings.action.saving') : t('projectSettings.action.save')}
             </button>
           </>
         }
       />
       <PSCard>
-        <PSRow label="프로젝트 이름">
+        <PSRow label={t('projectSettings.row.name')}>
           <PSInput value={name} onChange={setName} />
         </PSRow>
-        <PSRow label="고객사" hint="이 프로젝트가 속한 사이트.">
+        <PSRow label={t('projectSettings.row.site')} hint={t('projectSettings.row.siteHint')}>
           <PSInput value={site?.name ?? '—'} readOnly mono />
         </PSRow>
-        <PSRow label="환경 라벨" hint="사이트의 운영 단계 (Site settings 에서 변경).">
+        <PSRow label={t('projectSettings.row.env')} hint={t('projectSettings.row.envHint')}>
           <span style={styles.envChip}>{site?.environment ?? '—'}</span>
         </PSRow>
-        <PSRow label="생성일">
+        <PSRow label={t('projectSettings.row.createdAt')}>
           <PSInput value={new Date(project.createdAt).toLocaleString()} readOnly mono />
         </PSRow>
       </PSCard>
 
-      <PSCard title="Phase (dev/test only)" desc="테스트용 phase 수동 변경. 운영 시 제거 예정.">
-        <PSRow label="Current phase">
+      <PSCard title={t('projectSettings.phase.title')} desc={t('projectSettings.phase.desc')}>
+        <PSRow label={t('projectSettings.phase.row')}>
           <select
             value={project.phase}
             onChange={async (e) => {
@@ -211,9 +212,10 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
 /* ─── AS-IS (Source) ─────────────────────────────────────── */
 
 function PSSource({ project, highlight }: { project: Project; highlight?: boolean }) {
+  const t = useT();
   return (
     <>
-      <PSHead title="AS-IS" desc="AS-IS DDL · 야간 추출 데이터 · 도구 내장 DB." />
+      <PSHead title="AS-IS" desc={t('projectSettings.head.source.desc')} />
       <DdlCard project={project} side="asis" highlight={highlight} />
       <CsvSourceCard />
       <StagingCard />
@@ -222,36 +224,38 @@ function PSSource({ project, highlight }: { project: Project; highlight?: boolea
 }
 
 function CsvSourceCard() {
+  const t = useT();
   return (
     <div style={styles.amberCard}>
       <div style={styles.amberCardTitle}>
-        AS-IS 추출 데이터 (CSV)
+        {t('projectSettings.csv.title')}
         <span style={{ ...styles.uiOnlyBadge, marginLeft: 8 }}>UI only</span>
       </div>
       <div style={styles.amberCardDesc}>
-        추출 파일이 아직 등록되지 않았습니다. 운영팀의 야간 추출 파일 경로를 등록하면 도착 후 자동으로 파싱됩니다.
+        {t('projectSettings.csv.desc')}
       </div>
     </div>
   );
 }
 
 function StagingCard() {
+  const t = useT();
   return (
     <div style={styles.card}>
       <div style={styles.cardHeader}>
         <div style={{ flex: 1 }}>
           <div style={styles.cardTitle}>
             <span style={{ marginRight: 6 }}>📦</span>
-            AS-IS DB (도구 내장)
+            {t('projectSettings.staging.title')}
             <span style={{ ...styles.uiOnlyBadge, marginLeft: 8 }}>UI only</span>
           </div>
           <div style={styles.cardDesc}>
-            추출된 CSV 를 원본 그대로 적재하는 임베디드 DB — 호스트·자격증명 설정 없이 도구가 알아서 처리합니다.
+            {t('projectSettings.staging.desc')}
           </div>
         </div>
       </div>
       <div style={{ padding: '14px 16px', fontSize: 11.5, color: 'var(--text-3)' }}>
-        AS-IS DB 가 아직 초기화되지 않았습니다. 추출 데이터(CSV) 도착 후 자동으로 적재됩니다.
+        {t('projectSettings.staging.notInitialized')}
       </div>
     </div>
   );
@@ -260,6 +264,7 @@ function StagingCard() {
 /* ─── TO-BE (Target) ─────────────────────────────────────── */
 
 function PSTarget({ project, highlight }: { project: Project; highlight?: boolean }) {
+  const t = useT();
   /* mock state — connection/credentials 는 Project 엔티티에 없음 */
   const [host, setHost] = useState('pg-core-01.kdb.internal:5432');
   const [database, setDatabase] = useState('core_banking');
@@ -281,32 +286,32 @@ function PSTarget({ project, highlight }: { project: Project; highlight?: boolea
     <>
       <PSHead
         title="TO-BE"
-        desc="이행 대상 데이터베이스."
+        desc={t('projectSettings.head.target.desc')}
         actions={
           <button
             onClick={handleTest}
             disabled={connStatus === 'testing'}
             style={{ ...styles.btnSecondary, ...(connStatus === 'testing' ? styles.btnDisabled : {}) }}
           >
-            {connStatus === 'testing' ? '연결 테스트 중…' : '연결 테스트'}
+            {connStatus === 'testing' ? t('projectSettings.action.testing') : t('projectSettings.action.testConnection')}
           </button>
         }
       />
-      <PSCard title="Database connection" desc="대상 DB 접속 정보. Worker 노드가 이 설정으로 연결합니다." mock>
-        <PSRow label="DB 종류"><PSInput value="PostgreSQL 18" readOnly mono /></PSRow>
-        <PSRow label="호스트"><PSInput value={host} onChange={setHost} mono /></PSRow>
-        <PSRow label="데이터베이스"><PSInput value={database} onChange={setDatabase} mono /></PSRow>
-        <PSRow label="스키마"><PSInput value={schema} onChange={setSchema} mono /></PSRow>
-        <PSRow label="인코딩"><PSInput value={encoding} onChange={setEncoding} mono /></PSRow>
-        <PSRow label="콜레이션"><PSInput value={collation} onChange={setCollation} mono /></PSRow>
-        <PSRow label="SSL 모드"><PSInput value="verify-full · corp-ca-2024" readOnly mono /></PSRow>
+      <DdlCard project={project} side="tobe" highlight={highlight} />
+
+      <PSCard title={t('projectSettings.target.connection.title')} desc={t('projectSettings.target.connection.desc')} mock>
+        <PSRow label={t('projectSettings.target.row.dbType')}><PSInput value="PostgreSQL 18" readOnly mono /></PSRow>
+        <PSRow label={t('projectSettings.target.row.host')}><PSInput value={host} onChange={setHost} mono /></PSRow>
+        <PSRow label={t('projectSettings.target.row.database')}><PSInput value={database} onChange={setDatabase} mono /></PSRow>
+        <PSRow label={t('projectSettings.target.row.schema')}><PSInput value={schema} onChange={setSchema} mono /></PSRow>
+        <PSRow label={t('projectSettings.target.row.encoding')}><PSInput value={encoding} onChange={setEncoding} mono /></PSRow>
+        <PSRow label={t('projectSettings.target.row.collation')}><PSInput value={collation} onChange={setCollation} mono /></PSRow>
+        <PSRow label={t('projectSettings.target.row.sslMode')}><PSInput value="verify-full · corp-ca-2024" readOnly mono /></PSRow>
       </PSCard>
 
       <ConnectionStatusCard status={connStatus} lastTestedAt={lastTestedAt} onRetry={handleTest} />
 
       <CredsCard />
-
-      <DdlCard project={project} side="tobe" highlight={highlight} />
     </>
   );
 }
@@ -320,6 +325,7 @@ function ConnectionStatusCard({
   lastTestedAt: string | null;
   onRetry: () => void;
 }) {
+  const t = useT();
   const tone =
     status === 'ok' ? 'green' :
     status === 'failed' ? 'red' :
@@ -330,9 +336,9 @@ function ConnectionStatusCard({
     tone === 'amber' ? { bg: 'var(--amber-50)', bd: 'var(--amber)', fg: 'var(--amber)' } :
                        { bg: 'var(--panel-2)',  bd: 'var(--border)', fg: 'var(--text-3)' };
   const label =
-    status === 'ok' ? 'Connected' :
-    status === 'failed' ? 'Connection failed' :
-    status === 'testing' ? 'Testing…' : 'Not tested';
+    status === 'ok' ? t('projectSettings.connStatus.connected') :
+    status === 'failed' ? t('projectSettings.connStatus.failed') :
+    status === 'testing' ? t('projectSettings.connStatus.testing') : t('projectSettings.connStatus.untested');
 
   return (
     <div style={{ ...styles.statusCard, background: palette.bg, borderColor: palette.bd }}>
@@ -340,19 +346,20 @@ function ConnectionStatusCard({
       <span style={{ fontSize: 12, fontWeight: 600, color: palette.fg }}>{label}</span>
       <span style={styles.uiOnlyBadge}>UI only</span>
       <div style={{ flex: 1, fontSize: 11.5, color: 'var(--text-2)', fontFamily: 'var(--mono)' }}>
-        {status === 'ok' && lastTestedAt && <>last tested {lastTestedAt}</>}
-        {status === 'untested' && <>아직 연결을 테스트하지 않았습니다. [연결 테스트] 로 검증하세요.</>}
-        {status === 'testing' && <>연결을 확인하는 중입니다…</>}
-        {status === 'failed' && <>연결 실패</>}
+        {status === 'ok' && lastTestedAt && <>{t('projectSettings.connStatus.lastTested', { time: lastTestedAt })}</>}
+        {status === 'untested' && <>{t('projectSettings.connStatus.untestedHint')}</>}
+        {status === 'testing' && <>{t('projectSettings.connStatus.testingHint')}</>}
+        {status === 'failed' && <>{t('projectSettings.connStatus.failedHint')}</>}
       </div>
       {status === 'failed' && (
-        <button onClick={onRetry} style={styles.btnSecondary}>Retry</button>
+        <button onClick={onRetry} style={styles.btnSecondary}>{t('projectSettings.connStatus.retry')}</button>
       )}
     </div>
   );
 }
 
 function CredsCard() {
+  const t = useT();
   const [username, setUsername] = useState('app_ops');
   const [authMethod, setAuthMethod] = useState<'password' | 'kerberos' | 'ssh_key' | 'cert'>('password');
   const [passwordSet, setPasswordSet] = useState(true);
@@ -371,24 +378,24 @@ function CredsCard() {
       <div style={styles.cardHeader}>
         <div style={{ flex: 1 }}>
           <div style={styles.cardTitle}>
-            Credentials
+            {t('projectSettings.creds.title')}
             <span style={{ ...styles.uiOnlyBadge, marginLeft: 8 }}>UI only</span>
           </div>
           <div style={styles.cardDesc}>
-            로그인 정보와 인증 방식. 자격증명은 이 프로젝트에만 적용됩니다.
+            {t('projectSettings.creds.desc')}
           </div>
         </div>
         <button
           onClick={() => setPasswordSet(true)}
           style={styles.btnGhost}
         >
-          Rotate password
+          {t('projectSettings.creds.rotate')}
         </button>
       </div>
 
       <div style={styles.cardBody}>
-        <PSRow label="Username"><PSInput value={username} onChange={setUsername} mono /></PSRow>
-        <PSRow label="Auth method">
+        <PSRow label={t('projectSettings.creds.username')}><PSInput value={username} onChange={setUsername} mono /></PSRow>
+        <PSRow label={t('projectSettings.creds.authMethod')}>
           <select
             value={authMethod}
             onChange={(e) => setAuthMethod(e.target.value as typeof authMethod)}
@@ -401,7 +408,7 @@ function CredsCard() {
           </select>
         </PSRow>
         {authMethod === 'password' && (
-          <PSRow label="Password" hint={passwordSet ? 'set' : 'not set'}>
+          <PSRow label={t('projectSettings.creds.password')} hint={passwordSet ? t('projectSettings.creds.passwordSet') : t('projectSettings.creds.passwordNotSet')}>
             {editingPw ? (
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <input
@@ -414,37 +421,37 @@ function CredsCard() {
                     if (e.key === 'Enter') commitPw();
                     if (e.key === 'Escape') { setEditingPw(false); setNewPw(''); }
                   }}
-                  placeholder="new password"
+                  placeholder={t('projectSettings.creds.passwordPlaceholder')}
                   style={{ ...styles.inputInline, borderColor: 'var(--navy)' }}
                 />
-                <button onClick={() => setShowPw((s) => !s)} style={styles.btnXs}>{showPw ? 'Hide' : 'Show'}</button>
+                <button onClick={() => setShowPw((s) => !s)} style={styles.btnXs}>{showPw ? t('projectSettings.creds.hide') : t('projectSettings.creds.show')}</button>
               </div>
             ) : (
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={styles.pwDisplay}>
-                  {passwordSet ? (showPw ? '(mock) ops-pw-23f!' : '••••••••••') : <span style={{ color: 'var(--text-4)' }}>not set</span>}
+                  {passwordSet ? (showPw ? '(mock) ops-pw-23f!' : '••••••••••') : <span style={{ color: 'var(--text-4)' }}>{t('projectSettings.creds.passwordNotSet')}</span>}
                 </span>
-                <button onClick={() => setShowPw((s) => !s)} style={styles.btnXs}>{showPw ? 'Hide' : 'Show'}</button>
+                <button onClick={() => setShowPw((s) => !s)} style={styles.btnXs}>{showPw ? t('projectSettings.creds.hide') : t('projectSettings.creds.show')}</button>
                 <button
                   onClick={() => { setEditingPw(true); setNewPw(''); setShowPw(false); }}
                   style={styles.btnLink}
                 >
-                  Change…
+                  {t('projectSettings.creds.change')}
                 </button>
               </div>
             )}
           </PSRow>
         )}
         {authMethod === 'kerberos' && (
-          <PSRow label="Principal"><PSInput value="app_ops@KDB.CORP" mono /></PSRow>
+          <PSRow label={t('projectSettings.creds.principal')}><PSInput value="app_ops@KDB.CORP" mono /></PSRow>
         )}
         {authMethod === 'ssh_key' && (
-          <PSRow label="Private key" hint="대화형 발급 흐름은 V1 예정">
+          <PSRow label={t('projectSettings.creds.privateKey')} hint={t('projectSettings.creds.privateKeyHint')}>
             <PSInput value="~/.ssh/mig-ops.key" mono readOnly />
           </PSRow>
         )}
         {authMethod === 'cert' && (
-          <PSRow label="Certificate"><PSInput value="/etc/mig/certs/app_ops.pem" mono readOnly /></PSRow>
+          <PSRow label={t('projectSettings.creds.cert')}><PSInput value="/etc/mig/certs/app_ops.pem" mono readOnly /></PSRow>
         )}
       </div>
     </div>
@@ -460,6 +467,7 @@ function DdlCard({ project, side, highlight }: { project: Project; side: 'asis' 
 /* ─── Schedule ───────────────────────────────────────────── */
 
 function PSSchedule({ project }: { project: Project }) {
+  const t = useT();
   /* mock — 실제론 Project 엔티티에 schedule jsonb 추가 필요 */
   const [rehearsalOn, setRehearsalOn] = useState(true);
   const [startTime, setStartTime] = useState('22:00 KST');
@@ -472,40 +480,40 @@ function PSSchedule({ project }: { project: Project }) {
     <>
       <PSHead
         title="Schedule"
-        desc="Nightly rehearsal 자동 실행 · 컷오버 D-day · 외부 스케줄러 연동 옵션"
-        actions={<button style={styles.btnPrimary} disabled>Save changes</button>}
+        desc={t('projectSettings.head.schedule.desc')}
+        actions={<button style={styles.btnPrimary} disabled>{t('projectSettings.action.saveChanges')}</button>}
         mock
       />
 
       <PSCard
-        title="Nightly rehearsal"
-        desc="매일 정해진 시각에 dry-run rehearsal 을 자동 실행합니다. Control-M 같은 외부 스케줄러가 있는 환경에서는 비활성화하고 CLI 트리거를 쓰세요."
+        title={t('projectSettings.schedule.nightly.title')}
+        desc={t('projectSettings.schedule.nightly.desc')}
       >
-        <PSRow label="Enabled" hint={rehearsalOn ? '활성화됨 — 매일 밤 자동 실행' : '비활성화 — 수동 또는 외부 스케줄러가 트리거'}>
-          <Toggle on={rehearsalOn} onChange={setRehearsalOn} label={rehearsalOn ? 'Run every night' : 'Paused'} />
+        <PSRow label={t('projectSettings.schedule.row.enabled')} hint={rehearsalOn ? t('projectSettings.schedule.row.enabledOn') : t('projectSettings.schedule.row.enabledOff')}>
+          <Toggle on={rehearsalOn} onChange={setRehearsalOn} label={rehearsalOn ? t('projectSettings.schedule.toggle.on') : t('projectSettings.schedule.toggle.off')} />
         </PSRow>
-        <PSRow label="Start time" hint="타임존은 사이트 설정 기준">
+        <PSRow label={t('projectSettings.schedule.row.startTime')} hint={t('projectSettings.schedule.row.startTimeHint')}>
           <PSInput value={startTime} onChange={setStartTime} mono width={140} />
         </PSRow>
-        <PSRow label="Max duration" hint="초과 시 자동 abort">
-          <PSInput value={maxDuration} onChange={setMaxDuration} mono suffix="minutes" width={120} />
+        <PSRow label={t('projectSettings.schedule.row.maxDuration')} hint={t('projectSettings.schedule.row.maxDurationHint')}>
+          <PSInput value={maxDuration} onChange={setMaxDuration} mono suffix={t('projectSettings.schedule.minutes')} width={120} />
         </PSRow>
-        <PSRow label="Next scheduled">
+        <PSRow label={t('projectSettings.schedule.row.next')}>
           <span style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: rehearsalOn ? 'var(--text-2)' : 'var(--text-4)' }}>
-            {rehearsalOn ? `다음 실행 ${startTime}` : '— (disabled)'}
+            {rehearsalOn ? t('projectSettings.schedule.row.nextRun', { time: startTime }) : t('projectSettings.schedule.row.nextDisabled')}
           </span>
         </PSRow>
       </PSCard>
 
-      <PSCard title="Cutover window" desc="고객과 합의된 D-day 및 관련 시간 창.">
-        <PSRow label="Planned cutover" hint="이행 실제 실행 일시 (본운영 전환)">
+      <PSCard title={t('projectSettings.schedule.cutover.title')} desc={t('projectSettings.schedule.cutover.desc')}>
+        <PSRow label={t('projectSettings.schedule.cutover.dday')} hint={t('projectSettings.schedule.cutover.ddayHint')}>
           <PSInput value={cutover.dday ?? 'TBD'} mono />
         </PSRow>
-        <PSRow label="Freeze start (T-N hours)" hint="소스 DB 가 read-only 로 전환되는 시점">
-          <PSInput value={String(cutover.freezeHours ?? 24)} mono suffix="hours" width={120} />
+        <PSRow label={t('projectSettings.schedule.cutover.freeze')} hint={t('projectSettings.schedule.cutover.freezeHint')}>
+          <PSInput value={String(cutover.freezeHours ?? 24)} mono suffix={t('projectSettings.schedule.hours')} width={120} />
         </PSRow>
-        <PSRow label="Rollback SLA" hint="컷오버 실패 판단 후 구 시스템 복구 완료까지 허용 시간">
-          <PSInput value={String(cutover.rollbackSla ?? 15)} mono suffix="minutes" width={120} />
+        <PSRow label={t('projectSettings.schedule.cutover.rollback')} hint={t('projectSettings.schedule.cutover.rollbackHint')}>
+          <PSInput value={String(cutover.rollbackSla ?? 15)} mono suffix={t('projectSettings.schedule.minutes')} width={120} />
         </PSRow>
       </PSCard>
 
@@ -513,30 +521,30 @@ function PSSchedule({ project }: { project: Project }) {
         <div onClick={() => setExtOpen((o) => !o)} style={{ ...styles.collapseHeader, background: extOpen ? 'var(--panel-2)' : 'var(--panel)' }}>
           <span style={{ color: 'var(--text-4)', fontSize: 10, width: 10 }}>{extOpen ? '▾' : '▸'}</span>
           <div style={{ flex: 1 }}>
-            <div style={styles.cardTitle}>External trigger (선택)</div>
+            <div style={styles.cardTitle}>{t('projectSettings.schedule.external.title')}</div>
             <div style={styles.cardDesc}>
-              Control-M · Jenkins · Airflow 등 기존 사내 스케줄러에서 이 프로젝트를 트리거하는 방법
+              {t('projectSettings.schedule.external.desc')}
             </div>
           </div>
-          <span style={styles.statusBadgeQueued}>optional</span>
+          <span style={styles.statusBadgeQueued}>{t('projectSettings.schedule.external.optional')}</span>
         </div>
         {extOpen && (
           <div style={{ padding: '14px 16px' }}>
             <div style={styles.warnBox}>
-              <div style={styles.warnTitle}>⚠ 사전 조건 — Solution Settings 에서 활성화 필요</div>
-              External trigger 는 솔루션 전역 기능이라 <b>Solution Settings › External integrations</b> 에서 먼저 토글을 켜야 동작합니다. 켜지 않으면 CLI / API endpoint 가 응답하지 않습니다.
+              <div style={styles.warnTitle}>{t('projectSettings.schedule.external.warnTitle')}</div>
+              {t('projectSettings.schedule.external.warnBodyBefore')}<b>Solution Settings › External integrations</b>{t('projectSettings.schedule.external.warnBodyAfter')}
             </div>
             <div style={{ fontSize: 11, color: 'var(--text-2)', lineHeight: 1.6, marginBottom: 8, marginTop: 10 }}>
-              아래 명령을 외부 스케줄러(Control-M · Airflow · Jenkins · cron)에 등록하면 됩니다.
+              {t('projectSettings.schedule.external.cliHint')}
             </div>
             <pre style={styles.cliBlock}>
-{`# 야간 rehearsal (dry-run · TEST 타겟)
+{`# Nightly rehearsal (dry-run · TEST target)
 migrate run --project ${project.id} --mode rehearsal --dry-run
 
-# 컷오버 (운영 타겟 · 승인된 스냅샷 필요)
+# Cutover (production target · approved snapshot required)
 migrate run --project ${project.id} --mode cutover
 
-# 롤백
+# Rollback
 migrate rollback --project ${project.id} --to pre-cutover`}
             </pre>
           </div>
@@ -549,13 +557,14 @@ migrate rollback --project ${project.id} --to pre-cutover`}
 /* ─── Notifications ──────────────────────────────────────── */
 
 function PSNotify() {
+  const t = useT();
   const events = [
-    { k: 'run.failed',       l: 'Run failed',          d: 'rehearsal · cutover 실행 실패 시' },
-    { k: 'snapshot.pending', l: 'Snapshot pending',    d: '승인 대기 스냅샷이 생성되었을 때' },
-    { k: 'snapshot.approved',l: 'Snapshot approved',   d: '내가 요청한 스냅샷이 승인되었을 때' },
-    { k: 'snapshot.rejected',l: 'Snapshot rejected',   d: '내가 요청한 스냅샷이 반려되었을 때' },
-    { k: 'cutover.started',  l: 'Cutover started',     d: 'cutover 가 시작되었을 때' },
-    { k: 'cutover.finished', l: 'Cutover finished',    d: 'cutover 가 완료되었을 때' },
+    { k: 'run.failed',       l: t('projectSettings.notify.event.runFailed.label'),       d: t('projectSettings.notify.event.runFailed.desc') },
+    { k: 'snapshot.pending', l: t('projectSettings.notify.event.snapPending.label'),     d: t('projectSettings.notify.event.snapPending.desc') },
+    { k: 'snapshot.approved',l: t('projectSettings.notify.event.snapApproved.label'),    d: t('projectSettings.notify.event.snapApproved.desc') },
+    { k: 'snapshot.rejected',l: t('projectSettings.notify.event.snapRejected.label'),    d: t('projectSettings.notify.event.snapRejected.desc') },
+    { k: 'cutover.started',  l: t('projectSettings.notify.event.cutoverStarted.label'),  d: t('projectSettings.notify.event.cutoverStarted.desc') },
+    { k: 'cutover.finished', l: t('projectSettings.notify.event.cutoverFinished.label'), d: t('projectSettings.notify.event.cutoverFinished.desc') },
   ];
 
   const [subs, setSubs] = useState<Record<string, boolean>>(() => {
@@ -568,17 +577,17 @@ function PSNotify() {
     <>
       <PSHead
         title="Notifications"
-        desc="In-app inbox · 닫힌 네트워크에서는 유일한 기본 채널입니다."
-        actions={<button style={styles.btnPrimary} disabled>Save changes</button>}
+        desc={t('projectSettings.head.notify.desc')}
+        actions={<button style={styles.btnPrimary} disabled>{t('projectSettings.action.saveChanges')}</button>}
         mock
       />
 
       <div style={styles.infoBox}>
-        <div style={{ fontWeight: 600, marginBottom: 4 }}>📬 In-app notification inbox</div>
-        외부 Slack / Email / Webhook 은 폐쇄망에서는 쓸 수 없으므로, 모든 알림은 상단의 🔔 Bell 아이콘을 통해 수신됩니다.
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>{t('projectSettings.notify.inbox.title')}</div>
+        {t('projectSettings.notify.inbox.body')}
       </div>
 
-      <PSCard title="이벤트 구독" desc="알림으로 받을 이벤트를 선택합니다.">
+      <PSCard title={t('projectSettings.notify.subscriptions.title')} desc={t('projectSettings.notify.subscriptions.desc')}>
         {events.map((e, i) => (
           <div
             key={e.k}
@@ -596,12 +605,12 @@ function PSNotify() {
         ))}
       </PSCard>
 
-      <PSCard title="수신자 옵션" desc="이 프로젝트에 관한 알림을 받는 범위.">
-        <PSRow label="Scope" hint="본인이 관여한 활동만 받을지, 프로젝트 전체 이벤트를 받을지">
+      <PSCard title={t('projectSettings.notify.recipients.title')} desc={t('projectSettings.notify.recipients.desc')}>
+        <PSRow label={t('projectSettings.notify.recipients.scope')} hint={t('projectSettings.notify.recipients.scopeHint')}>
           <div style={{ display: 'flex', gap: 5 }}>
             {[
-              { k: 'mine-only',   l: 'My activity only' },
-              { k: 'all-project', l: 'All project events' },
+              { k: 'mine-only',   l: t('projectSettings.notify.scope.mine') },
+              { k: 'all-project', l: t('projectSettings.notify.scope.all') },
             ].map((opt) => {
               const active = opt.k === 'all-project';
               return (
@@ -621,7 +630,7 @@ function PSNotify() {
             })}
           </div>
         </PSRow>
-        <PSRow label="Retention" hint="알림이 inbox 에 유지되는 기간">
+        <PSRow label={t('projectSettings.notify.recipients.retention')} hint={t('projectSettings.notify.recipients.retentionHint')}>
           <PSInput value="90 days" mono width={160} />
         </PSRow>
       </PSCard>
@@ -632,6 +641,7 @@ function PSNotify() {
 /* ─── Snapshots ─────────────────────────────────────────── */
 
 function PSSnapshots({ project }: { project: Project }) {
+  const t = useT();
   const user = useAuthStore((s) => s.user);
   const allSnapshots = useSnapshotsStore((s) => s.snapshots);
   const fetchByProject = useSnapshotsStore((s) => s.fetchByProject);
@@ -705,7 +715,7 @@ function PSSnapshots({ project }: { project: Project }) {
     <>
       <PSHead
         title="Snapshots"
-        desc="매핑 스냅샷 버전 관리. v1.0 부터 시작해서 자동으로 버전이 증가합니다."
+        desc={t('projectSettings.head.snapshots.desc')}
         actions={
           <button onClick={() => setCreateOpen(!createOpen)} style={styles.btnPrimary}>
             {createOpen ? 'Cancel' : '+ Create snapshot'}
@@ -879,6 +889,7 @@ function PSSnapshots({ project }: { project: Project }) {
 /* ─── Danger zone ────────────────────────────────────────── */
 
 function PSDanger({ project }: { project: Project }) {
+  const t = useT();
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
@@ -919,7 +930,7 @@ function PSDanger({ project }: { project: Project }) {
 
   return (
     <>
-      <PSHead title="Danger zone" desc="Destructive actions. All operations are logged to the audit trail." />
+      <PSHead title="Danger zone" desc={t('projectSettings.head.danger.desc')} />
 
       <div style={styles.dangerCard}>
         <div style={styles.dangerRow}>
