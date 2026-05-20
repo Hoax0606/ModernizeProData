@@ -1,5 +1,4 @@
 import { useMemo, useState } from 'react';
-import { Navigate } from 'react-router-dom';
 import { useWorkspaceStore, type Project } from '../store/workspace';
 import { useUsersStore } from '../store/users';
 import { useAuthStore } from '../store/auth';
@@ -47,8 +46,8 @@ export function ExecutionOverviewPage() {
   const errorCount = (_p: Project) => 0;
   const warningCount = (_p: Project) => 0;
 
-  if (activeProjectId) return <Navigate to="/" replace />;
-  if (!site) return <Navigate to="/" replace />;
+  // redirect 는 sidebar 프로젝트 클릭 핸들러가 직접 처리 (race 회피).
+  if (activeProjectId || !site) return null;
 
   const filteredProjects = siteProjects.filter((p) => {
     if (phaseFilter && p.phase !== phaseFilter) return false;

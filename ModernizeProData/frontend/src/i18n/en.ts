@@ -519,6 +519,7 @@ export const en: Record<TranslationKey, string> = {
   'notifications.clearAll': 'Clear all',
   'notifications.empty.title': 'No notifications',
   'notifications.empty.hint': 'Run, approval and system events will appear here.',
+  'notifications.empty.unread': 'No unread messages.',
   'notifications.viewAll': 'View all in Approvals →',
 
   'projectEnv.test':       'Test',
@@ -570,6 +571,7 @@ export const en: Record<TranslationKey, string> = {
   'projectSettings.action.save':                'Save',
   'projectSettings.action.saving':              'Saving…',
   'projectSettings.action.saveChanges':         'Save changes',
+  'projectSettings.action.savedToast':          'Settings saved',
   'projectSettings.action.testConnection':      'Test connection',
   'projectSettings.action.testing':             'Testing connection…',
 

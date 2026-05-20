@@ -84,7 +84,7 @@ export const ko = {
   'solution.theme.light': 'Light',
   'solution.theme.dark': 'Dark',
   'solution.notifications': 'Notifications',
-  'solution.notifications.desc': '인앱 알림(🔔) 사용 여부. 어떤 이벤트를 받을지는 Project Settings › Notifications 에서 관리합니다.',
+  'solution.notifications.desc': '인앱 알림 사용 여부. 어떤 이벤트를 받을지는 Project Settings › Notifications 에서 관리합니다.',
   'solution.notifications.enable': 'Enable notifications',
   'solution.notifications.enableDesc': '끄면 모든 프로젝트의 인앱 알림이 일괄 비활성화됩니다.',
   'solution.external': 'External integrations',
@@ -521,8 +521,9 @@ export const ko = {
   'notifications.title': 'Notifications',
   'notifications.markAllRead': 'Mark all as read',
   'notifications.clearAll': 'Clear all',
-  'notifications.empty.title': 'No notifications',
+  'notifications.empty.title': '알림이 없습니다.',
   'notifications.empty.hint': '실행·승인·시스템 이벤트가 여기 표시됩니다.',
+  'notifications.empty.unread': '읽지않은 메시지가 없습니다.',
   'notifications.viewAll': 'Approvals에서 전체 보기 →',
 
   'projectEnv.test':       'Test',
@@ -574,6 +575,7 @@ export const ko = {
   'projectSettings.action.save':                'Save',
   'projectSettings.action.saving':              'Saving…',
   'projectSettings.action.saveChanges':         'Save changes',
+  'projectSettings.action.savedToast':          '설정이 저장되었습니다.',
   'projectSettings.action.testConnection':      'Test connection',
   'projectSettings.action.testing':             'Testing connection…',
 

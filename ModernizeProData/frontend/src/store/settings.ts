@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware';
 
 export type Theme = 'light' | 'dark';
 export type Language = 'ko' | 'ja' | 'en';
+export type NotificationScope = 'mine-only' | 'all-project';
 
 export interface ExternalConfig {
   scheduler: string;
@@ -16,12 +17,16 @@ interface SettingsState {
   theme: Theme;
   language: Language;
   notifications: boolean;
+  notificationScope: NotificationScope;
+  notificationRetention: string;
   externalIntegrations: boolean;
   externalConfig: ExternalConfig;
 
   setTheme: (theme: Theme) => void;
   setLanguage: (language: Language) => void;
   setNotifications: (on: boolean) => void;
+  setNotificationScope: (scope: NotificationScope) => void;
+  setNotificationRetention: (retention: string) => void;
   setExternalIntegrations: (on: boolean) => void;
   setExternalConfig: (config: Partial<ExternalConfig>) => void;
 }
@@ -36,6 +41,8 @@ export const useSettingsStore = create<SettingsState>()(
       theme: 'light',
       language: 'ko',
       notifications: true,
+      notificationScope: 'all-project',
+      notificationRetention: '90 days',
       externalIntegrations: false,
       externalConfig: {
         scheduler: 'Control-M',
@@ -48,6 +55,8 @@ export const useSettingsStore = create<SettingsState>()(
       setTheme: (theme) => set({ theme }),
       setLanguage: (language) => set({ language }),
       setNotifications: (on) => set({ notifications: on }),
+      setNotificationScope: (scope) => set({ notificationScope: scope }),
+      setNotificationRetention: (retention) => set({ notificationRetention: retention }),
       setExternalIntegrations: (on) => set({ externalIntegrations: on }),
       setExternalConfig: (config) =>
         set((s) => ({ externalConfig: { ...s.externalConfig, ...config } })),
