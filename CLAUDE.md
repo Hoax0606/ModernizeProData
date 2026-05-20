@@ -68,15 +68,12 @@ docs/                            # manuals, architecture, handoff (.docx/.pdf ar
 - Existing pattern: `V4__sites_projects.sql` · `V5__project_run_status.sql` · `V6__snapshots.sql`.
 
 ### Phase model
-- 9 phases: `planning · analysis · test · sign-off · rehearsal · ready · cutover · hypercare · done`
-- `cutover` can run **only in production environments**.
-- Two snapshot types: mapping snapshot and cutover snapshot.
-- `runStatus` (`idle | running | completed`) is a sub-status of test/rehearsal/cutover.
-
-### Git workflow
-- Commit format: Conventional Commits — `<type>(<scope>): <description>`.
-- **Never resolve merge conflicts in the GitHub web UI.** PR author resolves locally; runs `npx tsc --noEmit` and build before pushing.
-- For import-line conflicts, always take the **union** of both sides — never pick one side.
+- Nine phases: `planning · analysis · test · sign-off · rehearsal · ready · cutover · hypercare · done`.
+- `cutover` runs **only in the production stage**.
+- Two snapshot kinds: mapping snapshot and cutover snapshot.
+- `runStatus` (`idle | running | completed`) is a sub-status of test / rehearsal / cutover.
+- Snapshot `version` is auto-assigned by the server (`v1.0` initial). **If the previous snapshot is `approved` → major bump** (`v1.x → v2.0`); otherwise (`draft / pending / rejected`) → **minor bump** (`v1.0 → v1.1`). No manual editing. Logic lives in `Snapshot.generateNextVersion`.
+- The "create cutover snapshot" button is enabled **only in post-rehearsal phases** (`rehearsal · ready · cutover · hypercare · done`).
 
 ### Response style (user preference)
 - When discussing tool direction, **do not split answers into V1/V2/Phase tiers**. Present one recommended approach.
@@ -114,15 +111,15 @@ cd ModernizeProData/frontend; npx tsc --noEmit
 
 | Term | Meaning |
 |---|---|
-| Coordinator | HQ management node. Owns the meta DB. The single point of authority. |
-| Worker | Execution node installed on the air-gapped field network. Communicates over REST/WS only. |
-| Site | One operating environment of one customer. Holds AS-IS / TO-BE / environment label (dev/test/stg/prod). |
+| Coordinator | HQ control node. Owns the meta DB. Single point of authority. |
+| Worker | Execution node installed on the field's isolated network. Talks over REST / WS only. |
+| Site | One operational environment of one customer. Holds AS-IS / TO-BE / stage label (dev/test/stg/prod). |
 | Project | A migration unit inside a Site. One AS-IS → TO-BE mapping job. |
-| Phase | A Project's progression phase (the 9 above). |
-| Snapshot | The approval unit for a mapping definition. Two kinds: mapping snapshot, cutover snapshot. |
-| Cutover | Real-production cutover. Only in production environment, requires an approved snapshot. |
-| Rehearsal | Dry-run. Validates cutover scenarios in the test environment. |
-| AS-IS DB (tool-embedded) | The tool ingests the ops team's nightly CSV extracts into DuckDB — no direct connection to the source DB. |
+| Phase | A Project's progress phase (the nine above). |
+| Snapshot | Approval unit for a mapping definition. Two kinds: mapping / cutover. `version` is auto-assigned (`v1.0 → v1.1`; after approval → `v2.0`). |
+| Cutover | Production switch-over. Production stage only; requires an approved snapshot. |
+| Rehearsal | Dry-run. Validates the cutover scenario in the test stage. |
+| AS-IS DB (embedded) | The tool ingests nightly CSV extracts produced by the ops team into DuckDB — no direct connection to the external DB. |
 
 ## Recommended session-start workflow
 

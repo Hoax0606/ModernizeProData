@@ -57,3 +57,38 @@
 - **compile-preview API 스펙** 은 PoC 범위 결정 후 작성.
 - **`column_override` 의 정확한 컬럼 (위 4번 결정 후)·인덱스·제약** 은 V7 마이그레이션 작성 시점에 결정.
 - `docs/DESIGN.md` 의 stale 부분 (section 7 "매핑 정의 형식") 정정은 별도 PR. 본 handoff 는 ONBOARDING.md + memory 가 우선이라는 명시만 둠.
+
+---
+
+## 함께 들어간 변경 — snapshot versioning (배성민, 2026-05-19~20, branch `feature/versions`)
+
+룰엔진 설계와 병행으로 진행된 별도 작업. 룰엔진 본구현과 직접 의존 없음.
+
+### 한 일
+- `Snapshot` 엔티티에 `version VARCHAR(16)` 컬럼 추가 + Flyway 마이그레이션 (`(project_id, version)` 인덱스 포함). 기존 데이터는 `v1.0` 으로 backfill.
+- 자동 채번 정책 `Snapshot.generateNextVersion(latestVersion, latestStatus)`:
+  - 직전 snapshot **approved** → major bump (`v1.x → v2.0`)
+  - 그 외 (`draft / pending / rejected`) → minor bump (`v1.0 → v1.1`)
+  - 첫 생성·파싱 실패 → `v1.0` fallback
+- `SnapshotController.create` 가 `findLatestByProjectId` (`ORDER BY created_at DESC LIMIT 1`) 결과로 다음 버전 결정 후 저장.
+- `VersionsPage.tsx` 재작성 — version 표시, `Cutover Snapshot` 태그, `UI only` 마커 정리. cutover 생성 버튼은 **rehearsal 이후 phase** 에서만 활성, 빨간 strong 확인 다이얼로그 1회.
+- 새 snapshot 생성 직후 자동 선택을 "마지막 row" 가 아닌 **방금 만든 id** 로 변경 (race 회피).
+- `store/auditLog.ts` 신규 — zustand `persist` 로 클라이언트 localStorage 영속. 프로젝트 단위 누적·count·collapse. delete-all 시 audit log 도 같이 비움.
+- `ApprovalsPage` — 요청 버튼 일원화 + 확인 다이얼로그 위치 조정.
+
+### 다음 사람이 할 일
+1. **서버 `audit_log` 테이블 마이그레이션 들어오면** `store/auditLog.ts` 의 영속 구현만 API 로 교체. 인터페이스(`add / getByProject / clearByProject`)는 그대로 두기.
+2. **승인 후 rollback 시 버전 회수 정책** 결정 — approved snapshot 을 삭제하면 현재 코드는 "그 다음 row 기준으로 다시 채번" 이라 사실상 회수됨. 일본 금융권 감사 관점에서 회수 허용 여부 확인 필요.
+3. version 기준 정렬 UI 추가 시 lexicographic 정렬 함정 주의 (`v10.0 < v2.0`). 현재 UI 는 `created_at` 기준이라 무관.
+
+### 함정 / 결정 이력
+- **version 채번을 DB 시퀀스가 아닌 코드에서 계산** — major/minor 의미가 "직전 status 분기" 라 DB 제약/시퀀스로 표현 불가. 트랜잭션 안에서 `findLatestByProjectId → 계산 → save`. 동시성은 폐쇄망 단일 사용자 시나리오에 의존.
+- **`Snapshot.create` 오버로드 2개 유지** — 신규 시그니처 (`nextVersion` 인자 추가) 와 기존 시그니처 (`v1.0` 고정) 둘 다 남김. 시드·테스트 코드 호환용. **운영 코드는 무조건 신규 시그니처**.
+- **AUDIT LOG 가 localStorage 인 이유** — 서버 `audit_log` 테이블이 아직 없는 상태에서 PoC 데모용 임시. PC 간 동기화 안 됨을 의도적으로 수용.
+- **cutover snapshot 확인 다이얼로그는 production 가드와 별개** — 백엔드에 prod 가드는 그대로 있고, UI 에서 사용자 실수 방지용으로 한 번 더 막는다.
+
+### 안 한 것 (의도적으로)
+- 서버 사이드 audit log (위 1번). 다음 BE 작업자 몫.
+- version 수동 편집·강제 major bump 버튼. 자동 채번만으로 충분하다 판단.
+- snapshot 간 diff UI. mapping 화면 작업과 함께 진행 예정.
+- i18n 키 추가 — version·`Cutover Snapshot` 태그는 영문 고정 정책이라 ko/ja/en 동일.
