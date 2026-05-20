@@ -86,6 +86,7 @@ export function SettingsPage() {
             <div
               key={s.k}
               onClick={() => setSection(s.k)}
+              title={s.d}
               style={{
                 ...styles.asideItem,
                 background: active ? (s.danger ? 'var(--red-50)' : 'var(--navy-50)') : 'transparent',
@@ -221,7 +222,6 @@ function PSSource({ project, highlight }: { project: Project; highlight?: boolea
       <PSHead title="AS-IS" desc={t('projectSettings.head.source.desc')} />
       <DdlCard project={project} side="asis" highlight={highlight} />
       <CsvSourceCard />
-      <StagingCard />
     </>
   );
 }
@@ -1212,13 +1212,15 @@ const emptyStyles: Record<string, React.CSSProperties> = {
 
 const styles: Record<string, React.CSSProperties> = {
   /* layout */
-  wrap: { display: 'flex', height: '100%', minHeight: 0, margin: -18, background: 'var(--bg)' },
+  wrap: { display: 'flex', minHeight: '100%', height: '100%', margin: -18, background: 'var(--bg)', alignItems: 'stretch' },
   aside: {
     width: 220, minWidth: 220,
     borderRight: '1px solid var(--border)',
     background: 'var(--panel)',
     padding: '10px 0',
     overflow: 'auto',
+    alignSelf: 'stretch',
+    minHeight: 'calc(100vh - 122px)',
   },
   asideHeader: {
     padding: '4px 14px 6px',
@@ -1230,8 +1232,16 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     transition: 'background .08s',
   },
-  asideItemLabel: { fontSize: 12 },
-  asideItemDesc: { fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: 2 },
+  asideItemLabel: { fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+  asideItemDesc: {
+    fontSize: 10,
+    color: 'var(--text-3)',
+    fontFamily: 'var(--mono)',
+    marginTop: 2,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
   content: { flex: 1, minWidth: 0, overflow: 'auto', padding: '18px 26px 40px' },
 
   /* head */
