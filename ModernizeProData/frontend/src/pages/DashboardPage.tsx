@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { healthApi, type HealthInfo } from '../api/auth';
+import { tobeDdlApi, type DdlSchema } from '../api/tobeDdl';
 import { useWorkspaceStore, type Project } from '../store/workspace';
 import { useUsersStore } from '../store/users';
 import { useAuthStore } from '../store/auth';
+import { useSnapshotsStore } from '../store/snapshots';
 import { CreateSiteModal } from '../components/CreateSiteModal';
 import { CreateProjectModal } from '../components/CreateProjectModal';
 import { DdlImportButton } from '../components/DdlImportButton';
@@ -173,38 +174,109 @@ function MappingOnboarding({ project }: { project: Project }) {
 
 /* ─── 4단계: 정상 Dashboard ──────────────────────────────── */
 
+/**
+ * Per-TO-BE-table dashboard row.
+ *
+ * mapping 機能はまだ未実装なので、現状は全テーブルが 'unbound' に着地する.
+ * mapping データができたら mappedColumns/issuesCount をその値で埋めれば
+ * coverage / readiness が自然に推移する.
+ */
+interface DashboardRow {
+  tableId: string;
+  schemaName: string;
+  physicalName: string;
+  totalColumns: number;
+  mappedColumns: number;
+  issuesCount: number;
+  readiness: 'ready' | 'review' | 'unbound';
+}
+
 function ProjectDashboard({ project }: { project: import('../store/workspace').Project }) {
   const t = useT();
-  const [info, setInfo] = useState<HealthInfo | null>(null);
   const [filter, setFilter] = useState<'all' | 'ready' | 'review' | 'unbound'>('all');
+  const [tobeSchema, setTobeSchema] = useState<DdlSchema | null>(null);
+  const allSnapshots = useSnapshotsStore((s) => s.snapshots);
+  const fetchSnapshots = useSnapshotsStore((s) => s.fetchByProject);
+  const snapshots = useMemo(
+    () => allSnapshots.filter((sn) => sn.projectId === project.id),
+    [allSnapshots, project.id],
+  );
 
   useEffect(() => {
-    healthApi.info().then(setInfo).catch(() => {});
-  }, []);
+    let alive = true;
+    tobeDdlApi.get(project.id)
+      .then((s) => { if (alive) setTobeSchema(s); })
+      .catch(() => { if (alive) setTobeSchema({ latestImport: null, tables: [] }); });
+    fetchSnapshots(project.id);
+    return () => { alive = false; };
+  }, [project.id, fetchSnapshots]);
+
+  // 当該プロジェクトの承認済み snapshot 中の最新バージョン.
+  // per-table 関連付けはまだないので、全行に同じ値を表示する.
+  const latestApprovedVersion = useMemo(() => {
+    const approved = snapshots.filter((s) => s.status === 'approved');
+    if (approved.length === 0) return null;
+    // createdAt 降順の最新を採用
+    return approved.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0].version;
+  }, [snapshots]);
+
+  const rows: DashboardRow[] = useMemo(() => {
+    if (!tobeSchema) return [];
+    return tobeSchema.tables.map((tw) => {
+      const total = tw.columns.length;
+      const mapped = 0; // mapping 機能未実装
+      let readiness: DashboardRow['readiness'];
+      if (mapped === 0) readiness = 'unbound';
+      else if (mapped >= total) readiness = 'ready';
+      else readiness = 'review';
+      return {
+        tableId: tw.table.id,
+        schemaName: tw.table.schemaName ?? '',
+        physicalName: tw.table.physicalName,
+        totalColumns: total,
+        mappedColumns: mapped,
+        issuesCount: Math.max(total - mapped, 0),
+        readiness,
+      };
+    });
+  }, [tobeSchema]);
+
+  const counts = useMemo(() => ({
+    total: rows.length,
+    ready: rows.filter((r) => r.readiness === 'ready').length,
+    review: rows.filter((r) => r.readiness === 'review').length,
+    unbound: rows.filter((r) => r.readiness === 'unbound').length,
+  }), [rows]);
+
+  const filtered = filter === 'all' ? rows : rows.filter((r) => r.readiness === filter);
 
   return (
     <div>
       {/* Stat row */}
       <div style={styles.statRow}>
-        <Stat label="TO-BE TABLES" value={String(project.tableCount)} />
-        <Stat label="READY" value="0" sub="all checks pass" subColor="var(--green)" />
-        <Stat label="REVIEW" value="0" sub="errs / pending approval" subColor="var(--red)" />
-        <Stat label="UNBOUND" value="0" sub="no source assigned" subColor="var(--amber)" />
-        <Stat label="SNAPSHOT" value="—" sub="no snapshot" mono />
-        <Stat label="LAST RUN" value="—" sub="no run yet" mono />
+        <Stat label="TO-BE TABLES" value={String(counts.total)} />
+        <Stat label="READY"   value={String(counts.ready)}   tone="ok" />
+        <Stat label="REVIEW"  value={String(counts.review)}  tone="warn" />
+        <Stat label="UNBOUND" value={String(counts.unbound)} tone="err" />
+        <Stat
+          label="SNAPSHOT"
+          value={latestApprovedVersion ?? '—'}
+          sub={latestApprovedVersion ? 'approved' : 'no approved snapshot'}
+          tone={latestApprovedVersion ? 'ok' : 'idle'}
+          mono
+        />
+        <Stat label="LAST RUN" value="—" sub="no run yet" tone="idle" mono />
       </div>
 
-      {/* Filter + actions */}
+      {/* Filter */}
       <div style={styles.toolbar}>
         <div style={styles.filterGroup}>
-          <FilterPill active={filter === 'all'} onClick={() => setFilter('all')}>All <Cnt>0</Cnt></FilterPill>
-          <FilterPill active={filter === 'ready'} onClick={() => setFilter('ready')}>Ready <Cnt>0</Cnt></FilterPill>
-          <FilterPill active={filter === 'review'} onClick={() => setFilter('review')}>Review <Cnt>0</Cnt></FilterPill>
-          <FilterPill active={filter === 'unbound'} onClick={() => setFilter('unbound')}>Unbound <Cnt>0</Cnt></FilterPill>
+          <FilterPill active={filter === 'all'}     onClick={() => setFilter('all')}>All       <Cnt>{counts.total}</Cnt></FilterPill>
+          <FilterPill active={filter === 'ready'}   onClick={() => setFilter('ready')}>Ready   <Cnt>{counts.ready}</Cnt></FilterPill>
+          <FilterPill active={filter === 'review'}  onClick={() => setFilter('review')}>Review <Cnt>{counts.review}</Cnt></FilterPill>
+          <FilterPill active={filter === 'unbound'} onClick={() => setFilter('unbound')}>Unbound <Cnt>{counts.unbound}</Cnt></FilterPill>
         </div>
         <div style={{ flex: 1 }} />
-        <button style={styles.btnSecondary} disabled>Open Versions</button>
-        <button style={styles.btnPrimary2} disabled>Go to Execution</button>
       </div>
 
       {/* Table */}
@@ -212,53 +284,113 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
         <table style={styles.table}>
           <thead>
             <tr>
-              <Th>TO-BE TABLE</Th>
-              <Th>AS-IS SOURCE(S)</Th>
-              <Th>COLUMN COVERAGE</Th>
-              <Th align="right">ISSUES</Th>
-              <Th>APPROVAL</Th>
-              <Th>READINESS</Th>
-              <Th width={20} />
+              <Th width={28} align="center" />
+              <Th width={300}>TO-BE TABLE</Th>
+              <Th width={280}>AS-IS SOURCE</Th>
+              <Th width={260} align="center">COLUMN COVERAGE</Th>
+              <Th width={150} align="center">ISSUES</Th>
+              <Th width={130} align="center">READINESS</Th>
+              <Th width={36} />
             </tr>
           </thead>
           <tbody>
-            <tr>
-              <td colSpan={7} style={styles.emptyRow}>
-                <div style={styles.emptyTitle}>{t('dashboard.empty.title')}</div>
-                <div style={styles.emptyHint}>
-                  {t('dashboard.empty.hint')}
-                </div>
-              </td>
-            </tr>
+            {tobeSchema === null ? (
+              <tr>
+                <td colSpan={7} style={styles.emptyRow}>
+                  <div style={styles.emptyHint}>Loading…</div>
+                </td>
+              </tr>
+            ) : filtered.length === 0 ? (
+              <tr>
+                <td colSpan={7} style={styles.emptyRow}>
+                  <div style={styles.emptyTitle}>{t('dashboard.empty.title')}</div>
+                  <div style={styles.emptyHint}>{t('dashboard.empty.hint')}</div>
+                </td>
+              </tr>
+            ) : filtered.map((r, i) => (
+              <tr
+                key={r.tableId}
+                // TODO: mapping 画面ができたら navigate(`/mapping/${r.tableId}`) などに差し替える
+                onClick={() => { /* mapping 画面 未実装 */ }}
+                style={{
+                  background: i % 2 === 1 ? 'var(--zebra)' : 'var(--panel)',
+                  borderBottom: '1px solid var(--border)',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--panel-2)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = i % 2 === 1 ? 'var(--zebra)' : 'var(--panel)'; }}
+              >
+                <td style={{ ...styles.td, textAlign: 'center' }}><ReadinessDot kind={r.readiness} /></td>
+                <td style={{ ...styles.td, fontFamily: 'var(--mono)', fontWeight: 500 }}>
+                  {r.schemaName && (
+                    <span style={{ color: 'var(--text-4)', fontWeight: 400 }}>{r.schemaName}.</span>
+                  )}
+                  {r.physicalName}
+                </td>
+                <td style={{ ...styles.td, fontFamily: 'var(--mono)', fontSize: 11 }}>
+                  <span style={{ color: 'var(--text-4)', fontStyle: 'italic' }}>(no source)</span>
+                </td>
+                <td style={{ ...styles.td, textAlign: 'center' }}>
+                  {r.mappedColumns === 0 ? (
+                    <span style={{ color: 'var(--text-4)', fontFamily: 'var(--mono)', fontSize: 11 }}>—</span>
+                  ) : (
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, width: '100%', maxWidth: 240 }}>
+                      <ProgressBar pct={r.totalColumns > 0 ? (r.mappedColumns / r.totalColumns) * 100 : 0} />
+                      <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-2)', minWidth: 48, textAlign: 'right' }}>
+                        {r.mappedColumns}/{r.totalColumns}
+                      </span>
+                    </div>
+                  )}
+                </td>
+                <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)', fontSize: 11.5 }}>
+                  {r.readiness === 'ready' || r.issuesCount === 0
+                    ? <span style={{ color: 'var(--text-4)' }}>—</span>
+                    : <span style={{ color: 'var(--text-3)' }}>{r.issuesCount} unmapped</span>}
+                </td>
+                <td style={{ ...styles.td, textAlign: 'center' }}><ReadinessBadge kind={r.readiness} /></td>
+                <td style={{ ...styles.td, textAlign: 'center', color: 'var(--text-4)', fontSize: 16, lineHeight: 1 }}>›</td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
 
       <div style={styles.statusbar}>
-        <div>{project.tableCount} of {project.tableCount} tables · sort: name asc</div>
-        <div style={{ flex: 1 }} />
-        <div style={styles.dim}>
-          click a row → Mapping tab · click approval chip → Versions tab
-        </div>
+        <div>{filtered.length} of {rows.length} tables</div>
       </div>
-
-      {/* 개발 검증용 — 도구 정보 */}
-      {info && (
-        <div style={{ marginTop: 18 }}>
-          <div style={styles.devCard}>
-            <div style={styles.devCardHeader}>{t('dashboard.devCard.title')}</div>
-            <div style={styles.devCardBody}>
-              <div style={styles.devGrid}>
-                <Kv k="Name" v={info.name} />
-                <Kv k="Mode" v={info.mode} badge />
-                <Kv k="Java" v={info.javaVersion} mono />
-                <Kv k="OS" v={info.osName} />
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
+  );
+}
+
+function ProgressBar({ pct }: { pct: number }) {
+  return (
+    <div style={{
+      flex: 1, height: 6, background: 'var(--panel-2)',
+      border: '1px solid var(--border)', borderRadius: 3, overflow: 'hidden',
+    }}>
+      <div style={{ width: `${Math.min(100, Math.max(0, pct))}%`, height: '100%', background: 'var(--green)' }} />
+    </div>
+  );
+}
+
+function ReadinessDot({ kind }: { kind: DashboardRow['readiness'] }) {
+  const color = kind === 'ready' ? 'var(--green)'
+              : kind === 'unbound' ? 'var(--red)'
+              : 'var(--amber)';
+  return <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: color }} />;
+}
+
+function ReadinessBadge({ kind }: { kind: DashboardRow['readiness'] }) {
+  const tone = kind === 'ready' ? { bg: 'var(--green-50)', fg: 'var(--green)', br: 'var(--green)' }
+             : kind === 'unbound' ? { bg: 'var(--red-50)', fg: 'var(--red)', br: 'var(--red)' }
+             : { bg: 'var(--amber-50)', fg: 'var(--amber)', br: 'var(--amber)' };
+  return (
+    <span style={{
+      display: 'inline-block', padding: '2px 8px', fontSize: 10.5,
+      fontWeight: 700, fontFamily: 'var(--mono)',
+      background: tone.bg, color: tone.fg, border: `1px solid ${tone.br}`,
+      borderRadius: 3, textTransform: 'uppercase', letterSpacing: 0.4,
+    }}>{kind}</span>
   );
 }
 
@@ -282,12 +414,17 @@ function Step({ n, title, active, done }: { n: number; title: string; active?: b
   );
 }
 
-function Stat({ label, value, sub, subColor, mono }: { label: string; value: string; sub?: string; subColor?: string; mono?: boolean }) {
+function Stat({ label, value, sub, tone, mono }: { label: string; value: string; sub?: string; tone?: 'ok' | 'warn' | 'err' | 'idle'; mono?: boolean }) {
+  const valueColor = tone === 'ok'   ? 'var(--green)'
+                   : tone === 'warn' ? 'var(--amber)'
+                   : tone === 'err'  ? 'var(--red)'
+                   : tone === 'idle' ? 'var(--text-3)'
+                   : 'var(--text)';
   return (
     <div style={styles.stat}>
       <div style={styles.statLabel}>{label}</div>
-      <div style={{ ...styles.statValue, ...(mono ? { fontFamily: 'var(--mono)' } : {}) }}>{value}</div>
-      {sub && <div style={{ ...styles.statSub, ...(subColor ? { color: subColor } : {}) }}>{sub}</div>}
+      <div style={{ ...styles.statValue, color: valueColor, ...(mono ? { fontFamily: 'var(--mono)' } : {}) }}>{value}</div>
+      {sub && <div style={styles.statSub}>{sub}</div>}
     </div>
   );
 }
@@ -316,7 +453,7 @@ function Cnt({ children }: { children: React.ReactNode }) {
   return <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-4)' }}>{children}</span>;
 }
 
-function Th({ children, align, width }: { children?: React.ReactNode; align?: 'left' | 'right'; width?: number }) {
+function Th({ children, align, width }: { children?: React.ReactNode; align?: 'left' | 'right' | 'center'; width?: number }) {
   return (
     <th style={{
       padding: '6px 12px',
@@ -330,17 +467,6 @@ function Th({ children, align, width }: { children?: React.ReactNode; align?: 'l
       background: 'var(--panel-2)',
       borderBottom: '1px solid var(--border)',
     }}>{children}</th>
-  );
-}
-
-function Kv({ k, v, mono, badge }: { k: string; v: string; mono?: boolean; badge?: boolean }) {
-  return (
-    <div style={{ display: 'flex', gap: 10, padding: '4px 0' }}>
-      <span style={{ fontSize: 10.5, color: 'var(--text-3)', width: 70, textTransform: 'uppercase', letterSpacing: 0.4 }}>{k}</span>
-      <span style={{ fontSize: 12, color: 'var(--text)', ...(mono ? { fontFamily: 'var(--mono)' } : {}) }}>
-        {badge ? <span style={styles.modeBadge}>{v}</span> : v}
-      </span>
-    </div>
   );
 }
 
@@ -707,26 +833,6 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 4,
     fontSize: 13,
     fontWeight: 600,
-    cursor: 'pointer',
-  },
-  btnPrimary2: {
-    padding: '6px 12px',
-    background: 'var(--navy)',
-    color: '#fff',
-    border: '1px solid var(--navy)',
-    borderRadius: 4,
-    fontSize: 12,
-    fontWeight: 600,
-    cursor: 'pointer',
-  },
-  btnSecondary: {
-    padding: '6px 12px',
-    background: 'var(--panel)',
-    color: 'var(--text)',
-    border: '1px solid var(--border-strong)',
-    borderRadius: 4,
-    fontSize: 12,
-    fontWeight: 500,
     cursor: 'pointer',
   },
 
@@ -1098,18 +1204,4 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: 'var(--mono)',
   },
   dim: { color: 'var(--text-4)' },
-
-  /* Dev card */
-  devCard: { background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' },
-  devCardHeader: {
-    padding: '8px 14px', background: 'var(--panel-2)', borderBottom: '1px solid var(--border)',
-    fontSize: 11, fontWeight: 600, color: 'var(--text-2)', textTransform: 'uppercase', letterSpacing: 0.5,
-  },
-  devCardBody: { padding: 14 },
-  devGrid: { display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 4 },
-  modeBadge: {
-    display: 'inline-block', padding: '1px 7px', fontSize: 10, fontWeight: 700, fontFamily: 'var(--mono)',
-    background: 'var(--navy-50)', color: 'var(--navy)', border: '1px solid var(--navy)', borderRadius: 3,
-    textTransform: 'uppercase', letterSpacing: 0.4,
-  },
 };
