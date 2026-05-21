@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useAsisDdlStore } from '../store/asisDdl';
 import { useTobeDdlStore } from '../store/tobeDdl';
 import { useWorkspaceStore, type Project } from '../store/workspace';
+import { useActiveProjectReadOnly } from '../store/readOnly';
 import { DdlImportButton } from './DdlImportButton';
 import { useT } from '../i18n';
 
@@ -19,6 +20,7 @@ interface Props {
  */
 export function DdlSchemaPanel({ project, side, highlight }: Props) {
   const t = useT();
+  const readOnly = useActiveProjectReadOnly();
 
   const asisFetch = useAsisDdlStore((s) => s.fetch);
   const asisRemove = useAsisDdlStore((s) => s.remove);
@@ -122,7 +124,7 @@ export function DdlSchemaPanel({ project, side, highlight }: Props) {
           </div>
           <div style={styles.desc}>{t(descKey)}</div>
         </div>
-        {!hasSchema && (
+        {!hasSchema && !readOnly && (
           <DdlImportButton
             projectId={project.id}
             siteId={project.siteId}
@@ -174,21 +176,23 @@ export function DdlSchemaPanel({ project, side, highlight }: Props) {
                   </button>
                 </div>
               ) : (
-                <div style={styles.actions}>
-                  <DdlImportButton
-                    projectId={project.id}
-                    siteId={project.siteId}
-                    side={side}
-                    label={t(reimportKey)}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setConfirmDelete(true)}
-                    style={styles.deleteBtn}
-                  >
-                    {t(deleteKey)}
-                  </button>
-                </div>
+                !readOnly && (
+                  <div style={styles.actions}>
+                    <DdlImportButton
+                      projectId={project.id}
+                      siteId={project.siteId}
+                      side={side}
+                      label={t(reimportKey)}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDelete(true)}
+                      style={styles.deleteBtn}
+                    >
+                      {t(deleteKey)}
+                    </button>
+                  </div>
+                )
               )}
             </>
           ) : loading ? (

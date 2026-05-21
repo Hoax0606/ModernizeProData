@@ -89,8 +89,10 @@ export interface Project {
   ddlFiles: DdlFile[];
   /** 담당자 username — 작성 시 현재 로그인 사용자로 자동 설정. */
   owner: string;
-  /** 프로젝트를 배정받은 사용자 username. Site Overview / Execution Overview 의 dropdown 으로 변경. */
+  /** 프로젝트의 개발/매핑 담당. Site Overview 의 dropdown 으로 지정. */
   assignee?: string;
+  /** 프로젝트의 실행(run) 담당. Execution Overview 의 dropdown 으로 지정. assignee 와 별개. */
+  executionAssignee?: string;
   /** cutover 실행 메타 (시작·중단·완료 누가 언제). Coordinator 만 수정. */
   cutover?: CutoverMeta;
   /** 실행 단계(test/rehearsal/cutover)의 sub-status. phase 전환 시 idle 로 초기화. */
@@ -133,6 +135,8 @@ interface WorkspaceState {
   assignCutover: (projectId: string, assignee: string | undefined) => Promise<void>;
   /** Project 단위 담당자 지정. undefined = 미배정. */
   setProjectAssignee: (projectId: string, assignee: string | undefined) => Promise<void>;
+  /** Project 실행 담당자 지정. undefined = 미배정. */
+  setProjectExecutionAssignee: (projectId: string, executionAssignee: string | undefined) => Promise<void>;
 }
 
 export const emptyDbConnection = (): SiteDbConnection => ({
@@ -349,11 +353,20 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       },
 
       setProjectAssignee: async (projectId, assignee) => {
-        await projectApi.update(projectId, { assignee: assignee || undefined });
+        // unassigned (undefined) 는 backend 에 빈 문자열로 명시적 clear 요청.
+        // 응답으로 받은 실제 저장값을 store 에 반영 — backend 가 안 받았으면 store 도 안 바뀜.
+        const value = assignee ?? '';
+        const updated = await projectApi.update(projectId, { assignee: value });
         set((s) => ({
-          projects: s.projects.map((p) =>
-            p.id === projectId ? { ...p, assignee: assignee || undefined } : p
-          ),
+          projects: s.projects.map((p) => (p.id === projectId ? updated : p)),
+        }));
+      },
+
+      setProjectExecutionAssignee: async (projectId, executionAssignee) => {
+        const value = executionAssignee ?? '';
+        const updated = await projectApi.update(projectId, { executionAssignee: value });
+        set((s) => ({
+          projects: s.projects.map((p) => (p.id === projectId ? updated : p)),
         }));
       },
     }),

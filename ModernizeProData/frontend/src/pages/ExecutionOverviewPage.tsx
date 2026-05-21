@@ -25,7 +25,7 @@ export function ExecutionOverviewPage() {
   const projects = useWorkspaceStore((s) => s.projects);
   const activeSiteId = useWorkspaceStore((s) => s.activeSiteId);
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
-  const setProjectAssignee = useWorkspaceStore((s) => s.setProjectAssignee);
+  const setProjectExecutionAssignee = useWorkspaceStore((s) => s.setProjectExecutionAssignee);
 
   const site = useMemo(() => sites.find((s) => s.id === activeSiteId) ?? null, [sites, activeSiteId]);
   // assignee 변경에도 행 순서가 바뀌지 않도록 createdAt asc 로 명시 정렬.
@@ -39,6 +39,36 @@ export function ExecutionOverviewPage() {
 
   const users = useUsersStore((s) => s.users);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // 담당자 변경 draft — Save 누르기 전까지는 backend / store 에 반영 안 됨.
+  // key = projectId, value = 새 executionAssignee ('' = unassigned).
+  const [assigneeDraft, setAssigneeDraft] = useState<Record<string, string>>({});
+  const [savingAssignees, setSavingAssignees] = useState(false);
+
+  const dirtyAssigneeIds = useMemo(() => Object.keys(assigneeDraft).filter((id) => {
+    const p = projects.find((p) => p.id === id);
+    if (!p) return false;
+    return (assigneeDraft[id] ?? '') !== (p.executionAssignee ?? '');
+  }), [assigneeDraft, projects]);
+
+  const handleSaveAssignees = async () => {
+    if (dirtyAssigneeIds.length === 0 || savingAssignees) return;
+    setSavingAssignees(true);
+    try {
+      await Promise.all(
+        dirtyAssigneeIds.map((id) =>
+          setProjectExecutionAssignee(id, assigneeDraft[id] || undefined),
+        ),
+      );
+      setAssigneeDraft({});
+    } finally {
+      setSavingAssignees(false);
+    }
+  };
+
+  const handleDiscardAssignees = () => {
+    if (savingAssignees) return;
+    setAssigneeDraft({});
+  };
 
   // 필터 — phase · username · errors · warnings. 'has' / 'none' / '' (=all)
   const [phaseFilter, setPhaseFilter] = useState<string>('');
@@ -56,8 +86,8 @@ export function ExecutionOverviewPage() {
   const filteredProjects = siteProjects.filter((p) => {
     if (phaseFilter && p.phase !== phaseFilter) return false;
     if (userFilter === '__unassigned') {
-      if (p.assignee) return false;
-    } else if (userFilter && p.assignee !== userFilter) return false;
+      if (p.executionAssignee) return false;
+    } else if (userFilter && p.executionAssignee !== userFilter) return false;
     const ec = errorCount(p);
     if (errorFilter === 'has'  && ec === 0) return false;
     if (errorFilter === 'none' && ec >  0) return false;
@@ -67,15 +97,14 @@ export function ExecutionOverviewPage() {
     return true;
   });
 
-  // 체크박스 활성 기준: prod stage → ready 만, non-prod → rehearsal / test.
-  // 추가로 non-master 는 본인에게 분배된 행만 선택 가능 (Unassigned 포함 read-only).
-  const isProd = site?.environment === 'production';
-  const isMine = (p: Project) => !!user?.username && p.assignee === user.username;
-  const canEditRow = (p: Project) => isMaster || isMine(p);
+  // 체크박스 활성 기준: ready / sign-off 만 (test · rehearsal · cutover 는 실행 중 상태).
+  // 담당자 dropdown 은 Coordinator(master) 만 변경 가능. 그 외는 text 로만 표시 (본인 row 포함).
+  // 단 체크박스(run/abort 대상 선택) 는 본인 row 도 가능.
+  const isMine = (p: Project) => !!user?.username && p.executionAssignee === user.username;
+  const canEditRow = (_p: Project) => isMaster;
   const isSelectable = (p: Project) => {
-    if (!canEditRow(p)) return false;
-    if (isProd) return p.phase === 'ready';
-    return p.phase === 'rehearsal' || p.phase === 'test';
+    if (!isMaster && !isMine(p)) return false;
+    return p.phase === 'ready' || p.phase === 'sign-off';
   };
 
   const toggleOne = (id: string) =>
@@ -204,6 +233,26 @@ export function ExecutionOverviewPage() {
       <div style={styles.toolbar}>
         <span style={styles.toolbarHint}>{t('executionOverview.noRunYet')}</span>
         <div style={{ flex: 1 }} />
+        {dirtyAssigneeIds.length > 0 && (
+          <>
+            <button
+              onClick={handleDiscardAssignees}
+              disabled={savingAssignees}
+              style={{ ...styles.btnGhost, ...(savingAssignees ? styles.btnDisabled : {}) }}
+            >
+              {t('executionOverview.btn.discardAssignees')}
+            </button>
+            <button
+              onClick={handleSaveAssignees}
+              disabled={savingAssignees}
+              style={{ ...styles.btnPrimary, ...(savingAssignees ? styles.btnDisabled : {}) }}
+            >
+              {savingAssignees
+                ? t('executionOverview.btn.savingAssignees')
+                : t('executionOverview.btn.saveAssignees', { n: dirtyAssigneeIds.length })}
+            </button>
+          </>
+        )}
         <button onClick={handleRefresh} style={styles.btnGhost}>
           {t('executionOverview.btn.refresh')}
         </button>
@@ -274,19 +323,27 @@ export function ExecutionOverviewPage() {
                     </td>
                     <td style={styles.td}>
                       {canEditRow(p) ? (
-                        <select
-                          value={p.assignee ?? ''}
-                          onChange={(e) => setProjectAssignee(p.id, e.target.value || undefined)}
-                          style={styles.assigneeSelect}
-                        >
-                          <option value="">— {t('executionOverview.unassigned')} —</option>
-                          {users.map((u) => (
-                            <option key={u.id} value={u.username}>{u.username}</option>
-                          ))}
-                        </select>
+                        (() => {
+                          const draftValue = assigneeDraft[p.id];
+                          const effective = draftValue !== undefined ? draftValue : (p.executionAssignee ?? '');
+                          const isDirty = draftValue !== undefined && (draftValue ?? '') !== (p.executionAssignee ?? '');
+                          return (
+                            <select
+                              value={effective}
+                              onChange={(e) => setAssigneeDraft((cur) => ({ ...cur, [p.id]: e.target.value }))}
+                              disabled={savingAssignees}
+                              style={{ ...styles.assigneeSelect, ...(isDirty ? styles.assigneeSelectDirty : {}) }}
+                            >
+                              <option value="">— {t('executionOverview.unassigned')} —</option>
+                              {users.map((u) => (
+                                <option key={u.id} value={u.username}>{u.username}</option>
+                              ))}
+                            </select>
+                          );
+                        })()
                       ) : (
-                        <span style={{ ...styles.assigneeText, color: p.assignee ? 'var(--text)' : 'var(--text-4)' }}>
-                          {p.assignee ?? t('executionOverview.unassigned')}
+                        <span style={{ ...styles.assigneeText, color: p.executionAssignee ? 'var(--text)' : 'var(--text-4)' }}>
+                          {p.executionAssignee ?? t('executionOverview.unassigned')}
                         </span>
                       )}
                     </td>
@@ -457,6 +514,12 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '4px 8px', border: '1px solid var(--border-strong)', borderRadius: 3,
     background: 'var(--panel)', color: 'var(--text)', fontSize: 12,
     outline: 'none', fontFamily: 'var(--mono)', minWidth: 110,
+  },
+  assigneeSelectDirty: {
+    background: 'var(--amber-50)',
+    borderColor: 'var(--amber)',
+    color: 'var(--amber)',
+    fontWeight: 600,
   },
   assigneeText: { fontFamily: 'var(--mono)', fontSize: 11.5 },
 

@@ -6,6 +6,7 @@ import { useSettingsStore } from '../store/settings';
 import { projectApi } from '../api/workspace';
 import { ApiError } from '../api/client';
 import { useAuthStore } from '../store/auth';
+import { useActiveProjectReadOnly } from '../store/readOnly';
 import { DdlSchemaPanel } from '../components/DdlSchemaPanel';
 import { LockIcon } from '../components/LockIcon';
 import { Toast } from '../components/Toast';
@@ -135,6 +136,7 @@ export function SettingsPage() {
 
 function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
   const t = useT();
+  const readOnly = useActiveProjectReadOnly();
   const [name, setName] = useState(project.name);
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
@@ -180,8 +182,8 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
             {savedMsg && <span style={styles.savedMsg}>{savedMsg}</span>}
             <button
               onClick={handleSave}
-              disabled={!dirty || saving}
-              style={{ ...styles.btnPrimary, ...((!dirty || saving) ? styles.btnDisabled : {}) }}
+              disabled={!dirty || saving || readOnly}
+              style={{ ...styles.btnPrimary, ...((!dirty || saving || readOnly) ? styles.btnDisabled : {}) }}
             >
               {saving ? t('projectSettings.action.saving') : t('projectSettings.action.save')}
             </button>
@@ -190,12 +192,12 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
       />
       <PSCard>
         <PSRow label={t('projectSettings.row.name')}>
-          <PSInput value={name} onChange={unlocked ? setName : undefined} readOnly={!unlocked} />
+          <PSInput value={name} onChange={unlocked && !readOnly ? setName : undefined} readOnly={!unlocked || readOnly} />
           <button
             type="button"
             onClick={() => setUnlocked((u) => !u)}
-            style={styles.btnLockIcon}
-            disabled={saving}
+            style={{ ...styles.btnLockIcon, ...(readOnly ? styles.btnDisabled : {}) }}
+            disabled={saving || readOnly}
             title={unlocked ? t('projectSettings.general.lock') : t('projectSettings.general.unlock')}
             aria-label={unlocked ? t('projectSettings.general.lock') : t('projectSettings.general.unlock')}
           >
@@ -217,6 +219,7 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
         <PSRow label={t('projectSettings.phase.row')}>
           <select
             value={project.phase}
+            disabled={readOnly}
             onChange={async (e) => {
               const phase = e.target.value as ProjectPhase;
               try {
@@ -227,7 +230,7 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
                 console.error('[settings] phase change failed', err);
               }
             }}
-            style={styles.phaseSelect}
+            style={{ ...styles.phaseSelect, ...(readOnly ? styles.btnDisabled : {}) }}
           >
             {ALL_PHASES.map((ph) => <option key={ph} value={ph}>{ph}</option>)}
           </select>
@@ -344,6 +347,7 @@ migrate rollback --project ${project.id} --to pre-cutover`}
 
 function PSNotify({ project }: { project: Project }) {
   const t = useT();
+  const readOnly = useActiveProjectReadOnly();
   // Solution settings 의 Enable notifications. false 면 Event subscriptions 토글 일괄 비활성.
   const globalNotifEnabled = useSettingsStore((s) => s.notifications);
   const events = [
@@ -400,8 +404,8 @@ function PSNotify({ project }: { project: Project }) {
         actions={
           <button
             onClick={handleSave}
-            disabled={!isDirty}
-            style={{ ...styles.btnPrimary, ...(!isDirty ? styles.btnDisabled : {}) }}
+            disabled={!isDirty || readOnly}
+            style={{ ...styles.btnPrimary, ...((!isDirty || readOnly) ? styles.btnDisabled : {}) }}
           >
             {t('projectSettings.action.saveChanges')}
           </button>
@@ -424,7 +428,7 @@ function PSNotify({ project }: { project: Project }) {
             <Toggle
               on={globalNotifEnabled && isOn(e.k)}
               onChange={() => setDraftSubs((cur) => ({ ...cur, [e.k]: !(cur[e.k] ?? true) }))}
-              disabled={!globalNotifEnabled}
+              disabled={!globalNotifEnabled || readOnly}
               label=""
             />
           </div>
@@ -444,6 +448,7 @@ function PSDanger({ project }: { project: Project }) {
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
+  const readOnly = useActiveProjectReadOnly();
   const deleteProject = useWorkspaceStore((s) => s.deleteProject);
   const createProject = useWorkspaceStore((s) => s.createProject);
 
@@ -511,7 +516,11 @@ function PSDanger({ project }: { project: Project }) {
             </div>
           </div>
           {isMaster ? (
-            <button onClick={() => setDuplicateOpen(true)} style={styles.btnSecondary}>
+            <button
+              onClick={() => setDuplicateOpen(true)}
+              disabled={readOnly}
+              style={{ ...styles.btnSecondary, ...(readOnly ? styles.btnDisabled : {}) }}
+            >
               {t('projectSettings.danger.duplicate.cta')}
             </button>
           ) : (
@@ -527,7 +536,13 @@ function PSDanger({ project }: { project: Project }) {
             </div>
           </div>
           {isMaster ? (
-            <button onClick={() => setConfirmOpen(true)} style={styles.btnDanger}>Delete project…</button>
+            <button
+              onClick={() => setConfirmOpen(true)}
+              disabled={readOnly}
+              style={{ ...styles.btnDanger, ...(readOnly ? styles.btnDisabled : {}) }}
+            >
+              Delete project…
+            </button>
           ) : (
             <span style={styles.coordOnlyTag} title="Coordinator only">Coordinator only</span>
           )}
@@ -790,9 +805,8 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--text-3)',
     fontFamily: 'var(--mono)',
     marginTop: 2,
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
+    lineHeight: 1.4,
+    wordBreak: 'break-word',
   },
   content: { flex: 1, minWidth: 0, overflow: 'auto', padding: '18px 26px 40px' },
 

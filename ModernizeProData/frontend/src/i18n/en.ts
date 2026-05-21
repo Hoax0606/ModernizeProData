@@ -440,6 +440,9 @@ export const en: Record<TranslationKey, string> = {
   'siteSettings.dbStatus.notConfigured': 'Not configured',
   'shell.site.dbConfigured':    'TO-BE DB configured',
   'shell.site.dbNotConfigured': 'TO-BE DB not configured',
+  'shell.readOnly.projectTooltip': 'Read-only — not your assignment',
+  'shell.readOnly.banner':            'Read-only — this project is assigned to {assignee}. You can view but not change anything.',
+  'shell.readOnly.bannerUnassigned':  'Read-only — this project has no assignee yet. You can view but not change anything.',
   'siteSettings.testConnectionHint': 'add host & username to test',
   'siteSettings.projectCount': 'Project count',
   'siteSettings.projectCountHint': 'Number of projects in this site',
@@ -629,7 +632,7 @@ export const en: Record<TranslationKey, string> = {
 
   // Project Settings — General section
   'projectSettings.row.name':                   'Project name',
-  'projectSettings.row.site':                   'Customer site',
+  'projectSettings.row.site':                   'Site name',
   'projectSettings.row.env':                    'Environment label',
   'projectSettings.row.createdAt':              'Created at',
   'projectSettings.general.unlock':             'Unlock',
@@ -803,6 +806,9 @@ export const en: Record<TranslationKey, string> = {
   'siteOverview.col.actions':  'Actions',
   'siteOverview.panel.phaseMix': 'Phase mix',
   'siteOverview.unassigned':   'Unassigned',
+  'siteOverview.btn.saveAssignees':   'Save assignments ({n})',
+  'siteOverview.btn.savingAssignees': 'Saving…',
+  'siteOverview.btn.discardAssignees':'Discard',
   'siteOverview.empty':        'No projects',
 
   'siteExport.title':       'Site export',
@@ -828,6 +834,9 @@ export const en: Record<TranslationKey, string> = {
   'executionOverview.btn.abort':    'Abort',
   'executionOverview.btn.runN':     'Run {n}',
   'executionOverview.btn.abortN':   'Abort {n}',
+  'executionOverview.btn.saveAssignees':   'Save assignments ({n})',
+  'executionOverview.btn.savingAssignees': 'Saving…',
+  'executionOverview.btn.discardAssignees':'Discard',
   'executionOverview.runDisabled':  'Select at least one project to run',
   'executionOverview.abortDisabled':'Select at least one running project to abort',
   'executionOverview.col.checkbox': '',
