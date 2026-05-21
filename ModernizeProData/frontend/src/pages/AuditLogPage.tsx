@@ -170,11 +170,11 @@ export function AuditLogPage() {
                       </div>
                     </td>
                     <td style={styles.td}>
-                      <span style={styles.projTag}>{proj?.name ?? '—'}</span>
+                      <span style={styles.projName}>{proj?.name ?? '—'}</span>
                     </td>
                     <td style={{ ...styles.td, ...styles.mono }}>{log.user}</td>
                     <td style={styles.td}>
-                      <span style={styles.actionTag}>
+                      <span style={{ ...styles.actionTag, ...actionTagColor(log.action) }}>
                         {log.action.replace(/\b\w/g, (c) => c.toUpperCase())}
                       </span>
                     </td>
@@ -202,6 +202,30 @@ function Filter({ label, children }: { label: string; children: React.ReactNode 
 
 function Th({ children }: { children: React.ReactNode }) {
   return <th style={styles.th}>{children}</th>;
+}
+
+// action 별 색상 — VersionsPage / Approvals 의 snapshot 상태 색과 통일.
+function actionTagColor(action: string): React.CSSProperties {
+  const a = action.toLowerCase();
+  if (a.includes('cutover')) {
+    return { background: 'var(--red-50)', color: 'var(--red)', borderColor: 'var(--red)' };
+  }
+  if (a.includes('approve')) {
+    return { background: 'var(--green-50)', color: 'var(--green)', borderColor: 'var(--green)' };
+  }
+  if (a.includes('reject')) {
+    return { background: 'var(--red-50)', color: 'var(--red)', borderColor: 'var(--red)' };
+  }
+  if (a.includes('request') || a.includes('pending')) {
+    return { background: 'var(--amber-50)', color: 'var(--amber)', borderColor: 'var(--amber)' };
+  }
+  if (a.includes('snapshot') || a.includes('created') || a.includes('create')) {
+    return { background: 'var(--navy-50)', color: 'var(--navy)', borderColor: 'var(--navy)' };
+  }
+  if (a.includes('delete')) {
+    return { background: 'var(--panel-2)', color: 'var(--text-3)', borderColor: 'var(--border-strong)' };
+  }
+  return {};
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -296,16 +320,10 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11,
     color: 'var(--text-3)',
   },
-  projTag: {
-    display: 'inline-block',
-    padding: '1px 7px',
-    background: 'var(--navy-50)',
-    color: 'var(--navy)',
-    border: '1px solid var(--navy)',
-    borderRadius: 3,
-    fontSize: 10,
-    fontWeight: 600,
-    fontFamily: 'var(--mono)',
+  projName: {
+    fontSize: 11.5,
+    fontWeight: 700,
+    color: 'var(--text)',
     whiteSpace: 'nowrap',
   },
   actionTag: {
@@ -319,6 +337,8 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     fontFamily: 'var(--mono)',
     whiteSpace: 'nowrap',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
   },
   emptyRow: {
     padding: '60px 20px',

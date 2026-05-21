@@ -2,6 +2,8 @@ package com.ksinfo.modernize_pro_data.coordinator.api;
 
 import com.ksinfo.modernize_pro_data.common.dto.ApiResponse;
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.coordinator.site.AuditLogService;
+import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.Snapshot;
 import com.ksinfo.modernize_pro_data.coordinator.site.SnapshotRepository;
@@ -37,6 +39,7 @@ public class SnapshotController {
 
     private final SnapshotRepository snapshotRepository;
     private final ProjectRepository projectRepository;
+    private final AuditLogService auditLogService;
 
     /* ── DTOs ──────────────────────────────────── */
 
@@ -71,34 +74,41 @@ public class SnapshotController {
             @Valid @RequestBody CreateSnapshotRequest req,
             Authentication auth
     ) {
-        if (!projectRepository.existsById(projectId)) {
-            throw new ApiException("PROJECT_NOT_FOUND", "프로젝트를 찾을 수 없습니다", HttpStatus.NOT_FOUND);
-        }
-        
-        // 다음 버전 자동 생성:
-        //   직전 snapshot 이 approved → major bump (v1.x → v2.0)
-        //   그 외 (rejected/pending/draft) → minor bump (v1.0 → v1.1)
+        Project project = projectRepository.findById(projectId)
+                .orElseThrow(() -> new ApiException("PROJECT_NOT_FOUND", "프로젝트를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
+
         String nextVersion = snapshotRepository.findLatestByProjectId(projectId)
                 .map(latest -> Snapshot.generateNextVersion(latest.getVersion(), latest.getStatus()))
                 .orElse("v1.0");
-        
+
         Snapshot s = Snapshot.create(projectId, req.name(), req.description(),
                 req.type(), auth.getName(), req.tableCount(), req.ruleCount(), nextVersion);
         snapshotRepository.save(s);
         log.info("Snapshot created: {} ({}) v{} in project {}", s.getName(), s.getType(), s.getVersion(), projectId);
+
+        String action = "cutover".equalsIgnoreCase(req.type()) ? "cutover snapshot created" : "snapshot created";
+        auditLogService.record(project, auth.getName(), action)
+                .snapshot(s.getId(), s.getName())
+                .details(req.description())
+                .save();
         return ApiResponse.ok(s);
     }
 
     @PostMapping("/api/v1/snapshots/{id}/request")
     @Transactional
-    public ApiResponse<Snapshot> request(@PathVariable String id) {
+    public ApiResponse<Snapshot> request(@PathVariable String id, Authentication auth) {
         Snapshot s = findOrThrow(id);
         if (!"draft".equals(s.getStatus())) {
             throw new ApiException("SNAPSHOT_INVALID_STATUS", "draft 상태에서만 요청 가능", HttpStatus.BAD_REQUEST);
         }
         s.setStatus("pending");
         snapshotRepository.save(s);
-        log.info("Snapshot requested: {} ({})", s.getName(), s.getId());
+        log.info("Snapshot requested: {} ({}) by {}", s.getName(), s.getId(), auth.getName());
+
+        projectRepository.findById(s.getProjectId()).ifPresent(p ->
+                auditLogService.record(p, auth.getName(), "review requested")
+                        .snapshot(s.getId(), s.getName())
+                        .save());
         return ApiResponse.ok(s);
     }
 
@@ -115,6 +125,11 @@ public class SnapshotController {
         s.setApprovedAt(OffsetDateTime.now());
         snapshotRepository.save(s);
         log.info("Snapshot approved: {} by {}", s.getName(), auth.getName());
+
+        projectRepository.findById(s.getProjectId()).ifPresent(p ->
+                auditLogService.record(p, auth.getName(), "approved")
+                        .snapshot(s.getId(), s.getName())
+                        .save());
         return ApiResponse.ok(s);
     }
 
@@ -136,14 +151,27 @@ public class SnapshotController {
         s.setRejectionReason(req.reason());
         snapshotRepository.save(s);
         log.info("Snapshot rejected: {} by {}", s.getName(), auth.getName());
+
+        projectRepository.findById(s.getProjectId()).ifPresent(p ->
+                auditLogService.record(p, auth.getName(), "rejected")
+                        .snapshot(s.getId(), s.getName())
+                        .details(req.reason())
+                        .save());
         return ApiResponse.ok(s);
     }
 
     @DeleteMapping("/api/v1/snapshots/{id}")
     @Transactional
-    public ApiResponse<Void> delete(@PathVariable String id) {
+    public ApiResponse<Void> delete(@PathVariable String id, Authentication auth) {
         Snapshot s = findOrThrow(id);
+        String snapshotName = s.getName();
+        String projectId = s.getProjectId();
         snapshotRepository.delete(s);
+
+        projectRepository.findById(projectId).ifPresent(p ->
+                auditLogService.record(p, auth.getName(), "snapshot deleted")
+                        .snapshot(id, snapshotName)
+                        .save());
         return ApiResponse.ok(null);
     }
 

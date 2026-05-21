@@ -482,8 +482,35 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
   const users = useUsersStore((s) => s.users);
-  // non-master 는 본인에게 분배된 행만 편집 가능. Unassigned 포함 다른 행은 read-only.
-  const canEditRow = (p: Project) => isMaster || (!!user?.username && p.assignee === user.username);
+  // Coordinator(master) 만 dropdown 으로 변경 가능. 그 외 사용자는 본인 row 도 text 로 표시.
+  const canEditRow = (_p: Project) => isMaster;
+
+  // 담당자 변경 draft — Save 누르기 전까지는 backend / store 에 반영 안 됨.
+  const [assigneeDraft, setAssigneeDraft] = useState<Record<string, string>>({});
+  const [savingAssignees, setSavingAssignees] = useState(false);
+  const dirtyAssigneeIds = useMemo(() => Object.keys(assigneeDraft).filter((id) => {
+    const p = projects.find((pp) => pp.id === id);
+    if (!p) return false;
+    return (assigneeDraft[id] ?? '') !== (p.assignee ?? '');
+  }), [assigneeDraft, projects]);
+  const handleSaveAssignees = async () => {
+    if (dirtyAssigneeIds.length === 0 || savingAssignees) return;
+    setSavingAssignees(true);
+    try {
+      await Promise.all(
+        dirtyAssigneeIds.map((id) =>
+          setProjectAssignee(id, assigneeDraft[id] || undefined),
+        ),
+      );
+      setAssigneeDraft({});
+    } finally {
+      setSavingAssignees(false);
+    }
+  };
+  const handleDiscardAssignees = () => {
+    if (savingAssignees) return;
+    setAssigneeDraft({});
+  };
 
   // ProjectDashboard 와 동일한 TO-BE schema 가 source of truth.
   // 프로젝트마다 tobeDdlApi.get 으로 받아 tables/columns 카운트를 모아둔다.
@@ -586,6 +613,32 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
               </select>
             </label>
             <div style={{ flex: 1 }} />
+            {dirtyAssigneeIds.length > 0 && (
+              <>
+                <button
+                  onClick={handleDiscardAssignees}
+                  disabled={savingAssignees}
+                  style={{ ...styles.btnGhost, ...(savingAssignees ? styles.btnDisabled : {}) }}
+                >
+                  {t('siteOverview.btn.discardAssignees')}
+                </button>
+                <button
+                  onClick={handleSaveAssignees}
+                  disabled={savingAssignees}
+                  style={{
+                    padding: '5px 14px',
+                    background: 'var(--navy)', color: '#fff',
+                    border: '1px solid var(--navy)', borderRadius: 3,
+                    fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+                    ...(savingAssignees ? styles.btnDisabled : {}),
+                  }}
+                >
+                  {savingAssignees
+                    ? t('siteOverview.btn.savingAssignees')
+                    : t('siteOverview.btn.saveAssignees', { n: dirtyAssigneeIds.length })}
+                </button>
+              </>
+            )}
             <span style={styles.filterCount}>
               {t('filter.count', { shown: filteredProjects.length, total: projects.length })}
             </span>
@@ -627,24 +680,31 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
                         }}
                       >
                         <td style={styles.td}>
-                          <span style={{ ...styles.statusDot, ...statusDotColor(p.phase) }} />
-                          <span style={{ fontWeight: 500, marginLeft: 7 }}>{p.name}</span>
+                          <span style={{ fontWeight: 500 }}>{p.name}</span>
                         </td>
                         <td style={styles.td}>
                           <span style={{ ...styles.phaseChip, ...phaseChipColor(p.phase, p.runStatus) }}>{p.phase}</span>
                         </td>
                         <td style={styles.td} onClick={(e) => e.stopPropagation()}>
                           {canEditRow(p) ? (
-                            <select
-                              value={p.assignee ?? ''}
-                              onChange={(e) => setProjectAssignee(p.id, e.target.value || undefined)}
-                              style={styles.assigneeSelect}
-                            >
-                              <option value="">— {t('siteOverview.unassigned')} —</option>
-                              {users.map((u) => (
-                                <option key={u.id} value={u.username}>{u.username}</option>
-                              ))}
-                            </select>
+                            (() => {
+                              const draftValue = assigneeDraft[p.id];
+                              const effective = draftValue !== undefined ? draftValue : (p.assignee ?? '');
+                              const isDirty = draftValue !== undefined && (draftValue ?? '') !== (p.assignee ?? '');
+                              return (
+                                <select
+                                  value={effective}
+                                  onChange={(e) => setAssigneeDraft((cur) => ({ ...cur, [p.id]: e.target.value }))}
+                                  disabled={savingAssignees}
+                                  style={{ ...styles.assigneeSelect, ...(isDirty ? styles.assigneeSelectDirty : {}) }}
+                                >
+                                  <option value="">— {t('siteOverview.unassigned')} —</option>
+                                  {users.map((u) => (
+                                    <option key={u.id} value={u.username}>{u.username}</option>
+                                  ))}
+                                </select>
+                              );
+                            })()
                           ) : (
                             <span style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: p.assignee ? 'var(--text)' : 'var(--text-4)' }}>
                               {p.assignee ?? t('siteOverview.unassigned')}
@@ -905,6 +965,17 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--panel)', color: 'var(--text)', fontSize: 12,
     outline: 'none', fontFamily: 'var(--mono)', minWidth: 110,
   },
+  assigneeSelectDirty: {
+    background: 'var(--amber-50)',
+    borderColor: 'var(--amber)',
+    color: 'var(--amber)',
+    fontWeight: 600,
+  },
+  btnGhost: {
+    padding: '5px 10px', border: '1px solid var(--border-strong)', borderRadius: 3,
+    background: 'var(--panel)', color: 'var(--text-2)', fontSize: 11.5, cursor: 'pointer',
+  },
+  btnDisabled: { opacity: 0.45, cursor: 'not-allowed' },
   mappingProgressOuter: {
     width: 140, height: 6, background: 'var(--panel-2)',
     border: '1px solid var(--border)', borderRadius: 3, overflow: 'hidden',

@@ -13,7 +13,9 @@ import { CreateProjectModal } from '../components/CreateProjectModal';
 import { SignOutModal } from '../components/SignOutModal';
 import { ClusterAdminModal } from '../components/ClusterAdminModal';
 import { NotificationToast } from '../components/NotificationToast';
+import { LockIcon } from '../components/LockIcon';
 import { useWorkspaceStore } from '../store/workspace';
+import { isProjectReadOnly } from '../store/readOnly';
 import { useSnapshotsStore } from '../store/snapshots';
 import { useAuditLogStore } from '../store/auditLog';
 import { useNotificationStore } from '../store/notifications';
@@ -100,7 +102,7 @@ export function AppShell() {
     setActiveProject(st.activateProjectId ?? null);
   }, [location.key, setActiveProject]);
 
-  // 10초 간격으로 서버 동기화 (sites → projects → snapshots 순서 보장)
+  // 10초 간격으로 서버 동기화 (sites → projects → snapshots → audit logs 순서 보장)
   useEffect(() => {
     const sync = async () => {
       if (isEditingRef.current) return;
@@ -109,6 +111,7 @@ export function AppShell() {
       if (siteId) {
         await fetchProjects(siteId);
         await fetchSnapshots(siteId);
+        await useAuditLogStore.getState().fetchBySite(siteId);
       }
     };
     void sync();
@@ -118,6 +121,7 @@ export function AppShell() {
 
   const activeSite = useMemo(() => sites.find((s) => s.id === activeSiteId) ?? null, [sites, activeSiteId]);
   const activeProject = useMemo(() => allProjects.find((p) => p.id === activeProjectId) ?? null, [allProjects, activeProjectId]);
+  const activeProjectReadOnly = isProjectReadOnly(activeProject, user);
 
   const siteDbConfigured = (s: typeof sites[number]) => {
     const db = s.tobeDbByEnv?.[s.environment] as Partial<{ type: string; host: string; database: string; username: string }> | undefined;
@@ -407,35 +411,47 @@ export function AppShell() {
                   : <>{t('shell.projectsEmpty.noSite')}</>}
               </div>
             ) : (
-              projects.map((p) => (
-                <div
-                  key={p.id}
-                  onClick={() => {
-                    setActiveProject(p.id);
-                    // 사이트-레벨 페이지에 있을 때만 project 페이지로 이동 — project-level 페이지면 그대로 두고 프로젝트만 전환.
-                    if (location.pathname.startsWith('/site/')) {
-                      navigate('/', { replace: true });
-                    }
-                  }}
-                  style={{
-                    ...styles.projectRow,
-                    ...(activeProject?.id === p.id ? styles.projectRowActive : {}),
-                  }}
-                >
-                  <div style={styles.projectName}>{p.name}</div>
-                  <div style={styles.projectMeta}>
-                    {(() => {
-                      const c = phaseColors(p.phase, p.runStatus);
-                      return (
-                        <span style={{ ...styles.phaseBadge, background: c.bg, color: c.color, borderColor: c.border }}>
-                          {p.phase}
+              projects.map((p) => {
+                const readOnly = isProjectReadOnly(p, user);
+                return (
+                  <div
+                    key={p.id}
+                    onClick={() => {
+                      setActiveProject(p.id);
+                      // 사이트-레벨 페이지에 있을 때만 project 페이지로 이동 — project-level 페이지면 그대로 두고 프로젝트만 전환.
+                      if (location.pathname.startsWith('/site/')) {
+                        navigate('/', { replace: true });
+                      }
+                    }}
+                    style={{
+                      ...styles.projectRow,
+                      ...(activeProject?.id === p.id ? styles.projectRowActive : {}),
+                      ...(readOnly ? styles.projectRowReadOnly : {}),
+                    }}
+                    title={readOnly ? t('shell.readOnly.projectTooltip') : undefined}
+                  >
+                    <div style={styles.projectNameRow}>
+                      <span style={styles.projectName}>{p.name}</span>
+                      {readOnly && (
+                        <span style={styles.projectReadOnlyIcon} aria-label={t('shell.readOnly.projectTooltip')}>
+                          <LockIcon open={false} color="var(--amber)" size={11} />
                         </span>
-                      );
-                    })()}
-                    <span style={styles.projectMetaDim}>{p.tableCount} tables</span>
+                      )}
+                    </div>
+                    <div style={styles.projectMeta}>
+                      {(() => {
+                        const c = phaseColors(p.phase, p.runStatus);
+                        return (
+                          <span style={{ ...styles.phaseBadge, background: c.bg, color: c.color, borderColor: c.border }}>
+                            {p.phase}
+                          </span>
+                        );
+                      })()}
+                      <span style={styles.projectMetaDim}>{p.tableCount} tables</span>
+                    </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
 
@@ -716,6 +732,17 @@ export function AppShell() {
             <Tab to="/site/approvals" label={t('tab.approvals')} />
             <Tab to="/site/export" label={t('tab.siteExport')} />
             <Tab to="/site/audit" label={t('tab.auditLog')} />
+          </div>
+        )}
+
+        {activeProject && activeProjectReadOnly && (
+          <div style={styles.readOnlyBanner} role="status" aria-live="polite">
+            <LockIcon open={false} color="var(--amber)" size={13} />
+            <span style={styles.readOnlyBannerText}>
+              {activeProject.assignee
+                ? t('shell.readOnly.banner', { assignee: activeProject.assignee })
+                : t('shell.readOnly.bannerUnassigned')}
+            </span>
           </div>
         )}
 
@@ -1107,6 +1134,33 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 3,
     cursor: 'pointer',
   },
+  projectRowReadOnly: {
+    opacity: 0.65,
+  },
+  projectNameRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    minWidth: 0,
+  },
+  projectReadOnlyIcon: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    flexShrink: 0,
+  },
+  readOnlyBanner: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '6px 14px',
+    background: 'var(--amber-50)',
+    borderBottom: '1px solid var(--amber)',
+    color: 'var(--amber)',
+    fontSize: 11.5,
+    fontFamily: 'var(--mono)',
+    lineHeight: 1.4,
+  },
+  readOnlyBannerText: { fontWeight: 600 },
   projectRowActive: {
     background: 'var(--green-50)',
     boxShadow: 'inset 3px 0 0 var(--green)',
@@ -1118,6 +1172,8 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
+    flex: '0 1 auto',
+    minWidth: 0,
   },
   projectMeta: {
     display: 'flex',

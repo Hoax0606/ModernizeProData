@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom';
 import { useWorkspaceStore, type ProjectPhase } from '../store/workspace';
 import { useSnapshotsStore, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
 import { useAuthStore } from '../store/auth';
+import { useActiveProjectReadOnly } from '../store/readOnly';
 import { useAuditLogStore } from '../store/auditLog';
 import { useT, type TranslationKey } from '../i18n';
 
@@ -15,6 +16,7 @@ import { useT, type TranslationKey } from '../i18n';
 export function VersionsPage() {
   const t = useT();
   const user = useAuthStore((s) => s.user);
+  const readOnly = useActiveProjectReadOnly();
 
   const projects = useWorkspaceStore((s) => s.projects);
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
@@ -104,24 +106,42 @@ export function VersionsPage() {
     [snapshots, selectedSnapshotId],
   );
 
-  // 페이지 진입·snapshots fetch 완료 후, 선택된 게 없으면 최신 snapshot 자동 선택
+  // 페이지 첫 진입 시 한 번만 최신 snapshot 자동 선택.
+  // polling / 외부 변경으로 snapshots 가 갱신돼도 사용자가 보고 있던 화면을 강제 전환하지 않음
+  // (사용자가 row 를 누르거나 새 스냅샷 생성 시에만 selectedSnapshotId 변경).
+  const initializedRef = useRef(false);
   useEffect(() => {
+    if (initializedRef.current) return;
     if (snapshots.length === 0) return;
-    if (selectedSnapshotId && snapshots.some((s) => s.id === selectedSnapshotId)) return;
     setSelectedSnapshotId(snapshots[0].id);
-  }, [snapshots, selectedSnapshotId]);
-
-  // 알림 클릭으로 들어왔을 때 location.state.selectSnapshotId 로 지정된 스냅샷을 자동 선택
-  const location = useLocation();
+    initializedRef.current = true;
+  }, [snapshots]);
+  // 프로젝트 전환 시 다시 자동 선택되도록 reset
   useEffect(() => {
+    initializedRef.current = false;
+    setSelectedSnapshotId(null);
+  }, [activeProjectId]);
+
+  // 알림 클릭으로 들어왔을 때 location.state.selectSnapshotId 로 지정된 스냅샷을 자동 선택.
+  // - dependency 에서 `snapshots` 제거: 10초 polling 으로 snapshots 갱신될 때 effect 가 재실행되어
+  //   사용자가 클릭하지 않은 snapshot 으로 강제 이동되는 것 방지.
+  // - location.key 마다 1회만 처리되도록 ref 가드.
+  // - 처리한 뒤 location.state 즉시 클리어 (history.replaceState 가 비동기일 수 있어 ref 가 1차 가드).
+  const location = useLocation();
+  const handledLocationKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (handledLocationKeyRef.current === location.key) return;
     const st = location.state as { selectSnapshotId?: string | null } | null;
     const targetId = st?.selectSnapshotId;
-    if (!targetId) return;
-    // snapshot 이 아직 fetch 안 됐을 수 있으니, 도착하면 선택
-    if (snapshots.some((s) => s.id === targetId)) {
-      setSelectedSnapshotId(targetId);
+    if (!targetId) {
+      handledLocationKeyRef.current = location.key;
+      return;
     }
-  }, [location.key, snapshots]);
+    setSelectedSnapshotId(targetId);
+    initializedRef.current = true;
+    handledLocationKeyRef.current = location.key;
+    window.history.replaceState({}, '');
+  }, [location.key]);
 
   // AUDIT LOG 접기/펼치기 상태
   const [auditLogExpanded, setAuditLogExpanded] = useState(true);
@@ -252,12 +272,17 @@ export function VersionsPage() {
         <div style={{ flex: 1 }} />
         {!createOpen && (
           <>
-            <button onClick={() => openCreate('mapping')} style={styles.btnPrimary}>
+            <button
+              onClick={() => openCreate('mapping')}
+              style={{ ...styles.btnPrimary, ...(readOnly ? styles.btnDisabled : {}) }}
+              disabled={readOnly}
+            >
               {t('versions.create')}
             </button>
             <button
               onClick={() => openCreate('cutover')}
-              style={styles.btnCutover}
+              style={{ ...styles.btnCutover, ...(readOnly ? styles.btnDisabled : {}) }}
+              disabled={readOnly}
             >
               {t('versions.createCutover')}
             </button>
@@ -268,7 +293,8 @@ export function VersionsPage() {
                   for (const s of snapshots) await deleteSnapshot(s.id);
                   if (activeProjectId) clearAuditLogByProject(activeProjectId);
                 }}
-                style={{ ...styles.btnGhost, color: 'var(--red)', borderColor: 'var(--red)' }}
+                style={{ ...styles.btnGhost, color: 'var(--red)', borderColor: 'var(--red)', ...(readOnly ? styles.btnDisabled : {}) }}
+                disabled={readOnly}
               >
                 Delete all ({snapshots.length})
               </button>
@@ -283,7 +309,7 @@ export function VersionsPage() {
           <div style={styles.cutoverConfirmTitle}>{t('versions.cutoverConfirm.title')}</div>
           <div style={styles.cutoverConfirmDesc}>{t('versions.cutoverConfirm.desc')}</div>
           <div style={styles.cutoverConfirmActions}>
-            <button onClick={handleCutoverConfirm} style={styles.btnCutover}>{t('versions.cutoverConfirm.proceed')}</button>
+            <button onClick={handleCutoverConfirm} style={{ ...styles.btnCutover, ...(readOnly ? styles.btnDisabled : {}) }} disabled={readOnly}>{t('versions.cutoverConfirm.proceed')}</button>
             <button onClick={() => setCutoverConfirmOpen(false)} style={styles.btnGhost}>{t('common.cancel')}</button>
           </div>
         </div>
@@ -302,7 +328,7 @@ export function VersionsPage() {
               {createType === 'cutover' ? t('versions.type.cutover') : t('versions.type.mapping')} snapshot
             </div>
             <div style={styles.createActions}>
-              <button type="submit" style={{ ...styles.btnPrimary, ...(newName.trim() ? {} : styles.btnDisabled) }} disabled={!newName.trim()}>
+              <button type="submit" style={{ ...styles.btnPrimary, ...(newName.trim() && !readOnly ? {} : styles.btnDisabled) }} disabled={!newName.trim() || readOnly}>
                 {t('versions.create.submit')}
               </button>
               <button type="button" onClick={resetCreate} style={styles.btnGhost}>
@@ -408,7 +434,7 @@ export function VersionsPage() {
         {/* 오른쪽: 선택된 스냅샷 상세 정보 */}
         <div style={styles.detailPanel}>
           {selectedSnapshot ? (
-            <SnapshotDetailView snapshot={selectedSnapshot} onRequest={() => handleRequest(selectedSnapshot.id)} />
+            <SnapshotDetailView snapshot={selectedSnapshot} onRequest={() => handleRequest(selectedSnapshot.id)} readOnly={readOnly} />
           ) : (
             <div style={styles.noSelectionMessage}>
               <div style={styles.noSelectionTitle}>Select a snapshot</div>
@@ -490,7 +516,7 @@ function ChangeRow({ kind, table, detail }: { kind: 'added' | 'modified'; table:
   );
 }
 
-function SnapshotDetailView({ snapshot, onRequest }: {
+function SnapshotDetailView({ snapshot, onRequest, readOnly }: {
   snapshot: {
     id: string;
     name: string;
@@ -509,6 +535,7 @@ function SnapshotDetailView({ snapshot, onRequest }: {
     ruleCount: number;
   };
   onRequest: () => void;
+  readOnly?: boolean;
 }) {
   const t = useT();
   const user = useAuthStore((s) => s.user);
@@ -591,7 +618,8 @@ function SnapshotDetailView({ snapshot, onRequest }: {
                       setConfirmingRequest(false);
                       onRequest();
                     }}
-                    style={styles.btnPrimary}
+                    style={{ ...styles.btnPrimary, ...(readOnly ? styles.btnDisabled : {}) }}
+                    disabled={readOnly}
                   >
                     Confirm
                   </button>
@@ -600,7 +628,7 @@ function SnapshotDetailView({ snapshot, onRequest }: {
                   </button>
                 </div>
               ) : (
-                <button onClick={() => setConfirmingRequest(true)} style={styles.btnPrimary}>
+                <button onClick={() => setConfirmingRequest(true)} style={{ ...styles.btnPrimary, ...(readOnly ? styles.btnDisabled : {}) }} disabled={readOnly}>
                   Request Review
                 </button>
               )}

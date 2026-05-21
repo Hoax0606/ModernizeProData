@@ -52,6 +52,9 @@ public class Project {
     @Column(length = 64)
     private String assignee;
 
+    @Column(name = "execution_assignee", length = 64)
+    private String executionAssignee;
+
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(columnDefinition = "jsonb")
     private Map<String, Object> cutover;
