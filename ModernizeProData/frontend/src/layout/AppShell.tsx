@@ -1,6 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuthStore, roleLabel } from '../store/auth';
+import { authApi } from '../api/auth';
 import { useUsersStore } from '../store/users';
 import { BrandName } from '../components/BrandName';
 import { AboutModal } from '../components/AboutModal';
@@ -250,7 +251,10 @@ export function AppShell() {
     return () => window.removeEventListener('click', close);
   }, [notifOpen]);
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    // first-wins 정책: server-side 세션도 무효화해야 다음 로그인이 허용됨.
+    // 네트워크 실패/토큰 만료 등은 swallow — 클라이언트 정리는 그래도 진행.
+    try { await authApi.logout(); } catch { /* noop */ }
     logout();
     resetUsers();
     navigate('/login');

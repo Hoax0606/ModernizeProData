@@ -6,6 +6,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -54,9 +55,12 @@ public class AuthController {
     }
 
     @PostMapping("/logout")
-    public ApiResponse<Map<String, String>> logout() {
-        // Stateless JWT — 서버는 별도 작업 없음. 클라이언트가 토큰 폐기만 하면 됨.
-        // 추후 blacklist (Redis 등) 도입 가능.
+    public ApiResponse<Map<String, String>> logout(Authentication auth) {
+        // first-wins 정책상 server-side 에서도 세션 무효화. 다음 로그인 허용을 위해 필수.
+        // permitAll endpoint 이므로 auth 가 null 일 수 있음 (토큰 없이 호출). 그 경우 noop.
+        if (auth != null && auth.getName() != null) {
+            authService.logout(auth.getName());
+        }
         return ApiResponse.ok(Map.of("message", "로그아웃 되었습니다"));
     }
 }

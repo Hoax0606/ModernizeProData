@@ -19,8 +19,11 @@ import java.util.List;
 
 /**
  * Authorization: Bearer xxx 헤더의 JWT 를 검증하고 SecurityContext 에 사용자/권한 주입.
- * 토큰 없거나 잘못된 경우 그냥 통과 (SecurityConfig 의 authorizeHttpRequests 가 거부).
- * 삭제된 사용자는 DB 조회 후 인증 거부 → 프론트에서 401 수신 시 자동 로그아웃.
+ *
+ * 동시 접속 차단 (first-wins) 검증:
+ * - token 의 sid claim 이 user.current_session_id 와 일치해야 인증 주입.
+ * - 불일치 / null 인 경우 인증 주입 안 함 → SecurityConfig 가 401.
+ * - 토큰이 형식적으로 유효해도 user 가 다른 곳에서 logout / 새 로그인 했으면 무효화.
  */
 @Component
 @RequiredArgsConstructor
@@ -41,12 +44,16 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             jwtService.parse(token).ifPresent(claims -> {
                 String username = claims.getSubject();
                 String role = claims.get("role", String.class);
-                if (username != null && role != null && userRepository.existsByUsername(username)) {
-                    var authority = new SimpleGrantedAuthority("ROLE_" + role.toUpperCase());
-                    var auth = new UsernamePasswordAuthenticationToken(username, null, List.of(authority));
-                    auth.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
-                    SecurityContextHolder.getContext().setAuthentication(auth);
-                }
+                String sid = claims.get("sid", String.class);
+                if (username == null || role == null || sid == null) return;
+                userRepository.findByUsername(username).ifPresent(user -> {
+                    if (sid.equals(user.getCurrentSessionId())) {
+                        var authority = new SimpleGrantedAuthority("ROLE_" + role.toUpperCase());
+                        var auth = new UsernamePasswordAuthenticationToken(username, null, List.of(authority));
+                        auth.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+                        SecurityContextHolder.getContext().setAuthentication(auth);
+                    }
+                });
             });
         }
         chain.doFilter(request, response);

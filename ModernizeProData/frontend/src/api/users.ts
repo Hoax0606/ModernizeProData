@@ -34,4 +34,7 @@ export const usersApi = {
 
   changeMyPassword: (currentPassword: string, newPassword: string) =>
     unwrap(api.post<ApiResponse<null>>(`/api/v1/users/me/password`, { currentPassword, newPassword })),
+
+  resetPassword: (id: string, newPassword: string) =>
+    unwrap(api.post<ApiResponse<null>>(`/api/v1/users/${id}/password`, { newPassword })),
 };

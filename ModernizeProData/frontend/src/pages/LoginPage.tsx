@@ -25,9 +25,10 @@ export function LoginPage() {
       navigate('/');
     } catch (err) {
       if (err instanceof ApiError) {
-        if (err.code === 'AUTH_USER_NOT_FOUND')         setError(t('login.error.userNotFound'));
-        else if (err.code === 'AUTH_PASSWORD_INVALID')  setError(t('login.error.invalidPassword'));
-        else                                            setError(err.message || t('login.error'));
+        if (err.code === 'AUTH_USER_NOT_FOUND')                setError(t('login.error.userNotFound'));
+        else if (err.code === 'AUTH_PASSWORD_INVALID')         setError(t('login.error.invalidPassword'));
+        else if (err.code === 'AUTH_SESSION_ACTIVE_ELSEWHERE') setError(t('login.error.sessionActiveElsewhere'));
+        else                                                   setError(err.message || t('login.error'));
       } else {
         setError((err as Error).message ?? t('login.error'));
       }

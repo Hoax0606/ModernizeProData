@@ -45,6 +45,16 @@ public class User {
     @Column(name = "last_signin_at")
     private OffsetDateTime lastSignInAt;
 
+    /** 동시 접속 차단 (first-wins) — JWT 의 sid claim 과 비교할 현재 활성 세션 식별자. */
+    @Column(name = "current_session_id", length = 40)
+    private String currentSessionId;
+
+    @Column(name = "current_session_issued_at")
+    private OffsetDateTime currentSessionIssuedAt;
+
+    @Column(name = "current_session_expires_at")
+    private OffsetDateTime currentSessionExpiresAt;
+
     /** 새 사용자 생성용 팩토리 — id 자동 부여, createdAt = now. */
     public static User create(String username, String passwordHash, UserRole role) {
         User u = new User();
