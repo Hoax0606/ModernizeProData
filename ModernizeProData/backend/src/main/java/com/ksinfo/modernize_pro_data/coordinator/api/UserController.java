@@ -2,6 +2,7 @@ package com.ksinfo.modernize_pro_data.coordinator.api;
 
 import com.ksinfo.modernize_pro_data.common.dto.ApiResponse;
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.coordinator.auth.AuthService;
 import com.ksinfo.modernize_pro_data.coordinator.user.User;
 import com.ksinfo.modernize_pro_data.coordinator.user.UserRepository;
 import com.ksinfo.modernize_pro_data.coordinator.user.UserRole;
@@ -43,6 +44,7 @@ public class UserController {
 
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
+    private final AuthService authService;
 
     /* ── DTOs ─────────────────────────────────────────────────────── */
 
@@ -51,11 +53,15 @@ public class UserController {
             String username,
             UserRole role,
             OffsetDateTime createdAt,
-            OffsetDateTime lastSignInAt
+            OffsetDateTime lastSignInAt,
+            boolean hasActiveSession
     ) {
         static UserDto from(User u) {
+            boolean active = u.getCurrentSessionId() != null
+                    && u.getCurrentSessionExpiresAt() != null
+                    && u.getCurrentSessionExpiresAt().isAfter(OffsetDateTime.now());
             return new UserDto(u.getId(), u.getUsername(), u.getRole(),
-                    u.getCreatedAt(), u.getLastSignInAt());
+                    u.getCreatedAt(), u.getLastSignInAt(), active);
         }
     }
 
@@ -187,6 +193,27 @@ public class UserController {
 
         log.info("Password reset by admin: {} (by {})", target.getUsername(),
                 auth != null ? auth.getName() : "system");
+        return ApiResponse.ok(null);
+    }
+
+    @PostMapping("/{id}/force-logout")
+    @PreAuthorize("hasRole('MASTER')")
+    @Transactional
+    public ApiResponse<Void> forceLogout(
+            @PathVariable String id,
+            org.springframework.security.core.Authentication auth
+    ) {
+        User target = userRepository.findById(id)
+                .orElseThrow(() -> new ApiException(
+                        "USER_NOT_FOUND", "사용자를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
+
+        if (auth != null && target.getUsername().equals(auth.getName())) {
+            throw new ApiException(
+                    "FORCE_LOGOUT_SELF",
+                    "자기 자신의 세션은 강제 종료할 수 없습니다. Sign out 으로 종료하세요.",
+                    HttpStatus.BAD_REQUEST);
+        }
+        authService.forceLogout(target.getUsername(), auth != null ? auth.getName() : "system");
         return ApiResponse.ok(null);
     }
 

@@ -56,11 +56,19 @@ public class AuthController {
 
     @PostMapping("/logout")
     public ApiResponse<Map<String, String>> logout(Authentication auth) {
-        // first-wins 정책상 server-side 에서도 세션 무효화. 다음 로그인 허용을 위해 필수.
-        // permitAll endpoint 이므로 auth 가 null 일 수 있음 (토큰 없이 호출). 그 경우 noop.
         if (auth != null && auth.getName() != null) {
             authService.logout(auth.getName());
         }
         return ApiResponse.ok(Map.of("message", "로그아웃 되었습니다"));
+    }
+
+    /**
+     * Self force-logout — Login 거부 (AUTH_SESSION_ACTIVE_ELSEWHERE) 직후 사용자가
+     * "끊고 로그인" 을 선택했을 때 호출. 비번 재인증으로 본인 세션 무효화.
+     */
+    @PostMapping("/force-self-logout")
+    public ApiResponse<Map<String, String>> forceSelfLogout(@Valid @RequestBody LoginRequest req) {
+        authService.forceSelfLogout(req.username(), req.password());
+        return ApiResponse.ok(Map.of("message", "세션이 종료되었습니다"));
     }
 }
