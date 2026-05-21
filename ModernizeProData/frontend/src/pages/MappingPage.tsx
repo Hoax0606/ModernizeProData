@@ -225,8 +225,13 @@ export function MappingPage() {
   }, [hydrationTick]);
 
   const [selected, setSelected] = useState<Selection>(initialSelection);
+  // 매핑 메뉴 진입 시 항상 첫 TOBE 테이블을 보여준다.
+  // 사용자가 메뉴 안에서 다른 테이블을 골라도 다른 메뉴로 나갔다 들어오면 다시 첫 TOBE.
+  useEffect(() => {
+    if (initialSelection) setSelected(initialSelection);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // hydrate 된 데이터에 selected 가 존재하지 않으면 자동으로 첫 TOBE 로 reset.
-  // (selected 없음, 새 프로젝트, 또는 영속된 selection 이 이번 프로젝트 데이터에 없는 경우 모두 처리.)
   useEffect(() => {
     if (!initialSelection) return;
     if (!selected) { setSelected(initialSelection); return; }
@@ -602,7 +607,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
 }) {
   const navigate = useNavigate();
   const [bindingOpen, setBindingOpen] = useState((bindingEdit?.sources ?? table.sources).length === 0);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [importMappingOpen, setImportMappingOpen] = useState(false);
   const [q, setQ] = useState('');
   type RuleFilter = 'all' | 'unmapped' | 'auto' | 'rule' | 'null' | 'default';
   const [coverageFilter, setCoverageFilter] = useState<RuleFilter>('all');
@@ -699,9 +705,24 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   const missingImports = bindingSources
     .map((s) => ASIS_TABLES.find((a) => a.name === s.table))
     .filter((a): a is AsisTable => !!a && !a.imported);
-  const testDisabled = counts.unmapped > 0 || bindingSources.length === 0 || missingImports.length > 0;
+  // TO-BE Target DB connection 가 site settings 에 채워져 있는지 검사
+  const activeSite = useWorkspaceStore((s) => {
+    const ap = s.projects.find((p) => p.id === s.activeProjectId);
+    return ap ? (s.sites.find((st) => st.id === ap.siteId) ?? null) : null;
+  });
+  const tobeDb = activeSite ? activeSite.tobeDbByEnv?.[activeSite.environment] : undefined;
+  const tobeDbConfigured = !!tobeDb
+    && !!tobeDb.type?.trim()
+    && !!tobeDb.host?.trim()
+    && !!tobeDb.username?.trim();
+  const testDisabled =
+    counts.unmapped > 0
+    || bindingSources.length === 0
+    || missingImports.length > 0
+    || !tobeDbConfigured;
   const testDisabledReason =
-    bindingSources.length === 0 ? 'AS-IS source 가 연결되어 있지 않습니다.'
+    !tobeDbConfigured ? 'TO-BE Target DB connection 이 Site Settings 에 설정되어 있지 않습니다.'
+    : bindingSources.length === 0 ? 'AS-IS source 가 연결되어 있지 않습니다.'
     : missingImports.length > 0 ? `AS-IS extracted data 가 임포트되지 않았습니다: ${missingImports.map((a) => a.short).join(', ')}`
     : counts.unmapped > 0 ? `Unmapped 컬럼이 ${counts.unmapped}개 남아 있습니다.`
     : 'Run test migration for this table';
@@ -764,8 +785,14 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         </div>
         <div style={{ flex: 1 }} />
         <button style={styles.btnGhost}><Ic.download /> Import YAML</button>
-        <button style={styles.btnSecondary}>Auto-map unmapped</button>
+        <button
+          style={styles.btnSecondary}
+          onClick={() => setImportMappingOpen(true)}
+        >Auto-map unmapped</button>
       </div>
+      {importMappingOpen && (
+        <ImportMappingSpecModal onClose={() => setImportMappingOpen(false)} />
+      )}
 
       {/* Grid + inspector */}
       <div style={styles.gridSplit}>
@@ -1804,6 +1831,97 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
       </div>
       </div>
     </aside>
+  );
+}
+
+function ImportMappingSpecModal({ onClose }: { onClose: () => void }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const handlePick = (f: File | null) => {
+    if (!f) return;
+    setFile(f);
+  };
+  return (
+    <div style={styles.modalBackdrop} onClick={onClose}>
+      <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <div style={styles.modalTitle}>Mapping Definition</div>
+          <div style={{ flex: 1 }} />
+          <select
+            value=""
+            onChange={(e) => {
+              const v = e.target.value;
+              if (!v) return;
+              const a = document.createElement('a');
+              a.href = `/templates/mapping_definition_template.${v}`;
+              a.download = `mapping_definition_template.${v}`;
+              a.click();
+              e.target.value = '';
+            }}
+            style={styles.modalTemplateSelect}
+          >
+            <option value="" disabled>Download template…</option>
+            <option value="xlsx">Excel (.xlsx)</option>
+          </select>
+        </div>
+        <div style={styles.modalBody}>
+          <div
+            onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging(false);
+              const f = e.dataTransfer.files?.[0];
+              if (f) handlePick(f);
+            }}
+            onClick={() => inputRef.current?.click()}
+            style={{
+              ...styles.modalDropZone,
+              borderColor: dragging ? 'var(--navy)' : 'var(--border-strong)',
+              background: dragging ? 'var(--navy-50)' : 'var(--panel-2)',
+            }}
+          >
+            <input
+              ref={inputRef}
+              type="file"
+              accept=".xlsx,.csv,.yml,.yaml,.json"
+              onChange={(e) => handlePick(e.target.files?.[0] ?? null)}
+              style={{ display: 'none' }}
+            />
+            {file ? (
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontFamily: 'var(--mono)', fontWeight: 600, fontSize: 13 }}>{file.name}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 4 }}>
+                  {(file.size / 1024).toFixed(1)} KB · 다른 파일을 선택하려면 다시 클릭
+                </div>
+              </div>
+            ) : (
+              <div style={{ textAlign: 'center', color: 'var(--text-3)' }}>
+                <div style={{ fontSize: 13, marginBottom: 4 }}>파일을 끌어다 놓거나 클릭해서 선택</div>
+                <div style={{ fontSize: 11 }}>.xlsx · .csv · .yaml · .json</div>
+              </div>
+            )}
+          </div>
+          <div style={styles.modalHint}>
+            <Ic.warn />
+            <span>매칭된 unmapped 행만 자동 채워지고, 이미 매핑된 행은 덮어쓰지 않습니다.</span>
+          </div>
+        </div>
+        <div style={styles.modalFooter}>
+          <button style={styles.btnSecondary} onClick={onClose}>Cancel</button>
+          <button
+            style={file ? styles.btnPrimary : styles.btnPrimaryDisabled}
+            disabled={!file}
+            onClick={() => {
+              // TODO: 백엔드 mapping-spec import API 가 생기면 여기서 호출.
+              console.log('[mapping] would import spec', file?.name);
+              onClose();
+            }}
+          >Import</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -2892,6 +3010,68 @@ const styles: Record<string, React.CSSProperties> = {
   csvMissingBtn: {
     background: 'transparent', border: 'none', padding: 0,
     cursor: 'pointer', display: 'inline-flex', alignItems: 'center',
+  },
+
+  // Import mapping spec modal
+  modalBackdrop: {
+    position: 'fixed', inset: 0, zIndex: 1000,
+    background: 'rgba(0, 0, 0, 0.45)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    padding: 20,
+  },
+  modalCard: {
+    background: 'var(--panel)',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 6,
+    width: 520, maxWidth: '100%',
+    display: 'flex', flexDirection: 'column',
+    boxShadow: '0 10px 32px rgba(0, 0, 0, 0.2)',
+  },
+  modalHeader: {
+    padding: '14px 16px',
+    borderBottom: '1px solid var(--border)',
+    display: 'flex', alignItems: 'center', gap: 8,
+  },
+  modalTemplateSelect: {
+    height: 26, padding: '0 8px',
+    border: '1px solid var(--border-strong)', borderRadius: 4,
+    background: 'var(--panel)', color: '#01589C',
+    fontSize: 11.5, fontFamily: 'var(--mono)', fontWeight: 600,
+    cursor: 'pointer',
+  },
+  modalTitle: {
+    fontSize: 14, fontWeight: 700, color: 'var(--text)',
+    marginBottom: 4,
+  },
+  modalSubtitle: {
+    fontSize: 11.5, color: 'var(--text-3)',
+  },
+  modalBody: {
+    padding: 16,
+    display: 'flex', flexDirection: 'column', gap: 12,
+  },
+  modalDropZone: {
+    border: '2px dashed var(--border-strong)',
+    borderRadius: 6,
+    padding: '28px 16px',
+    cursor: 'pointer',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    minHeight: 100,
+    transition: 'background 120ms, border-color 120ms',
+  },
+  modalHint: {
+    display: 'flex', alignItems: 'flex-start', gap: 6,
+    padding: 10,
+    background: 'var(--amber-50)',
+    border: '1px solid var(--amber)',
+    borderRadius: 4,
+    color: 'var(--amber)',
+    fontSize: 11, lineHeight: 1.5,
+  },
+  modalFooter: {
+    padding: '12px 16px',
+    borderTop: '1px solid var(--border)',
+    display: 'flex', justifyContent: 'flex-end', gap: 6,
   },
   btnPrimaryDisabled: {
     display: 'inline-flex', alignItems: 'center', gap: 5,
