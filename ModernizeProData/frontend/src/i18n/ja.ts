@@ -868,4 +868,23 @@ export const ja: Record<TranslationKey, string> = {
   'help.tips.execution': 'Execution → Run 実行・予約・進捗・隔離処理。',
   'help.tips.artifacts': 'Artifacts → 検証レポート・マッピングスナップショット・audit log export。',
   'help.tips.logs': 'Log viewer → 作業・システムの audit log 閲覧。',
+
+  /* Log viewer (project tab) */
+  'logs.title':                 'Log viewer',
+  'logs.subtitle':              '実行ログの閲覧・フィルタ・検索・export',
+  'logs.empty.noProject':       'プロジェクトを先に選択してください。',
+  'logs.empty.noResult':        'フィルタ条件に一致するログがありません。',
+  'logs.search.placeholder':    'Search log messages…',
+  'logs.toggle.followTail':     'Follow tail',
+  'logs.toggle.wrap':           'Wrap',
+  'logs.export':                'Export',
+  'logs.footer.shown':          '{shown} / {total} lines',
+  'logs.detail.title':          'Log entry',
+  'logs.detail.run':            'Run',
+  'logs.detail.stage':          'Stage',
+  'logs.detail.time':           'Time',
+  'logs.detail.suggested':      'Suggested action',
+  'logs.detail.context':        'Context ({n})',
+  'logs.detail.emptyTitle':     'No log selected',
+  'logs.detail.emptyHint':      '左の一覧から行を選ぶと詳細が表示されます。',
 };

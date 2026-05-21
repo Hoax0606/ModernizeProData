@@ -868,6 +868,25 @@ export const ko = {
   'help.tips.execution': 'Execution → Run 실행·예약·진행상황·격리 처리.',
   'help.tips.artifacts': 'Artifacts → 검증 리포트·매핑 스냅샷·audit log export.',
   'help.tips.logs': 'Log viewer → 작업·시스템 audit log 조회.',
+
+  /* Log viewer (project tab) */
+  'logs.title':                 'Log viewer',
+  'logs.subtitle':              '실행 로그 조회·필터·검색·export',
+  'logs.empty.noProject':       '프로젝트를 먼저 선택하세요.',
+  'logs.empty.noResult':        '필터 조건에 맞는 로그가 없습니다.',
+  'logs.search.placeholder':    'Search log messages…',
+  'logs.toggle.followTail':     'Follow tail',
+  'logs.toggle.wrap':           'Wrap',
+  'logs.export':                'Export',
+  'logs.footer.shown':          '{shown} / {total} lines',
+  'logs.detail.title':          'Log entry',
+  'logs.detail.run':            'Run',
+  'logs.detail.stage':          'Stage',
+  'logs.detail.time':           'Time',
+  'logs.detail.suggested':      'Suggested action',
+  'logs.detail.context':        'Context ({n})',
+  'logs.detail.emptyTitle':     'No log selected',
+  'logs.detail.emptyHint':      '왼쪽 목록에서 라인을 선택하면 상세가 표시됩니다.',
 } as const;
 
 export type TranslationKey = keyof typeof ko;

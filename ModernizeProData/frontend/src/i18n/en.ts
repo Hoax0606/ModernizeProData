@@ -863,4 +863,23 @@ export const en: Record<TranslationKey, string> = {
   'help.tips.execution': 'Execution → run, schedule, monitor and isolate runs.',
   'help.tips.artifacts': 'Artifacts → verification reports · mapping snapshots · audit log export.',
   'help.tips.logs': 'Log viewer → browse operational and system audit logs.',
+
+  /* Log viewer (project tab) */
+  'logs.title':                 'Log viewer',
+  'logs.subtitle':              'Browse, filter, search and export run logs',
+  'logs.empty.noProject':       'Select a project first.',
+  'logs.empty.noResult':        'No log lines match the current filter.',
+  'logs.search.placeholder':    'Search log messages…',
+  'logs.toggle.followTail':     'Follow tail',
+  'logs.toggle.wrap':           'Wrap',
+  'logs.export':                'Export',
+  'logs.footer.shown':          '{shown} / {total} lines',
+  'logs.detail.title':          'Log entry',
+  'logs.detail.run':            'Run',
+  'logs.detail.stage':          'Stage',
+  'logs.detail.time':           'Time',
+  'logs.detail.suggested':      'Suggested action',
+  'logs.detail.context':        'Context ({n})',
+  'logs.detail.emptyTitle':     'No log selected',
+  'logs.detail.emptyHint':      'Pick a line on the left to see its details.',
 };
