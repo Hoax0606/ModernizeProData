@@ -1,4 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useWorkspaceStore } from '../store/workspace';
+import { useAsisDdlStore } from '../store/asisDdl';
+import { useTobeDdlStore } from '../store/tobeDdl';
+import { useMappingEditsStore } from '../store/mappingEdits';
+import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
+import { projectApi } from '../api/workspace';
+import { MappingOnboarding } from './DashboardPage';
 
 /* ============================================================
  * Mapping page — UI scaffold ported from Prototype/src/mapping.jsx.
@@ -17,6 +25,8 @@ type AsisTable = {
   columnCount: number;
   rows: number;
   unrouted?: boolean;
+  /** Whether extracted data (CSV) has been imported into the AS-IS workspace. */
+  imported?: boolean;
   /** TO-BE internalNames this AS-IS feeds (mock). */
   routing: string[];
 };
@@ -47,157 +57,103 @@ type MappingRow = {
   note?: string;
 };
 
-const ASIS_TABLES: AsisTable[] = [
-  { name: 'HR.EMPLOYEE_MASTER',    short: 'EMPLOYEE_MASTER',    columnCount: 28, rows: 3_120,     routing: ['TOBE_employees', 'TOBE_employee_audit'] },
-  { name: 'HR.DEPARTMENT',         short: 'DEPARTMENT',         columnCount:  6, rows:    48,     routing: ['TOBE_departments'] },
-  { name: 'HR.POSITION_HISTORY',   short: 'POSITION_HISTORY',   columnCount:  9, rows: 12_580,    routing: ['TOBE_combined_history'] },
-  { name: 'CRM.CUST_PROFILE_OLD',  short: 'CUST_PROFILE_OLD',   columnCount: 12, rows:  8_450,    routing: ['TOBE_user_view'] },
-  { name: 'LEGACY.USER_LOG',       short: 'USER_LOG',           columnCount: 14, rows: 1_240_000, routing: [], unrouted: true },
-  { name: 'LEGACY.AUDIT_RAW',      short: 'AUDIT_RAW',          columnCount:  7, rows: 4_800_000, routing: [], unrouted: true },
-];
+/**
+ * Hydrated from /api/v1/projects/{id}/asis-ddl response in MappingPage.useEffect.
+ * Mutable module-level so module-scope helpers (resolveSrcType, computeAsisMappings)
+ * see the latest values without prop drilling.
+ */
+let ASIS_TABLES: AsisTable[] = [];
 
-const TOBE_TABLES: TobeTable[] = [
-  {
-    name: 'public.employees', internalName: 'TOBE_employees', short: 'employees',
-    columnCount: 26, rows: 3_120,
-    compositionKind: 'single',
-    sources: [{ alias: 'em', table: 'HR.EMPLOYEE_MASTER', role: 'primary', rows: 3_120 }],
-  },
-  {
-    name: 'public.employee_audit', internalName: 'TOBE_employee_audit', short: 'employee_audit',
-    columnCount: 8, rows: 1_500,
-    compositionKind: 'single',
-    sources: [{ alias: 'em', table: 'HR.EMPLOYEE_MASTER', role: 'primary', rows: 3_120 }],
-    whereFilter: "em.audit_flag = 'Y'",
-  },
-  {
-    name: 'public.departments', internalName: 'TOBE_departments', short: 'departments',
-    columnCount: 5, rows: 48,
-    compositionKind: 'single',
-    sources: [{ alias: 'de', table: 'HR.DEPARTMENT', role: 'primary', rows: 48 }],
-  },
-  {
-    name: 'public.user_view', internalName: 'TOBE_user_view', short: 'user_view',
-    columnCount: 18, rows: 8_450,
-    compositionKind: 'join',
-    sources: [
-      { alias: 'em', table: 'HR.EMPLOYEE_MASTER',  role: 'primary', rows: 3_120 },
-      { alias: 'cu', table: 'CRM.CUST_PROFILE_OLD', role: 'join', joinType: 'LEFT JOIN', joinOn: 'em.user_id = cu.user_id', rows: 8_450 },
-    ],
-  },
-  {
-    name: 'public.combined_history', internalName: 'TOBE_combined_history', short: 'combined_history',
-    columnCount: 9, rows: 12_580,
-    compositionKind: 'union',
-    sources: [
-      { alias: 'ph', table: 'HR.POSITION_HISTORY', role: 'union', rows: 12_580 },
-    ],
-  },
-  {
-    name: 'public.activity_log', internalName: 'TOBE_activity_log', short: 'activity_log',
-    columnCount: 6, rows: 0,
-    unrouted: true,
+let TOBE_TABLES: TobeTable[] = [];
+
+let MAPPING_BY_TOBE: Record<string, MappingRow[]> = {};
+
+type AsisColumn = { name: string; type: string; pk?: boolean; nullPct?: number; distinct?: number };
+
+let ASIS_COLUMNS: Record<string, AsisColumn[]> = {};
+
+/** Convert DDL schema response → AsisTable[]. */
+function ddlToAsisTables(schema: DdlSchema | undefined | null): AsisTable[] {
+  if (!schema) return [];
+  return schema.tables.map((t) => {
+    const fullName = qualifiedName(t);
+    return {
+      name: fullName,
+      short: t.table.physicalName,
+      columnCount: t.columns.length,
+      rows: 0,
+      routing: [],
+      unrouted: true,
+      imported: true,  // TODO: 백엔드 CSV import 상태 API 가 생기면 실제 값으로 교체. 현재는 테스트용으로 모두 imported 처리.
+    };
+  });
+}
+
+/** Convert DDL schema response → TobeTable[]. internalName = DdlTable.id. */
+function ddlToTobeTables(schema: DdlSchema | undefined | null): TobeTable[] {
+  if (!schema) return [];
+  return schema.tables.map((t) => ({
+    name: qualifiedName(t),
+    internalName: t.table.id,
+    short: t.table.physicalName,
+    columnCount: t.columns.length,
+    rows: 0,
     compositionKind: 'none',
     sources: [],
-  },
-];
+    unrouted: true,
+  }));
+}
 
-const MAPPING_BY_TOBE: Record<string, MappingRow[]> = {
-  TOBE_employees: [
-    { src: 'EMP_ID',         tgt: 'employee_id',  srcType: 'CHAR(8)',     tgtType: 'UUID',           rule: 'rule',     status: 'ok',   pk: true,  sourceAlias: 'em', tgtNullable: false, note: 'CHAR(8) → UUID v5(namespace, emp_id)' },
-    { src: 'EMP_NM',         tgt: 'employee_name', srcType: 'EBCDIC-KANJI(40)', tgtType: 'VARCHAR(120)', rule: 'rule',  status: 'warn', sourceAlias: 'em', tgtNullable: false, note: 'iconv: ebcdic-kanji → utf-8 · 1 char hit fallback' },
-    { src: 'HIRE_YMD',       tgt: 'hire_date',    srcType: 'CHAR(8) YYYYMMDD', tgtType: 'DATE',     rule: 'rule',     status: 'ok',   sourceAlias: 'em', tgtNullable: false },
-    { src: 'BIRTH_YMD',      tgt: 'birth_date',   srcType: 'CHAR(8) YYYYMMDD', tgtType: 'DATE',     rule: 'rule',     status: 'ok',   sourceAlias: 'em', tgtNullable: true },
-    { src: 'DEPT_CD',        tgt: 'department_id', srcType: 'CHAR(4)',   tgtType: 'INTEGER',         rule: 'rule',     status: 'ok',   sourceAlias: 'em', tgtNullable: false },
-    { src: 'POSITION_CD',    tgt: 'position_code', srcType: 'CHAR(3)',   tgtType: 'CHAR(3)',         rule: 'auto',     status: 'ok',   sourceAlias: 'em', tgtNullable: true },
-    { src: 'GENDER_CD',      tgt: 'gender',       srcType: 'CHAR(1)',     tgtType: 'CHAR(1)',         rule: 'auto',     status: 'ok',   sourceAlias: 'em', tgtNullable: true },
-    { src: 'EMAIL',          tgt: 'email',        srcType: 'VARCHAR(64)', tgtType: 'VARCHAR(255)',    rule: 'auto',     status: 'ok',   sourceAlias: 'em', tgtNullable: true },
-    { src: 'SALARY',         tgt: 'salary',       srcType: 'COMP-3(9,2)', tgtType: 'NUMERIC(11,2)',   rule: 'rule',     status: 'ok',   sourceAlias: 'em', tgtNullable: true },
-    { src: 'ENTRY_TS',       tgt: 'created_at',   srcType: 'CHAR(14)',    tgtType: 'TIMESTAMP',       rule: 'rule',     status: 'ok',   sourceAlias: 'em', tgtNullable: false },
-    { src: 'STATUS_CD',      tgt: 'status',       srcType: 'CHAR(1)',     tgtType: 'VARCHAR(16)',     rule: 'rule',     status: 'err',  sourceAlias: 'em', tgtNullable: false, note: '5 distinct values in source, only 3 mapped in transform' },
-    { src: 'PHONE_NUM',      tgt: 'phone',        srcType: 'CHAR(20)',    tgtType: 'VARCHAR(32)',     rule: 'auto',     status: 'ok',   sourceAlias: 'em', tgtNullable: true },
-    { src: '—',              tgt: 'phone_e164',   srcType: '—',           tgtType: 'VARCHAR(20)',     rule: 'unmapped', status: 'queued', tgtNullable: true },
-    { src: '—',              tgt: 'manager_id',   srcType: '—',           tgtType: 'UUID',            rule: 'null',     status: 'queued', tgtNullable: true },
-    { src: '—',              tgt: 'tenant_id',    srcType: '—',           tgtType: 'INTEGER',         rule: 'default',  status: 'queued', tgtNullable: false, ddlDefault: '1' },
-    { src: '(new)',          tgt: 'mfa_enabled',  srcType: '—',           tgtType: 'BOOLEAN',         rule: 'added',    status: 'ok',   tgtNullable: false, ddlDefault: 'false', note: 'default = false' },
-    { src: 'OBSOLETE_FLAG',  tgt: '—',            srcType: 'CHAR(1)',     tgtType: '—',               rule: 'skip',     status: 'skip', sourceAlias: 'em' },
-    { src: 'UPDATE_TS',      tgt: 'updated_at',   srcType: 'CHAR(14)',    tgtType: 'TIMESTAMP',       rule: 'rule',     status: 'ok',   sourceAlias: 'em', tgtNullable: false },
-  ],
-  TOBE_employee_audit: [
-    { src: 'EMP_ID',         tgt: 'employee_id',  srcType: 'CHAR(8)',     tgtType: 'UUID',           rule: 'rule',     status: 'ok',   pk: true, sourceAlias: 'em', tgtNullable: false },
-    { src: 'AUDIT_KIND',     tgt: 'kind',         srcType: 'CHAR(2)',     tgtType: 'VARCHAR(16)',     rule: 'rule',     status: 'ok',   sourceAlias: 'em', tgtNullable: false },
-    { src: 'AUDIT_TS',       tgt: 'audited_at',   srcType: 'CHAR(14)',    tgtType: 'TIMESTAMP',       rule: 'rule',     status: 'ok',   sourceAlias: 'em', tgtNullable: false },
-    { src: '—',              tgt: 'note',         srcType: '—',           tgtType: 'TEXT',            rule: 'null',     status: 'queued', tgtNullable: true },
-  ],
-  TOBE_departments: [
-    { src: 'DEPT_CD',  tgt: 'department_id',   srcType: 'CHAR(4)',    tgtType: 'INTEGER',         rule: 'rule', status: 'ok', pk: true, sourceAlias: 'de', tgtNullable: false },
-    { src: 'DEPT_NM',  tgt: 'department_name', srcType: 'VARCHAR(80)',tgtType: 'VARCHAR(120)',    rule: 'auto', status: 'ok', sourceAlias: 'de', tgtNullable: false },
-    { src: 'PARENT_CD',tgt: 'parent_id',       srcType: 'CHAR(4)',    tgtType: 'INTEGER',         rule: 'rule', status: 'ok', sourceAlias: 'de', tgtNullable: true },
-  ],
-  TOBE_user_view: [
-    { src: 'EMP_ID',    tgt: 'user_id',     srcType: 'CHAR(8)',     tgtType: 'UUID',          rule: 'rule', status: 'ok', pk: true, sourceAlias: 'em', tgtNullable: false },
-    { src: 'EMAIL',     tgt: 'email',       srcType: 'VARCHAR(64)', tgtType: 'VARCHAR(255)',  rule: 'auto', status: 'ok', sourceAlias: 'em', tgtNullable: true },
-    { src: 'PROFILE',   tgt: 'profile_blob', srcType: 'CLOB',       tgtType: 'JSONB',         rule: 'rule', status: 'warn', sourceAlias: 'cu', tgtNullable: true, note: 'free-text → JSONB; 14% of rows are non-JSON' },
-    { src: '—',         tgt: 'last_seen_at', srcType: '—',          tgtType: 'TIMESTAMP',     rule: 'unmapped', status: 'queued', tgtNullable: true },
-  ],
-  TOBE_combined_history: [
-    { src: 'EMP_ID',     tgt: 'employee_id', srcType: 'CHAR(8)',  tgtType: 'UUID',      rule: 'rule', status: 'ok', sourceAlias: 'ph', tgtNullable: false },
-    { src: 'CHANGE_YMD', tgt: 'changed_on',  srcType: 'CHAR(8)',  tgtType: 'DATE',      rule: 'rule', status: 'ok', sourceAlias: 'ph', tgtNullable: false },
-    { src: 'NEW_POS_CD', tgt: 'position_code', srcType: 'CHAR(3)', tgtType: 'CHAR(3)', rule: 'auto', status: 'ok', sourceAlias: 'ph', tgtNullable: true },
-  ],
-};
+function ddlToAsisColumns(schema: DdlSchema | undefined | null): Record<string, AsisColumn[]> {
+  if (!schema) return {};
+  const out: Record<string, AsisColumn[]> = {};
+  for (const t of schema.tables) {
+    out[qualifiedName(t)] = t.columns.map((c) => ({
+      name: c.physicalName,
+      type: c.dataTypeRaw || c.dataType || '—',
+      pk: (c.pkOrder ?? 0) > 0,
+      nullPct: c.nullable ? undefined : 0,
+    }));
+  }
+  return out;
+}
 
-const ASIS_COLUMNS: Record<string, { name: string; type: string; pk?: boolean; nullPct?: number; distinct?: number }[]> = {
-  'HR.EMPLOYEE_MASTER': [
-    { name: 'EMP_ID',        type: 'CHAR(8)',          pk: true, nullPct: 0,    distinct: 3120 },
-    { name: 'EMP_NM',        type: 'EBCDIC-KANJI(40)', nullPct: 0.2,  distinct: 3045 },
-    { name: 'HIRE_YMD',      type: 'CHAR(8)',          nullPct: 0,    distinct: 1820 },
-    { name: 'BIRTH_YMD',     type: 'CHAR(8)',          nullPct: 4.1,  distinct: 2900 },
-    { name: 'DEPT_CD',       type: 'CHAR(4)',          nullPct: 0.6,  distinct: 47 },
-    { name: 'POSITION_CD',   type: 'CHAR(3)',          nullPct: 1.3,  distinct: 12 },
-    { name: 'GENDER_CD',     type: 'CHAR(1)',          nullPct: 0.0,  distinct: 2 },
-    { name: 'EMAIL',         type: 'VARCHAR(64)',      nullPct: 18.4, distinct: 3010 },
-    { name: 'SALARY',        type: 'COMP-3(9,2)',      nullPct: 0,    distinct: 2840 },
-    { name: 'ENTRY_TS',      type: 'CHAR(14)',         nullPct: 0,    distinct: 3120 },
-    { name: 'STATUS_CD',     type: 'CHAR(1)',          nullPct: 0,    distinct: 5 },
-    { name: 'PHONE_NUM',     type: 'CHAR(20)',         nullPct: 22.6, distinct: 2820 },
-    { name: 'OBSOLETE_FLAG', type: 'CHAR(1)',          nullPct: 0,    distinct: 2 },
-    { name: 'UPDATE_TS',     type: 'CHAR(14)',         nullPct: 0,    distinct: 3120 },
-  ],
-  'CRM.CUST_PROFILE_OLD': [
-    { name: 'USER_ID',       type: 'VARCHAR(32)',  pk: true, nullPct: 0,    distinct: 8450 },
-    { name: 'CUST_NM',       type: 'EBCDIC-KANJI(60)', nullPct: 0.5,  distinct: 7980 },
-    { name: 'PROFILE',       type: 'CLOB',              nullPct: 14.0, distinct: 7200 },
-    { name: 'REGIST_YMD',    type: 'CHAR(8)',           nullPct: 2.1,  distinct: 3800 },
-    { name: 'LAST_LOGIN_TS', type: 'CHAR(14)',          nullPct: 5.4,  distinct: 7800 },
-    { name: 'STATUS_CD',     type: 'CHAR(2)',           nullPct: 0,    distinct: 4 },
-    { name: 'GRADE_CD',      type: 'CHAR(1)',           nullPct: 0,    distinct: 5 },
-    { name: 'EMAIL',         type: 'VARCHAR(64)',       nullPct: 31.2, distinct: 5900 },
-    { name: 'MOBILE_NUM',    type: 'CHAR(20)',          nullPct: 44.7, distinct: 4800 },
-    { name: 'ADDR_CD',       type: 'CHAR(7)',           nullPct: 8.3,  distinct: 1200 },
-    { name: 'ENTRY_TS',      type: 'CHAR(14)',          nullPct: 0,    distinct: 8450 },
-    { name: 'UPDATE_TS',     type: 'CHAR(14)',          nullPct: 0,    distinct: 8450 },
-  ],
-  'HR.DEPARTMENT': [
-    { name: 'DEPT_CD',    type: 'CHAR(4)',    pk: true, nullPct: 0,   distinct: 48 },
-    { name: 'DEPT_NM',    type: 'VARCHAR(80)',          nullPct: 0,   distinct: 48 },
-    { name: 'PARENT_CD',  type: 'CHAR(4)',              nullPct: 8.3, distinct: 12 },
-    { name: 'LEVEL_NO',   type: 'SMALLINT',             nullPct: 0,   distinct: 4 },
-    { name: 'ENTRY_TS',   type: 'CHAR(14)',             nullPct: 0,   distinct: 48 },
-    { name: 'UPDATE_TS',  type: 'CHAR(14)',             nullPct: 0,   distinct: 48 },
-  ],
-  'HR.POSITION_HISTORY': [
-    { name: 'SEQ_NO',     type: 'INTEGER',   pk: true, nullPct: 0,   distinct: 12580 },
-    { name: 'EMP_ID',     type: 'CHAR(8)',              nullPct: 0,   distinct: 3120 },
-    { name: 'CHANGE_YMD', type: 'CHAR(8)',              nullPct: 0,   distinct: 4200 },
-    { name: 'OLD_POS_CD', type: 'CHAR(3)',              nullPct: 2.1, distinct: 12 },
-    { name: 'NEW_POS_CD', type: 'CHAR(3)',              nullPct: 0,   distinct: 12 },
-    { name: 'OLD_DEPT_CD',type: 'CHAR(4)',              nullPct: 3.0, distinct: 47 },
-    { name: 'NEW_DEPT_CD',type: 'CHAR(4)',              nullPct: 0,   distinct: 47 },
-    { name: 'REASON_CD',  type: 'CHAR(2)',              nullPct: 0,   distinct: 8 },
-    { name: 'ENTRY_TS',   type: 'CHAR(14)',             nullPct: 0,   distinct: 12580 },
-  ],
-};
+/**
+ * Initial mapping rows for each TO-BE table — all columns start as unmapped
+ * (no mapping snapshot in backend yet). User edits accumulate in rowEdits.
+ */
+function ddlToMappingByTobe(tobe: DdlSchema | undefined | null): Record<string, MappingRow[]> {
+  if (!tobe) return {};
+  const out: Record<string, MappingRow[]> = {};
+  for (const t of tobe.tables) {
+    out[t.table.id] = t.columns.map((c) => ({
+      src: '—',
+      tgt: c.physicalName,
+      srcType: '—',
+      tgtType: c.dataTypeRaw || c.dataType || '—',
+      rule: 'unmapped',
+      status: 'queued',
+      pk: (c.pkOrder ?? 0) > 0,
+      tgtNullable: c.nullable,
+      ddlDefault: c.defaultValue ?? undefined,
+    }));
+  }
+  return out;
+}
+
+function qualifiedName(t: DdlTableWithColumns): string {
+  return t.table.schemaName ? `${t.table.schemaName}.${t.table.physicalName}` : t.table.physicalName;
+}
+
+/**
+ * 빈 객체 fallback — zustand selector 가 매 호출마다 새 객체 리터럴을 반환하면
+ * Object.is 비교가 매번 false 라 무한 재렌더링이 발생한다. 한 번만 만든 같은
+ * reference 를 fallback 으로 쓰면 변경 없음을 감지할 수 있다.
+ */
+const EMPTY_BINDING_EDITS: Record<string, TableBindingEdit> = Object.freeze({}) as Record<string, TableBindingEdit>;
+const EMPTY_SKIP_COLS: Record<string, Record<string, boolean>> = Object.freeze({}) as Record<string, Record<string, boolean>>;
+const EMPTY_ROW_EDITS: Record<string, RowEdit> = Object.freeze({}) as Record<string, RowEdit>;
+
 
 // ── Tiny inline icon set (subset matching prototype Ic.*) ────
 
@@ -211,6 +167,7 @@ const Ic = {
   download: () => svg(<><line x1="7" y1="2" x2="7" y2="10" /><polyline points="3.5,6.5 7,10 10.5,6.5" /><line x1="2" y1="12.5" x2="12" y2="12.5" /></>),
   x:      () => svg(<><line x1="3" y1="3" x2="11" y2="11" /><line x1="11" y1="3" x2="3" y2="11" /></>),
   key:    () => svg(<><circle cx="4.5" cy="7" r="2.5" /><line x1="7" y1="7" x2="12.5" y2="7" /><line x1="11" y1="7" x2="11" y2="9.5" /><line x1="9" y1="7" x2="9" y2="9" /></>),
+  refresh: () => svg(<><polyline points="12,2 12,5 9,5" /><path d="M12 5a5 5 0 1 0 1 5" /></>),
 };
 function svg(children: React.ReactNode) {
   return (
@@ -227,13 +184,79 @@ type Selection = { side: Side; name: string; internalName?: string } | null;
 type TableBindingEdit = { sources: TobeTable['sources']; mode: 'join' | 'union' };
 
 export function MappingPage() {
-  const [selected, setSelected] = useState<Selection>({ side: 'tobe', name: 'public.employees', internalName: 'TOBE_employees' });
+  const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
+  const projects = useWorkspaceStore((s) => s.projects);
+  const activeProject = useMemo(
+    () => projects.find((p) => p.id === activeProjectId) ?? null,
+    [projects, activeProjectId],
+  );
+  const asisSchema = useAsisDdlStore((s) => activeProjectId ? s.schemasByProject[activeProjectId] : undefined);
+  const tobeSchema = useTobeDdlStore((s) => activeProjectId ? s.schemasByProject[activeProjectId] : undefined);
+  const asisLoading = useAsisDdlStore((s) => activeProjectId ? !!s.loadingByProject[activeProjectId] : false);
+  const tobeLoading = useTobeDdlStore((s) => activeProjectId ? !!s.loadingByProject[activeProjectId] : false);
+
+  useEffect(() => {
+    if (!activeProjectId) return;
+    useAsisDdlStore.getState().fetch(activeProjectId).catch((e) => console.error('[mapping] asis-ddl fetch failed', e));
+    useTobeDdlStore.getState().fetch(activeProjectId).catch((e) => console.error('[mapping] tobe-ddl fetch failed', e));
+  }, [activeProjectId]);
+
+  // Hydrate module-level fixtures whenever schemas change, then bump a state value
+  // to force a re-render so children see the new ASIS_TABLES / TOBE_TABLES / etc.
+  const [hydrationTick, setHydrationTick] = useState(0);
+  useEffect(() => {
+    ASIS_TABLES = ddlToAsisTables(asisSchema);
+    TOBE_TABLES = ddlToTobeTables(tobeSchema);
+    ASIS_COLUMNS = ddlToAsisColumns(asisSchema);
+    MAPPING_BY_TOBE = ddlToMappingByTobe(tobeSchema);
+    setHydrationTick((t) => t + 1);
+  }, [asisSchema, tobeSchema]);
+
+  const initialSelection: Selection = useMemo(() => {
+    if (TOBE_TABLES.length > 0) {
+      const first = TOBE_TABLES[0];
+      return { side: 'tobe', name: first.name, internalName: first.internalName };
+    }
+    if (ASIS_TABLES.length > 0) {
+      return { side: 'asis', name: ASIS_TABLES[0].name };
+    }
+    return null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrationTick]);
+
+  const [selected, setSelected] = useState<Selection>(initialSelection);
+  // hydrate 된 데이터에 selected 가 존재하지 않으면 자동으로 첫 TOBE 로 reset.
+  // (selected 없음, 새 프로젝트, 또는 영속된 selection 이 이번 프로젝트 데이터에 없는 경우 모두 처리.)
+  useEffect(() => {
+    if (!initialSelection) return;
+    if (!selected) { setSelected(initialSelection); return; }
+    const existsInTobe = selected.side === 'tobe' && TOBE_TABLES.some((t) => t.internalName === selected.internalName);
+    const existsInAsis = selected.side === 'asis' && ASIS_TABLES.some((t) => t.name === selected.name);
+    if (!existsInTobe && !existsInAsis) {
+      setSelected(initialSelection);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialSelection, hydrationTick]);
+
   const [search, setSearch] = useState('');
   const [showUnrouted, setShowUnrouted] = useState(false);
-  const [tableBindingEdits, setTableBindingEdits] = useState<Record<string, TableBindingEdit>>({});
 
-  const handleBindingChange = useCallback((internalName: string, edit: TableBindingEdit) =>
-    setTableBindingEdits((prev) => ({ ...prev, [internalName]: edit })), []);
+  const tableBindingEdits = useMappingEditsStore(
+    (s) => (activeProjectId ? s.tableBindingEdits[activeProjectId] : undefined) || EMPTY_BINDING_EDITS,
+  );
+  const asisSkippedCols = useMappingEditsStore(
+    (s) => (activeProjectId ? s.asisSkippedCols[activeProjectId] : undefined) || EMPTY_SKIP_COLS,
+  );
+
+  const handleBindingChange = useCallback((internalName: string, edit: TableBindingEdit) => {
+    if (!activeProjectId) return;
+    useMappingEditsStore.getState().setBindingEdit(activeProjectId, internalName, edit);
+  }, [activeProjectId]);
+
+  const handleToggleAsisSkip = useCallback((tableName: string, colName: string, nextSkip: boolean) => {
+    if (!activeProjectId) return;
+    useMappingEditsStore.getState().setAsisSkip(activeProjectId, tableName, colName, nextSkip);
+  }, [activeProjectId]);
 
   const effectiveTobe = useMemo(() =>
     TOBE_TABLES.map((t) => {
@@ -246,12 +269,53 @@ export function MappingPage() {
         unrouted: srcs.length === 0,
         compositionKind: (srcs.length === 0 ? 'none' : srcs.length === 1 ? 'single' : edit.mode) as TobeTable['compositionKind'],
       };
-    }), [tableBindingEdits]);
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tableBindingEdits, hydrationTick]);
+
+  const effectiveAsis = useMemo(() => {
+    const routedByAsis: Record<string, string[]> = {};
+    for (const t of effectiveTobe) {
+      for (const s of t.sources) {
+        (routedByAsis[s.table] ||= []).push(t.internalName);
+      }
+    }
+    return ASIS_TABLES.map((at) => {
+      const r = routedByAsis[at.name] || [];
+      return { ...at, routing: r, unrouted: r.length === 0 };
+    });
+  }, [effectiveTobe]);
+
+  if (!activeProjectId) {
+    return (
+      <div style={styles.fullBleed}>
+        <div style={styles.centerEmpty}>
+          <div style={{ maxWidth: 460, color: 'var(--text-3)', fontSize: 13, textAlign: 'center' }}>
+            활성 프로젝트가 없습니다. 좌측 메뉴에서 사이트·프로젝트를 먼저 선택하세요.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if ((asisLoading || tobeLoading) && ASIS_TABLES.length === 0 && TOBE_TABLES.length === 0) {
+    return (
+      <div style={styles.fullBleed}>
+        <div style={styles.centerEmpty}>
+          <div style={{ color: 'var(--text-3)', fontSize: 13 }}>DDL 로딩 중…</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (activeProject && (activeProject.tableCount === 0 || activeProject.tobeTableCount === 0)) {
+    return <MappingOnboarding project={activeProject} />;
+  }
 
   return (
     <div style={styles.fullBleed}>
       <DualInventory
-        asis={ASIS_TABLES}
+        asis={effectiveAsis}
         tobe={effectiveTobe}
         selected={selected}
         onSelect={setSelected}
@@ -265,6 +329,9 @@ export function MappingPage() {
         onSelect={setSelected}
         tableBindingEdits={tableBindingEdits}
         onBindingChange={handleBindingChange}
+        effectiveTobe={effectiveTobe}
+        asisSkippedCols={asisSkippedCols}
+        onToggleAsisSkip={handleToggleAsisSkip}
       />
     </div>
   );
@@ -282,7 +349,10 @@ function DualInventory({
   search: string; setSearch: (v: string) => void;
   showUnrouted: boolean; setShowUnrouted: (v: boolean) => void;
 }) {
-  const [activeTab, setActiveTab] = useState<Side>('tobe');
+  const [activeTab, setActiveTab] = useState<Side>(selected?.side ?? 'tobe');
+  useEffect(() => {
+    if (selected?.side) setActiveTab(selected.side);
+  }, [selected?.side]);
   const matchQ = (name: string) => !search || name.toLowerCase().includes(search.toLowerCase());
   const visAsis = asis.filter((t) => matchQ(t.name) && (!showUnrouted || !!t.unrouted));
   const visTobe = tobe.filter((t) => matchQ(t.name) && (!showUnrouted || !!t.unrouted));
@@ -300,12 +370,26 @@ function DualInventory({
           const isActive = activeTab === side;
           const accent = side === 'asis' ? 'var(--amber)' : 'var(--navy)';
           return (
-            <button key={side} onClick={() => setActiveTab(side)} style={{
-              ...styles.invTab,
-              color: isActive ? accent : 'var(--text-3)',
-              fontWeight: isActive ? 700 : 500,
-              boxShadow: isActive ? `inset 0 -2px 0 ${accent}` : 'none',
-            }}>
+            <button
+              key={side}
+              onClick={() => {
+                setActiveTab(side);
+                if (selected?.side === side) return;
+                if (side === 'tobe') {
+                  const first = (visTobe[0] || tobe[0]) as TobeTable | undefined;
+                  if (first) onSelect({ side: 'tobe', name: first.name, internalName: first.internalName });
+                } else {
+                  const first = (visAsis[0] || asis[0]) as AsisTable | undefined;
+                  if (first) onSelect({ side: 'asis', name: first.name });
+                }
+              }}
+              style={{
+                ...styles.invTab,
+                color: isActive ? accent : 'var(--text-3)',
+                fontWeight: isActive ? 700 : 500,
+                boxShadow: isActive ? `inset 0 -2px 0 ${accent}` : 'none',
+              }}
+            >
               {label}
               <span style={{
                 ...styles.invTabCount,
@@ -469,11 +553,14 @@ function InventoryItem({
 
 // ── Right: workspace ─────────────────────────────────────────
 
-function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange }: {
+function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, effectiveTobe, asisSkippedCols, onToggleAsisSkip }: {
   selected: Selection;
   onSelect: (s: Selection) => void;
   tableBindingEdits: Record<string, TableBindingEdit>;
   onBindingChange: (internalName: string, edit: TableBindingEdit) => void;
+  effectiveTobe: TobeTable[];
+  asisSkippedCols: Record<string, Record<string, boolean>>;
+  onToggleAsisSkip: (tableName: string, colName: string, nextSkip: boolean) => void;
 }) {
   if (!selected) return <GuidePanel />;
   if (selected.side === 'tobe') {
@@ -493,7 +580,16 @@ function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange }: {
   }
   const asis = ASIS_TABLES.find((t) => t.name === selected.name);
   if (!asis) return <GuidePanel />;
-  return <AsisTableDetail table={asis} onJumpTobe={(internalName, name) => onSelect({ side: 'tobe', internalName, name })} />;
+  return (
+    <AsisTableDetail
+      key={asis.name}
+      table={asis}
+      effectiveTobe={effectiveTobe}
+      skippedCols={asisSkippedCols[asis.name] || {}}
+      onToggleSkip={(colName, nextSkip) => onToggleAsisSkip(asis.name, colName, nextSkip)}
+      onJumpTobe={(internalName, name) => onSelect({ side: 'tobe', internalName, name })}
+    />
+  );
 }
 
 // ── TO-BE mapping detail ─────────────────────────────────────
@@ -504,56 +600,111 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   bindingEdit?: TableBindingEdit;
   onBindingChange: (edit: TableBindingEdit) => void;
 }) {
+  const navigate = useNavigate();
   const [bindingOpen, setBindingOpen] = useState((bindingEdit?.sources ?? table.sources).length === 0);
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [q, setQ] = useState('');
-  const [ruleFilter, setRuleFilter] = useState<'all' | MappingRow['rule']>('all');
+  type RuleFilter = 'all' | 'unmapped' | 'auto' | 'rule' | 'null' | 'default';
+  const [coverageFilter, setCoverageFilter] = useState<RuleFilter>('all');
   const [activeIdx, setActiveIdx] = useState(0);
-  const [rowEdits, setRowEdits] = useState<Record<string, RowEdit>>({});
-  const handleSaveEdit = useCallback((r: MappingRow, edit: RowEdit) =>
-    setRowEdits((prev) => ({ ...prev, [r.tgt]: { ...prev[r.tgt], ...edit } })), []);
+  const activeProjectIdForRow = useWorkspaceStore((s) => s.activeProjectId);
+  const rowEdits = useMappingEditsStore(
+    (s) => (activeProjectIdForRow ? s.rowEdits[activeProjectIdForRow]?.[table.internalName] : undefined) || EMPTY_ROW_EDITS,
+  );
+  const [testStatus, setTestStatus] = useState<'idle' | 'running' | 'completed'>('idle');
+  const [testProgress, setTestProgress] = useState(0);
+  const startTest = useCallback(async () => {
+    setTestStatus('running');
+    setTestProgress(0);
+    const active = useWorkspaceStore.getState().getActiveProject();
+    if (active) {
+      try {
+        await projectApi.update(active.id, { phase: 'test', runStatus: 'running' });
+        const siteId = useWorkspaceStore.getState().activeSiteId;
+        if (siteId) await useWorkspaceStore.getState().fetchProjects(siteId);
+      } catch (e) {
+        console.error('[mapping] phase update (start) failed', e);
+      }
+    }
+  }, []);
+  useEffect(() => {
+    if (testStatus !== 'running') return;
+    const id = window.setInterval(() => {
+      setTestProgress((p) => {
+        if (p >= 100) {
+          window.clearInterval(id);
+          setTestStatus('completed');
+          const active = useWorkspaceStore.getState().getActiveProject();
+          if (active) {
+            projectApi.update(active.id, { phase: 'test', runStatus: 'completed' })
+              .then(() => {
+                const siteId = useWorkspaceStore.getState().activeSiteId;
+                if (siteId) return useWorkspaceStore.getState().fetchProjects(siteId);
+              })
+              .catch((e) => console.error('[mapping] phase update (complete) failed', e));
+          }
+          return 100;
+        }
+        return Math.min(100, p + 4);
+      });
+    }, 80);
+    return () => window.clearInterval(id);
+  }, [testStatus]);
+  const handleSaveEdit = useCallback((r: MappingRow, edit: RowEdit) => {
+    if (!activeProjectIdForRow) return;
+    useMappingEditsStore.getState().setRowEdit(activeProjectIdForRow, table.internalName, r.tgt, edit);
+  }, [activeProjectIdForRow, table.internalName]);
   const [bindingSources, setBindingSources] = useState(bindingEdit?.sources ?? table.sources);
   const [bindingMode, setBindingMode] = useState<'join' | 'union'>(
     bindingEdit?.mode ?? (table.compositionKind === 'union' ? 'union' : 'join'),
   );
-  const transformCompletions = useMemo(() =>
-    bindingSources.flatMap((s) =>
-      (ASIS_COLUMNS[s.table] || []).flatMap((c) => [`${s.alias}.${c.name}`, c.name])
-    ), [bindingSources]);
-
-  const [extraRows, setExtraRows] = useState<MappingRow[]>([]);
-  const [addingField, setAddingField] = useState(false);
-  const [newFieldName, setNewFieldName] = useState('');
-  const [newFieldType, setNewFieldType] = useState('TEXT');
-
-  const allRows = useMemo(() => [...rows, ...extraRows], [rows, extraRows]);
-
-  const handleAddField = () => {
-    if (!newFieldName.trim()) return;
-    setExtraRows((prev) => [...prev, {
-      src: '—', tgt: newFieldName.trim(), srcType: '—', tgtType: newFieldType,
-      rule: 'added' as const, status: 'queued' as const, tgtNullable: true,
-    }]);
-    setNewFieldName('');
-    setAddingField(false);
-  };
+  const allRows = useMemo(() => rows.map((r) => {
+    const re = rowEdits[r.tgt];
+    if (!re) return r;
+    const filledSrc = re.savedSrc?.some((s) => s && s.trim() !== '') ?? false;
+    const hasRule = !!(re.savedRule && re.savedRule.trim());
+    let eff: MappingRow['rule'] = r.rule;
+    if (re.savedStrategy === 'null') eff = 'null';
+    else if (re.savedStrategy === 'default') eff = 'default';
+    else if (re.savedStrategy === 'expression') {
+      if (hasRule || filledSrc) eff = filledSrc && !hasRule ? 'auto' : 'rule';
+    } else if (filledSrc && r.rule === 'unmapped') {
+      eff = 'auto';
+    }
+    // source 도 SQL 도 모두 비웠으면 다시 unmapped 로
+    if (re.savedSrc !== undefined && !filledSrc && !hasRule
+        && re.savedStrategy !== 'null' && re.savedStrategy !== 'default') {
+      eff = 'unmapped';
+    }
+    return eff === r.rule ? r : { ...r, rule: eff };
+  }), [rows, rowEdits]);
 
   const visibleRows = useMemo(() => allRows.filter((r) => r.rule !== 'skip'), [allRows]);
 
   const filtered = visibleRows.filter((r) =>
     (!q || (r.src + ' ' + r.tgt).toLowerCase().includes(q.toLowerCase())) &&
-    (ruleFilter === 'all' || r.rule === ruleFilter),
+    (coverageFilter === 'all' || r.rule === coverageFilter),
   );
 
   const counts = {
     all:      visibleRows.length,
+    unmapped: visibleRows.filter((r) => r.rule === 'unmapped').length,
     auto:     visibleRows.filter((r) => r.rule === 'auto').length,
     rule:     visibleRows.filter((r) => r.rule === 'rule').length,
     null:     visibleRows.filter((r) => r.rule === 'null').length,
     default:  visibleRows.filter((r) => r.rule === 'default').length,
-    unmapped: visibleRows.filter((r) => r.rule === 'unmapped').length,
   };
   const active = visibleRows[activeIdx] ?? visibleRows[0];
+
+  const missingImports = bindingSources
+    .map((s) => ASIS_TABLES.find((a) => a.name === s.table))
+    .filter((a): a is AsisTable => !!a && !a.imported);
+  const testDisabled = counts.unmapped > 0 || bindingSources.length === 0 || missingImports.length > 0;
+  const testDisabledReason =
+    bindingSources.length === 0 ? 'AS-IS source 가 연결되어 있지 않습니다.'
+    : missingImports.length > 0 ? `AS-IS extracted data 가 임포트되지 않았습니다: ${missingImports.map((a) => a.short).join(', ')}`
+    : counts.unmapped > 0 ? `Unmapped 컬럼이 ${counts.unmapped}개 남아 있습니다.`
+    : 'Run test migration for this table';
 
   return (
     <div style={styles.workspace}>
@@ -564,16 +715,37 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         <div style={{ flex: 1 }} />
         <div style={styles.statusCounts}>
           {counts.unmapped > 0 && <StatusBadge tone="queued">{counts.unmapped} unmapped</StatusBadge>}
+          {missingImports.length > 0 && (
+            <button
+              type="button"
+              onClick={() => navigate('/settings', { state: { highlightSide: 'asis-csv' } })}
+              title="Project Settings → AS-IS 의 CSV 카드로 이동합니다."
+              style={styles.csvMissingBtn}
+            >
+              <StatusBadge tone="warn">
+                {missingImports.length} CSV not imported →
+              </StatusBadge>
+            </button>
+          )}
         </div>
-        <button style={styles.btnPrimary} title="Run test migration for this table">
-          <Ic.play /> Test
+        <button
+          style={(testDisabled || testStatus === 'running') ? styles.btnPrimaryDisabled : styles.btnPrimary}
+          disabled={testDisabled || testStatus === 'running'}
+          onClick={startTest}
+          title={
+            testStatus === 'running' ? `Testing… ${testProgress}%`
+            : testStatus === 'completed' ? 'Test completed. Click to re-run.'
+            : testDisabledReason
+          }
+        >
+          <Ic.play /> {testStatus === 'running' ? `Testing ${testProgress}%` : testStatus === 'completed' ? 'Re-test' : 'Test'}
         </button>
       </div>
 
       {bindingSources.length === 0 && (
         <div style={styles.noSourceBanner}>
           <Ic.warn />
-          <span>AS-IS 소스가 연결되지 않았습니다. 아래 <b>Table binding</b> 패널에서 [Add source] 로 소스 테이블을 추가하세요.</span>
+          <span>AS-IS 테이블이 매핑되지 않았습니다. <b>Table binding</b> 패널에서 <b>+ Add source</b>로 테이블을 추가하세요.</span>
         </div>
       )}
       <CollapsibleBinding
@@ -590,54 +762,50 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
           <Ic.search />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by field name…" style={styles.searchInput} />
         </div>
-        <div style={styles.ruleFilter}>
-          {(
-            [
-              ['all', 'All'], ['unmapped', 'Unmapped'], ['auto', 'Passthrough'],
-              ['rule', 'Transform'], ['null', 'Null'], ['default', 'Default'],
-            ] as const
-          ).map(([k, l], i) => (
-            <button
-              key={k}
-              onClick={() => setRuleFilter(k)}
-              style={{
-                ...styles.ruleFilterBtn,
-                borderLeft: i ? '1px solid var(--border)' : 'none',
-                background: ruleFilter === k ? 'var(--navy-50)' : 'transparent',
-                color: ruleFilter === k ? 'var(--navy)' : 'var(--text-2)',
-                fontWeight: ruleFilter === k ? 600 : 500,
-              }}
-            >
-              {l}
-            </button>
-          ))}
-        </div>
         <div style={{ flex: 1 }} />
         <button style={styles.btnGhost}><Ic.download /> Import YAML</button>
         <button style={styles.btnSecondary}>Auto-map unmapped</button>
-        <button onClick={() => setAddingField(true)} style={styles.btnGhost} disabled={addingField}>
-          <Ic.plus /> Add field
-        </button>
       </div>
 
       {/* Grid + inspector */}
       <div style={styles.gridSplit}>
         <div style={styles.gridScroll}>
-          <table style={styles.gridTable}>
+          <TobeCoverageBar
+            total={counts.all}
+            ruleCounts={{
+              unmapped: counts.unmapped,
+              auto: counts.auto,
+              rule: counts.rule,
+              null: counts.null,
+              default: counts.default,
+            }}
+            filter={coverageFilter}
+            onFilter={setCoverageFilter}
+          />
+          <table style={{ ...styles.gridTable, tableLayout: 'auto', minWidth: 980 }}>
+            <colgroup>
+              <col style={{ width: 24 }} />
+              <col style={{ width: 220 }} />
+              <col style={{ width: 50 }} />
+              <col style={{ width: 170 }} />
+              <col style={{ width: 28 }} />
+              <col style={{ width: 220 }} />
+              <col style={{ width: 140 }} />
+              <col style={{ width: 110 }} />
+            </colgroup>
             <thead>
               <tr>
                 {[
-                  { l: '',             w: 24 },
-                  { l: 'Source field', w: '22%' },
-                  { l: 'Alias',        w: 50 },
-                  { l: 'Source type',  w: 170 },
-                  { l: '',             w: 28 },
-                  { l: 'Target field', w: '22%' },
-                  { l: 'Target type',  w: 140 },
-                  { l: 'Rule',         w: 70 },
-                  { l: 'Status',       w: 80 },
+                  { l: '',             align: 'left' as const },
+                  { l: 'Source field', align: 'left' as const },
+                  { l: 'Alias',        align: 'center' as const },
+                  { l: 'Source type',  align: 'left' as const },
+                  { l: '',             align: 'left' as const },
+                  { l: 'Target field', align: 'left' as const },
+                  { l: 'Target type',  align: 'left' as const },
+                  { l: 'State',        align: 'center' as const },
                 ].map((h, i) => (
-                  <th key={i} style={{ ...styles.gridTh, width: h.w }}>{h.l}</th>
+                  <th key={i} style={{ ...styles.gridTh, textAlign: h.align, top: 56, zIndex: 1 }}>{h.l}</th>
                 ))}
               </tr>
             </thead>
@@ -659,14 +827,20 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
                     <td style={{ ...styles.gridTd, textAlign: 'center' }}>
                       {r.pk && <span title="primary key" style={{ color: 'var(--navy)', display: 'inline-flex' }}><Ic.key /></span>}
                     </td>
-                    <td style={{ ...styles.gridTd, fontFamily: 'var(--mono)', fontWeight: 500, color: rowEdits[r.tgt]?.savedSrc?.length ? 'var(--text)' : srcCellColor(r) }}>
+                    <td style={{ ...styles.gridTd, fontFamily: 'var(--mono)', fontWeight: 500, color: rowEdits[r.tgt]?.savedSrc?.some((s) => s && s.trim()) ? 'var(--text)' : srcCellColor(r) }}>
                       {(() => {
                         const eff = rowEdits[r.tgt]?.savedSrc;
-                        if (eff?.length) return <span>{eff.map((s) => s.slice(s.lastIndexOf('.') + 1)).join(' + ')}</span>;
+                        if (eff !== undefined) {
+                          const filled = eff.filter((s) => s && s.trim() !== '');
+                          if (filled.length === 0) {
+                            return <span style={{ fontStyle: 'italic', color: 'var(--text-4)' }}>(unassigned)</span>;
+                          }
+                          return <span>{filled.map((s) => s.slice(s.lastIndexOf('.') + 1)).join(' + ')}</span>;
+                        }
                         return srcCellContent(r);
                       })()}
                     </td>
-                    <td style={{ ...styles.gridTd, padding: '5px 4px' }}>
+                    <td style={{ ...styles.gridTd, padding: '5px 4px', textAlign: 'center' }}>
                       {(() => {
                         const eff = rowEdits[r.tgt]?.savedSrc;
                         if (eff?.length) {
@@ -699,60 +873,33 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
                     <td style={styles.gridTd}>
                       {r.tgtType === '—' ? <span style={{ color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>—</span> : <TypeBadge>{r.tgtType}</TypeBadge>}
                     </td>
-                    <td style={styles.gridTd}><RuleTag rule={r.rule} /></td>
-                    <td style={styles.gridTd}><StatusFor row={r} /></td>
+                    <td style={{ ...styles.gridTd, textAlign: 'center' }}><RuleTag rule={r.rule} status={r.status} /></td>
                   </tr>
                 );
               })}
-              {addingField && (
-                <tr style={{ background: 'var(--navy-50)', borderBottom: '1px solid var(--border)' }}>
-                  <td colSpan={4} />
-                  <td style={{ ...styles.gridTd, padding: '5px 0', textAlign: 'center', color: 'var(--green)' }}>+</td>
-                  <td style={styles.gridTd}>
-                    <input
-                      value={newFieldName}
-                      onChange={(e) => setNewFieldName(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') handleAddField(); if (e.key === 'Escape') setAddingField(false); }}
-                      placeholder="new_column_name"
-                      autoFocus
-                      style={{ ...styles.metaInput, width: '100%' }}
-                    />
-                  </td>
-                  <td style={styles.gridTd}>
-                    <select value={newFieldType} onChange={(e) => setNewFieldType(e.target.value)} style={styles.joinSelect}>
-                      {['TEXT', 'VARCHAR(255)', 'INTEGER', 'BIGINT', 'BOOLEAN', 'DATE', 'TIMESTAMP', 'UUID', 'JSONB', 'NUMERIC(11,2)'].map((t) => (
-                        <option key={t}>{t}</option>
-                      ))}
-                    </select>
-                  </td>
-                  <td colSpan={2} style={styles.gridTd}>
-                    <div style={{ display: 'flex', gap: 4 }}>
-                      <button onClick={handleAddField} style={styles.btnPrimarySm}>Add</button>
-                      <button onClick={() => setAddingField(false)} style={{ ...styles.btnSecondary, height: 24, fontSize: 11 }}>Cancel</button>
-                    </div>
-                  </td>
-                </tr>
-              )}
-              {filtered.length === 0 && !addingField && (
+              {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={9} style={styles.gridEmpty}>no fields match this filter</td>
+                  <td colSpan={8} style={styles.gridEmpty}>no fields match this filter</td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
 
-        {inspectorOpen
-          ? <Inspector
-              active={active}
-              composition={table.compositionKind}
-              sources={bindingSources}
-              rowEdit={rowEdits[active?.tgt ?? '']}
-              onSave={(edit) => handleSaveEdit(active, edit)}
-              completions={transformCompletions}
-              onClose={() => setInspectorOpen(false)}
-            />
-          : <InspectorRail onOpen={() => setInspectorOpen(true)} />}
+        <InspectorRail
+          open={inspectorOpen}
+          onToggle={() => setInspectorOpen((o) => !o)}
+        />
+        {inspectorOpen && (
+          <Inspector
+            active={active}
+            composition={table.compositionKind}
+            sources={bindingSources}
+            rowEdit={rowEdits[active?.tgt ?? '']}
+            onSave={(edit) => handleSaveEdit(active, edit)}
+            onClose={() => setInspectorOpen(false)}
+          />
+        )}
       </div>
     </div>
   );
@@ -913,9 +1060,9 @@ function CollapsibleBinding({ table, open, onToggle, sources, onSourcesChange, c
                   border: `1px solid ${s.role === 'primary' ? 'var(--navy)' : 'var(--border)'}`,
                   background: s.role === 'primary' ? 'var(--navy-50)' : 'var(--panel)',
                 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
                     <span style={styles.aliasChipFilled}>{s.alias}</span>
-                    <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.table}</span>
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.table}</span>
                     <span style={{ fontFamily: 'var(--mono)', fontSize: 10.5, color: 'var(--text-4)', whiteSpace: 'nowrap' }}>
                       {s.rows.toLocaleString()} rows
                     </span>
@@ -930,6 +1077,7 @@ function CollapsibleBinding({ table, open, onToggle, sources, onSourcesChange, c
                         <option>LEFT JOIN</option><option>INNER JOIN</option><option>RIGHT JOIN</option><option>FULL JOIN</option>
                       </select>
                     )}
+                    <div style={{ flex: 1 }} />
                     <button
                       onClick={() => onSourcesChange(sources.filter((s2) => s2.alias !== s.alias))}
                       title="Remove source"
@@ -1010,6 +1158,14 @@ type RowEdit = { savedSrc?: string[]; savedRule?: string; savedDefault?: string;
 function resolveSrcType(s: string, sources: TobeTable['sources']): string {
   if (!s) return '—';
   const di = s.indexOf('.');
+  if (di < 0) {
+    // No alias prefix — search every bound source table for the first matching column.
+    for (const src of sources) {
+      const col = (ASIS_COLUMNS[src.table] || []).find((c) => c.name === s);
+      if (col) return col.type;
+    }
+    return '—';
+  }
   const alias = s.slice(0, di);
   const col = s.slice(di + 1);
   const entry = sources.find((e) => e.alias === alias);
@@ -1251,27 +1407,22 @@ function HighlightEditor({
 
 // ── Inspector ────────────────────────────────────────────────
 
-function Inspector({ active, composition, sources, rowEdit, onSave, completions, onClose }: {
+function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   active: MappingRow | undefined;
   composition: TobeTable['compositionKind'];
   sources: TobeTable['sources'];
   rowEdit?: RowEdit;
   onSave: (edit: RowEdit) => void;
-  completions?: string[];
   onClose: () => void;
 }) {
   const [editingRule, setEditingRule] = useState(false);
   const [editValue, setEditValue] = useState('');
   const [savedRule, setSavedRule] = useState<string | null>(null);
   const [ruleError, setRuleError] = useState<string | null>(null);
-  const [editNotNull, setEditNotNull] = useState(false);
-  const [editDefault, setEditDefault] = useState('');
   const [editSrc, setEditSrc] = useState<string[]>([]);
   const [editSrcType, setEditSrcType] = useState<string[]>([]);
   const [savedSrc, setSavedSrc] = useState<string[] | null>(null);
   const [savedSrcType, setSavedSrcType] = useState<string[] | null>(null);
-  const [savedDefault, setSavedDefault] = useState<string | null>(null);
-  const [savedNotNull, setSavedNotNull] = useState<boolean | null>(null);
   const [editStrategy, setEditStrategy] = useState<'expression' | 'null' | 'default'>('expression');
   const [savedStrategy, setSavedStrategy] = useState<'expression' | 'null' | 'default' | null>(null);
   const [userFnOpen, setUserFnOpen] = useState(false);
@@ -1280,8 +1431,6 @@ function Inspector({ active, composition, sources, rowEdit, onSave, completions,
     setEditingRule(false); setRuleError(null);
     const re = rowEdit;
     setSavedRule(re?.savedRule ?? null);
-    setSavedDefault(re?.savedDefault ?? null);
-    setSavedNotNull(re?.savedNotNull ?? null);
     setSavedStrategy(re?.savedStrategy ?? null);
     const src = re?.savedSrc ?? null;
     setSavedSrc(src);
@@ -1291,12 +1440,29 @@ function Inspector({ active, composition, sources, rowEdit, onSave, completions,
   const initSrc: string[] = active.src === '—' ? [] : [active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src];
   const resolveType = (s: string) => resolveSrcType(s, sources);
   const validAliases = new Set(sources.map((s) => s.alias));
+  const prevAutoCastRef = useRef('');
+
+  // 슬롯 i 의 source 값을 새 값으로 바꾸고, 첫 번째 슬롯이면 CAST 자동 입력 갱신.
+  // editValue 가 비어있거나 이전 자동 CAST 와 같을 때만 덮어써서 사용자 수동 입력은 보존.
+  const computeAutoCast = (firstSrc: string | undefined): string => {
+    if (!firstSrc || !active) return '';
+    const srcCol = firstSrc.includes('.') ? firstSrc.slice(firstSrc.indexOf('.') + 1) : firstSrc;
+    const srcT = resolveSrcType(firstSrc, sources);
+    if (!srcT || srcT === '—' || active.tgtType === '—') return '';
+    return (srcT === active.tgtType ? srcCol : `CAST(${srcCol} AS ${active.tgtType})`).toUpperCase();
+  };
+
   const handleEdit = () => {
     const inferredStrategy = savedStrategy ?? (active.rule === 'null' ? 'null' : active.rule === 'default' ? 'default' : 'expression');
     setEditStrategy(inferredStrategy);
-    setEditValue((savedRule ?? transformPlain(active)).toUpperCase());
-    setEditNotNull(savedNotNull !== null ? savedNotNull : active.tgtNullable === false);
-    setEditDefault(savedDefault ?? active.ddlDefault ?? '');
+    const initialAutoCast =
+      active.src !== '—' && active.tgt !== '—'
+      && active.srcType !== '—' && active.tgtType !== '—'
+      && active.srcType !== active.tgtType
+        ? `CAST(${active.src} AS ${active.tgtType})`
+        : '';
+    prevAutoCastRef.current = initialAutoCast.toUpperCase();
+    setEditValue((savedRule ?? initialAutoCast).toUpperCase());
     // Filter out stale alias references no longer present in current binding
     const rawSrc = savedSrc ?? initSrc;
     const cleanedSrc = rawSrc.filter((s) => {
@@ -1311,41 +1477,88 @@ function Inspector({ active, composition, sources, rowEdit, onSave, completions,
     setEditingRule(true);
   };
   const handleSave = () => {
-    if (editStrategy === 'expression') {
+    const filledSrcs = editSrc.filter((s) => s && s.trim() !== '');
+    const isUnassigned = filledSrcs.length === 0;
+    // source 가 비어있으면 expression validation 우회 — unmapped 로 저장.
+    if (editStrategy === 'expression' && !isUnassigned) {
       const err = validateRule(editValue);
       if (err) { setRuleError(err); return; }
     }
     setRuleError(null);
     setSavedStrategy(editStrategy);
-    setSavedRule(editStrategy === 'expression' ? editValue : null);
-    setSavedDefault(editDefault);
-    setSavedNotNull(editNotNull);
-    const filled = editSrc.filter(Boolean);
-    const newSrc = filled.length > 0 ? filled : null;
+    const ruleToSave = editStrategy === 'expression' && !isUnassigned ? editValue : null;
+    setSavedRule(ruleToSave);
+    const newSrc = filledSrcs.length > 0 ? filledSrcs : null;
     setSavedSrc(newSrc);
     setSavedSrcType(newSrc ? newSrc.map(resolveType) : null);
-    onSave({ savedRule: editStrategy === 'expression' ? editValue : undefined, savedSrc: newSrc ?? undefined, savedDefault: editDefault, savedNotNull: editNotNull, savedStrategy: editStrategy });
+    onSave({
+      savedRule: ruleToSave ?? undefined,
+      savedSrc: newSrc ?? [],
+      savedStrategy: editStrategy,
+    });
     setEditingRule(false);
   };
   const updateEditSrcAt = (i: number, val: string) => {
-    setEditSrc((prev) => prev.map((x, j) => j === i ? val : x));
-    setEditSrcType((prev) => prev.map((x, j) => j === i ? resolveType(val) : x));
+    const nextEditSrc = editSrc.map((x, j) => (j === i ? val : x));
+    setEditSrc(nextEditSrc);
+    setEditSrcType((prev) => prev.map((x, j) => (j === i ? resolveType(val) : x)));
+
+    // 1번째 슬롯이 변경되면 expression 자동 채움.
+    if (editStrategy !== 'expression') return;
+    if (i !== 0) return;
+    const firstSrc = nextEditSrc.find((s) => s && s.trim() !== '');
+    const newAutoCast = firstSrc
+      ? computeAutoCast(firstSrc)
+      : '-- NOT MAPPED YET — PICK A STRATEGY';
+    setEditValue(newAutoCast);
+    prevAutoCastRef.current = newAutoCast;
+    if (ruleError) setRuleError(null);
   };
 
-  const displaySrcArr = savedSrc ?? initSrc;
+  const displaySrcArr = (savedSrc ?? initSrc).filter((s) => s && s.trim() !== '');
   const displaySrcName = displaySrcArr.length === 0
     ? '(unassigned)'
-    : displaySrcArr[0].slice(displaySrcArr[0].lastIndexOf('.') + 1) +
-      (displaySrcArr.length > 1 ? ` +${displaySrcArr.length - 1}` : '');
+    : displaySrcArr.map((s) => s.slice(s.lastIndexOf('.') + 1)).join(' + ');
+  const handleClear = () => {
+    setSavedSrc(null);
+    setSavedSrcType(null);
+    setSavedRule(null);
+    setSavedStrategy(null);
+    setEditingRule(false);
+    setEditValue('');
+    setRuleError(null);
+    prevAutoCastRef.current = '';
+    onSave({
+      savedSrc: [],
+      savedRule: undefined,
+      savedStrategy: undefined,
+    });
+  };
+
   return (
     <aside style={styles.inspector}>
       <div style={styles.inspectorHeader}>
-        <button onClick={onClose} title="Hide detail" style={styles.inspectorClose}><Ic.x /></button>
-        <div style={styles.inspectorEyebrow}>Mapping detail</div>
-        <div style={{ fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 600 }}>{displaySrcName}</div>
-        <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-3)' }}>→ {active.tgt}</div>
+        <div style={styles.inspectorHeaderTopRow}>
+          <span style={styles.inspectorEyebrow}>Mapping detail</span>
+          <div style={{ flex: 1 }} />
+          <button
+            type="button"
+            onClick={handleClear}
+            title="이 컬럼의 매핑·룰 흔적을 모두 초기화합니다."
+            style={styles.inspectorHeaderIconBtn}
+          ><Ic.refresh /></button>
+          <button
+            type="button"
+            onClick={onClose}
+            title="Mapping detail 닫기"
+            style={styles.inspectorHeaderClose}
+          ><Ic.x /></button>
+        </div>
+        <div style={{ fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 600 }}>{active.tgt}</div>
+        <div style={{ fontFamily: 'var(--mono)', fontSize: 10.5, color: 'var(--text-3)', wordBreak: 'break-all', lineHeight: 1.4 }}>← {displaySrcName}</div>
       </div>
 
+      <div style={styles.inspectorBody}>
       <div style={styles.inspectorMeta}>
         <MetaRow k="Source column">
           {editingRule ? (
@@ -1404,30 +1617,14 @@ function Inspector({ active, composition, sources, rowEdit, onSave, completions,
         <MetaRow k="Source table"><SourceAliasTag alias={active.sourceAlias} composition={composition} /></MetaRow>
         <MetaRow k="Primary key">{active.pk ? <StatusBadge tone="info">yes</StatusBadge> : <span style={{ color: 'var(--text-4)' }}>—</span>}</MetaRow>
         <MetaRow k="Not null">
-          {editingRule ? (
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 11.5, color: 'var(--text-2)' }}>
-              <input type="checkbox" checked={editNotNull} onChange={(e) => setEditNotNull(e.target.checked)} style={{ margin: 0 }} />
-              NOT NULL
-            </label>
-          ) : (
-            (savedNotNull !== null ? savedNotNull : active.tgtNullable === false)
-              ? <StatusBadge tone="warn">required</StatusBadge>
-              : <span style={{ color: 'var(--text-4)' }}>nullable</span>
-          )}
+          {active.tgtNullable === false
+            ? <StatusBadge tone="warn">required</StatusBadge>
+            : <span style={{ color: 'var(--text-4)' }}>nullable</span>}
         </MetaRow>
         <MetaRow k="Default">
-          {editingRule ? (
-            <input
-              value={editDefault}
-              onChange={(e) => setEditDefault(e.target.value)}
-              placeholder="DDL DEFAULT value"
-              style={styles.metaInput}
-            />
-          ) : (
-            (savedDefault ?? active.ddlDefault)
-              ? <span style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-2)' }}>{savedDefault ?? active.ddlDefault}</span>
-              : <span style={{ color: 'var(--text-4)' }}>—</span>
-          )}
+          {active.ddlDefault
+            ? <span style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-2)' }}>{active.ddlDefault}</span>
+            : <span style={{ color: 'var(--text-4)' }}>—</span>}
         </MetaRow>
       </div>
 
@@ -1435,42 +1632,93 @@ function Inspector({ active, composition, sources, rowEdit, onSave, completions,
         <div style={styles.sectionLabel}>Transform</div>
         {editingRule ? (
           <>
-            <div style={styles.strategyBtnGroup}>
-              {(['expression', 'null', 'default'] as const).map((s) => (
-                <button
-                  key={s}
-                  onClick={() => { setEditStrategy(s); setRuleError(null); }}
-                  style={{ ...styles.strategyBtn, ...(editStrategy === s ? styles.strategyBtnActive : {}) }}
-                >
-                  {s === 'expression' ? 'Expression' : s === 'null' ? 'NULL' : 'Default'}
-                </button>
-              ))}
-            </div>
-            {editStrategy === 'expression' && (
-              <>
-                <HighlightEditor
-                  value={editValue}
-                  onChange={(v) => { setEditValue(v.toUpperCase()); if (ruleError) setRuleError(null); }}
-                  language="sql"
-                  hasError={!!ruleError}
-                  completions={completions}
-                  minHeight={72}
-                />
-                {ruleError && <div style={styles.ruleErrorMsg}>{ruleError}</div>}
-              </>
-            )}
+            {(() => {
+              const hasMappedSrc = editSrc.some((s) => s && s.trim() !== '');
+              return (
+                <div style={styles.strategyBtnGroup}>
+                  {(['expression', 'null', 'default'] as const).map((s) => {
+                    const blockedByMappedSrc = hasMappedSrc && (s === 'null' || s === 'default');
+                    const blockedByNotNull = active.tgtNullable === false && s === 'null';
+                    const disabled = blockedByMappedSrc || blockedByNotNull;
+                    const reason = blockedByNotNull
+                      ? 'NOT NULL 이 체크된 컬럼은 NULL 로 채울 수 없습니다.'
+                      : blockedByMappedSrc
+                        ? 'AS-IS 소스가 매핑된 컬럼에는 NULL/Default 를 사용할 수 없습니다. 먼저 Source field 를 비우세요.'
+                        : undefined;
+                    return (
+                      <button
+                        key={s}
+                        disabled={disabled}
+                        onClick={() => { if (disabled) return; setEditStrategy(s); setRuleError(null); }}
+                        title={reason}
+                        style={{
+                          ...styles.strategyBtn,
+                          ...(editStrategy === s ? styles.strategyBtnActive : {}),
+                          ...(disabled ? { opacity: 0.4, cursor: 'not-allowed' } : {}),
+                        }}
+                      >
+                        {s === 'expression' ? 'Expression' : s === 'null' ? 'NULL' : 'Default'}
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+            {editStrategy === 'expression' && (() => {
+              const localCompletions = (() => {
+                const set = new Set<string>();
+                editSrc.forEach((s) => {
+                  if (!s) return;
+                  set.add(s);
+                  const di = s.indexOf('.');
+                  if (di > 0) set.add(s.slice(di + 1));
+                });
+                return Array.from(set);
+              })();
+              return (
+                <>
+                  <HighlightEditor
+                    value={editValue}
+                    onChange={(v) => { setEditValue(v.toUpperCase()); if (ruleError) setRuleError(null); }}
+                    language="sql"
+                    placeholder={transformPlain(active)}
+                    hasError={!!ruleError}
+                    completions={localCompletions}
+                    minHeight={72}
+                  />
+                  {ruleError && <div style={styles.ruleErrorMsg}>{ruleError}</div>}
+                </>
+              );
+            })()}
             {editStrategy === 'null' && (
               <div style={styles.codeBlock}>
                 <span style={{ color: '#e8b86f' }}>NULL</span>
                 <span style={{ color: '#7a8aa6' }}>{' '}-- 이 컬럼은 항상 NULL 로 출력됩니다</span>
               </div>
             )}
-            {editStrategy === 'default' && (
-              <div style={styles.codeBlock}>
-                <span style={{ color: '#e8b86f' }}>DEFAULT</span>
-                <span style={{ color: '#7a8aa6' }}>{' '}-- DDL 기본값을 사용합니다</span>
-              </div>
-            )}
+            {editStrategy === 'default' && (() => {
+              const dv = (active.ddlDefault || 'NULL').trim();
+              const t = active.tgtType.toUpperCase();
+              const isText = t.includes('CHAR') || t.includes('TEXT') || t.includes('VARCHAR') || t.includes('JSONB') || t.includes('UUID');
+              const isNumber = /^-?\d+(\.\d+)?$/.test(dv);
+              const isKeyword = ['NULL', 'TRUE', 'FALSE', 'CURRENT_TIMESTAMP', 'NOW()'].includes(dv.toUpperCase());
+              const literal = isKeyword ? dv.toUpperCase()
+                : isNumber ? dv
+                : isText ? `'${dv.replace(/'/g, "''")}'`
+                : dv;
+              return (
+                <div style={styles.codeBlock}>
+                  <div>
+                    <span style={{ color: '#7a8aa6' }}>-- 모든 행에 대해 이 값으로 채움</span>
+                  </div>
+                  <div>
+                    <span style={{ color: '#9fd9b3' }}>{literal}</span>
+                    <span style={{ color: '#7a8aa6' }}>::{active.tgtType}</span>
+                    <span style={{ color: '#7a8aa6' }}>{' '}<span style={{ color: '#e8b86f' }}>AS</span> {active.tgt}</span>
+                  </div>
+                </div>
+              );
+            })()}
           </>
         ) : (() => {
           const effectiveStrategy = savedStrategy ?? (active.rule === 'null' ? 'null' : active.rule === 'default' ? 'default' : 'expression');
@@ -1483,12 +1731,30 @@ function Inspector({ active, composition, sources, rowEdit, onSave, completions,
             );
           }
           if (effectiveStrategy === 'default') {
+            const dv = (active.ddlDefault || '').trim();
+            if (!dv) {
+              return (
+                <div style={styles.codeBlock}>
+                  <span style={{ color: '#e8b86f' }}>DEFAULT</span>
+                  <span style={{ color: '#7a8aa6' }}>{' '}-- (no default set)</span>
+                </div>
+              );
+            }
+            const t = active.tgtType.toUpperCase();
+            const isText = t.includes('CHAR') || t.includes('TEXT') || t.includes('VARCHAR') || t.includes('JSONB') || t.includes('UUID');
+            const isNumber = /^-?\d+(\.\d+)?$/.test(dv);
+            const isKeyword = ['NULL', 'TRUE', 'FALSE', 'CURRENT_TIMESTAMP', 'NOW()'].includes(dv.toUpperCase());
+            const literal = isKeyword ? dv.toUpperCase()
+              : isNumber ? dv
+              : isText ? `'${dv.replace(/'/g, "''")}'`
+              : dv;
             return (
               <div style={styles.codeBlock}>
-                <span style={{ color: '#e8b86f' }}>DEFAULT</span>
-                {(savedDefault ?? active.ddlDefault) && (
-                  <span style={{ color: '#9fd9b3' }}>{' '}{savedDefault ?? active.ddlDefault}</span>
-                )}
+                <div>
+                  <span style={{ color: '#9fd9b3' }}>{literal}</span>
+                  <span style={{ color: '#7a8aa6' }}>::{active.tgtType}</span>
+                  <span style={{ color: '#7a8aa6' }}>{' '}<span style={{ color: '#e8b86f' }}>AS</span> {active.tgt}</span>
+                </div>
               </div>
             );
           }
@@ -1524,30 +1790,6 @@ function Inspector({ active, composition, sources, rowEdit, onSave, completions,
         )}
       </div>
 
-      <div style={styles.section}>
-        <div style={styles.sectionLabel}>
-          Sample preview <StatusBadge tone="warn">ui only</StatusBadge>
-        </div>
-        <div style={styles.sampleTable}>
-          <div style={styles.sampleHeader}>
-            <span>Source ({active.src})</span>
-            <span>Transformed ({active.tgt})</span>
-          </div>
-          {samplePreview(active).map((row, i) => (
-            <div
-              key={i}
-              style={{
-                ...styles.sampleRow,
-                background: i % 2 ? 'var(--panel-2)' : 'var(--panel)',
-              }}
-            >
-              <span style={{ color: 'var(--text-3)' }}>{row.src}</span>
-              <span style={{ color: row.out === 'NULL' ? 'var(--text-4)' : 'var(--text)' }}>{row.out}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-
       <div style={styles.inspectorActions}>
         {editingRule ? (
           <>
@@ -1560,14 +1802,21 @@ function Inspector({ active, composition, sources, rowEdit, onSave, completions,
           </>
         )}
       </div>
+      </div>
     </aside>
   );
 }
 
-function InspectorRail({ onOpen }: { onOpen: () => void }) {
+function InspectorRail({ open, onToggle }: { open: boolean; onToggle: () => void }) {
   return (
-    <div onClick={onOpen} title="Show mapping detail" style={styles.inspectorRail}>
-      <div style={styles.inspectorRailLabel}>‹ Mapping detail</div>
+    <div
+      onClick={onToggle}
+      title={open ? 'Hide mapping detail' : 'Show mapping detail'}
+      style={styles.inspectorRail}
+    >
+      <div style={styles.inspectorRailLabel}>
+        {open ? '›' : '‹'} Mapping detail
+      </div>
     </div>
   );
 }
@@ -1602,20 +1851,120 @@ function transformPlain(r: MappingRow): string {
   return transformPreview(r).map((line) => line.replace(/<[^>]+>/g, '')).join('\n');
 }
 
-function samplePreview(r: MappingRow): { src: string; out: string }[] {
-  if (r.rule === 'unmapped' || r.rule === 'skip') return [];
-  if (r.rule === 'null')     return Array.from({ length: 4 }, () => ({ src: '—', out: 'NULL' }));
-  if (r.rule === 'default')  return Array.from({ length: 4 }, () => ({ src: '—', out: r.ddlDefault ?? 'DEFAULT' }));
-  const samples = ['000142', '000143', '000144', '000145', '000146'];
-  return samples.map((s) => ({ src: s, out: r.rule === 'auto' ? s : s.replace(/^0+/, '') }));
-}
-
 // ── AS-IS table detail ───────────────────────────────────────
 
-function AsisTableDetail({ table, onJumpTobe }: { table: AsisTable; onJumpTobe: (internalName: string, name: string) => void }) {
+type AsisColMapping = { tobeInternalName: string; tobeShortName: string; tobeColumn: string; rule: MappingRow['rule'] };
+
+function computeAsisMappings(
+  asisTableName: string,
+  effectiveTobe: TobeTable[],
+  rowEditsByTobe: Record<string, Record<string, RowEdit>>,
+): Record<string, AsisColMapping[]> {
+  const out: Record<string, AsisColMapping[]> = {};
+  for (const tobe of effectiveTobe) {
+    const aliases = new Set(tobe.sources.filter((s) => s.table === asisTableName).map((s) => s.alias));
+    if (aliases.size === 0) continue;
+    const rows = MAPPING_BY_TOBE[tobe.internalName] || [];
+    const edits = rowEditsByTobe[tobe.internalName] || {};
+    for (const r of rows) {
+      const edit: RowEdit | undefined = edits[r.tgt];
+
+      // 1. effectiveRule — savedStrategy/savedRule/savedSrc 반영
+      let effRule: MappingRow['rule'] = r.rule;
+      if (edit?.savedStrategy === 'null') effRule = 'null';
+      else if (edit?.savedStrategy === 'default') effRule = 'default';
+      else if (edit?.savedStrategy === 'expression') {
+        if (edit.savedRule && edit.savedRule.trim()) effRule = 'rule';
+      }
+      if (effRule === r.rule && edit?.savedSrc && edit.savedSrc.length > 0 && r.rule === 'unmapped') {
+        effRule = 'auto';
+      }
+      if (effRule === 'added' || effRule === 'unmapped' || effRule === 'null' || effRule === 'default') continue;
+
+      // 2. AS-IS column 추출 — 사용자가 savedSrc 로 설정한 게 우선
+      let srcCol: string | undefined;
+      let sourceAlias: string | undefined;
+      const savedSrcs = edit?.savedSrc;
+      if (savedSrcs && savedSrcs.length > 0 && savedSrcs[0]) {
+        const f = savedSrcs[0];
+        const di = f.indexOf('.');
+        if (di >= 0) {
+          sourceAlias = f.slice(0, di);
+          srcCol = f.slice(di + 1);
+        } else {
+          srcCol = f;
+        }
+      } else {
+        sourceAlias = r.sourceAlias;
+        srcCol = r.src === '—' ? undefined : r.src;
+      }
+      if (!srcCol || srcCol === '—' || srcCol === '(new)') continue;
+
+      // alias 가 있으면 그 alias 가 현재 AS-IS 테이블의 alias 중 하나여야 함
+      if (sourceAlias && !aliases.has(sourceAlias)) continue;
+      // alias 가 없으면, srcCol 이 현재 AS-IS 테이블에 실제로 존재해야 함
+      if (!sourceAlias && !(ASIS_COLUMNS[asisTableName] || []).some((c) => c.name === srcCol)) continue;
+
+      (out[srcCol] ||= []).push({
+        tobeInternalName: tobe.internalName,
+        tobeShortName: tobe.short,
+        tobeColumn: r.tgt,
+        rule: effRule,
+      });
+    }
+  }
+  return out;
+}
+
+type AsisColFilter = 'all' | 'mapped' | 'unmapped' | 'skip';
+
+const EMPTY_ROW_EDITS_BY_TOBE: Record<string, Record<string, RowEdit>> = Object.freeze({}) as Record<string, Record<string, RowEdit>>;
+
+function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJumpTobe }: {
+  table: AsisTable;
+  effectiveTobe: TobeTable[];
+  skippedCols: Record<string, boolean>;
+  onToggleSkip: (colName: string, nextSkip: boolean) => void;
+  onJumpTobe: (internalName: string, name: string) => void;
+}) {
   const cols = ASIS_COLUMNS[table.name] || [];
-  const [subTab, setSubTab] = useState<'columns' | 'samples' | 'profile'>('columns');
-  const routedTobe = TOBE_TABLES.filter((t) => table.routing.includes(t.internalName));
+  const [colFilter, setColFilter] = useState<AsisColFilter>('all');
+  const routedTobe = effectiveTobe.filter((t) => t.sources.some((s) => s.table === table.name));
+
+  const activeProjectIdForAsis = useWorkspaceStore((s) => s.activeProjectId);
+  const rowEditsByTobe = useMappingEditsStore(
+    (s) => (activeProjectIdForAsis ? s.rowEdits[activeProjectIdForAsis] : undefined) || EMPTY_ROW_EDITS_BY_TOBE,
+  );
+
+  const mappings = useMemo(
+    () => computeAsisMappings(table.name, effectiveTobe, rowEditsByTobe),
+    [table.name, effectiveTobe, rowEditsByTobe],
+  );
+  const colStatus = (colName: string): 'mapped' | 'skip' | 'unmapped' => {
+    const ms = mappings[colName] || [];
+    if (ms.some((m) => m.rule !== 'skip')) return 'mapped';
+    const override = skippedCols[colName];
+    if (override === true) return 'skip';
+    if (override === false) return 'unmapped';
+    if (ms.some((m) => m.rule === 'skip')) return 'skip';
+    return 'unmapped';
+  };
+
+  const coverage = useMemo(() => {
+    let mapped = 0, skip = 0, unmapped = 0;
+    for (const c of cols) {
+      const s = colStatus(c.name);
+      if (s === 'mapped') mapped++;
+      else if (s === 'skip') skip++;
+      else unmapped++;
+    }
+    return { mapped, skip, unmapped, total: cols.length };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cols, mappings, skippedCols]);
+
+  const filteredCols = colFilter === 'all'
+    ? cols
+    : cols.filter((c) => colStatus(c.name) === colFilter);
 
   return (
     <div style={styles.workspace}>
@@ -1623,19 +1972,13 @@ function AsisTableDetail({ table, onJumpTobe }: { table: AsisTable; onJumpTobe: 
         <span style={{ ...styles.sidePill, color: 'var(--amber)', background: 'var(--amber-50)', borderColor: 'var(--amber)' }}>AS-IS</span>
         <div style={styles.tableChip}>{table.name}</div>
         <div style={{ flex: 1 }} />
-        <button style={styles.btnSecondary}><Ic.plus /> Route to TO-BE…</button>
-      </div>
-
-      <div style={styles.asisHint}>
-        <Ic.warn />
-        <span>이 화면은 <b>읽기 전용 브라우저</b>입니다. 컬럼 매핑 규칙을 편집하려면 좌측 TO-BE 트리에서 대상 테이블을 선택하세요.</span>
       </div>
 
       <div style={styles.routingPanel}>
         <div style={styles.routingHeader}>Routing</div>
         {routedTobe.length === 0 ? (
           <div style={styles.routingEmpty}>
-            이 AS-IS 테이블은 아직 어느 TO-BE 테이블에도 연결되어 있지 않습니다. [Route to TO-BE…] 로 이행 대상을 지정하세요.
+            이 AS-IS 테이블은 아직 어느 TO-BE 테이블에도 연결되어 있지 않습니다. 좌측 TO-BE 트리에서 대상 테이블을 선택해 <b>Table binding</b>에 이 AS-IS 소스를 추가하세요.
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -1659,71 +2002,142 @@ function AsisTableDetail({ table, onJumpTobe }: { table: AsisTable; onJumpTobe: 
         )}
       </div>
 
-      {/* Sub-tabs */}
-      <div style={styles.subTabs}>
-        {(
-          [
-            { k: 'columns', l: 'Columns', c: cols.length },
-            { k: 'samples', l: 'Samples', c: 10 },
-            { k: 'profile', l: 'Profile', c: cols.length },
-          ] as const
-        ).map((tdef) => {
-          const isActive = subTab === tdef.k;
-          return (
-            <button key={tdef.k} onClick={() => setSubTab(tdef.k)} style={{
-              ...styles.subTabBtn,
-              color: isActive ? 'var(--navy)' : 'var(--text-2)',
-              fontWeight: isActive ? 600 : 500,
-              boxShadow: isActive ? 'inset 0 -2px 0 var(--navy)' : 'none',
-            }}>
-              {tdef.l}
-              <span style={{
-                ...styles.subTabCount,
-                background: isActive ? 'var(--navy-50)' : 'var(--panel-2)',
-              }}>{tdef.c}</span>
-            </button>
-          );
-        })}
-      </div>
-
       <div style={{ flex: 1, overflow: 'auto', background: 'var(--panel)' }}>
-        {subTab === 'columns' && (
-          <table style={styles.gridTable}>
-            <thead>
-              <tr>
-                {['Column', 'Type', 'Null %', 'Distinct'].map((h, i) => (
-                  <th key={i} style={{ ...styles.gridTh, textAlign: i >= 2 ? 'right' : 'left' }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {cols.map((c, i) => (
-                <tr key={c.name} style={{ background: i % 2 === 1 ? 'var(--zebra)' : 'var(--panel)', borderBottom: '1px solid var(--border)' }}>
-                  <td style={{ ...styles.gridTd, fontFamily: 'var(--mono)', fontWeight: 500 }}>
-                    {c.pk && <span style={{ color: 'var(--navy)', marginRight: 5, fontSize: 9, fontWeight: 700 }}>PK</span>}
-                    {c.name}
-                  </td>
-                  <td style={styles.gridTd}><TypeBadge>{c.type}</TypeBadge></td>
-                  <td style={{ ...styles.gridTd, textAlign: 'right', fontFamily: 'var(--mono)', color: (c.nullPct ?? 0) > 10 ? 'var(--amber)' : 'var(--text-2)' }}>
-                    {(c.nullPct ?? 0).toFixed(1)}%
-                  </td>
-                  <td style={{ ...styles.gridTd, textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text-2)' }}>
-                    {(c.distinct ?? 0).toLocaleString()}
-                  </td>
+        <CoverageBar {...coverage} filter={colFilter} onFilter={setColFilter} />
+            <table style={{ ...styles.gridTable, tableLayout: 'fixed' }}>
+              <colgroup>
+                <col style={{ width: '20%' }} />
+                <col style={{ width: '16%' }} />
+                <col style={{ width: '90px' }} />
+                <col />
+                <col style={{ width: '110px' }} />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th style={{ ...styles.gridTh, textAlign: 'left',   top: 56, zIndex: 1 }}>Column</th>
+                  <th style={{ ...styles.gridTh, textAlign: 'left',   top: 56, zIndex: 1 }}>Type</th>
+                  <th style={{ ...styles.gridTh, textAlign: 'center', top: 56, zIndex: 1 }}>Not Null</th>
+                  <th style={{ ...styles.gridTh, textAlign: 'left',   top: 56, zIndex: 1 }}>Mapped TO-BE</th>
+                  <th style={{ ...styles.gridTh, textAlign: 'right',  top: 56, zIndex: 1 }}>Action</th>
                 </tr>
-              ))}
-              {cols.length === 0 && (
-                <tr><td colSpan={4} style={styles.gridEmpty}>(no column schema available for this table)</td></tr>
-              )}
-            </tbody>
-          </table>
-        )}
-        {subTab === 'samples' && (
-          <div style={styles.subTabPlaceholder}>샘플 미리보기는 실접속 시 SELECT * LIMIT 10 으로 채워집니다.</div>
-        )}
-        {subTab === 'profile' && (
-          <div style={styles.subTabPlaceholder}>고정 프로파일 값입니다. 실접속 시 ANALYZE / information_schema 로 채워집니다.</div>
-        )}
+              </thead>
+              <tbody>
+                {filteredCols.map((c, i) => {
+                  const status = colStatus(c.name);
+                  const ms = mappings[c.name] || [];
+                  const realMappings = ms.filter((m) => m.rule !== 'skip');
+                  const notNull = (c.nullPct ?? 0) === 0;
+                  return (
+                    <tr key={c.name} style={{
+                      background: i % 2 === 1 ? 'var(--zebra)' : 'var(--panel)',
+                      borderBottom: '1px solid var(--border)',
+                      opacity: status === 'skip' ? 0.62 : 1,
+                    }}>
+                      <td style={{ ...styles.gridTd, fontFamily: 'var(--mono)', fontWeight: 500 }}>
+                        {c.pk && <span style={{ color: 'var(--navy)', marginRight: 5, fontSize: 9, fontWeight: 700 }}>PK</span>}
+                        {c.name}
+                      </td>
+                      <td style={styles.gridTd}><TypeBadge>{c.type}</TypeBadge></td>
+                      <td style={{ ...styles.gridTd, textAlign: 'center' }}>
+                        {notNull
+                          ? <StatusBadge tone="info">NOT NULL</StatusBadge>
+                          : <span style={{ color: 'var(--text-4)', fontSize: 10, fontFamily: 'var(--mono)' }}>—</span>}
+                      </td>
+                      <td style={styles.gridTd}>
+                        {realMappings.length === 0 ? (
+                          status === 'skip' ? (
+                            <StatusBadge tone="skip">skip</StatusBadge>
+                          ) : (
+                            <StatusBadge tone="err">unmapped</StatusBadge>
+                          )
+                        ) : (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                            {realMappings.map((m, j) => (
+                              <button
+                                key={`${m.tobeInternalName}-${j}`}
+                                style={styles.tobeTargetChip}
+                                title={`Go to ${m.tobeShortName}.${m.tobeColumn}`}
+                                onClick={() => onJumpTobe(m.tobeInternalName, TOBE_TABLES.find((t) => t.internalName === m.tobeInternalName)?.name || m.tobeShortName)}
+                              >
+                                <span style={{ color: 'var(--text-3)' }}>{m.tobeShortName}</span>
+                                <span style={{ color: 'var(--text-4)', margin: '0 3px' }}>.</span>
+                                <span style={{ color: 'var(--navy)', fontWeight: 600 }}>{m.tobeColumn}</span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                      <td style={{ ...styles.gridTd, textAlign: 'right' }}>
+                        {status === 'mapped' ? (
+                          <span style={{ color: 'var(--text-4)', fontSize: 10 }}>—</span>
+                        ) : status === 'skip' ? (
+                          <button style={styles.skipBtnOn} onClick={() => onToggleSkip(c.name, false)}>
+                            ✓ Skipped
+                          </button>
+                        ) : (
+                          <button style={styles.skipBtnOff} onClick={() => onToggleSkip(c.name, true)}>
+                            Skip
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {filteredCols.length === 0 && (
+                  <tr><td colSpan={5} style={styles.gridEmpty}>
+                    {cols.length === 0
+                      ? '(no column schema available for this table)'
+                      : `(no ${colFilter} columns)`}
+                  </td></tr>
+                )}
+              </tbody>
+            </table>
+      </div>
+    </div>
+  );
+}
+
+function CoverageBar({ mapped, skip, unmapped, total, filter, onFilter }: {
+  mapped: number; skip: number; unmapped: number; total: number;
+  filter: AsisColFilter;
+  onFilter: (f: AsisColFilter) => void;
+}) {
+  const pct = (n: number) => (total === 0 ? 0 : (n / total) * 100);
+  const btn = (key: AsisColFilter, label: string, count: number, dotColor?: string) => {
+    const isActive = filter === key;
+    return (
+      <button
+        key={key}
+        onClick={() => onFilter(key)}
+        style={{
+          ...styles.coverageFilterBtn,
+          background: isActive ? 'var(--panel)' : 'transparent',
+          borderColor: isActive ? 'var(--border-strong)' : 'transparent',
+          color: isActive ? 'var(--text)' : 'var(--text-2)',
+          fontWeight: isActive ? 700 : 500,
+        }}
+      >
+        {dotColor && <span style={{ ...styles.coverageDot, background: dotColor }} />}
+        <span>{label}</span>
+        <span style={{ ...styles.coverageFilterCount, color: isActive ? 'var(--text)' : 'var(--text-3)' }}>{count}</span>
+      </button>
+    );
+  };
+  return (
+    <div style={styles.coverageWrap}>
+      <div style={styles.coverageHeader}>
+        <span style={styles.coverageLabel}>Coverage</span>
+        <div style={styles.coverageFilters}>
+          {btn('all', 'All', total)}
+          {btn('mapped', 'Mapped', mapped, 'var(--green)')}
+          {btn('unmapped', 'Unmapped', unmapped, 'var(--red)')}
+          {btn('skip', 'Skip', skip, 'var(--border-strong)')}
+        </div>
+      </div>
+      <div style={styles.coverageTrack}>
+        <div style={{ width: `${pct(mapped)}%`, background: 'var(--green)' }} />
+        <div style={{ width: `${pct(unmapped)}%`, background: 'var(--red)' }} />
+        <div style={{ width: `${pct(skip)}%`, background: 'var(--border-strong)' }} />
       </div>
     </div>
   );
@@ -1739,6 +2153,68 @@ function GuidePanel() {
         <div style={{ marginTop: 6 }}>
           TO-BE 테이블을 선택하면 컬럼 매핑을 편집할 수 있고, AS-IS 테이블을 선택하면 스키마와 라우팅을 확인할 수 있습니다.
         </div>
+      </div>
+    </div>
+  );
+}
+
+type TobeRuleFilter = 'all' | 'unmapped' | 'auto' | 'rule' | 'null' | 'default';
+
+// Unmapped 만 빨강; 나머지는 같은 초록 계열, Default 를 기준으로 점점 옅어진다.
+const TOBE_RULE_COLORS: Record<Exclude<TobeRuleFilter, 'all'>, string> = {
+  unmapped: 'var(--red)',
+  auto:     '#059669',  // green 600 (darkest)
+  rule:     '#34d399',  // green 400
+  null:     '#6ee7b7',  // green 200
+  default:  '#a7f3d0',  // green 100 (lightest)
+};
+
+function TobeCoverageBar({ total, ruleCounts, filter, onFilter }: {
+  total: number;
+  ruleCounts: { unmapped: number; auto: number; rule: number; null: number; default: number };
+  filter: TobeRuleFilter;
+  onFilter: (f: TobeRuleFilter) => void;
+}) {
+  const pct = (n: number) => (total === 0 ? 0 : (n / total) * 100);
+  const btn = (key: TobeRuleFilter, label: string, count: number, dotColor?: string) => {
+    const isActive = filter === key;
+    return (
+      <button
+        key={key}
+        onClick={() => onFilter(key)}
+        style={{
+          ...styles.coverageFilterBtn,
+          background: isActive ? 'var(--panel)' : 'transparent',
+          borderColor: isActive ? 'var(--border-strong)' : 'transparent',
+          color: isActive ? 'var(--text)' : 'var(--text-2)',
+          fontWeight: isActive ? 700 : 500,
+        }}
+      >
+        {dotColor && <span style={{ ...styles.coverageDot, background: dotColor }} />}
+        <span>{label}</span>
+        <span style={{ ...styles.coverageFilterCount, color: isActive ? 'var(--text)' : 'var(--text-3)' }}>{count}</span>
+      </button>
+    );
+  };
+  return (
+    <div style={{ ...styles.coverageWrap, minWidth: 980 }}>
+      <div style={styles.coverageHeader}>
+        <span style={styles.coverageLabel}>State</span>
+        <div style={styles.coverageFilters}>
+          {btn('all',      'All',         total)}
+          {btn('unmapped', 'Unmapped',    ruleCounts.unmapped, TOBE_RULE_COLORS.unmapped)}
+          {btn('auto',     'Passthrough', ruleCounts.auto,     TOBE_RULE_COLORS.auto)}
+          {btn('rule',     'Transform',   ruleCounts.rule,     TOBE_RULE_COLORS.rule)}
+          {btn('null',     'Null',        ruleCounts.null,     TOBE_RULE_COLORS.null)}
+          {btn('default',  'Default',     ruleCounts.default,  TOBE_RULE_COLORS.default)}
+        </div>
+      </div>
+      <div style={styles.coverageTrack}>
+        <div style={{ width: `${pct(ruleCounts.unmapped)}%`, background: TOBE_RULE_COLORS.unmapped }} />
+        <div style={{ width: `${pct(ruleCounts.auto)}%`,     background: TOBE_RULE_COLORS.auto }} />
+        <div style={{ width: `${pct(ruleCounts.rule)}%`,     background: TOBE_RULE_COLORS.rule }} />
+        <div style={{ width: `${pct(ruleCounts.null)}%`,     background: TOBE_RULE_COLORS.null }} />
+        <div style={{ width: `${pct(ruleCounts.default)}%`,  background: TOBE_RULE_COLORS.default }} />
       </div>
     </div>
   );
@@ -1764,12 +2240,13 @@ function TobeBindingEmpty({ tableName }: { tableName: string }) {
 
 // ── Small reusable UI atoms ──────────────────────────────────
 
-function StatusBadge({ tone, children }: { tone: 'ok' | 'warn' | 'err' | 'info' | 'skip' | 'queued'; children: React.ReactNode }) {
+function StatusBadge({ tone, children }: { tone: 'ok' | 'warn' | 'err' | 'info' | 'blue' | 'skip' | 'queued'; children: React.ReactNode }) {
   const palette = {
     ok:     { color: 'var(--green)', bg: 'var(--green-50)', border: 'var(--green)' },
     warn:   { color: 'var(--amber)', bg: 'var(--amber-50)', border: 'var(--amber)' },
     err:    { color: 'var(--red)',   bg: 'var(--red-50)',   border: 'var(--red)' },
     info:   { color: 'var(--navy)',  bg: 'var(--navy-50)',  border: 'var(--navy)' },
+    blue:   { color: '#01589C',      bg: 'rgba(1, 88, 156, 0.12)', border: '#01589C' },
     skip:   { color: 'var(--text-3)', bg: 'var(--panel-2)', border: 'var(--border-strong)' },
     queued: { color: 'var(--text-2)', bg: 'var(--panel-2)', border: 'var(--border-strong)' },
   }[tone];
@@ -1784,17 +2261,19 @@ function StatusBadge({ tone, children }: { tone: 'ok' | 'warn' | 'err' | 'info' 
   );
 }
 
-function RuleTag({ rule }: { rule: MappingRow['rule'] }) {
-  const map: Record<MappingRow['rule'], { l: string; tone: Parameters<typeof StatusBadge>[0]['tone'] }> = {
-    auto:     { l: 'pass',  tone: 'ok' },
-    rule:     { l: 'rule',  tone: 'info' },
-    null:     { l: 'null',  tone: 'queued' },
-    default:  { l: 'def',   tone: 'queued' },
-    unmapped: { l: '—',     tone: 'queued' },
-    added:    { l: 'new',   tone: 'ok' },
-    skip:     { l: 'skip',  tone: 'skip' },
+function RuleTag({ rule, status }: { rule: MappingRow['rule']; status?: MappingRow['status'] }) {
+  const labels: Record<MappingRow['rule'], string> = {
+    auto: 'pass', rule: 'rule', null: 'null', default: 'def',
+    unmapped: 'unmapped', added: 'new', skip: 'skip',
   };
-  return <StatusBadge tone={map[rule].tone}>{map[rule].l}</StatusBadge>;
+  let tone: Parameters<typeof StatusBadge>[0]['tone'];
+  if (rule === 'skip') tone = 'skip';
+  else if (rule === 'unmapped') tone = 'err';
+  else if (status === 'err') tone = 'err';
+  else if (status === 'warn') tone = 'warn';
+  else if (rule === 'auto') tone = 'blue';
+  else tone = 'ok';
+  return <StatusBadge tone={tone}>{labels[rule]}</StatusBadge>;
 }
 
 function TypeBadge({ children }: { children: React.ReactNode }) {
@@ -2093,14 +2572,39 @@ const styles: Record<string, React.CSSProperties> = {
     borderLeft: '1px solid var(--border)',
     background: 'var(--panel)',
     display: 'flex', flexDirection: 'column',
-    overflow: 'auto',
+    overflow: 'hidden',  // outer 는 스크롤 없음 — 내부 영역만 스크롤
   },
-  inspectorHeader: { padding: '12px 14px', borderBottom: '1px solid var(--border)', position: 'relative' },
-  inspectorClose: {
-    position: 'absolute', top: 8, right: 10,
-    border: 'none', background: 'transparent',
-    color: 'var(--text-3)', cursor: 'pointer', padding: 4,
-    display: 'inline-flex',
+  inspectorHeader: {
+    padding: '12px 14px', borderBottom: '1px solid var(--border)',
+    position: 'sticky', top: 0, zIndex: 1, background: 'var(--panel)',
+    flexShrink: 0,
+  },
+  inspectorHeaderTopRow: {
+    display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6,
+  },
+  inspectorHeaderBtn: {
+    height: 22, padding: '0 10px', borderRadius: 3,
+    background: 'transparent', color: 'var(--text-2)',
+    border: '1px solid var(--border-strong)',
+    fontSize: 10.5, fontWeight: 600, cursor: 'pointer',
+    fontFamily: 'var(--mono)', letterSpacing: 0.3,
+  },
+  inspectorHeaderIconBtn: {
+    width: 22, height: 22, padding: 0, borderRadius: 3,
+    background: 'transparent', color: 'var(--text-3)',
+    border: '1px solid transparent',
+    cursor: 'pointer',
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+  },
+  inspectorHeaderClose: {
+    width: 22, height: 22, padding: 0, borderRadius: 3,
+    background: 'transparent', color: 'var(--text-3)',
+    border: '1px solid transparent',
+    cursor: 'pointer',
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+  },
+  inspectorBody: {
+    flex: 1, minHeight: 0, overflow: 'auto',
   },
   inspectorEyebrow: {
     fontSize: 10.5, color: 'var(--text-3)',
@@ -2246,6 +2750,7 @@ const styles: Record<string, React.CSSProperties> = {
   inspectorRail: {
     width: 22, minWidth: 22,
     borderLeft: '1px solid var(--border)',
+    borderRight: '1px solid var(--border)',
     background: 'var(--panel-2)',
     cursor: 'pointer',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -2293,24 +2798,75 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid var(--amber)',
     fontSize: 10, fontWeight: 600, letterSpacing: 0.2,
   },
-  subTabs: {
-    display: 'flex', alignItems: 'stretch',
-    padding: '0 14px',
+
+  // Coverage bar (AS-IS Columns tab)
+  coverageWrap: {
+    padding: '10px 14px',
     borderBottom: '1px solid var(--border)',
-    background: 'var(--panel)', height: 30,
+    background: 'var(--panel-2)',
+    position: 'sticky', top: 0, zIndex: 2,
   },
-  subTabBtn: {
-    position: 'relative',
-    padding: '0 13px', border: 'none', background: 'transparent',
-    display: 'inline-flex', alignItems: 'center', gap: 6,
-    cursor: 'pointer', fontSize: 12,
+  coverageHeader: {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    fontSize: 11, marginBottom: 6,
   },
-  subTabCount: {
-    fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-4)',
-    padding: '0 5px',
-    border: '1px solid var(--border)', borderRadius: 6,
+  coverageLabel: {
+    fontSize: 10, color: 'var(--text-3)',
+    textTransform: 'uppercase', letterSpacing: 0.7,
   },
-  subTabPlaceholder: { padding: '24px', fontSize: 11.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
+  coverageLegend: {
+    display: 'inline-flex', alignItems: 'center',
+    fontFamily: 'var(--mono)', fontSize: 10.5, color: 'var(--text-2)',
+  },
+  coverageDot: {
+    display: 'inline-block', width: 8, height: 8, borderRadius: 2, marginRight: 4,
+  },
+  coverageFilters: {
+    display: 'inline-flex', alignItems: 'center', gap: 4,
+  },
+  coverageFilterBtn: {
+    display: 'inline-flex', alignItems: 'center', gap: 5,
+    height: 22, padding: '0 10px', borderRadius: 4,
+    border: '1px solid transparent',
+    fontSize: 11, cursor: 'pointer',
+    fontFamily: 'inherit',
+  },
+  coverageFilterCount: {
+    fontFamily: 'var(--mono)', fontSize: 10.5, fontWeight: 700,
+    padding: '0 5px', borderRadius: 6,
+    background: 'var(--panel-2)', border: '1px solid var(--border)',
+  },
+  coverageTrack: {
+    display: 'flex', height: 6, borderRadius: 3, overflow: 'hidden',
+    background: 'var(--border)',
+  },
+
+  // TO-BE target chip (AS-IS Columns "Mapped TO-BE")
+  tobeTargetChip: {
+    display: 'inline-flex', alignItems: 'center',
+    padding: '1px 6px', borderRadius: 3,
+    border: '1px solid var(--border)', background: 'var(--panel)',
+    fontFamily: 'var(--mono)', fontSize: 11,
+    cursor: 'pointer',
+  },
+
+  // Skip toggle (AS-IS Columns Action)
+  skipBtnOff: {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    height: 20, padding: '0 8px', borderRadius: 3,
+    background: 'var(--panel)', color: 'var(--text-2)',
+    border: '1px solid var(--border-strong)',
+    fontFamily: 'var(--mono)', fontSize: 10.5, fontWeight: 600,
+    cursor: 'pointer', whiteSpace: 'nowrap',
+  },
+  skipBtnOn: {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    height: 20, padding: '0 8px', borderRadius: 3,
+    background: 'var(--panel-2)', color: 'var(--text-3)',
+    border: '1px solid var(--border-strong)',
+    fontFamily: 'var(--mono)', fontSize: 10.5, fontWeight: 600,
+    cursor: 'pointer', whiteSpace: 'nowrap',
+  },
 
   // Empty states
   centerEmpty: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 32 },
@@ -2332,6 +2888,18 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid var(--navy)', borderRadius: 4,
     fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
     whiteSpace: 'nowrap',
+  },
+  csvMissingBtn: {
+    background: 'transparent', border: 'none', padding: 0,
+    cursor: 'pointer', display: 'inline-flex', alignItems: 'center',
+  },
+  btnPrimaryDisabled: {
+    display: 'inline-flex', alignItems: 'center', gap: 5,
+    height: 26, padding: '0 10px',
+    background: 'var(--panel-2)', color: 'var(--text-4)',
+    border: '1px solid var(--border-strong)', borderRadius: 4,
+    fontSize: 11.5, fontWeight: 600, cursor: 'not-allowed',
+    whiteSpace: 'nowrap', opacity: 0.7,
   },
   btnPrimarySm: {
     display: 'inline-flex', alignItems: 'center', gap: 4,

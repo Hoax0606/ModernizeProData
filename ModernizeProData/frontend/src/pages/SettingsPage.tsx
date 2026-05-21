@@ -8,8 +8,10 @@ import { useAuthStore } from '../store/auth';
 import { DdlSchemaPanel } from '../components/DdlSchemaPanel';
 import { useT } from '../i18n';
 
-/** AppShell 의 AS-IS/TO-BE 램프 클릭 → navigate(..., { state: { highlightSide } }) 로 전달. */
-type HighlightSide = 'asis' | 'tobe';
+/** AppShell 의 AS-IS/TO-BE 램프 클릭 → navigate(..., { state: { highlightSide } }) 로 전달.
+ *  'asis-csv' 는 MappingPage 의 "CSV not imported" 배지에서 들어오는 경우에 쓰이며
+ *  AS-IS 섹션의 CSV 카드를 하이라이트한다. */
+type HighlightSide = 'asis' | 'asis-csv' | 'tobe';
 interface HighlightState { highlightSide?: HighlightSide }
 
 const ALL_PHASES: ProjectPhase[] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
@@ -43,7 +45,7 @@ export function SettingsPage() {
     const state = location.state as HighlightState | null;
     const side = state?.highlightSide;
     if (!side) return;
-    setSection(side === 'asis' ? 'source' : 'target');
+    setSection(side === 'tobe' ? 'target' : 'source');
     setHighlightSide(side);
     const t = window.setTimeout(() => setHighlightSide(null), 1000);
     // location.state 를 history 에서 비워두 — 같은 페이지 재진입 시 재발 방지.
@@ -113,7 +115,7 @@ export function SettingsPage() {
 
       <div style={styles.content}>
         {section === 'general'   && <PSGeneral   project={project} site={site} />}
-        {section === 'source'    && <PSSource    project={project} highlight={highlightSide === 'asis'} />}
+        {section === 'source'    && <PSSource    project={project} highlight={highlightSide === 'asis'} highlightCsv={highlightSide === 'asis-csv'} />}
         {section === 'target'    && <PSTarget    project={project} highlight={highlightSide === 'tobe'} />}
         {section === 'schedule'  && <PSSchedule  project={project} />}
         {section === 'notify'    && <PSNotify    />}
@@ -214,22 +216,25 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
 
 /* ─── AS-IS (Source) ─────────────────────────────────────── */
 
-function PSSource({ project, highlight }: { project: Project; highlight?: boolean }) {
+function PSSource({ project, highlight, highlightCsv }: { project: Project; highlight?: boolean; highlightCsv?: boolean }) {
   const t = useT();
   return (
     <>
       <PSHead title="AS-IS" desc={t('projectSettings.head.source.desc')} />
       <DdlCard project={project} side="asis" highlight={highlight} />
-      <CsvSourceCard />
+      <CsvSourceCard highlight={highlightCsv} />
       <StagingCard />
     </>
   );
 }
 
-function CsvSourceCard() {
+function CsvSourceCard({ highlight }: { highlight?: boolean }) {
   const t = useT();
   return (
-    <div style={styles.amberCard}>
+    <div style={{
+      ...styles.amberCard,
+      ...(highlight ? { boxShadow: '0 0 0 3px var(--amber)', transition: 'box-shadow 200ms' } : {}),
+    }}>
       <div style={styles.amberCardTitle}>
         {t('projectSettings.csv.title')}
         <span style={{ ...styles.uiOnlyBadge, marginLeft: 8 }}>UI only</span>
