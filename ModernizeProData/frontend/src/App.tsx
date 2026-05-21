@@ -12,6 +12,7 @@ import { VersionsPage } from './pages/VersionsPage';
 import { ApprovalsPage } from './pages/ApprovalsPage';
 import { ExecutionPage } from './pages/ExecutionPage';
 import { ExecutionOverviewPage } from './pages/ExecutionOverviewPage';
+import { MappingPage } from './pages/MappingPage';
 import { ArtifactsPage } from './pages/ArtifactsPage';
 import { AppShell } from './layout/AppShell';
 import { ProtectedRoute } from './routes/ProtectedRoute';
@@ -47,7 +48,7 @@ function App() {
               <Route path="/site/export" element={<SiteExportPage />} />
               <Route path="/site/approvals" element={<ApprovalsPage />} />
               <Route path="/site/audit" element={<AuditLogPage />} />
-              <Route path="/mapping" element={<PlaceholderPage title="Mapping" description="AS-IS → TO-BE 컬럼 매핑 정의" />} />
+              <Route path="/mapping" element={<MappingPage />} />
               <Route path="/versions" element={<VersionsPage />} />
               <Route path="/execution" element={<ExecutionPage />} />
               <Route path="/artifacts" element={<ArtifactsPage />} />

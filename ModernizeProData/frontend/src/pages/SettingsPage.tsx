@@ -12,8 +12,10 @@ import { LockIcon } from '../components/LockIcon';
 import { Toast } from '../components/Toast';
 import { useT } from '../i18n';
 
-/** AppShell 의 AS-IS/TO-BE 램프 클릭 → navigate(..., { state: { highlightSide } }) 로 전달. */
-type HighlightSide = 'asis' | 'tobe';
+/** AppShell 의 AS-IS/TO-BE 램프 클릭 → navigate(..., { state: { highlightSide } }) 로 전달.
+ *  'asis-csv' 는 MappingPage 의 "CSV not imported" 배지에서 들어오는 경우에 쓰이며
+ *  AS-IS 섹션의 CSV 카드를 하이라이트한다. */
+type HighlightSide = 'asis' | 'asis-csv' | 'tobe';
 interface HighlightState { highlightSide?: HighlightSide }
 
 const ALL_PHASES: ProjectPhase[] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
