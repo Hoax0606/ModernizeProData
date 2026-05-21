@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Modal } from './Modal';
 import { useAuthStore, roleLabel } from '../store/auth';
+import { usersApi } from '../api/users';
+import { ApiError } from '../api/client';
 import { useT } from '../i18n';
 
 interface Props {
@@ -24,12 +26,48 @@ export function AccountProfileModal({ open, onClose }: Props) {
   const lastSignInAt = useAuthStore((s) => s.lastSignInAt);
   const loginAt = useAuthStore((s) => s.loginAt);
   const [pwOpen, setPwOpen] = useState(false);
+  const [curPw, setCurPw] = useState('');
+  const [newPw, setNewPw] = useState('');
+  const [confirmPw, setConfirmPw] = useState('');
+  const [pwError, setPwError] = useState<string | null>(null);
+  const [pwSaving, setPwSaving] = useState(false);
+  const [pwSuccess, setPwSuccess] = useState(false);
 
   const lastSignIn = formatDt(lastSignInAt);
   const sessionStart = loginAt ? `since ${formatDt(loginAt)}` : '—';
-  const lastPwChange = '—'; // 비밀번호 변경 기능 구현 시 교체
-
   const role = roleLabel(user?.role);
+
+  const resetPwForm = () => {
+    setCurPw(''); setNewPw(''); setConfirmPw('');
+    setPwError(null); setPwSuccess(false);
+  };
+  const closePw = () => { setPwOpen(false); resetPwForm(); };
+
+  const canSubmitPw = !!curPw && !!newPw && newPw === confirmPw && newPw.length >= 4 && !pwSaving;
+
+  const handlePwSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPwError(null);
+    if (newPw !== confirmPw) { setPwError(t('account.pw.error.mismatch')); return; }
+    if (newPw.length < 4) { setPwError(t('account.pw.error.tooShort')); return; }
+    setPwSaving(true);
+    try {
+      await usersApi.changeMyPassword(curPw, newPw);
+      setPwSuccess(true);
+      setCurPw(''); setNewPw(''); setConfirmPw('');
+      setTimeout(() => { setPwOpen(false); setPwSuccess(false); }, 1200);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        if (err.code === 'CURRENT_PASSWORD_INVALID') setPwError(t('account.pw.error.invalid'));
+        else if (err.code === 'PASSWORD_SAME')       setPwError(t('account.pw.error.same'));
+        else                                          setPwError(err.message || t('account.pw.error.generic'));
+      } else {
+        setPwError(t('account.pw.error.generic'));
+      }
+    } finally {
+      setPwSaving(false);
+    }
+  };
 
   return (
     <Modal open={open} onClose={onClose} width={520} title={t('account.title')}>
@@ -49,36 +87,40 @@ export function AccountProfileModal({ open, onClose }: Props) {
       <Field label={t('account.lastSignIn')} value={lastSignIn} mono />
       <Field label={t('account.activeSession')} value={sessionStart} mono />
 
-      {/* Password 섹션 — 명확한 라벨 + 버튼 */}
+      {/* Password 섹션 */}
       <div style={styles.pwSection}>
         <div style={styles.pwHeader}>
           <div>
             <div style={styles.pwTitle}>{t('account.passwordLabel')}</div>
-            <div style={styles.pwMeta}>{t('account.lastChanged')} · {lastPwChange}</div>
           </div>
           {!pwOpen ? (
             <button onClick={() => setPwOpen(true)} style={styles.pwBtn}>
               {t('account.changePassword')}
             </button>
           ) : (
-            <button onClick={() => setPwOpen(false)} style={styles.pwBtnGhost}>
+            <button onClick={closePw} style={styles.pwBtnGhost} disabled={pwSaving}>
               {t('common.cancel')}
             </button>
           )}
         </div>
 
         {pwOpen && (
-          <div style={styles.pwForm}>
-            <div style={styles.pwNotImpl}>
-              {t('account.notImpl')}
-            </div>
-            <FormField label={t('account.currentPw')} type="password" />
-            <FormField label={t('account.newPw')} type="password" />
-            <FormField label={t('account.confirmPw')} type="password" />
+          <form onSubmit={handlePwSubmit} style={styles.pwForm}>
+            <FormField label={t('account.currentPw')} type="password" value={curPw} onChange={setCurPw} autoFocus />
+            <FormField label={t('account.newPw')} type="password" value={newPw} onChange={setNewPw} />
+            <FormField label={t('account.confirmPw')} type="password" value={confirmPw} onChange={setConfirmPw} />
+            {pwError && <div style={styles.pwErrorMsg}>{pwError}</div>}
+            {pwSuccess && <div style={styles.pwSuccessMsg}>{t('account.pw.success')}</div>}
             <div style={styles.pwActions}>
-              <button style={styles.btnPrimary} disabled title={t('account.notImplTitle')}>{t('common.save')}</button>
+              <button
+                type="submit"
+                style={{ ...styles.btnPrimary, ...(canSubmitPw ? {} : styles.btnDisabled) }}
+                disabled={!canSubmitPw}
+              >
+                {pwSaving ? t('account.pw.saving') : t('common.save')}
+              </button>
             </div>
-          </div>
+          </form>
         )}
       </div>
     </Modal>
@@ -96,11 +138,18 @@ function Field({ label, value, mono }: { label: string; value: string; mono?: bo
   );
 }
 
-function FormField({ label, type = 'text' }: { label: string; type?: string }) {
+function FormField({ label, type = 'text', value, onChange, autoFocus }: { label: string; type?: string; value: string; onChange: (v: string) => void; autoFocus?: boolean }) {
   return (
     <label style={styles.formField}>
       <span style={styles.formLabel}>{label}</span>
-      <input type={type} style={styles.formInput} />
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={styles.formInput}
+        autoFocus={autoFocus}
+        autoComplete={type === 'password' ? 'new-password' : 'off'}
+      />
     </label>
   );
 }
@@ -212,6 +261,25 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: 'var(--mono)',
     outline: 'none',
   },
+  pwErrorMsg: {
+    padding: '6px 10px',
+    background: 'var(--red-50)',
+    border: '1px solid var(--red)',
+    color: 'var(--red)',
+    borderRadius: 4,
+    fontSize: 11.5,
+    marginBottom: 10,
+  },
+  pwSuccessMsg: {
+    padding: '6px 10px',
+    background: 'var(--green-50)',
+    border: '1px solid var(--green)',
+    color: 'var(--green)',
+    borderRadius: 4,
+    fontSize: 11.5,
+    marginBottom: 10,
+  },
+  btnDisabled: { opacity: 0.5, cursor: 'not-allowed' },
   pwActions: { display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 6 },
   btnPrimary: {
     padding: '5px 14px',

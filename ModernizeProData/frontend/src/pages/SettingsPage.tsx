@@ -351,12 +351,12 @@ function PSNotify({ project }: { project: Project }) {
   // Solution settings 의 Enable notifications. false 면 Event subscriptions 토글 일괄 비활성.
   const globalNotifEnabled = useSettingsStore((s) => s.notifications);
   const events = [
+    { k: 'run.started',      l: t('projectSettings.notify.event.runStarted.label'),      d: t('projectSettings.notify.event.runStarted.desc') },
     { k: 'run.failed',       l: t('projectSettings.notify.event.runFailed.label'),       d: t('projectSettings.notify.event.runFailed.desc') },
+    { k: 'run.finished',     l: t('projectSettings.notify.event.runFinished.label'),     d: t('projectSettings.notify.event.runFinished.desc') },
     { k: 'snapshot.pending', l: t('projectSettings.notify.event.snapPending.label'),     d: t('projectSettings.notify.event.snapPending.desc') },
     { k: 'snapshot.approved',l: t('projectSettings.notify.event.snapApproved.label'),    d: t('projectSettings.notify.event.snapApproved.desc') },
     { k: 'snapshot.rejected',l: t('projectSettings.notify.event.snapRejected.label'),    d: t('projectSettings.notify.event.snapRejected.desc') },
-    { k: 'cutover.started',  l: t('projectSettings.notify.event.cutoverStarted.label'),  d: t('projectSettings.notify.event.cutoverStarted.desc') },
-    { k: 'cutover.finished', l: t('projectSettings.notify.event.cutoverFinished.label'), d: t('projectSettings.notify.event.cutoverFinished.desc') },
   ];
 
   const subsMap          = useNotificationPrefsStore((s) => s.subs);

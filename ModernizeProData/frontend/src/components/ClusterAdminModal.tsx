@@ -147,26 +147,31 @@ function UsersTab() {
 
   return (
     <>
-      <div style={styles.toolbar}>
-        <div style={{ flex: 1 }} />
-        {!addOpen ? (
+      {!addOpen && (
+        <div style={styles.toolbar}>
+          <div style={{ flex: 1 }} />
           <button onClick={() => setAddOpen(true)} style={styles.btnPrimary}>
             {t('userMgmt.addUser')}
           </button>
-        ) : (
-          <button onClick={() => { setAddOpen(false); resetAddForm(); }} style={styles.btnGhost}>
-            {t('userMgmt.cancelAdd')}
-          </button>
-        )}
-      </div>
+        </div>
+      )}
 
       {addOpen && (
-        <form onSubmit={handleAdd} style={styles.addForm}>
-          <div style={styles.addRow3}>
-            <Field label={t('userMgmt.add.username')}>
-              <input value={newName} onChange={(e) => { setNewName(e.target.value); setError(null); }} style={styles.input} autoFocus required />
-            </Field>
-            <Field label={t('userMgmt.add.role')}>
+        <form onSubmit={handleAdd} style={styles.addCard}>
+          <div style={styles.addCardHeader}>{t('userMgmt.addUser')}</div>
+          <div style={styles.addCardBody}>
+            <div style={styles.formRow}>
+              <label style={styles.formRowLabel}>{t('userMgmt.add.username')}</label>
+              <input
+                value={newName}
+                onChange={(e) => { setNewName(e.target.value); setError(null); }}
+                style={styles.input}
+                autoFocus
+                required
+              />
+            </div>
+            <div style={styles.formRow}>
+              <label style={styles.formRowLabel}>{t('userMgmt.add.role')}</label>
               <select value={newRole} onChange={(e) => setNewRole(e.target.value as UserRole)} style={styles.input}>
                 {ROLE_OPTIONS.map((r) => (
                   <option key={r} value={r} disabled={r === 'master' && hasMaster}>
@@ -174,16 +179,30 @@ function UsersTab() {
                   </option>
                 ))}
               </select>
-            </Field>
-            <Field label={t('userMgmt.add.password')} hint={t('userMgmt.add.passwordHint')}>
-              <input type="text" value={newPw} onChange={(e) => setNewPw(e.target.value)} style={{ ...styles.input, fontFamily: 'var(--mono)' }} placeholder="••••••••" required />
-            </Field>
-          </div>
-          {error && <div style={styles.errorMsg}>{error}</div>}
-          <div style={styles.addActions}>
-            <button type="submit" style={{ ...styles.btnPrimary, ...(canSubmitAdd ? {} : styles.btnDisabled) }} disabled={!canSubmitAdd}>
-              {t('userMgmt.add.submit')}
-            </button>
+            </div>
+            <div style={styles.formRow}>
+              <label style={styles.formRowLabel}>{t('userMgmt.add.password')}</label>
+              <div style={styles.formRowControl}>
+                <input
+                  type="text"
+                  value={newPw}
+                  onChange={(e) => setNewPw(e.target.value)}
+                  style={{ ...styles.input, fontFamily: 'var(--mono)' }}
+                  placeholder="••••••••"
+                  required
+                />
+                <div style={styles.formRowHint}>{t('userMgmt.add.passwordHint')}</div>
+              </div>
+            </div>
+            {error && <div style={styles.errorMsg}>{error}</div>}
+            <div style={styles.addActions}>
+              <button type="button" onClick={() => { setAddOpen(false); resetAddForm(); }} style={styles.btnGhost}>
+                {t('userMgmt.cancelAdd')}
+              </button>
+              <button type="submit" style={{ ...styles.btnPrimary, ...(canSubmitAdd ? {} : styles.btnDisabled) }} disabled={!canSubmitAdd}>
+                {t('userMgmt.add.submit')}
+              </button>
+            </div>
           </div>
         </form>
       )}
@@ -506,6 +525,37 @@ const styles: Record<string, React.CSSProperties> = {
 
   toolbar: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 },
 
+  addCard: {
+    background: 'var(--panel)',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 5,
+    marginBottom: 12,
+    overflow: 'hidden',
+  },
+  addCardHeader: {
+    padding: '10px 16px',
+    background: 'var(--panel-2)',
+    color: 'var(--text)',
+    fontSize: 12.5,
+    fontWeight: 600,
+    borderBottom: '1px solid var(--border)',
+  },
+  addCardBody: { padding: '14px 16px 12px' },
+  formRow: {
+    display: 'grid',
+    gridTemplateColumns: '120px 1fr',
+    alignItems: 'center',
+    gap: 14,
+    padding: '8px 0',
+    borderBottom: '1px dashed var(--border)',
+  },
+  formRowLabel: {
+    fontSize: 11.5,
+    fontWeight: 500,
+    color: 'var(--text)',
+  },
+  formRowControl: { display: 'flex', flexDirection: 'column', gap: 4 },
+  formRowHint: { fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
   addForm: {
     background: 'var(--panel-2)',
     border: '1px solid var(--border)',
@@ -514,6 +564,7 @@ const styles: Record<string, React.CSSProperties> = {
     marginBottom: 12,
   },
   addRow3: { display: 'grid', gridTemplateColumns: '1fr 140px 1fr', gap: 10, alignItems: 'end' },
+  addRow2: { display: 'grid', gridTemplateColumns: '160px 1fr', gap: 12, alignItems: 'end', marginTop: 12 },
   field: { display: 'flex', flexDirection: 'column', gap: 4 },
   fieldLabel: { fontSize: 11.5, fontWeight: 600, color: 'var(--text)' },
   fieldHint: { fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },

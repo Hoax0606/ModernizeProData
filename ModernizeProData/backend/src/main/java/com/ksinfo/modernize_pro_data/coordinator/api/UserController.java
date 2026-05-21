@@ -67,6 +67,11 @@ public class UserController {
 
     public record UpdateRoleRequest(@NotNull UserRole role) {}
 
+    public record ChangePasswordRequest(
+            @NotBlank String currentPassword,
+            @NotBlank @Size(min = 4, max = 128) String newPassword
+    ) {}
+
     /* ── Endpoints ─────────────────────────────────────────────────── */
 
     @GetMapping
@@ -115,6 +120,37 @@ public class UserController {
         }
         userRepository.delete(target);
         log.info("User deleted: {} ({})", target.getUsername(), target.getRole());
+        return ApiResponse.ok(null);
+    }
+
+    @PostMapping("/me/password")
+    @Transactional
+    public ApiResponse<Void> changeMyPassword(
+            @Valid @RequestBody ChangePasswordRequest req,
+            org.springframework.security.core.Authentication auth
+    ) {
+        if (auth == null || auth.getName() == null) {
+            throw new ApiException("UNAUTHORIZED", "로그인이 필요합니다", HttpStatus.UNAUTHORIZED);
+        }
+        User u = userRepository.findByUsername(auth.getName())
+                .orElseThrow(() -> new ApiException(
+                        "USER_NOT_FOUND", "사용자를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
+
+        if (!passwordEncoder.matches(req.currentPassword(), u.getPasswordHash())) {
+            throw new ApiException(
+                    "CURRENT_PASSWORD_INVALID",
+                    "현재 비밀번호가 일치하지 않습니다",
+                    HttpStatus.BAD_REQUEST);
+        }
+        if (req.currentPassword().equals(req.newPassword())) {
+            throw new ApiException(
+                    "PASSWORD_SAME",
+                    "새 비밀번호가 기존과 동일합니다",
+                    HttpStatus.BAD_REQUEST);
+        }
+        u.setPasswordHash(passwordEncoder.encode(req.newPassword()));
+        userRepository.save(u);
+        log.info("Password changed: {}", u.getUsername());
         return ApiResponse.ok(null);
     }
 

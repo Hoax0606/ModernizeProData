@@ -106,7 +106,7 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
 
       {/* Appearance */}
       <Card title={t('solution.appearance')}>
-        <Row label={t('solution.language')}>
+        <Row label={t('solution.language')} align="right">
           <select
             value={language}
             onChange={(e) => setLanguage(e.target.value as Language)}
@@ -117,7 +117,7 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
             ))}
           </select>
         </Row>
-        <Row label={t('solution.theme')}>
+        <Row label={t('solution.theme')} align="right">
           <div style={styles.toggleGroup}>
             <button
               onClick={() => setTheme('light')}
@@ -258,11 +258,11 @@ function Card({ title, desc, right, children }: { title: React.ReactNode; desc?:
   );
 }
 
-function Row({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
+function Row({ label, children, align }: { label: React.ReactNode; children: React.ReactNode; align?: 'left' | 'right' }) {
   return (
     <div style={styles.row}>
       <div style={styles.rowLabel}>{label}</div>
-      <div style={styles.rowValue}>{children}</div>
+      <div style={{ ...styles.rowValue, justifyContent: align === 'right' ? 'flex-end' : 'flex-start' }}>{children}</div>
     </div>
   );
 }
