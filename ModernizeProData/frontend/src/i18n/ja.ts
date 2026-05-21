@@ -512,7 +512,6 @@ export const ja: Record<TranslationKey, string> = {
   'artifacts.empty.title':        'No artifacts yet',
   'artifacts.empty.hint':         'マッピング・スナップショット・実行が進むと成果物がここに表示されます。',
   'artifacts.empty.noItems':      '(no items yet)',
-  'artifacts.exportAll':          'Export all',
   'artifacts.cat.dashboard':      'Dashboard snapshot',
   'artifacts.cat.diff':           'Schema diff',
   'artifacts.cat.ddl':            'DDL scripts',
@@ -818,8 +817,36 @@ export const ja: Record<TranslationKey, string> = {
 
   'siteExport.title':       'Site export',
   'siteExport.subtitle':    'このサイトの全プロジェクト・マッピング・成果物を一括 export',
-  'siteExport.downloadAll': 'Download all',
-  'siteExport.notImpl':     '未実装 — バックエンド export ジョブ接続後に有効化されます。',
+  'siteExport.scope':       'site export',
+  'siteExport.summary':     '{tables} tables · {files} files',
+  'siteExport.loading':     'TO-BE スキーマ情報を読み込み中…',
+
+  'siteExport.section.formats':   'Artifact formats',
+  'siteExport.section.documents': 'Documents',
+
+  'siteExport.format.migration.label':  'Migration (.sql)',
+  'siteExport.format.migration.hint':   'テーブル毎に up + down',
+  'siteExport.format.mapping.label':    'Mapping (.xlsx)',
+  'siteExport.format.mapping.hint':     'カラム単位ルール',
+  'siteExport.format.validation.label': 'Validation (.xlsx)',
+  'siteExport.format.validation.hint':  'PK/FK/NULL/sum レポート',
+  'siteExport.format.summary.label':    'Site summary (.xlsx)',
+  'siteExport.format.summary.hint':     'サイト全体プロジェクト メタ + テーブル/カラム集計',
+
+  'siteExport.btn.download':        'Download bundle',
+  'siteExport.btn.downloading':     'バンドル生成中…',
+  'siteExport.btn.copyManifest':    'Copy manifest',
+  'siteExport.btn.copied':          'Copied',
+  'siteExport.btn.previewSpec':     'Preview spec',
+
+  'siteExport.footer.signed':       'signed · sha256 + pgp · will be logged to audit',
+
+  'siteExport.preview.summary':     'Site summary',
+  'siteExport.preview.manifest':    'Manifest ({n})',
+
+  'siteExport.empty.title':         'No projects',
+  'siteExport.empty.desc':          'このサイトにプロジェクトがありません。先にプロジェクトを作成してください。',
+  'siteExport.empty.noFormats':     '1 つ以上のフォーマットを選択してください。',
   'siteOverview.open':         'Open',
   'siteOverview.kpi.projects':      'Projects',
   'siteOverview.kpi.running':       'Running',

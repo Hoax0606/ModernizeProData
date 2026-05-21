@@ -511,7 +511,6 @@ export const ko = {
   'artifacts.empty.title':        'No artifacts yet',
   'artifacts.empty.hint':         '매핑·스냅샷·실행이 진행되면 산출물이 여기에 나타납니다.',
   'artifacts.empty.noItems':      '(no items yet)',
-  'artifacts.exportAll':          'Export all',
   'artifacts.cat.dashboard':      'Dashboard snapshot',
   'artifacts.cat.diff':           'Schema diff',
   'artifacts.cat.ddl':            'DDL scripts',
@@ -818,8 +817,36 @@ export const ko = {
 
   'siteExport.title':       'Site export',
   'siteExport.subtitle':    '이 사이트의 모든 프로젝트·매핑·산출물 일괄 export',
-  'siteExport.downloadAll': 'Download all',
-  'siteExport.notImpl':     '미구현 — 백엔드 export job 연결 후 활성화됩니다.',
+  'siteExport.scope':       'site export',
+  'siteExport.summary':     '{tables} tables · {files} files',
+  'siteExport.loading':     'TO-BE 스키마 정보를 불러오는 중…',
+
+  'siteExport.section.formats':   'Artifact formats',
+  'siteExport.section.documents': 'Documents',
+
+  'siteExport.format.migration.label':  'Migration (.sql)',
+  'siteExport.format.migration.hint':   '테이블별 up + down',
+  'siteExport.format.mapping.label':    'Mapping (.xlsx)',
+  'siteExport.format.mapping.hint':     '컬럼 단위 규칙',
+  'siteExport.format.validation.label': 'Validation (.xlsx)',
+  'siteExport.format.validation.hint':  'PK/FK/NULL/sum 리포트',
+  'siteExport.format.summary.label':    'Site summary (.xlsx)',
+  'siteExport.format.summary.hint':     '사이트 전체 프로젝트 메타 + 테이블/컬럼 집계',
+
+  'siteExport.btn.download':        'Download bundle',
+  'siteExport.btn.downloading':     '번들 생성 중…',
+  'siteExport.btn.copyManifest':    'Copy manifest',
+  'siteExport.btn.copied':          'Copied',
+  'siteExport.btn.previewSpec':     'Preview spec',
+
+  'siteExport.footer.signed':       'signed · sha256 + pgp · will be logged to audit',
+
+  'siteExport.preview.summary':     'Site summary',
+  'siteExport.preview.manifest':    'Manifest ({n})',
+
+  'siteExport.empty.title':         'No projects',
+  'siteExport.empty.desc':          '이 사이트에 프로젝트가 없습니다. 먼저 프로젝트를 만들어주세요.',
+  'siteExport.empty.noFormats':     '하나 이상의 포맷을 선택하세요.',
   'siteOverview.open':         'Open',
   'siteOverview.kpi.projects':      'Projects',
   'siteOverview.kpi.running':       'Running',
