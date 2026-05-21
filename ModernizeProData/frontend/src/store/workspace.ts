@@ -43,6 +43,10 @@ export interface Site {
   tobeEncoding: SourceEncoding;
   /** AS-IS CSV 디렉터리 경로. 도구가 이 경로에서 직접 CSV를 읽어 Parquet 변환. */
   csvPath: string;
+  /** AS-IS 측 추출 원본 DB 종류 (Oracle / DB2 / SQL Server / PostgreSQL / MySQL / Mainframe DB2 / Other). 표시용. */
+  asisDbType?: string;
+  /** AS-IS 측 DB 버전 (예: "11g R2", "16.0"). 표시용. */
+  asisDbVersion?: string;
   notes?: string;
   /** 현재 활성 운영 단계 (test/dev/staging/production). TO-BE DB 는 이 단계의 것을 사용. */
   environment: ProjectEnvironment;

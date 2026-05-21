@@ -46,6 +46,7 @@ const PROJECT_ENV_LABEL: Record<ProjectEnvironment, TranslationKey> = {
 };
 
 const DB_TYPES = ['PostgreSQL', 'Oracle', 'MySQL', 'SQL Server', 'Db2'];
+const ASIS_DB_TYPES = ['Oracle', 'DB2', 'Mainframe DB2', 'SQL Server', 'PostgreSQL', 'MySQL', 'Other'];
 
 export function CreateSiteModal({ open, onClose }: Props) {
   const t = useT();
@@ -59,7 +60,8 @@ export function CreateSiteModal({ open, onClose }: Props) {
   const [asisEncoding, setAsisEncoding] = useState<SourceEncoding>('shift_jis');
   const [tobeEncoding, setTobeEncoding] = useState<SourceEncoding>('utf-8');
   const [csvPath, setCsvPath] = useState('');
-  const [notes, setNotes] = useState('');
+  const [asisDbType, setAsisDbType] = useState('');
+  const [asisDbVersion, setAsisDbVersion] = useState('');
 
   // 운영 단계 + 단계별 DB drafts.
   const [stage, setStage] = useState<ProjectEnvironment>('dev');
@@ -106,7 +108,8 @@ export function CreateSiteModal({ open, onClose }: Props) {
     setAsisEncoding('shift_jis');
     setTobeEncoding('utf-8');
     setCsvPath('');
-    setNotes('');
+    setAsisDbType('');
+    setAsisDbVersion('');
     setStage('dev');
     setTobeDbByEnv({});
     setError(null);
@@ -139,7 +142,8 @@ export function CreateSiteModal({ open, onClose }: Props) {
         asisEncoding,
         tobeEncoding,
         csvPath: csvPath.trim(),
-        notes: notes.trim() || undefined,
+        asisDbType: asisDbType.trim() || undefined,
+        asisDbVersion: asisDbVersion.trim() || undefined,
         environment: stage,
         tobeDbByEnv: finalByEnv,
         tobeDbLocks: finalLocks,
@@ -203,17 +207,25 @@ export function CreateSiteModal({ open, onClose }: Props) {
           </select>
         </Field>
 
+        <div style={styles.twoCol}>
+          <Field label={t('siteSettings.asisDbType')}>
+            <select value={asisDbType} onChange={(e) => setAsisDbType(e.target.value)} style={styles.input}>
+              <option value="">— {t('siteSettings.asisDbTypePlaceholder')} —</option>
+              {ASIS_DB_TYPES.map((d) => <option key={d}>{d}</option>)}
+            </select>
+          </Field>
+          <Field label={t('siteSettings.asisDbVersion')}>
+            <input
+              value={asisDbVersion}
+              onChange={(e) => setAsisDbVersion(e.target.value)}
+              placeholder={t('siteSettings.asisDbVersionPlaceholder')}
+              style={styles.input}
+            />
+          </Field>
+        </div>
+
         <Field label={t('siteSettings.csvPath')}>
           <CsvPathField value={csvPath} onChange={setCsvPath} />
-        </Field>
-
-        <Field label={t('siteSettings.notes')}>
-          <textarea
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            style={{ ...styles.input, resize: 'vertical', minHeight: 56, fontFamily: 'var(--mono)' }}
-            rows={2}
-          />
         </Field>
 
         <Field label={t('siteSettings.stage')}>
