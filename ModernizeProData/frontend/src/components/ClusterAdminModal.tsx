@@ -77,6 +77,21 @@ function UsersTab() {
   const [submitting, setSubmitting] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
+  // Force logout (master 가 다른 user 의 활성 세션 강제 종료)
+  const [forceLogoutId, setForceLogoutId] = useState<string | null>(null);
+  const handleForceLogout = async (id: string, username: string) => {
+    if (!window.confirm(t('userMgmt.forceLogout.confirm', { name: username }))) return;
+    setForceLogoutId(id);
+    try {
+      await usersApi.forceLogout(id);
+      await loadUsers();
+    } catch (err) {
+      setError(formatApiError(err));
+    } finally {
+      setForceLogoutId(null);
+    }
+  };
+
   // Reset password (master 가 다른 user 의 비번 강제 변경)
   const [resetPwUserId, setResetPwUserId] = useState<string | null>(null);
   const [resetPwValue, setResetPwValue] = useState('');
@@ -332,6 +347,18 @@ function UsersTab() {
                           style={{ ...styles.miniBtn, ...(isSelf ? styles.btnDisabled : {}) }}
                         >
                           {t('userMgmt.resetPassword')}
+                        </button>
+                        <button
+                          onClick={() => handleForceLogout(u.id, u.username)}
+                          disabled={isSelf || !u.hasActiveSession || forceLogoutId === u.id}
+                          title={
+                            isSelf ? t('userMgmt.forceLogout.selfHint')
+                            : !u.hasActiveSession ? t('userMgmt.forceLogout.noSession')
+                            : t('userMgmt.forceLogout')
+                          }
+                          style={{ ...styles.miniBtn, ...((isSelf || !u.hasActiveSession) ? styles.btnDisabled : {}) }}
+                        >
+                          {forceLogoutId === u.id ? '…' : t('userMgmt.forceLogout')}
                         </button>
                         <button
                           onClick={() => setConfirmDeleteId(u.id)}

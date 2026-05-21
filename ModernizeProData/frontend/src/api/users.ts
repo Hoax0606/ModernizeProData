@@ -7,6 +7,7 @@ export interface ManagedUserDto {
   role: UserRole;
   createdAt: string;
   lastSignInAt?: string;
+  hasActiveSession?: boolean;
 }
 
 export interface CreateUserRequest {
@@ -37,4 +38,8 @@ export const usersApi = {
 
   resetPassword: (id: string, newPassword: string) =>
     unwrap(api.post<ApiResponse<null>>(`/api/v1/users/${id}/password`, { newPassword })),
+
+  /** master 가 다른 사용자의 활성 세션 강제 종료. */
+  forceLogout: (id: string) =>
+    unwrap(api.post<ApiResponse<null>>(`/api/v1/users/${id}/force-logout`)),
 };

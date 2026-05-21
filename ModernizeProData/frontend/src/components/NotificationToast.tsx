@@ -38,9 +38,12 @@ export function NotificationToast() {
   const initializedRef = useRef(false);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
-  // 마운트 시 기존 entry 들을 'seen' 으로 표시 — 처음 로드 시 한꺼번에 뜨지 않도록.
+  // 마운트 후 audit log 가 실제로 도착한 첫 시점에 기존 entry 들을 'seen' 으로 표시.
+  // 빈 배열 상태에서 초기화하면, 다음 polling 으로 들어온 log 들이 전부 '새 알림' 으로
+  // 간주되어 새로고침할 때마다 떼거지로 toast 가 뜬다.
   useEffect(() => {
     if (initializedRef.current) return;
+    if (allLogs.length === 0) return;
     initializedRef.current = true;
     seenIdsRef.current = new Set(allLogs.map((l) => l.id));
   }, [allLogs]);
