@@ -2,6 +2,7 @@ package com.ksinfo.modernize_pro_data.coordinator.api;
 
 import com.ksinfo.modernize_pro_data.common.dto.ApiResponse;
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.coordinator.site.AuditLogService;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.SiteRepository;
@@ -35,6 +36,7 @@ public class ProjectController {
 
     private final ProjectRepository projectRepository;
     private final SiteRepository siteRepository;
+    private final AuditLogService auditLogService;
 
     /* ── DTOs ──────────────────────────────────────── */
 
@@ -53,6 +55,7 @@ public class ProjectController {
             List<Map<String, Object>> ddlFiles,
             String owner,
             String assignee,
+            String executionAssignee,
             Map<String, Object> cutover,
             String runStatus
     ) {}
@@ -89,6 +92,8 @@ public class ProjectController {
         if (req.assignee() != null) p.setAssignee(req.assignee());
         projectRepository.save(p);
         log.info("Project created: {} in site {}", p.getName(), siteId);
+        auditLogService.record(p, auth.getName(), "project created")
+                .target(p.getName()).save();
         return ApiResponse.ok(p);
     }
 
@@ -102,7 +107,7 @@ public class ProjectController {
     @PatchMapping("/api/v1/projects/{id}")
     @PreAuthorize("hasAnyRole('MASTER','ADMIN')")
     @Transactional
-    public ApiResponse<Project> update(@PathVariable String id, @Valid @RequestBody UpdateProjectRequest req) {
+    public ApiResponse<Project> update(@PathVariable String id, @Valid @RequestBody UpdateProjectRequest req, Authentication auth) {
         Project p = projectRepository.findById(id)
                 .orElseThrow(() -> new ApiException("PROJECT_NOT_FOUND", "프로젝트를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
 
@@ -111,17 +116,49 @@ public class ProjectController {
             throw new ApiException("PROJECT_NAME_DUPLICATE",
                     "같은 이름의 프로젝트가 이미 존재합니다", HttpStatus.CONFLICT);
         }
+        String prevPhase = p.getPhase();
+        String prevAssignee = p.getAssignee();
+        String prevExecutionAssignee = p.getExecutionAssignee();
+
         if (req.name() != null)       p.setName(req.name());
         if (req.phase() != null)      p.setPhase(req.phase());
         if (req.tableCount() != null) p.setTableCount(req.tableCount());
         if (req.ddlFiles() != null)   p.setDdlFiles(req.ddlFiles());
         if (req.owner() != null)      p.setOwner(req.owner());
-        if (req.assignee() != null)   p.setAssignee(req.assignee());
+        // assignee: empty string 은 명시적 clear (null 로 set), 누락(null) 은 변경 없음
+        if (req.assignee() != null) {
+            String newAssignee = req.assignee().isEmpty() ? null : req.assignee();
+            log.info("Project {} assignee: {} -> {}", id, p.getAssignee(), newAssignee);
+            p.setAssignee(newAssignee);
+        }
+        if (req.executionAssignee() != null) {
+            String newExec = req.executionAssignee().isEmpty() ? null : req.executionAssignee();
+            log.info("Project {} executionAssignee: {} -> {}", id, p.getExecutionAssignee(), newExec);
+            p.setExecutionAssignee(newExec);
+        }
         if (req.cutover() != null)    p.setCutover(req.cutover());
         if (req.runStatus() != null)  p.setRunStatus(req.runStatus());
 
+        // audit log — 의미 있는 변경만 기록
+        String actor = auth != null ? auth.getName() : "system";
+        if (req.phase() != null && !java.util.Objects.equals(prevPhase, p.getPhase())) {
+            auditLogService.record(p, actor, "phase changed")
+                    .details(prevPhase + " → " + p.getPhase()).save();
+        }
+        if (req.assignee() != null && !java.util.Objects.equals(prevAssignee, p.getAssignee())) {
+            auditLogService.record(p, actor, "assignee changed")
+                    .details((prevAssignee == null ? "(none)" : prevAssignee) + " → "
+                           + (p.getAssignee() == null ? "(none)" : p.getAssignee())).save();
+        }
+        if (req.executionAssignee() != null && !java.util.Objects.equals(prevExecutionAssignee, p.getExecutionAssignee())) {
+            auditLogService.record(p, actor, "execution assignee changed")
+                    .details((prevExecutionAssignee == null ? "(none)" : prevExecutionAssignee) + " → "
+                           + (p.getExecutionAssignee() == null ? "(none)" : p.getExecutionAssignee())).save();
+        }
+
         projectRepository.save(p);
-        log.info("Project updated: {} ({})", p.getName(), p.getId());
+        log.info("Project updated: {} ({}) — assignee={} executionAssignee={}",
+                p.getName(), p.getId(), p.getAssignee(), p.getExecutionAssignee());
         return ApiResponse.ok(p);
     }
 

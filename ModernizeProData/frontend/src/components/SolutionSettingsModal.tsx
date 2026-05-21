@@ -3,7 +3,7 @@ import { Modal } from './Modal';
 import { BrandName } from './BrandName';
 import { Toggle } from './Toggle';
 import { Toast } from './Toast';
-import { useSettingsStore, type Theme, type Language, type ExternalConfig } from '../store/settings';
+import { useSettingsStore, type Theme, type Language, type ExternalConfig, type NotificationScope } from '../store/settings';
 import { useAuthStore } from '../store/auth';
 import { LANGUAGE_LABELS, useT } from '../i18n';
 
@@ -26,6 +26,8 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
   const [theme, setTheme] = useState<Theme>(store.theme);
   const [language, setLanguage] = useState<Language>(store.language);
   const [notifications, setNotifications] = useState(store.notifications);
+  const [notifScope, setNotifScope] = useState<NotificationScope>(store.notificationScope);
+  const [notifRetention, setNotifRetention] = useState(store.notificationRetention);
   const [externalOn, setExternalOn] = useState(store.externalIntegrations);
   const [extCfg, setExtCfg] = useState<ExternalConfig>(store.externalConfig);
   const [saved, setSaved] = useState(false);
@@ -36,16 +38,20 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
     setTheme(store.theme);
     setLanguage(store.language);
     setNotifications(store.notifications);
+    setNotifScope(store.notificationScope);
+    setNotifRetention(store.notificationRetention);
     setExternalOn(store.externalIntegrations);
     setExtCfg(store.externalConfig);
     setSaved(false);
-  }, [open, store.theme, store.language, store.notifications, store.externalIntegrations, store.externalConfig]);
+  }, [open, store.theme, store.language, store.notifications, store.notificationScope, store.notificationRetention, store.externalIntegrations, store.externalConfig]);
 
   // 변경 여부 — Save 버튼 활성 조건
   const isDirty = useMemo(() => {
     if (theme !== store.theme) return true;
     if (language !== store.language) return true;
     if (notifications !== store.notifications) return true;
+    if (notifScope !== store.notificationScope) return true;
+    if (notifRetention !== store.notificationRetention) return true;
     if (externalOn !== store.externalIntegrations) return true;
     if (extCfg.scheduler !== store.externalConfig.scheduler) return true;
     if (extCfg.cliPath !== store.externalConfig.cliPath) return true;
@@ -53,13 +59,15 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
     if (extCfg.apiToken !== store.externalConfig.apiToken) return true;
     if (extCfg.syslog !== store.externalConfig.syslog) return true;
     return false;
-  }, [theme, language, notifications, externalOn, extCfg, store]);
+  }, [theme, language, notifications, notifScope, notifRetention, externalOn, extCfg, store]);
 
   const handleSave = () => {
     if (!isDirty) return;
     store.setTheme(theme);
     store.setLanguage(language);
     store.setNotifications(notifications);
+    store.setNotificationScope(notifScope);
+    if (isMaster) store.setNotificationRetention(notifRetention);
     store.setExternalIntegrations(externalOn);
     store.setExternalConfig(extCfg);
     setSaved(true);
@@ -98,7 +106,7 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
 
       {/* Appearance */}
       <Card title={t('solution.appearance')}>
-        <Row label={t('solution.language')}>
+        <Row label={t('solution.language')} align="right">
           <select
             value={language}
             onChange={(e) => setLanguage(e.target.value as Language)}
@@ -109,7 +117,7 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
             ))}
           </select>
         </Row>
-        <Row label={t('solution.theme')}>
+        <Row label={t('solution.theme')} align="right">
           <div style={styles.toggleGroup}>
             <button
               onClick={() => setTheme('light')}
@@ -134,6 +142,54 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
             <div style={styles.rowSub}>{t('solution.notifications.enableDesc')}</div>
           </div>
           <Toggle on={notifications} onChange={() => setNotifications((v) => !v)} ariaLabel={t('solution.notifications.enable')} />
+        </div>
+
+        <div>
+          {/* Scope — Enable notifications 와 무관하게 항상 활성.
+              표준 Row 의 width:220 라벨 박스로는 hint 가 한 줄에 안 들어가서 custom 행. */}
+          <div style={styles.row}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={styles.rowLabelTitle}>{t('projectSettings.notify.recipients.scope')}</div>
+              <div style={{ ...styles.rowSub, whiteSpace: 'nowrap' }}>
+                {t('projectSettings.notify.recipients.scopeHint')}
+              </div>
+            </div>
+            <select
+              value={notifScope}
+              onChange={(e) => setNotifScope(e.target.value as NotificationScope)}
+              style={{ ...styles.select, width: 180, flexShrink: 0 }}
+            >
+              <option value="mine-only">{t('projectSettings.notify.scope.mine')}</option>
+              <option value="all-project">{t('projectSettings.notify.scope.all')}</option>
+            </select>
+          </div>
+
+          {/* Retention — master 만 수정 가능. 4개 옵션 중 택일. 우측 드롭다운. */}
+          <Row label={
+            <RowLabel
+              title={<>{t('projectSettings.notify.recipients.retention')} {!isMaster && <span style={styles.masterOnlyTag}>{t('solution.external.masterOnly')}</span>}</>}
+              sub={t('projectSettings.notify.recipients.retentionHint')}
+            />
+          }>
+            <div style={{ marginLeft: 'auto' }}>
+              <select
+                value={notifRetention}
+                onChange={(e) => setNotifRetention(e.target.value)}
+                disabled={!isMaster}
+                style={{
+                  ...styles.select,
+                  width: 120,
+                  background: isMaster ? 'var(--panel)' : 'var(--panel-2)',
+                  color: isMaster ? 'var(--text)' : 'var(--text-3)',
+                }}
+              >
+                <option value="7 days">7일</option>
+                <option value="30 days">30일</option>
+                <option value="90 days">90일</option>
+                <option value="OFF">OFF</option>
+              </select>
+            </div>
+          </Row>
         </div>
       </Card>
 
@@ -202,16 +258,16 @@ function Card({ title, desc, right, children }: { title: React.ReactNode; desc?:
   );
 }
 
-function Row({ label, children }: { label: React.ReactNode; children: React.ReactNode }) {
+function Row({ label, children, align }: { label: React.ReactNode; children: React.ReactNode; align?: 'left' | 'right' }) {
   return (
     <div style={styles.row}>
       <div style={styles.rowLabel}>{label}</div>
-      <div style={styles.rowValue}>{children}</div>
+      <div style={{ ...styles.rowValue, justifyContent: align === 'right' ? 'flex-end' : 'flex-start' }}>{children}</div>
     </div>
   );
 }
 
-function RowLabel({ title, sub }: { title: string; sub?: string }) {
+function RowLabel({ title, sub }: { title: React.ReactNode; sub?: string }) {
   return (
     <div>
       <div style={styles.rowLabelTitle}>{title}</div>

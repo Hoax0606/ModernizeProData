@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import { useT } from '../i18n';
 
 interface Props {
@@ -5,7 +6,7 @@ interface Props {
   onChange: (v: string) => void;
 }
 
-// File System Access API (Chromium). 미지원 브라우저에서는 prompt 로 fallback.
+// File System Access API (Chromium / secure context).
 type DirectoryPickerOptions = { id?: string; mode?: 'read' | 'readwrite' };
 interface FileSystemDirectoryHandleLike { name: string }
 interface WindowWithDirPicker extends Window {
@@ -14,26 +15,36 @@ interface WindowWithDirPicker extends Window {
 
 /**
  * CSV 디렉터리 입력 + 폴더 선택 버튼.
- * 브라우저는 보안상 절대 경로를 받을 수 없어 폴더명만 채워짐 — desktop 앱에서는 네이티브 dialog 로 교체.
+ * - Chromium + secure context: showDirectoryPicker 사용 (네이티브 폴더 다이얼로그)
+ * - 그 외: <input type="file" webkitdirectory> 로 폴더 선택. (브라우저 보안상 절대경로는
+ *   받을 수 없고 폴더명 + 첫 파일의 webkitRelativePath 만 추출 — 사용자가 직접 절대경로를
+ *   완성해 줘야 함. desktop 앱(jpackage) 으로 배포되면 네이티브 dialog 로 교체 예정.)
  */
 export function CsvPathField({ value, onChange }: Props) {
   const t = useT();
+  const fallbackRef = useRef<HTMLInputElement | null>(null);
 
   const handleBrowse = async () => {
     const w = window as WindowWithDirPicker;
     if (typeof w.showDirectoryPicker === 'function') {
       try {
         const handle = await w.showDirectoryPicker({ mode: 'read' });
-        // 절대 경로는 받을 수 없음 → 기존 값 그대로 두고 폴더명만 추가
         onChange(handle.name);
       } catch {
         /* 사용자 취소 — 무시 */
       }
       return;
     }
-    // 미지원 브라우저: prompt 로 직접 입력
-    const v = window.prompt(t('siteSettings.csvPathPlaceholder'), value);
-    if (v !== null) onChange(v);
+    fallbackRef.current?.click();
+  };
+
+  const handleFallbackChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    const first = files[0] as File & { webkitRelativePath?: string };
+    const segments = first.webkitRelativePath?.split('/') ?? [];
+    if (segments.length > 1) onChange(segments[0]);
+    e.target.value = '';
   };
 
   return (
@@ -48,6 +59,16 @@ export function CsvPathField({ value, onChange }: Props) {
       <button type="button" onClick={handleBrowse} style={styles.btnGhost}>
         {t('siteSettings.csvPathBrowse')}
       </button>
+      <input
+        ref={fallbackRef}
+        type="file"
+        // @ts-expect-error — webkitdirectory 는 비표준 attribute
+        webkitdirectory=""
+        directory=""
+        multiple
+        style={{ display: 'none' }}
+        onChange={handleFallbackChange}
+      />
     </div>
   );
 }

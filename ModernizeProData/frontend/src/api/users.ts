@@ -31,4 +31,10 @@ export const usersApi = {
 
   updateRole: (id: string, role: UserRole) =>
     unwrap(api.patch<ApiResponse<ManagedUserDto>>(`/api/v1/users/${id}/role`, { role } satisfies UpdateRoleRequest)),
+
+  changeMyPassword: (currentPassword: string, newPassword: string) =>
+    unwrap(api.post<ApiResponse<null>>(`/api/v1/users/me/password`, { currentPassword, newPassword })),
+
+  resetPassword: (id: string, newPassword: string) =>
+    unwrap(api.post<ApiResponse<null>>(`/api/v1/users/${id}/password`, { newPassword })),
 };

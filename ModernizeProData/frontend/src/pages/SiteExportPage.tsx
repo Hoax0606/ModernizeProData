@@ -1,11 +1,10 @@
 import { useMemo } from 'react';
-import { Navigate } from 'react-router-dom';
 import { useWorkspaceStore } from '../store/workspace';
 import { useT } from '../i18n';
 
 /**
  * Site export — 사이트 단위 일괄 export.
- * 프로젝트가 선택되어 있으면 / 로 redirect (project tab 들이 노출되어야 하므로).
+ * 프로젝트가 선택되어 있으면 본문 미렌더 (sidebar 클릭 핸들러가 redirect 처리).
  */
 export function SiteExportPage() {
   const t = useT();
@@ -17,9 +16,8 @@ export function SiteExportPage() {
   const site = useMemo(() => sites.find((s) => s.id === activeSiteId) ?? null, [sites, activeSiteId]);
   const siteProjects = useMemo(() => projects.filter((p) => p.siteId === activeSiteId), [projects, activeSiteId]);
 
-  // 프로젝트가 활성화된 상태에서는 site export 화면이 의미 없음
-  if (activeProjectId) return <Navigate to="/" replace />;
-  if (!site) return <Navigate to="/" replace />;
+  // redirect 는 sidebar 프로젝트 클릭 핸들러가 직접 처리 (race 회피).
+  if (activeProjectId || !site) return null;
 
   return (
     <div>

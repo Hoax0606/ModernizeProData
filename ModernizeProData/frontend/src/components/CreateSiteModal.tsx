@@ -13,8 +13,10 @@ import {
 } from '../store/workspace';
 import { useAuthStore } from '../store/auth';
 import { ApiError } from '../api/client';
+import { tobeDbApi } from '../api/tobeDb';
 import { useT, type TranslationKey } from '../i18n';
 import { CsvPathField } from './CsvPathField';
+import { TestConnectionResult, type TestStatus } from './TestConnectionResult';
 
 interface Props {
   open: boolean;
@@ -63,10 +65,39 @@ export function CreateSiteModal({ open, onClose }: Props) {
   const [stage, setStage] = useState<ProjectEnvironment>('dev');
   const [tobeDbByEnv, setTobeDbByEnv] = useState<TobeDbByEnv>({});
   const [error, setError] = useState<string | null>(null);
-  // 현재 단계의 DB 폼 — tobeDbByEnv 에서 가져오거나 빈 connection.
-  const tobeDb: SiteDbConnection = tobeDbByEnv[stage] ?? emptyDbConnection();
-  const patchTobeDb = (patch: Partial<SiteDbConnection>) =>
-    setTobeDbByEnv((cur) => ({ ...cur, [stage]: { ...(cur[stage] ?? emptyDbConnection()), ...patch } }));
+  const [testStatus, setTestStatus] = useState<TestStatus>('idle');
+  const [testMessage, setTestMessage] = useState<string | null>(null);
+  // 현재 단계의 DB 폼 — tobeDbByEnv 에서 가져오거나 빈 connection (database 필드 누락 보호).
+  const tobeDb: SiteDbConnection = { ...emptyDbConnection(), ...(tobeDbByEnv[stage] ?? {}) };
+  const patchTobeDb = (patch: Partial<SiteDbConnection>) => {
+    setTobeDbByEnv((cur) => ({
+      ...cur,
+      [stage]: { ...emptyDbConnection(), ...(cur[stage] ?? {}), ...patch },
+    }));
+    setTestStatus('idle');
+    setTestMessage(null);
+  };
+
+  const handleTest = async () => {
+    if (testStatus === 'testing') return;
+    setTestStatus('testing');
+    setTestMessage(null);
+    try {
+      const result = await tobeDbApi.testConnectionStandalone({
+        dbType:   tobeDb.type,
+        host:     tobeDb.host.trim(),
+        port:     tobeDb.port.trim() || '5432',
+        database: tobeDb.database.trim(),
+        username: tobeDb.username.trim(),
+        password: tobeDb.password,
+      });
+      setTestStatus(result.success ? 'ok' : 'failed');
+      setTestMessage(result.message);
+    } catch (e) {
+      setTestStatus('failed');
+      setTestMessage((e as Error)?.message ?? 'Network error');
+    }
+  };
 
   const reset = () => {
     setName('');
@@ -79,6 +110,8 @@ export function CreateSiteModal({ open, onClose }: Props) {
     setStage('dev');
     setTobeDbByEnv({});
     setError(null);
+    setTestStatus('idle');
+    setTestMessage(null);
   };
 
   const blockedByProd = stage === 'production' && !isMaster;
@@ -122,22 +155,21 @@ export function CreateSiteModal({ open, onClose }: Props) {
     }
   };
 
-  const canTestConnection = !!tobeDb.host.trim() && !!tobeDb.username.trim();
+  const canTestConnection =
+    !!tobeDb.host.trim() &&
+    !!tobeDb.username.trim() &&
+    !!tobeDb.database.trim() &&
+    testStatus !== 'testing';
 
   return (
     <Modal
       open={open}
       onClose={onClose}
       width={560}
-      title={
-        <div>
-          <div>{t('createSite.title')}</div>
-          <div style={styles.subtitle}>{t('createSite.subtitle')}</div>
-        </div>
-      }
+      title={t('createSite.title')}
     >
       <form onSubmit={handleSubmit} style={styles.form}>
-        <Field label={t('siteSettings.name')} hint={t('createSite.nameHint')}>
+        <Field label={t('siteSettings.name')}>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -155,7 +187,7 @@ export function CreateSiteModal({ open, onClose }: Props) {
           <EnvPills value={tobeEnv} onChange={setTobeEnv} t={t} />
         </Field>
 
-        <Field label={t('siteSettings.asisEncoding')} hint={t('siteSettings.encodingHint')}>
+        <Field label={t('siteSettings.asisEncoding')}>
           <select value={asisEncoding} onChange={(e) => setAsisEncoding(e.target.value as SourceEncoding)} style={styles.input}>
             {ENCODING_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>{t(o.key)}</option>
@@ -171,11 +203,11 @@ export function CreateSiteModal({ open, onClose }: Props) {
           </select>
         </Field>
 
-        <Field label={t('siteSettings.csvPath')} hint={t('siteSettings.csvPathHint')}>
+        <Field label={t('siteSettings.csvPath')}>
           <CsvPathField value={csvPath} onChange={setCsvPath} />
         </Field>
 
-        <Field label={t('siteSettings.notes')} hint={t('siteSettings.notesHint')}>
+        <Field label={t('siteSettings.notes')}>
           <textarea
             value={notes}
             onChange={(e) => setNotes(e.target.value)}
@@ -184,17 +216,15 @@ export function CreateSiteModal({ open, onClose }: Props) {
           />
         </Field>
 
-        {/* 운영 단계 — TO-BE DB 바로 위 */}
-        <Field label={t('siteSettings.stage')} hint={t('siteSettings.stageHint')}>
+        <Field label={t('siteSettings.stage')}>
           <StagePills value={stage} onChange={setStage} byEnv={tobeDbByEnv} t={t} />
         </Field>
 
         {/* TO-BE Target DB connection — 선택된 stage 에 묶여 있음 */}
         <div style={styles.dbCard}>
           <div style={styles.dbHeader}>
-            {t('siteSettings.tobeDb')} <span style={styles.dbStageTag}>{t(PROJECT_ENV_LABEL[stage])}</span>
+            {t('siteSettings.tobeDb')}
           </div>
-          <div style={styles.dbDesc}>{t('siteSettings.tobeDb.desc')}</div>
 
           <div style={styles.dbGrid2}>
             <select value={tobeDb.type} onChange={(e) => patchTobeDb({ type: e.target.value })} style={styles.input}>
@@ -207,19 +237,33 @@ export function CreateSiteModal({ open, onClose }: Props) {
             <input value={tobeDb.host} onChange={(e) => patchTobeDb({ host: e.target.value })} placeholder={`${t('siteSettings.dbHost')} (10.20.30.40)`} style={styles.input} />
             <input value={tobeDb.port} onChange={(e) => patchTobeDb({ port: e.target.value })} placeholder={t('siteSettings.dbPort')} style={styles.input} />
           </div>
+          <input
+            value={tobeDb.database}
+            onChange={(e) => patchTobeDb({ database: e.target.value })}
+            placeholder={`${t('siteSettings.dbName')} (${t('siteSettings.dbNamePh')})`}
+            style={{ ...styles.input, width: '100%' }}
+            autoComplete="off"
+          />
           <div style={styles.dbGrid2}>
             <input value={tobeDb.username} onChange={(e) => patchTobeDb({ username: e.target.value })} placeholder={t('siteSettings.dbUsername')} style={styles.input} autoComplete="off" />
             <input type="password" value={tobeDb.password} onChange={(e) => patchTobeDb({ password: e.target.value })} placeholder={t('siteSettings.dbPassword')} style={styles.input} autoComplete="new-password" />
           </div>
           <div style={styles.dbTestRow}>
-            <span style={styles.dbTestHint}>{t('siteSettings.testConnectionHint')}</span>
+            <TestConnectionResult
+              status={testStatus}
+              message={testMessage}
+              testingLabel={t('siteSettings.test.testing')}
+              okLabel={t('siteSettings.test.success')}
+              failedLabel={t('siteSettings.test.failed')}
+            />
             <button
               type="button"
+              onClick={handleTest}
               disabled={!canTestConnection}
               title={canTestConnection ? t('siteSettings.testConnection') : t('siteSettings.testConnectionHint')}
-              style={{ ...styles.btnGhost, ...(canTestConnection ? {} : styles.btnDisabled) }}
+              style={{ ...styles.btnGhost, ...(canTestConnection ? styles.btnTestActive : styles.btnDisabled) }}
             >
-              {t('siteSettings.testConnection')}
+              {testStatus === 'testing' ? t('siteSettings.test.testing') : t('siteSettings.testConnection')}
             </button>
           </div>
         </div>
@@ -275,11 +319,13 @@ function StagePills({
   byEnv: TobeDbByEnv;
   t: ReturnType<typeof useT>;
 }) {
+  const isCfg = (c: SiteDbConnection | undefined) =>
+    !!c && !!c.type?.trim() && !!c.host?.trim() && !!c.database?.trim() && !!c.username?.trim();
   return (
     <div style={styles.pillRow}>
       {PROJECT_ENVIRONMENTS.map((env) => {
         const isActive = value === env;
-        const hasData = !!byEnv[env];
+        const configured = isCfg(byEnv[env]);
         return (
           <button
             key={env}
@@ -287,7 +333,7 @@ function StagePills({
             onClick={() => onChange(env)}
             style={{ ...styles.pill, ...(isActive ? styles.pillActive : {}) }}
           >
-            {hasData && <span style={styles.stageDot} />}
+            <span style={{ ...styles.stageDot, background: configured ? 'var(--green)' : 'var(--red)' }} />
             {t(PROJECT_ENV_LABEL[env])}
           </button>
         );
@@ -397,7 +443,13 @@ const styles: Record<string, React.CSSProperties> = {
   dbDesc: { fontSize: 11, color: 'var(--text-2)', fontFamily: 'var(--mono)', marginBottom: 2 },
   dbGrid2: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 },
   dbGridHostPort: { display: 'grid', gridTemplateColumns: '1fr 90px', gap: 8 },
-  dbTestRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 2 },
+  dbTestRow: { display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, marginTop: 2 },
+  btnTestActive: {
+    background: 'var(--navy)',
+    color: '#fff',
+    border: '1px solid var(--navy)',
+    fontWeight: 600,
+  },
   dbTestHint: { fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
 
   errorBox: {
