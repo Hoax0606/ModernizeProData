@@ -12,8 +12,12 @@
   "dependencies": {
     "@stomp/stompjs": "^7.3.0",
     "@tanstack/react-query": "^5.100.10",
+    "@tanstack/react-virtual": "^3.13.25",
     "axios": "^1.16.0",
+<<<<<<< HEAD
+=======
     "exceljs": "^3.4.0",
+>>>>>>> 6cdf9b6f15c4551dd6a6a07b8633a3f16ad45abc
     "jszip": "^3.10.1",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
