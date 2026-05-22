@@ -275,6 +275,11 @@ export function MappingPage() {
   });
   useEffect(() => {
     ASIS_TABLES = ddlToAsisTables(asisSchema);
+    // PoC: Site 의 csvPath 가 채워져 있으면 모든 AS-IS 테이블을 imported 로 간주.
+    // (실제 파일 존재 / 행 수 검증은 백엔드 CSV import API 가 생기면 그 응답으로 교체.)
+    if (siteForDialect?.csvPath && siteForDialect.csvPath.trim() !== '') {
+      ASIS_TABLES = ASIS_TABLES.map((t) => ({ ...t, imported: true }));
+    }
     TOBE_TABLES = ddlToTobeTables(tobeSchema);
     ASIS_COLUMNS = ddlToAsisColumns(asisSchema);
     MAPPING_BY_TOBE = ddlToMappingByTobe(tobeSchema);
@@ -298,9 +303,14 @@ export function MappingPage() {
   }, [hydrationTick]);
 
   const [selected, setSelected] = useState<Selection>(null);
-  // 매핑 메뉴 초기 화면은 무조건 TO-BE 첫 테이블. AS-IS schema 가 TO-BE 보다 먼저 도착하더라도
-  // TOBE_TABLES 가 채워질 때까지 기다린 후 한 번만 강제 set 한다.
+  // 매핑 메뉴 초기 화면은 무조건 TO-BE 첫 테이블. 프로젝트가 바뀌면 다시 reset.
   const didInitialSelectRef = useRef(false);
+  // 프로젝트 변경 시 selection lock 해제.
+  useEffect(() => {
+    didInitialSelectRef.current = false;
+    setSelected(null);
+  }, [activeProjectId]);
+  // hydrate 후 첫 TOBE 자동 선택 (프로젝트당 한 번).
   useEffect(() => {
     if (didInitialSelectRef.current) return;
     if (TOBE_TABLES.length === 0) return;  // TO-BE 아직 안 옴 — 다음 tick 대기
@@ -693,6 +703,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   };
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [importMappingOpen, setImportMappingOpen] = useState(false);
+  const [importYamlOpen, setImportYamlOpen] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
   const [q, setQ] = useState('');
   type RuleFilter = 'all' | 'unmapped' | 'auto' | 'rule' | 'null' | 'default';
   const [coverageFilter, setCoverageFilter] = useState<RuleFilter>('all');
@@ -876,43 +888,91 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
             : testDisabledReason
           }
         >
-          <Ic.play /> {testStatus === 'running' ? `Testing ${testProgress}%` : testStatus === 'completed' ? 'Re-test' : 'Test'}
+          <Ic.play /> {testStatus === 'running' ? `Testing ${testProgress}%` : 'Test'}
         </button>
+        {testStatus === 'completed' && (
+          <button
+            type="button"
+            onClick={() => setReportOpen(true)}
+            title="변환 룰을 적용한 TO-BE 데이터 미리보기를 봅니다."
+            style={styles.reportChip}
+          >
+            <Ic.arrow /> Report
+          </button>
+        )}
       </div>
 
-      {bindingSources.length === 0 && (
+      {!reportOpen && bindingSources.length === 0 && (
         <div style={styles.noSourceBanner}>
           <Ic.warn />
           <span>AS-IS 테이블이 매핑되지 않았습니다. <b>Table binding</b> 패널에서 <b>+ Add source</b>로 테이블을 추가하세요.</span>
         </div>
       )}
-      <CollapsibleBinding
-        table={table} open={bindingOpen} pulse={bindingPulse} onToggle={() => setBindingOpen((o) => !o)}
-        sources={bindingSources}
-        onSourcesChange={(s) => { setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode }); }}
-        compositionMode={bindingMode}
-        onCompositionModeChange={(m) => { setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m }); }}
-      />
+      {!reportOpen && (
+        <CollapsibleBinding
+          table={table} open={bindingOpen} pulse={bindingPulse} onToggle={() => setBindingOpen((o) => !o)}
+          sources={bindingSources}
+          onSourcesChange={(s) => { setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode }); }}
+          compositionMode={bindingMode}
+          onCompositionModeChange={(m) => { setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m }); }}
+        />
+      )}
 
       {/* Toolbar */}
-      <div style={styles.toolbar}>
+      <div style={{ ...styles.toolbar, display: reportOpen ? 'none' : 'flex' }}>
         <div style={styles.toolbarSearch}>
           <Ic.search />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by field name…" style={styles.searchInput} />
         </div>
         <div style={{ flex: 1 }} />
-        <button style={styles.btnGhost}><Ic.download /> Import YAML</button>
+        <button
+          style={styles.btnGhost}
+          onClick={() => setImportYamlOpen(true)}
+        ><Ic.download /> Import YAML</button>
         <button
           style={styles.btnSecondary}
           onClick={() => setImportMappingOpen(true)}
         >Auto-map unmapped</button>
       </div>
       {importMappingOpen && (
-        <ImportMappingSpecModal onClose={() => setImportMappingOpen(false)} />
+        <ImportFileModal
+          title="Mapping Definition"
+          accept=".csv"
+          acceptLabel=".csv"
+          templateHref="/templates/mapping_definition_template.csv"
+          templateFilename="mapping_definition_template.csv"
+          hint="매칭된 unmapped 행만 자동 채워지고, 이미 매핑된 행은 덮어쓰지 않습니다."
+          onClose={() => setImportMappingOpen(false)}
+        />
+      )}
+      {importYamlOpen && (
+        <ImportFileModal
+          title="Import YAML"
+          accept=".yml,.yaml"
+          acceptLabel=".yml · .yaml"
+          hint="YAML 정의서로 매핑을 일괄 임포트합니다. 매칭된 unmapped 행만 채워지고, 이미 매핑된 행은 덮어쓰지 않습니다."
+          onClose={() => setImportYamlOpen(false)}
+        />
+      )}
+
+      {reportOpen && (
+        <ReportView
+          table={table}
+          rows={visibleRows}
+          onClose={() => setReportOpen(false)}
+          onPickColumn={(tgt) => {
+            const idx = visibleRows.findIndex((r) => r.tgt === tgt);
+            if (idx >= 0) {
+              setActiveIdx(idx);
+              setInspectorOpen(true);
+              setReportOpen(false);
+            }
+          }}
+        />
       )}
 
       {/* Grid + inspector */}
-      <div style={styles.gridSplit}>
+      <div style={{ ...styles.gridSplit, display: reportOpen ? 'none' : 'flex' }}>
         <div style={styles.gridScroll}>
           <TobeCoverageBar
             total={counts.all}
@@ -1962,7 +2022,17 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   );
 }
 
-function ImportMappingSpecModal({ onClose }: { onClose: () => void }) {
+function ImportFileModal({
+  title, accept, acceptLabel, templateHref, templateFilename, hint, onClose,
+}: {
+  title: string;
+  accept: string;
+  acceptLabel: string;
+  templateHref?: string;
+  templateFilename?: string;
+  hint: string;
+  onClose: () => void;
+}) {
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -1974,24 +2044,17 @@ function ImportMappingSpecModal({ onClose }: { onClose: () => void }) {
     <div style={styles.modalBackdrop} onClick={onClose}>
       <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
-          <div style={styles.modalTitle}>Mapping Definition</div>
+          <div style={styles.modalTitle}>{title}</div>
           <div style={{ flex: 1 }} />
-          <select
-            value=""
-            onChange={(e) => {
-              const v = e.target.value;
-              if (!v) return;
-              const a = document.createElement('a');
-              a.href = `/templates/mapping_definition_template.${v}`;
-              a.download = `mapping_definition_template.${v}`;
-              a.click();
-              e.target.value = '';
-            }}
-            style={styles.modalTemplateSelect}
-          >
-            <option value="" disabled>Download template…</option>
-            <option value="xlsx">Excel (.xlsx)</option>
-          </select>
+          {templateHref && (
+            <a
+              href={templateHref}
+              download={templateFilename}
+              style={styles.modalTemplateBtn}
+            >
+              <Ic.download /> Download template
+            </a>
+          )}
         </div>
         <div style={styles.modalBody}>
           <div
@@ -2013,7 +2076,7 @@ function ImportMappingSpecModal({ onClose }: { onClose: () => void }) {
             <input
               ref={inputRef}
               type="file"
-              accept=".xlsx,.csv,.yml,.yaml,.json"
+              accept={accept}
               onChange={(e) => handlePick(e.target.files?.[0] ?? null)}
               style={{ display: 'none' }}
             />
@@ -2027,13 +2090,13 @@ function ImportMappingSpecModal({ onClose }: { onClose: () => void }) {
             ) : (
               <div style={{ textAlign: 'center', color: 'var(--text-3)' }}>
                 <div style={{ fontSize: 13, marginBottom: 4 }}>파일을 끌어다 놓거나 클릭해서 선택</div>
-                <div style={{ fontSize: 11 }}>.xlsx · .csv · .yaml · .json</div>
+                <div style={{ fontSize: 11 }}>{acceptLabel}</div>
               </div>
             )}
           </div>
           <div style={styles.modalHint}>
             <Ic.warn />
-            <span>매칭된 unmapped 행만 자동 채워지고, 이미 매핑된 행은 덮어쓰지 않습니다.</span>
+            <span>{hint}</span>
           </div>
         </div>
         <div style={styles.modalFooter}>
@@ -2042,12 +2105,222 @@ function ImportMappingSpecModal({ onClose }: { onClose: () => void }) {
             style={file ? styles.btnPrimary : styles.btnPrimaryDisabled}
             disabled={!file}
             onClick={() => {
-              // TODO: 백엔드 mapping-spec import API 가 생기면 여기서 호출.
-              console.log('[mapping] would import spec', file?.name);
+              // TODO: 백엔드 import API 가 생기면 여기서 호출.
+              console.log(`[${title}] would import`, file?.name);
               onClose();
             }}
           >Import</button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Report view (Test 결과 미리보기) ─────────────────────────
+
+function hashStr(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+/** 컬럼 타입과 row 인덱스로 결정적 더미 값 생성. test 결과를 가짜로 채움. */
+function previewValue(row: MappingRow, rowIdx: number): string {
+  if (row.rule === 'unmapped') return '';
+  if (row.rule === 'null') return 'NULL';
+  if (row.rule === 'default') return row.ddlDefault ?? 'DEFAULT';
+
+  const seed = hashStr(`${row.tgt}|${rowIdx}`);
+  const t = row.tgtType.toUpperCase();
+  // NULL probability for nullable cols
+  if (row.tgtNullable && seed % 17 === 0) return 'NULL';
+
+  if (t.startsWith('UUID')) {
+    const hex = (seed * 0x9E3779B1).toString(16).padStart(8, '0');
+    return `${hex}-${(seed % 0xffff).toString(16).padStart(4, '0')}-5${(seed % 0xfff).toString(16).padStart(3, '0')}-${(seed % 0xfff).toString(16).padStart(3, '0')}-${(seed * 7 % 0xffffff).toString(16).padStart(6, '0')}${(seed * 13 % 0xffffff).toString(16).padStart(6, '0')}`;
+  }
+  if (t.startsWith('DATE')) {
+    const y = 2018 + (seed % 8);
+    const m = 1 + (seed % 12);
+    const d = 1 + (seed % 27);
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }
+  if (t.startsWith('TIMESTAMP')) {
+    const y = 2023 + (seed % 2);
+    const m = 1 + (seed % 12);
+    const d = 1 + (seed % 27);
+    const hh = seed % 24;
+    const mm = (seed * 7) % 60;
+    const ss = (seed * 13) % 60;
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+  }
+  if (t.startsWith('BOOLEAN') || t === 'BIT') {
+    return seed % 2 === 0 ? 'false' : 'true';
+  }
+  if (t.includes('INT') || t === 'BIGSERIAL' || t === 'SERIAL') {
+    return String(1000 + (seed % 90000));
+  }
+  if (t.startsWith('NUMERIC') || t.startsWith('NUMBER') || t.startsWith('DECIMAL')) {
+    return ((1000 + (seed % 90000)) + (seed % 100) / 100).toFixed(2);
+  }
+  if (t === 'TEXT' || t.includes('CLOB')) {
+    return `(text payload ${seed % 9999})`;
+  }
+  if (t === 'BYTEA' || t.includes('BLOB')) {
+    return `(bytes ${seed % 9999})`;
+  }
+  if (t.startsWith('CHAR(1)') || t === 'CHAR') {
+    const choices = ['M', 'F', 'A', 'B'];
+    return choices[seed % choices.length];
+  }
+  if (t.includes('VARCHAR') || t.includes('CHAR')) {
+    const samples = ['active', 'CALL', 'EMAIL', 'VISIT', 'leave', '田中', '김유라', 'P01', 'D101'];
+    return samples[seed % samples.length];
+  }
+  return `v${seed % 9999}`;
+}
+
+function excelColLabel(i: number): string {
+  // 0 → A, 25 → Z, 26 → AA, ...
+  let s = '';
+  let n = i;
+  while (true) {
+    s = String.fromCharCode(65 + (n % 26)) + s;
+    n = Math.floor(n / 26) - 1;
+    if (n < 0) break;
+  }
+  return s;
+}
+
+function ReportView({ table, rows, onClose, onPickColumn }: {
+  table: TobeTable;
+  rows: MappingRow[];
+  onClose: () => void;
+  onPickColumn: (tgt: string) => void;
+}) {
+  const PREVIEW_ROWS = 20;
+  // 파일명에 schema 제거 — m_user 형태로 보이게
+  const shortName = table.short || (table.name.includes('.') ? table.name.split('.').pop()! : table.name);
+  return (
+    <div style={styles.xlWindow}>
+      {/* 1) 타이틀 바 */}
+      <div style={styles.xlTitlebar}>
+        <span style={styles.xlTitleCenter}>{shortName} (읽기 전용) - Report</span>
+        <div style={styles.xlTitleRight}>
+          <span style={styles.xlTitleBtn}>─</span>
+          <span style={styles.xlTitleBtn}>▢</span>
+          <button
+            type="button"
+            onClick={onClose}
+            title="Mapping 화면으로 돌아가기"
+            style={{ ...styles.xlTitleBtn, ...styles.xlTitleBtnClose }}
+            aria-label="Close report"
+          >✕</button>
+        </div>
+      </div>
+
+      {/* 2) 리본 메뉴바 (탭만 — 디자인) */}
+      <div style={styles.xlRibbon}>
+        <span style={{ ...styles.xlRibbonTab, ...styles.xlRibbonTabFile }}>ファイル</span>
+        <span style={{ ...styles.xlRibbonTab, ...styles.xlRibbonTabActive }}>ホーム</span>
+        <span style={styles.xlRibbonTab}>挿入</span>
+        <span style={styles.xlRibbonTab}>ページレイアウト</span>
+        <span style={styles.xlRibbonTab}>数式</span>
+        <span style={styles.xlRibbonTab}>データ</span>
+        <span style={styles.xlRibbonTab}>校閲</span>
+        <span style={styles.xlRibbonTab}>表示</span>
+        <span style={styles.xlRibbonTab}>ヘルプ</span>
+      </div>
+      <div style={styles.xlRibbonBody} />
+
+      {/* 3) 수식 입력줄 */}
+      <div style={styles.xlFormulaBar}>
+        <div style={styles.xlNameBox}>
+          <span>A1</span>
+          <span style={styles.xlNameBoxCaret}>▾</span>
+        </div>
+        <div style={styles.xlFormulaButtons}>
+          <span style={{ ...styles.xlFormulaBtn, ...styles.xlFormulaBtnCancel }}>✕</span>
+          <span style={{ ...styles.xlFormulaBtn, ...styles.xlFormulaBtnConfirm }}>✓</span>
+          <span style={{ ...styles.xlFormulaBtn, ...styles.xlFormulaBtnFx }}>
+            <i>f</i><sub>x</sub>
+          </span>
+        </div>
+        <div style={styles.xlFormulaInput}>이 데이터는 DB에 저장되지 않습니다</div>
+      </div>
+
+      {/* 4) 스프레드시트 */}
+      <div style={styles.xlSheetArea}>
+        <table style={styles.xlSheet}>
+          <thead>
+            {/* A B C ... 알파벳 헤더 */}
+            <tr>
+              <th style={styles.xlCorner}> </th>
+              {rows.map((_r, i) => (
+                <th key={`abc-${i}`} style={styles.xlColHeader}>{excelColLabel(i)}</th>
+              ))}
+            </tr>
+            {/* 1행 — 컬럼명 (셀 병합 효과) */}
+            <tr>
+              <th style={{ ...styles.xlRowHeader, ...styles.xlRowHeaderName }}>1</th>
+              {rows.map((r) => (
+                <th
+                  key={`name-${r.tgt}`}
+                  onClick={() => onPickColumn(r.tgt)}
+                  title={`${r.tgt} (${r.tgtType}) · 클릭해서 매핑 상세 보기`}
+                  style={styles.xlColName}
+                >
+                  {r.tgt}
+                </th>
+              ))}
+            </tr>
+            {/* 2행 — 타입 (셀 병합 효과 — 1행과 같은 회색 배경) */}
+            <tr>
+              <th style={{ ...styles.xlRowHeader, ...styles.xlRowHeaderType }}>2</th>
+              {rows.map((r) => (
+                <th
+                  key={`type-${r.tgt}`}
+                  onClick={() => onPickColumn(r.tgt)}
+                  style={styles.xlColType}
+                >
+                  {r.tgtType}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {Array.from({ length: PREVIEW_ROWS }, (_, i) => (
+              <tr key={i}>
+                <td style={styles.xlRowHeader}>{i + 3}</td>
+                {rows.map((r) => {
+                  const v = previewValue(r, i);
+                  const isNull = v === 'NULL' || v === '';
+                  return (
+                    <td key={r.tgt} style={styles.xlCell}>
+                      <span style={{
+                        color: isNull ? '#a8a8a8' : '#201f1e',
+                        fontStyle: isNull ? 'italic' : 'normal',
+                        whiteSpace: 'nowrap',
+                      }}>
+                        {isNull ? '' : v}
+                      </span>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* 시트 탭 */}
+      <div style={styles.xlSheetTabs}>
+        <span style={{ ...styles.xlSheetTab, ...styles.xlSheetTabActive }}>Sheet1</span>
+      </div>
+
+      {/* 상태바 */}
+      <div style={styles.xlStatusBar}>
+        준비 완료 · 열 {rows.length} · 행 {PREVIEW_ROWS}
       </div>
     </div>
   );
@@ -3121,6 +3394,376 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
     whiteSpace: 'nowrap',
   },
+  // Test 옆 Report chip
+  reportChip: {
+    display: 'inline-flex', alignItems: 'center', gap: 5,
+    height: 26, padding: '0 10px', marginLeft: -6,
+    background: 'var(--panel)', color: 'var(--navy)',
+    border: '1px solid var(--navy)', borderRadius: 4,
+    fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+    fontFamily: 'inherit',
+  },
+
+  // ── Report view (Excel UI prototype 그대로) ───────────────
+  xlWindow: {
+    flex: 1, minHeight: 0, minWidth: 0,
+    margin: 10,
+    display: 'flex', flexDirection: 'column',
+    background: '#ffffff',
+    fontFamily: '"Calibri", "Segoe UI", "맑은 고딕", "Malgun Gothic", system-ui, sans-serif',
+    fontSize: 11,
+    color: '#201f1e',
+    userSelect: 'none',
+    border: '1px solid #c8c6c4',
+    borderRadius: 8,
+    overflow: 'hidden',
+    boxShadow: '0 2px 10px rgba(0, 0, 0, 0.06)',
+  },
+  xlTitlebar: {
+    height: 28, background: '#217346', color: '#ffffff',
+    display: 'flex', alignItems: 'center', padding: 0,
+    fontSize: 11.5, flexShrink: 0, position: 'relative',
+  },
+  xlTitleCenter: {
+    position: 'absolute', left: '50%', transform: 'translateX(-50%)',
+    color: '#ffffff', fontSize: 11.5, letterSpacing: 0.2,
+  },
+  xlTitleRight: {
+    marginLeft: 'auto', display: 'flex', alignItems: 'stretch', height: '100%',
+  },
+  xlTitleBtn: {
+    width: 46, height: 28, padding: 0,
+    background: 'transparent', color: '#ffffff',
+    border: 'none', fontSize: 13,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    cursor: 'default',
+    fontFamily: 'inherit',
+  },
+  xlTitleBtnClose: { cursor: 'pointer' },
+
+  xlRibbon: {
+    height: 28, background: '#217346', color: '#ffffff',
+    display: 'flex', alignItems: 'flex-end',
+    padding: '0 8px', fontSize: 12, flexShrink: 0,
+  },
+  xlRibbonTab: {
+    padding: '4px 12px', height: 24, lineHeight: '16px',
+    color: 'rgba(255,255,255,0.92)', cursor: 'default',
+  },
+  xlRibbonTabFile: { background: '#185c37', fontWeight: 600 },
+  xlRibbonTabActive: {
+    background: '#f3f2f1', color: '#201f1e', fontWeight: 600,
+    borderTopLeftRadius: 2, borderTopRightRadius: 2,
+  },
+  xlRibbonBody: {
+    height: 4, background: '#f3f2f1',
+    borderBottom: '1px solid #d0d0d0', flexShrink: 0,
+  },
+
+  xlFormulaBar: {
+    height: 24, background: '#F3F3F3',
+    display: 'flex', alignItems: 'stretch',
+    borderBottom: '1px solid #D0D0D0',
+    flexShrink: 0, padding: '2px 4px', gap: 4,
+  },
+  xlNameBox: {
+    width: 110, background: '#FFFFFF',
+    border: '1px solid #D0D0D0',
+    display: 'flex', alignItems: 'center', padding: '0 8px',
+    fontSize: 11, color: '#201f1e',
+  },
+  xlNameBoxCaret: { marginLeft: 'auto', fontSize: 9, color: '#605e5c' },
+  xlFormulaButtons: {
+    display: 'flex', alignItems: 'center', gap: 2, padding: '0 4px',
+  },
+  xlFormulaBtn: {
+    width: 20, height: 18,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    background: 'transparent', color: '#888', fontSize: 11,
+    cursor: 'default',
+  },
+  xlFormulaBtnCancel: { color: '#b40000' },
+  xlFormulaBtnConfirm: { color: '#006400' },
+  xlFormulaBtnFx: {
+    color: '#605e5c',
+    fontFamily: '"Cambria Math", "Times New Roman", serif',
+    fontStyle: 'italic', fontSize: 12,
+  },
+  xlFormulaInput: {
+    flex: 1, background: '#FFFFFF', border: '1px solid #D0D0D0',
+    padding: '0 8px', display: 'flex', alignItems: 'center',
+    fontSize: 11, color: '#201f1e',
+    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+  },
+
+  xlSheetArea: {
+    flex: 1, overflow: 'auto', background: '#ffffff', minHeight: 0, minWidth: 0,
+  },
+  xlSheet: {
+    borderCollapse: 'collapse',
+    fontFamily: '"Calibri", "Segoe UI", system-ui, sans-serif',
+    fontSize: 11, background: '#ffffff',
+    width: 'max-content', minWidth: '100%',
+  },
+  xlCorner: {
+    position: 'sticky', top: 0, left: 0, zIndex: 3,
+    width: 32, height: 20, background: '#e1e1e1',
+    borderRight: '1px solid #b8b8b8', borderBottom: '1px solid #b8b8b8',
+    padding: 0,
+  },
+  xlColHeader: {
+    position: 'sticky', top: 0, zIndex: 1,
+    minWidth: 100, height: 20, background: '#e1e1e1', color: '#555',
+    borderRight: '1px solid #c8c8c8', borderBottom: '1px solid #b8b8b8',
+    fontSize: 11, fontWeight: 400, textAlign: 'center',
+  },
+  xlRowHeader: {
+    position: 'sticky', left: 0, zIndex: 1,
+    width: 32, height: 20, background: '#e1e1e1', color: '#555',
+    borderRight: '1px solid #b8b8b8', borderBottom: '1px solid #d8d8d8',
+    fontSize: 11, fontWeight: 400, textAlign: 'center', padding: 0,
+  },
+  xlRowHeaderName: { top: 20, left: 0, zIndex: 2, borderBottom: 'none' },
+  xlRowHeaderType: { top: 42, left: 0, zIndex: 2, borderBottom: '1px solid #b8b8b8' },
+  xlColName: {
+    position: 'sticky', top: 20, zIndex: 1,
+    minWidth: 100, height: 22,
+    padding: '3px 6px 0 6px',
+    background: '#f3f2f1', color: '#217346',
+    fontSize: 12, fontWeight: 700, textAlign: 'left',
+    borderRight: '1px solid #c8c8c8', borderBottom: 'none',
+    verticalAlign: 'bottom', whiteSpace: 'nowrap',
+    cursor: 'pointer',
+  },
+  xlColType: {
+    position: 'sticky', top: 42, zIndex: 1,
+    minWidth: 100, height: 20,
+    padding: '0 6px 3px 6px',
+    background: '#f3f2f1', color: '#605e5c',
+    fontSize: 10.5, fontWeight: 400, textAlign: 'left',
+    borderRight: '1px solid #c8c8c8', borderBottom: '1px solid #b8b8b8',
+    verticalAlign: 'top', whiteSpace: 'nowrap',
+    cursor: 'pointer',
+  },
+  xlCell: {
+    minWidth: 100, height: 20, padding: '0 6px',
+    background: '#ffffff', color: '#201f1e',
+    borderRight: '1px solid #e1e1e1', borderBottom: '1px solid #e1e1e1',
+    fontSize: 11, verticalAlign: 'middle',
+  },
+
+  xlSheetTabs: {
+    height: 22, background: '#f3f2f1',
+    borderTop: '1px solid #d0d0d0',
+    display: 'flex', alignItems: 'center', padding: '0 8px', gap: 4,
+    flexShrink: 0,
+  },
+  xlSheetTab: {
+    padding: '2px 14px', fontSize: 11, color: '#444',
+    background: '#ffffff', border: '1px solid #c8c8c8',
+    borderBottom: 'none', marginTop: 2, cursor: 'default',
+  },
+  xlSheetTabActive: {
+    color: '#217346', fontWeight: 700,
+    borderBottom: '2px solid #217346',
+  },
+  xlStatusBar: {
+    height: 22, background: '#217346', color: '#ffffff',
+    display: 'flex', alignItems: 'center', padding: '0 12px',
+    fontSize: 11, flexShrink: 0,
+  },
+
+  // ── 옛 report* (사용 안 함, 유지하면 컴파일 OK) ────────
+  reportWrap: {
+    flex: 1, minHeight: 0,
+    display: 'flex', flexDirection: 'column',
+    background: '#ffffff',
+    fontFamily: '"Segoe UI", "Calibri", system-ui, sans-serif',
+  },
+  // 짙은 녹색 Excel title bar (Artifacts 와 같은 #217346)
+  reportTitleBar: {
+    display: 'flex', alignItems: 'center', gap: 10,
+    height: 30,
+    padding: '0 0 0 0',
+    background: '#217346',
+    color: '#ffffff',
+    fontSize: 11.5, fontWeight: 400,
+    flexShrink: 0,
+  },
+  reportTitleText: {
+    fontSize: 11.5, color: '#ffffff', fontWeight: 400,
+    letterSpacing: 0.1,
+    textAlign: 'center',
+  },
+  // Formula bar — 진한 회색 (Artifacts formulaSpacer 와 같은 회색 tone 통일).
+  // Name box / fx 도 같은 회색.
+  reportFormulaBar: {
+    display: 'flex', alignItems: 'stretch', gap: 0,
+    height: 22,
+    background: '#e1e1e1',
+    borderBottom: '1px solid #d0cfce',
+    flexShrink: 0,
+  },
+  reportNameBox: {
+    display: 'inline-flex', alignItems: 'center',
+    width: 80, padding: '0 8px',
+    background: '#e1e1e1',
+    color: '#201f1e',
+    fontFamily: '"Calibri", "Segoe UI", system-ui, sans-serif',
+    fontSize: 11,
+    borderRight: '1px solid #d0cfce',
+  },
+  reportFxBtn: {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    width: 28,
+    background: '#e1e1e1',
+    color: '#605e5c',
+    fontFamily: '"Cambria Math", "Times New Roman", serif',
+    fontSize: 12, fontStyle: 'italic',
+    borderRight: '1px solid #d0cfce',
+  },
+  reportFormulaInput: {
+    flex: 1, padding: '0 10px',
+    background: '#ffffff',
+    display: 'flex', alignItems: 'center',
+    fontFamily: '"Calibri", "Segoe UI", system-ui, sans-serif',
+    fontSize: 11, color: '#201f1e',
+    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+  },
+  reportTitleClose: {
+    width: 46, height: 32, padding: 0,
+    background: 'transparent',
+    color: '#ffffff',
+    border: 'none',
+    fontSize: 16, fontWeight: 400,
+    cursor: 'pointer',
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    fontFamily: 'inherit',
+  },
+  // 시트 영역
+  reportBody: {
+    flex: 1, minHeight: 0, overflow: 'auto',
+    background: '#ffffff',
+  },
+  reportTable: {
+    borderCollapse: 'collapse',
+    fontFamily: '"Calibri", "Segoe UI", system-ui, sans-serif',
+    fontSize: 11,
+    width: 'max-content',
+    minWidth: '100%',
+    background: '#ffffff',
+  },
+  // 좌상단 corner cell (A 위, 1 왼쪽) — 진한 회색 (formula bar / 헤더 톤과 통일)
+  reportCornerCell: {
+    position: 'sticky', top: 0, left: 0, zIndex: 3,
+    width: 36, height: 20,
+    background: '#e1e1e1',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: '1px solid #d0cfce',
+    padding: 0,
+  },
+  // A B C ... 알파벳 컬럼 헤더 — 진한 회색
+  reportAlphaCell: {
+    position: 'sticky', top: 0, zIndex: 1,
+    minWidth: 110,
+    height: 20,
+    padding: '0 4px',
+    background: '#e1e1e1',
+    color: '#444',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: '1px solid #d0cfce',
+    fontSize: 11, fontWeight: 400,
+    textAlign: 'center',
+    userSelect: 'none',
+  },
+  // 데이터 row 번호 (3, 4, 5...) — 진한 회색 (헤더 톤)
+  reportRowNumCell: {
+    position: 'sticky', left: 0, zIndex: 1,
+    width: 36, height: 20,
+    background: '#e1e1e1',
+    color: '#444',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: '1px solid #e8e8e8',
+    fontSize: 11, fontWeight: 400,
+    textAlign: 'center',
+    padding: 0,
+  },
+  // Row 1: 컬럼명 — 옅은 회색 (Artifacts ribbon 톤), 셀 병합 효과로 아래 가로 border 제거
+  reportHeaderRowNumName: {
+    position: 'sticky', top: 20, left: 0, zIndex: 3,
+    width: 36, height: 22,
+    background: '#e1e1e1',
+    color: '#444',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: 'none',  // ← Row 2 와 셀 병합 효과
+    fontSize: 11, fontWeight: 400,
+    textAlign: 'center',
+    padding: 0,
+  },
+  reportHeaderNameOnly: {
+    position: 'sticky', top: 20, zIndex: 1,
+    minWidth: 110, height: 22,
+    padding: '4px 6px 0 6px',
+    background: '#f3f2f1',
+    color: '#217346',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: 'none',  // ← Row 2 와 셀 병합 효과
+    textAlign: 'left',
+    fontSize: 11.5, fontWeight: 700,
+    cursor: 'pointer',
+    userSelect: 'none',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden', textOverflow: 'ellipsis',
+    verticalAlign: 'bottom',
+  },
+  // Row 2: 타입 — 옅은 회색, sticky top 42
+  reportHeaderRowNumType: {
+    position: 'sticky', top: 42, left: 0, zIndex: 3,
+    width: 36, height: 20,
+    background: '#e1e1e1',
+    color: '#444',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: '1px solid #d0cfce',
+    fontSize: 11, fontWeight: 400,
+    textAlign: 'center',
+    padding: 0,
+  },
+  reportHeaderTypeOnly: {
+    position: 'sticky', top: 42, zIndex: 1,
+    minWidth: 110, height: 20,
+    padding: '0 6px 4px 6px',
+    background: '#f3f2f1',
+    color: '#605e5c',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: '1px solid #d0cfce',
+    textAlign: 'left',
+    fontSize: 10.5, fontWeight: 400,
+    cursor: 'pointer',
+    userSelect: 'none',
+    whiteSpace: 'nowrap',
+    verticalAlign: 'top',
+  },
+  reportCell: {
+    minWidth: 110, height: 20,
+    padding: '0 6px',
+    background: '#ffffff',
+    color: '#201f1e',
+    borderRight: '1px solid #e8e8e8',
+    borderBottom: '1px solid #e8e8e8',
+    fontSize: 11,
+    verticalAlign: 'middle',
+  },
+  reportStatusBar: {
+    height: 22,
+    padding: '0 12px',
+    borderTop: '1px solid #d0cfce',
+    background: '#217346',
+    fontSize: 11, color: '#ffffff',
+    display: 'flex', alignItems: 'center',
+    flexShrink: 0,
+    fontFamily: '"Segoe UI", "Calibri", system-ui, sans-serif',
+  },
+
   dialectChip: {
     display: 'inline-flex', alignItems: 'center',
     padding: '2px 8px', borderRadius: 3,
@@ -3154,12 +3797,14 @@ const styles: Record<string, React.CSSProperties> = {
     borderBottom: '1px solid var(--border)',
     display: 'flex', alignItems: 'center', gap: 8,
   },
-  modalTemplateSelect: {
-    height: 26, padding: '0 8px',
+  modalTemplateBtn: {
+    display: 'inline-flex', alignItems: 'center', gap: 5,
+    height: 26, padding: '0 10px',
     border: '1px solid var(--border-strong)', borderRadius: 4,
     background: 'var(--panel)', color: '#01589C',
     fontSize: 11.5, fontFamily: 'var(--mono)', fontWeight: 600,
-    cursor: 'pointer',
+    cursor: 'pointer', textDecoration: 'none',
+    whiteSpace: 'nowrap',
   },
   modalTitle: {
     fontSize: 14, fontWeight: 700, color: 'var(--text)',
