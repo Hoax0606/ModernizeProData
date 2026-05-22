@@ -729,6 +729,7 @@ export function AppShell() {
           <div style={styles.tabbar}>
             <Tab to="/" end label={t('tab.siteOverview')} />
             <Tab to="/site/execution" label={t('tab.executionOverview')} />
+            <Tab to="/site/quarantine" label={t('tab.siteQuarantine')} />
             <Tab to="/site/approvals" label={t('tab.approvals')} />
             <Tab to="/site/export" label={t('tab.siteExport')} />
             <Tab to="/site/audit" label={t('tab.auditLog')} />

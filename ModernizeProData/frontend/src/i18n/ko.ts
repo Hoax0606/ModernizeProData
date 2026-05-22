@@ -33,6 +33,7 @@ export const ko = {
 
   'tab.siteOverview':      'Site overview',
   'tab.executionOverview': 'Execution overview',
+  'tab.siteQuarantine':    'Quarantine',
   'tab.siteExport':        'Site export',
   'tab.approvals':         'Approvals',
   'tab.cutover':           'Cutover',
@@ -901,6 +902,65 @@ export const ko = {
   'logs.footer.live':           'LIVE',
   'logs.mode.live':             'Live tail',
   'logs.mode.history':          'History',
+
+  'logs.view.label':            'View',
+  'logs.view.stream':           'Stream',
+  'logs.view.quarantine':       'Quarantine',
+  'logs.quarantine.empty':      '위 드롭다운에서 항목을 선택하면 상세가 표시됩니다.',
+  'logs.quarantine.count':      '{n}건 격리됨',
+  'logs.quarantine.group':      '{stage} ({n})',
+  'logs.quarantine.discardGroup': '그룹 비우기',
+  'logs.quarantine.clearAll':   '전체 비우기',
+  'logs.quarantine.send':       'Quarantine으로 보내기',
+  'logs.quarantine.discardOne': '버리기',
+  'logs.quarantine.alreadyIn':  '이미 격리 큐에 있음',
+
+  'logs.quarantine.statsGroups':   '{n} groups',
+  'logs.quarantine.statsRows':     '{n} rows ({err} error · {warn} warning)',
+  'logs.quarantine.filter.all':    'All',
+  'logs.quarantine.filter.errors': 'Errors',
+  'logs.quarantine.filter.warnings': 'Warnings',
+  'logs.quarantine.pick.all':      '항목 선택…',
+  'logs.quarantine.rowsBadge':     '{n} ROWS',
+  'logs.quarantine.colProject':    'PROJECT_NAME',
+  'logs.quarantine.colTable':      'TABLE_NAME',
+  'logs.quarantine.colAsIs':       'AS-IS',
+  'logs.quarantine.colToBe':       'TO-BE',
+
+  /* TO-BE 제약 — quarantineToBeConstraint 가 stage / detail 에서 vars 채움. */
+  'logs.quarantine.tobe.fk':         '{parentTable}.{parentCol} 에 존재',
+  'logs.quarantine.tobe.lookup':     '조회 테이블에 존재',
+  'logs.quarantine.tobe.notnull':    '필수 (NULL 불가)',
+  'logs.quarantine.tobe.unique':     '고유값 (중복 불가)',
+  'logs.quarantine.tobe.range':      '허용 범위 내',
+  'logs.quarantine.tobe.rangeGte':   '{n} 이상',
+  'logs.quarantine.tobe.type':       '정상 형식',
+  'logs.quarantine.tobe.typeFormat': '{fmt} 형식',
+  'logs.quarantine.tobe.length':     '최대 길이 이내',
+  'logs.quarantine.tobe.lengthLte':  '최대 {n} 글자',
+  'logs.quarantine.tobe.checksum':   '원본 합계와 일치',
+  'logs.quarantine.tobe.encode':     '문자로 변환 가능',
+  'logs.quarantine.role.violated': 'error',
+  'logs.quarantine.role.context':  'context',
+
+  /* humanizeQuarantineDetail 가 stage / table / col 을 채워서 한 줄 설명을 만든다. */
+  'logs.quarantine.human.fk':       '{childTable} 의 {childCol} 값이 {parentTable} 에서 찾을 수 없습니다. 부모 데이터가 먼저 적재되어야 합니다.',
+  'logs.quarantine.human.notnull':  '{table} 의 {col} 컬럼이 비어있습니다. 필수 입력이라 빈 값은 적재되지 않습니다.',
+  'logs.quarantine.human.unique':   '{table} 의 {col} 값이 같은 행이 여러 개 있습니다. 중복은 한 번만 적재됩니다.',
+  'logs.quarantine.human.range':    '{table} 의 {col} 값이 허용 범위를 벗어났습니다.',
+  'logs.quarantine.human.type':     '{table} 의 {col} 값이 기대한 형식과 다릅니다.',
+  'logs.quarantine.human.length':   '{table} 의 {col} 값이 컬럼 최대 길이를 초과합니다.',
+  'logs.quarantine.human.lookup':   '{table} 의 {col} 값이 조회 테이블에서 찾을 수 없습니다.',
+  'logs.quarantine.human.checksum': '{table} 의 합계가 원본과 일치하지 않습니다. 행 누락이나 데이터 변형 가능성이 있습니다.',
+  'logs.quarantine.human.encode':   '{table} 의 {col} 에 글자로 변환되지 않는 바이트가 있어 (물음표) 로 대체됐습니다.',
+
+  'logs.quarantine.act.rerunTable':    '이 테이블만 다시 이행',
+  'logs.quarantine.act.openMapping':   '매핑 열기',
+  'logs.quarantine.act.openInspector': '스트림에서 보기',
+
+  'siteQuarantine.eyebrow':         'SITE QUARANTINE',
+  'siteQuarantine.empty.noSite':    '사이트를 먼저 선택하세요.',
+  'siteQuarantine.pickProject.all': '모든 프로젝트',
 } as const;
 
 export type TranslationKey = keyof typeof ko;

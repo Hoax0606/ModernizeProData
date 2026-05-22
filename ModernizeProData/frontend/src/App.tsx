@@ -14,6 +14,7 @@ import { ExecutionPage } from './pages/ExecutionPage';
 import { ExecutionOverviewPage } from './pages/ExecutionOverviewPage';
 import { ArtifactsPage } from './pages/ArtifactsPage';
 import { LogViewerPage } from './pages/LogViewerPage';
+import { SiteQuarantinePage } from './pages/SiteQuarantinePage';
 import { AppShell } from './layout/AppShell';
 import { ProtectedRoute } from './routes/ProtectedRoute';
 import { useSettingsStore } from './store/settings';
@@ -45,6 +46,7 @@ function App() {
             <Route element={<AppShell />}>
               <Route path="/" element={<DashboardPage />} />
               <Route path="/site/execution" element={<ExecutionOverviewPage />} />
+              <Route path="/site/quarantine" element={<SiteQuarantinePage />} />
               <Route path="/site/export" element={<SiteExportPage />} />
               <Route path="/site/approvals" element={<ApprovalsPage />} />
               <Route path="/site/audit" element={<AuditLogPage />} />

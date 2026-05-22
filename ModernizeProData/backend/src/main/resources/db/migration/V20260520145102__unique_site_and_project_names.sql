@@ -15,8 +15,8 @@ UPDATE sites s
           AND s2.created_at < s.created_at
        );
 
-ALTER TABLE sites
-  ADD CONSTRAINT uq_sites_name UNIQUE (name);
+ALTER TABLE sites DROP CONSTRAINT IF EXISTS uq_sites_name;
+ALTER TABLE sites ADD CONSTRAINT uq_sites_name UNIQUE (name);
 
 UPDATE projects p
    SET name = p.name || ' (dup-' || substring(p.id, 3) || ')'
@@ -28,5 +28,5 @@ UPDATE projects p
           AND p2.created_at < p.created_at
        );
 
-ALTER TABLE projects
-  ADD CONSTRAINT uq_projects_site_name UNIQUE (site_id, name);
+ALTER TABLE projects DROP CONSTRAINT IF EXISTS uq_projects_site_name;
+ALTER TABLE projects ADD CONSTRAINT uq_projects_site_name UNIQUE (site_id, name);

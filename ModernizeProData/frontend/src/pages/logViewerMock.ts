@@ -1,11 +1,13 @@
 import type { RunLogLine } from '../api/runLogs';
+import { buildQuarantineGroups, type QuarantineGroup } from './quarantineMock';
 
 /**
  * LogViewer demo / mock generator.
  *
  *  - 결정적 (seq → 동일 값). 데모 도중 새로고침해도 같은 화면.
  *  - 금융 데이터 이행 도메인의 실제 로그 톤 흉내 (LOAD/CHECKSUM/FK violation/encoding 등).
- *  - 비율: ~80% INFO / 13% WARN / 7% ERROR.
+ *  - ERROR/WARN 라인 수는 quarantineMock.quarantineTotals() 와 정확히 일치 — Stream chip 의
+ *    ERROR/WARN 카운트와 Quarantine 카드 뷰의 row 통계가 한 source 에서 derive.
  *  - ERROR 라인은 suggestion 포함. 액션 버튼이 그 위에 떠야 함.
  *
  *  실제 BE ingest 가 들어오면 LogViewerPage 의 USE_MOCK 플래그만 false 로 돌려 떼낸다.
@@ -85,25 +87,90 @@ export function buildMockLines(runId: string, count = 240): RunLogLine[] {
   const baseTs = Date.now() - count * 250;
 
   const infoTpl  = TEMPLATES.filter((t) => t.level === 0);
-  const warnTpl  = TEMPLATES.filter((t) => t.level === 1);
-  const errorTpl = TEMPLATES.filter((t) => t.level === 2);
+
+  /**
+   * ERROR/WARN 라인은 quarantineMock 의 group 에서 derive — 같은 stage / 같은 row 분포.
+   * 그래야 Quarantine 카드의 "Open row inspector" 가 Stream stepFilter 로 이어졌을 때
+   * 그 group 에 해당하는 라인이 정확히 나온다.
+   */
+  const groups = buildQuarantineGroups(runId);
+  const errGroups  = groups.filter((g) => g.severity === 'error');
+  const warnGroups = groups.filter((g) => g.severity === 'warning');
+  const errRows  = sumRows(errGroups);
+  const warnRows = sumRows(warnGroups);
+
+  const errSlotSet  = pickSlots(count, Math.min(errRows,  count));
+  const warnSlotSet = pickSlots(count, Math.min(warnRows, count - errSlotSet.size), errSlotSet);
+  /* slot 들을 시간순(=인덱스 오름차순)으로 정렬한 뒤 group rowCount 비율대로 매핑.
+     g1 의 4 slot, g2 의 4 slot, g3 의 6 slot ... 순서대로 cursor 가 진행한다. */
+  const errSlotOrdered  = Array.from(errSlotSet).sort((a, b) => a - b);
+  const warnSlotOrdered = Array.from(warnSlotSet).sort((a, b) => a - b);
+  const errMap  = mapSlotsToGroups(errSlotOrdered,  errGroups);
+  const warnMap = mapSlotsToGroups(warnSlotOrdered, warnGroups);
 
   for (let i = 0; i < count; i++) {
-    const roll = rnd(i * 31) % 100;
-    const pool = roll < 80 ? infoTpl : roll < 93 ? warnTpl : errorTpl;
-    const t = pool[rnd(i * 17) % pool.length];
     const ts = new Date(baseTs + i * 250 + (rnd(i) % 200)).toISOString();
-    lines.push({
-      seq: i + 1,
-      runId,
-      ts,
-      level: t.level,
-      stage: t.stage,
-      message: t.build(i),
-      suggestion: t.suggestion,
-    });
+    const g = errMap.get(i) ?? warnMap.get(i);
+    if (g) {
+      lines.push({
+        seq: i + 1,
+        runId,
+        ts,
+        level: g.severity === 'error' ? 2 : 1,
+        stage: g.stage,
+        message: `${g.reason} — ${g.detail}`,
+      });
+    } else {
+      // INFO — 기존 풍부한 template 그대로 사용 (loader/checksum/transform 등).
+      const tmpl = infoTpl[rnd(i * 17) % infoTpl.length];
+      lines.push({
+        seq: i + 1,
+        runId,
+        ts,
+        level: tmpl.level,
+        stage: tmpl.stage,
+        message: tmpl.build(i),
+        suggestion: tmpl.suggestion,
+      });
+    }
   }
   return lines;
+}
+
+function sumRows(gs: QuarantineGroup[]): number {
+  let n = 0; for (const g of gs) n += g.rowCount; return n;
+}
+
+/** ordered slot indices 를 group 의 rowCount 만큼 순서대로 매핑. */
+function mapSlotsToGroups(ordered: number[], gs: QuarantineGroup[]): Map<number, QuarantineGroup> {
+  const m = new Map<number, QuarantineGroup>();
+  let cur = 0;
+  for (const g of gs) {
+    for (let k = 0; k < g.rowCount && cur < ordered.length; k++, cur++) {
+      m.set(ordered[cur], g);
+    }
+  }
+  return m;
+}
+
+/**
+ * 0..count-1 슬롯에서 n 개를 균등 분산으로 deterministic 하게 선택.
+ * exclude 에 든 슬롯은 충돌 시 다음 빈 슬롯으로 밀어냄.
+ */
+function pickSlots(count: number, n: number, exclude?: Set<number>): Set<number> {
+  const result = new Set<number>();
+  if (n <= 0 || count <= 0) return result;
+  const step = count / n;
+  for (let i = 0; i < n; i++) {
+    let s = Math.floor(i * step + step / 2) % count;
+    let guard = 0;
+    while ((exclude?.has(s) || result.has(s)) && guard < count) {
+      s = (s + 1) % count;
+      guard++;
+    }
+    result.add(s);
+  }
+  return result;
 }
 
 /* ────────────── stage stats — INFO 선택 시 우측 패널 ──────────── */
