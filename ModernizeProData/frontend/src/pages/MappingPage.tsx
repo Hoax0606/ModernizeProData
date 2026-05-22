@@ -2192,6 +2192,27 @@ function excelColLabel(i: number): string {
   return s;
 }
 
+function typeIconLabel(t: string): string {
+  const u = t.toLowerCase();
+  if (u === 'uuid') return 'UUID';
+  if (u.startsWith('varchar') || u.startsWith('char') || u === 'text' || u.includes('nvarchar')) return 'ABC';
+  if (u === 'int' || u === 'integer' || u === 'bigint' || u === 'smallint' || u === 'serial' || u === 'bigserial') return '123';
+  if (u.startsWith('numeric') || u.startsWith('decimal') || u.startsWith('number')) return '1.2';
+  if (u.startsWith('timestamp')) return 'TS';
+  if (u === 'date') return 'DT';
+  if (u === 'time') return 'TM';
+  if (u === 'bool' || u === 'boolean' || u === 'bit') return 'T/F';
+  if (u === 'bytea' || u.includes('blob') || u.includes('binary') || u === 'raw') return 'BIN';
+  if (u === 'json' || u === 'jsonb') return '{}';
+  return u.slice(0, 3).toUpperCase();
+}
+
+function isNumericType(t: string): boolean {
+  const u = t.toLowerCase();
+  return u === 'int' || u === 'integer' || u === 'bigint' || u === 'smallint'
+    || u.startsWith('numeric') || u.startsWith('number') || u.startsWith('decimal');
+}
+
 function ReportView({ table, rows, onClose, onPickColumn }: {
   table: TobeTable;
   rows: MappingRow[];
@@ -2199,131 +2220,193 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
   onPickColumn: (tgt: string) => void;
 }) {
   const PREVIEW_ROWS = 20;
-  // 파일명에 schema 제거 — m_user 형태로 보이게
   const shortName = table.short || (table.name.includes('.') ? table.name.split('.').pop()! : table.name);
+  const tobeDbLabel = dialectLabel(TOBE_DIALECT);
+
+  const ws = useWorkspaceStore.getState();
+  const activeSiteName = ws.getActiveSite()?.name || 'modernize';
+  const activeProjectName = ws.getActiveProject()?.name || 'project';
+
   return (
-    <div style={styles.xlWindow}>
-      {/* 1) 타이틀 바 */}
-      <div style={styles.xlTitlebar}>
-        <span style={styles.xlTitleCenter}>{shortName} (읽기 전용) - Report</span>
-        <div style={styles.xlTitleRight}>
-          <span style={styles.xlTitleBtn}>─</span>
-          <span style={styles.xlTitleBtn}>▢</span>
+    <div style={styles.dbvWindow}>
+      {/* ① 타이틀바 */}
+      <div style={styles.dbvTitlebar}>
+        <div style={styles.dbvTitlebarLeft}>
+          <img src="/mpd.png" alt="" style={styles.dbvLogo} />
+          <span style={styles.dbvTitleText}>{shortName} - Report</span>
+        </div>
+        <div style={styles.dbvTitlebarRight}>
+          <span style={styles.dbvTitleBtn}>─</span>
+          <span style={styles.dbvTitleBtn}>▢</span>
           <button
             type="button"
             onClick={onClose}
             title="Mapping 화면으로 돌아가기"
-            style={{ ...styles.xlTitleBtn, ...styles.xlTitleBtnClose }}
+            style={{ ...styles.dbvTitleBtn, ...styles.dbvTitleBtnClose }}
             aria-label="Close report"
           >✕</button>
         </div>
       </div>
 
-      {/* 2) 리본 메뉴바 (탭만 — 디자인) */}
-      <div style={styles.xlRibbon}>
-        <span style={{ ...styles.xlRibbonTab, ...styles.xlRibbonTabFile }}>ファイル</span>
-        <span style={{ ...styles.xlRibbonTab, ...styles.xlRibbonTabActive }}>ホーム</span>
-        <span style={styles.xlRibbonTab}>挿入</span>
-        <span style={styles.xlRibbonTab}>ページレイアウト</span>
-        <span style={styles.xlRibbonTab}>数式</span>
-        <span style={styles.xlRibbonTab}>データ</span>
-        <span style={styles.xlRibbonTab}>校閲</span>
-        <span style={styles.xlRibbonTab}>表示</span>
-        <span style={styles.xlRibbonTab}>ヘルプ</span>
-      </div>
-      <div style={styles.xlRibbonBody} />
-
-      {/* 3) 수식 입력줄 */}
-      <div style={styles.xlFormulaBar}>
-        <div style={styles.xlNameBox}>
-          <span>A1</span>
-          <span style={styles.xlNameBoxCaret}>▾</span>
-        </div>
-        <div style={styles.xlFormulaButtons}>
-          <span style={{ ...styles.xlFormulaBtn, ...styles.xlFormulaBtnCancel }}>✕</span>
-          <span style={{ ...styles.xlFormulaBtn, ...styles.xlFormulaBtnConfirm }}>✓</span>
-          <span style={{ ...styles.xlFormulaBtn, ...styles.xlFormulaBtnFx }}>
-            <i>f</i><sub>x</sub>
-          </span>
-        </div>
-        <div style={styles.xlFormulaInput}>이 데이터는 DB에 저장되지 않습니다</div>
+      {/* ② 메뉴바 */}
+      <div style={styles.dbvMenubar}>
+        {['File', 'Edit', 'Navigate', 'Search', 'SQL Editor', 'Database', 'Window', 'Help'].map((m) => (
+          <span key={m} style={styles.dbvMenuItem}>{m}</span>
+        ))}
       </div>
 
-      {/* 4) 스프레드시트 */}
-      <div style={styles.xlSheetArea}>
-        <table style={styles.xlSheet}>
+      {/* ③ 툴바 */}
+      <div style={styles.dbvToolbar}>
+        {['📄','📂','💾'].map((s, i) => <span key={`g1-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
+        <span style={styles.dbvToolSep} />
+        {['↶','↷'].map((s, i) => <span key={`g2-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
+        <span style={styles.dbvToolSep} />
+        {['▶','⏹'].map((s, i) => <span key={`g3-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
+        <span style={styles.dbvToolSep} />
+        <span style={styles.dbvToolDropdown}>Auto<span style={styles.dbvToolDropArrow}>▾</span></span>
+        <span style={styles.dbvToolDropdown}>{tobeDbLabel}<span style={styles.dbvToolDropArrow}>▾</span></span>
+        <span style={styles.dbvToolDropdown}>{activeProjectName}@{shortName}<span style={styles.dbvToolDropArrow}>▾</span></span>
+        <span style={styles.dbvToolSep} />
+        {['⚙','🔍','⤓','⤴'].map((s, i) => <span key={`g4-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
+      </div>
+
+      {/* ④ 탭바 — 프로젝트의 모든 TO-BE 테이블 */}
+      <div style={styles.dbvTabbar}>
+        {TOBE_TABLES.map((t) => {
+          const active = t.internalName === table.internalName;
+          const name = t.short || t.name.split('.').pop() || t.name;
+          return (
+            <div
+              key={t.internalName}
+              style={active
+                ? { ...styles.dbvTab, ...styles.dbvTabActive }
+                : styles.dbvTab}
+            >
+              <i className="fa-solid fa-table" style={{ color: '#2DBD96', fontSize: 12 }} />
+              <span>{name}</span>
+              {active && <span style={styles.dbvTabClose}>✕</span>}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ⑤ 서브탭 */}
+      <div style={styles.dbvSubtabs}>
+        <span style={styles.dbvSubtab}>Properties</span>
+        <span style={{ ...styles.dbvSubtab, ...styles.dbvSubtabActive }}>Data</span>
+        <span style={styles.dbvSubtab}>Diagram</span>
+      </div>
+
+      {/* ⑥ 필터바 */}
+      <div style={styles.dbvFilterbar}>
+        <span style={styles.dbvFilterShowSql}>Show SQL</span>
+        <span style={styles.dbvFilterInput}>이 데이터는 DB에 저장되지 않습니다.</span>
+        <span style={styles.dbvFilterIcons}>
+          {['▾','▶','✕','⟳','⊞','⚙'].map((s, i) => <span key={i} style={styles.dbvFilterIcon}>{s}</span>)}
+        </span>
+      </div>
+
+      {/* 데이터 그리드 */}
+      <div style={styles.dbvGridArea}>
+        <table style={styles.dbvGrid}>
           <thead>
-            {/* A B C ... 알파벳 헤더 */}
             <tr>
-              <th style={styles.xlCorner}> </th>
-              {rows.map((_r, i) => (
-                <th key={`abc-${i}`} style={styles.xlColHeader}>{excelColLabel(i)}</th>
-              ))}
-            </tr>
-            {/* 1행 — 컬럼명 (셀 병합 효과) */}
-            <tr>
-              <th style={{ ...styles.xlRowHeader, ...styles.xlRowHeaderName }}>1</th>
+              <th style={styles.dbvGridCorner}> </th>
               {rows.map((r) => (
                 <th
-                  key={`name-${r.tgt}`}
+                  key={r.tgt}
                   onClick={() => onPickColumn(r.tgt)}
                   title={`${r.tgt} (${r.tgtType}) · 클릭해서 매핑 상세 보기`}
-                  style={styles.xlColName}
+                  style={styles.dbvGridCol}
                 >
-                  {r.tgt}
-                </th>
-              ))}
-            </tr>
-            {/* 2행 — 타입 (셀 병합 효과 — 1행과 같은 회색 배경) */}
-            <tr>
-              <th style={{ ...styles.xlRowHeader, ...styles.xlRowHeaderType }}>2</th>
-              {rows.map((r) => (
-                <th
-                  key={`type-${r.tgt}`}
-                  onClick={() => onPickColumn(r.tgt)}
-                  style={styles.xlColType}
-                >
-                  {r.tgtType}
+                  <div style={styles.dbvColHeaderInner}>
+                    <span style={styles.dbvColTypeIcon}>{typeIconLabel(r.tgtType)}</span>
+                    <span>{r.tgt}</span>
+                    <span style={styles.dbvColCaret}>▾</span>
+                  </div>
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {Array.from({ length: PREVIEW_ROWS }, (_, i) => (
-              <tr key={i}>
-                <td style={styles.xlRowHeader}>{i + 3}</td>
-                {rows.map((r) => {
-                  const v = previewValue(r, i);
-                  const isNull = v === 'NULL' || v === '';
-                  return (
-                    <td key={r.tgt} style={styles.xlCell}>
-                      <span style={{
-                        color: isNull ? '#a8a8a8' : '#201f1e',
-                        fontStyle: isNull ? 'italic' : 'normal',
-                        whiteSpace: 'nowrap',
-                      }}>
-                        {isNull ? '' : v}
-                      </span>
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
+            {Array.from({ length: PREVIEW_ROWS }, (_, i) => {
+              const zebra = i % 2 === 1;
+              return (
+                <tr key={i}>
+                  <td style={styles.dbvRowNum}>{i + 1}</td>
+                  {rows.map((r) => {
+                    const v = previewValue(r, i);
+                    const isNull = v === 'NULL' || v === '';
+                    const numeric = isNumericType(r.tgtType);
+                    return (
+                      <td
+                        key={r.tgt}
+                        style={{
+                          ...styles.dbvCell,
+                          ...(zebra ? styles.dbvCellZebra : {}),
+                          ...(numeric ? styles.dbvCellNum : {}),
+                        }}
+                      >
+                        {isNull
+                          ? <span style={styles.dbvCellNull}>[NULL]</span>
+                          : v}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
 
-      {/* 시트 탭 */}
-      <div style={styles.xlSheetTabs}>
-        <span style={{ ...styles.xlSheetTab, ...styles.xlSheetTabActive }}>Sheet1</span>
+      {/* 하단 상태바 */}
+      <div style={styles.dbvStatusbar}>
+        <span style={{ ...styles.dbvStatusBtn, ...styles.dbvStatusBtnDropdown }}>Refresh</span>
+        <span style={styles.dbvStatusSep} />
+        <span style={styles.dbvStatusBtn}>💾 Save</span>
+        <span style={styles.dbvStatusBtn}>✕ Cancel</span>
+        <span style={styles.dbvStatusSep} />
+        <span style={styles.dbvStatusBtn}>⏮</span>
+        <span style={styles.dbvStatusBtn}>◀</span>
+        <span style={styles.dbvStatusBtn}>▶</span>
+        <span style={styles.dbvStatusBtn}>⏭</span>
+        <span style={styles.dbvStatusSep} />
+        <span style={{ ...styles.dbvStatusBtn, ...styles.dbvStatusBtnDropdown }}>Export data</span>
+        <span style={styles.dbvStatusSep} />
+        <span style={styles.dbvStatusBtn}>{PREVIEW_ROWS}</span>
+        <span style={styles.dbvStatusCenter}>
+          {PREVIEW_ROWS} row(s) fetched - 0.0s, on {fmtDate(new Date())} at {fmtTime(new Date())}
+        </span>
+        <span style={styles.dbvStatusRight}>{PREVIEW_ROWS}</span>
       </div>
 
-      {/* 상태바 */}
-      <div style={styles.xlStatusBar}>
-        준비 완료 · 열 {rows.length} · 행 {PREVIEW_ROWS}
+      {/* 브레드크럼 */}
+      <div style={styles.dbvBreadcrumb}>
+        <span style={styles.dbvCrumb}>
+          <i className="fa-solid fa-database" style={{ color: '#2DBD96', fontSize: 12 }} />
+          <span>{tobeDbLabel} - {activeSiteName}</span>
+        </span>
+        <span style={styles.dbvCrumbSep}>▸</span>
+        <span style={styles.dbvCrumb}>
+          <i className="fa-solid" style={{ color: '#2DBD96', fontSize: 12 }}>&#xf46d;</i>
+          <span>{activeProjectName}</span>
+        </span>
+        <span style={styles.dbvCrumbSep}>▸</span>
+        <span style={styles.dbvCrumb}>
+          <i className="fa-solid fa-table" style={{ color: '#2DBD96', fontSize: 12 }} />
+          <span>{shortName}</span>
+        </span>
       </div>
     </div>
   );
+}
+
+function fmtDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function fmtTime(d: Date): string {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
 }
 
 function MetaRow({ k, children }: { k: string; children: React.ReactNode }) {
@@ -3405,6 +3488,210 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   // ── Report view (Excel UI prototype 그대로) ───────────────
+  // ── Report view (DBeaver UI prototype) ───────────────
+  dbvWindow: {
+    flex: 1, minHeight: 0, minWidth: 0,
+    margin: 10,
+    display: 'flex', flexDirection: 'column',
+    background: '#ffffff',
+    fontFamily: '"Segoe UI", "맑은 고딕", "Malgun Gothic", system-ui, sans-serif',
+    fontSize: 12, color: '#1f1f1f',
+    userSelect: 'none',
+    border: '1px solid #c8c6c4', borderRadius: 8, overflow: 'hidden',
+    boxShadow: '0 2px 10px rgba(0,0,0,0.06)',
+  },
+  dbvTitlebar: {
+    height: 28, background: '#FFFFFF', color: '#000',
+    display: 'flex', alignItems: 'center', padding: '0 8px',
+    fontSize: 12, flexShrink: 0,
+  },
+  dbvTitlebarLeft: { display: 'flex', alignItems: 'center', gap: 8 },
+  dbvLogo: { width: 18, height: 18, objectFit: 'contain', display: 'inline-block' },
+  dbvTitleText: { color: '#000', fontSize: 12, fontWeight: 500 },
+  dbvTitlebarRight: { marginLeft: 'auto', display: 'flex', alignItems: 'stretch', height: '100%' },
+  dbvTitleBtn: {
+    width: 40, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    color: '#555', fontSize: 13, cursor: 'default',
+    background: 'transparent', border: 'none', fontFamily: 'inherit',
+  },
+  dbvTitleBtnClose: { cursor: 'pointer' },
+
+  dbvMenubar: {
+    height: 24, background: '#FFFFFF', color: '#000',
+    display: 'flex', alignItems: 'center', padding: '0 8px',
+    fontSize: 12, flexShrink: 0,
+  },
+  dbvMenuItem: {
+    padding: '0 10px', height: 24, lineHeight: '24px',
+    cursor: 'default', color: '#000',
+  },
+
+  dbvToolbar: {
+    height: 32, background: '#ECECEC',
+    borderBottom: '1px solid #c8c8c8',
+    display: 'flex', alignItems: 'center', padding: '0 4px', gap: 4,
+    flexShrink: 0,
+  },
+  dbvToolBtn: {
+    width: 24, height: 24,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    color: '#555', fontSize: 12, borderRadius: 2, cursor: 'default',
+  },
+  dbvToolSep: { width: 1, height: 18, background: '#c0c0c0', margin: '0 2px' },
+  dbvToolDropdown: {
+    display: 'inline-flex', alignItems: 'center',
+    height: 22, padding: '0 6px',
+    background: '#ffffff', border: '1px solid #c0c0c0', borderRadius: 2,
+    fontSize: 11, color: '#1f1f1f', margin: '0 2px', gap: 4, cursor: 'default',
+  },
+  dbvToolDropArrow: { color: '#888', fontSize: 9 },
+
+  dbvTabbar: {
+    height: 28, background: '#ECECEC',
+    display: 'flex', alignItems: 'flex-end',
+    padding: '0 4px', flexShrink: 0,
+    overflowX: 'auto', overflowY: 'hidden',
+  },
+  dbvTab: {
+    height: 24, padding: '0 10px', marginTop: 4,
+    background: '#ECECEC', color: '#555', fontSize: 12,
+    display: 'inline-flex', alignItems: 'center', gap: 6,
+    cursor: 'default',
+    borderTopLeftRadius: 2, borderTopRightRadius: 2,
+    whiteSpace: 'nowrap', flexShrink: 0,
+  },
+  dbvTabActive: {
+    background: '#FFFFFF', color: '#000',
+    borderBottom: '2px solid #2DBD96',
+    height: 26, marginTop: 2,
+    fontWeight: 600,
+  },
+  dbvTabClose: { color: '#555', fontSize: 11, marginLeft: 2 },
+
+  dbvSubtabs: {
+    height: 28, background: '#ECECEC',
+    display: 'flex', alignItems: 'stretch', padding: 0,
+    flexShrink: 0,
+  },
+  dbvSubtab: {
+    padding: '0 14px', height: 28,
+    display: 'inline-flex', alignItems: 'center',
+    color: '#555', fontSize: 12, cursor: 'default',
+    background: '#ECECEC',
+  },
+  dbvSubtabActive: {
+    background: '#FFFFFF', color: '#000', fontWeight: 600,
+    boxShadow: 'inset 0 -2px 0 #2DBD96',
+  },
+
+  dbvFilterbar: {
+    height: 30, background: '#F5F5F5',
+    borderBottom: '1px solid #d0d0d0',
+    display: 'flex', alignItems: 'center', padding: '0 6px', gap: 6,
+    flexShrink: 0,
+  },
+  dbvFilterShowSql: {
+    height: 22, padding: '0 10px',
+    background: '#ffffff', border: '1px solid #c0c0c0', borderRadius: 2,
+    fontSize: 11, color: '#1f1f1f',
+    display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'default',
+  },
+  dbvFilterInput: {
+    flex: 1, height: 22,
+    background: '#ffffff', border: '1px solid #c0c0c0', borderRadius: 2,
+    padding: '0 8px',
+    fontSize: 11, color: '#a0a0a0', fontStyle: 'italic',
+    display: 'flex', alignItems: 'center',
+  },
+  dbvFilterIcons: { display: 'flex', alignItems: 'center', gap: 2 },
+  dbvFilterIcon: {
+    width: 22, height: 22,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    color: '#555', fontSize: 11, borderRadius: 2, cursor: 'default',
+  },
+
+  dbvGridArea: {
+    flex: 1, overflow: 'auto', background: '#ffffff', minHeight: 0, minWidth: 0,
+  },
+  dbvGrid: {
+    borderCollapse: 'collapse',
+    fontFamily: '"Segoe UI", "맑은 고딕", system-ui, sans-serif',
+    fontSize: 12, background: '#ffffff',
+    width: 'max-content', minWidth: '100%',
+  },
+  dbvGridCorner: {
+    position: 'sticky', top: 0, left: 0, zIndex: 3,
+    width: 44, height: 32,
+    background: '#F0F0F0',
+    borderRight: '1px solid #CCCCCC', borderBottom: '1px solid #CCCCCC',
+    padding: 0,
+  },
+  dbvGridCol: {
+    position: 'sticky', top: 0, zIndex: 1,
+    minWidth: 120, height: 32,
+    background: '#F0F0F0',
+    borderRight: '1px solid #CCCCCC', borderBottom: '1px solid #CCCCCC',
+    color: '#000', fontSize: 11.5, fontWeight: 600,
+    textAlign: 'left', padding: '0 6px',
+    whiteSpace: 'nowrap', cursor: 'pointer',
+  },
+  dbvColHeaderInner: { display: 'flex', alignItems: 'center', width: '100%' },
+  dbvColTypeIcon: {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    minWidth: 22, height: 16, padding: '0 2px',
+    color: '#2DBD96', fontSize: 10, fontWeight: 700,
+    fontFamily: '"Segoe UI", sans-serif',
+    marginRight: 5,
+    background: 'transparent',
+    letterSpacing: 0.2, textTransform: 'uppercase',
+  },
+  dbvColCaret: { color: '#2DBD96', fontSize: 9, marginLeft: 'auto', paddingLeft: 8 },
+
+  dbvRowNum: {
+    position: 'sticky', left: 0, zIndex: 1,
+    width: 44, height: 22,
+    background: '#F0F0F0',
+    borderRight: '1px solid #CCCCCC', borderBottom: '1px solid #ebebeb',
+    color: '#555', fontSize: 11, textAlign: 'center', padding: '0 4px',
+    fontFamily: '"Consolas", "Courier New", monospace',
+  },
+  dbvCell: {
+    minWidth: 120, height: 22, padding: '0 6px',
+    background: '#FFFFFF', color: '#000',
+    borderRight: '1px solid #ebebeb', borderBottom: '1px solid #ebebeb',
+    fontSize: 12, verticalAlign: 'middle',
+    whiteSpace: 'nowrap',
+    fontFamily: '"Consolas", "Segoe UI", monospace',
+  },
+  dbvCellZebra: { background: '#F0FBF7' },
+  dbvCellNum: { textAlign: 'right' },
+  dbvCellNull: { color: '#BBBBBB', fontStyle: 'italic' },
+
+  dbvStatusbar: {
+    height: 28, background: '#ECECEC',
+    borderTop: '1px solid #d0d0d0',
+    display: 'flex', alignItems: 'center', padding: '0 6px', gap: 4,
+    fontSize: 11, color: '#555555', flexShrink: 0,
+  },
+  dbvStatusBtn: {
+    display: 'inline-flex', alignItems: 'center', gap: 4,
+    height: 22, padding: '0 6px', borderRadius: 2,
+    background: 'transparent', color: '#555555', cursor: 'default',
+  },
+  dbvStatusBtnDropdown: {},  // 화살표는 텍스트로 직접 (CSS ::after 안 쓰는 인라인 한계)
+  dbvStatusSep: { width: 1, height: 16, background: '#c8c8c8', margin: '0 2px' },
+  dbvStatusCenter: { flex: 1, textAlign: 'center', color: '#555555', fontSize: 11 },
+  dbvStatusRight: { color: '#555555', fontSize: 11, padding: '0 8px' },
+
+  dbvBreadcrumb: {
+    height: 24, background: '#ECECEC',
+    borderTop: '1px solid #d0d0d0',
+    display: 'flex', alignItems: 'center', padding: '0 8px', gap: 4,
+    fontSize: 11, color: '#1A9E7A', flexShrink: 0,
+  },
+  dbvCrumb: { display: 'inline-flex', alignItems: 'center', gap: 4 },
+  dbvCrumbSep: { color: '#999', margin: '0 2px' },
+
   xlWindow: {
     flex: 1, minHeight: 0, minWidth: 0,
     margin: 10,
