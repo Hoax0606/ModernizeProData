@@ -535,7 +535,6 @@ export const en: Record<TranslationKey, string> = {
   'artifacts.empty.title':        'No artifacts yet',
   'artifacts.empty.hint':         'Artifacts will appear here once mapping, snapshots and runs are in place.',
   'artifacts.empty.noItems':      '(no items yet)',
-  'artifacts.exportAll':          'Export all',
   'artifacts.cat.dashboard':      'Dashboard snapshot',
   'artifacts.cat.diff':           'Schema diff',
   'artifacts.cat.ddl':            'DDL scripts',
@@ -842,8 +841,36 @@ export const en: Record<TranslationKey, string> = {
 
   'siteExport.title':       'Site export',
   'siteExport.subtitle':    'Bulk export of all projects, mappings, and artifacts in this site',
-  'siteExport.downloadAll': 'Download all',
-  'siteExport.notImpl':     'Not implemented — enabled once the backend export job is wired.',
+  'siteExport.scope':       'site export',
+  'siteExport.summary':     '{tables} tables · {files} files',
+  'siteExport.loading':     'Loading TO-BE schema…',
+
+  'siteExport.section.formats':   'Artifact formats',
+  'siteExport.section.documents': 'Documents',
+
+  'siteExport.format.migration.label':  'Migration (.sql)',
+  'siteExport.format.migration.hint':   'up + down per table',
+  'siteExport.format.mapping.label':    'Mapping (.xlsx)',
+  'siteExport.format.mapping.hint':     'column-level rules',
+  'siteExport.format.validation.label': 'Validation (.xlsx)',
+  'siteExport.format.validation.hint':  'PK/FK/NULL/sum report',
+  'siteExport.format.summary.label':    'Site summary (.xlsx)',
+  'siteExport.format.summary.hint':     'Site-wide project metadata + table/column totals',
+
+  'siteExport.btn.download':        'Download bundle',
+  'siteExport.btn.downloading':     'Building…',
+  'siteExport.btn.copyManifest':    'Copy manifest',
+  'siteExport.btn.copied':          'Copied',
+  'siteExport.btn.previewSpec':     'Preview spec',
+
+  'siteExport.footer.signed':       'signed · sha256 + pgp · will be logged to audit',
+
+  'siteExport.preview.summary':     'Site summary',
+  'siteExport.preview.manifest':    'Manifest ({n})',
+
+  'siteExport.empty.title':         'No projects',
+  'siteExport.empty.desc':          'No projects in this site. Create a project first.',
+  'siteExport.empty.noFormats':     'Select at least one format.',
   'siteOverview.open':         'Open',
   'siteOverview.kpi.projects':      'Projects',
   'siteOverview.kpi.running':       'Running',

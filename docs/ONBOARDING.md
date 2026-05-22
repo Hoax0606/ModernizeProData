@@ -4,7 +4,7 @@ A team-shared document summarizing the accumulated design decisions for the data
 
 **Prerequisite** — The one-line project intro, tech stack, directory map, and domain glossary live in the repo-root `CLAUDE.md`. This document covers the design details not (or only briefly) covered there.
 
-Updated: 2026-05-19
+Updated: 2026-05-21
 
 ---
 
@@ -544,7 +544,140 @@ Chrome before declaring "it works."
 
 ---
 
-## 17. Further Reading
+## 17. Site Export — Client-side zip Delivery (added 2026-05-21)
+
+The bulk-export feature that lets a Coordinator user package all artifacts of
+a site into a single `.zip` and hand it off (USB stick, email, etc.) to the
+review side. Lives on the `All projects` page under the `Site export` tab
+(`/site/export`).
+
+### 17.1 Why client-side
+
+The backend `/api/v1/sites/{id}/export` endpoint with Apache POI and signed
+ZIP streaming is **not yet built**. To unblock PoC delivery, the entire zip
+assembly currently runs in the browser using `jszip` (zip container) and
+`exceljs` (real `.xlsx` workbooks). When the backend export job lands, the
+frontend will hand the same UX off to a single API call and dispose of the
+client-side builders.
+
+`xlsx` (SheetJS) was rejected in favour of `exceljs` because the npm-published
+SheetJS version carries two open CVEs (Prototype Pollution, ReDoS). They are
+not exploitable in write-only flows like ours, but `npm audit` warnings would
+keep reappearing in the financial-grade security review.
+
+### 17.2 Picker categories (4)
+
+| Section | Category | Per-table? | Notes |
+|---|---|---|---|
+| Artifact formats | Migration (`.sql`) | yes | Currently a 4-line stub with `-- TODO: {tableName}`. Real CREATE TABLE / INDEX / FK / SEQUENCE / GRANT blocks come when backend export job is wired. |
+| Artifact formats | Mapping (`.xlsx`) | yes | 1-sheet empty Cover ("Not yet populated") workbook. Real Rules sheet with `Source col / Source type / Target col / Target type / Rule / Status / Note` columns comes when mapping snapshot data is wired. |
+| Artifact formats | Validation (`.xlsx`) | yes | 1-sheet empty Cover workbook. Real Checks sheet (`Check / Scope / Expected / Actual / Δ / Verdict / Note`) comes when test/rehearsal/cutover runs land. |
+| Documents | Site summary (`.xlsx`) | site-level | **Already works with real data.** Sheets: Cover / Phase mix / All tables / one per project. |
+
+DDL and Pipeline categories were intentionally removed (DDL is the customer-
+supplied input, Pipeline is internal runtime config — neither is a customer
+deliverable in their own right).
+
+### 17.3 Bundle layout
+
+```
+site-export-<site>-YYYY-MM-DD-HHmm.zip
+└── site-export-<site>-YYYY-MM-DD-HHmm/            (folder name == zip stem)
+    ├── <project>/
+    │   ├── migration/tbl_NNN.up.sql
+    │   ├── mapping/tbl_NNN.map.xlsx
+    │   └── validation/tbl_NNN.report.xlsx
+    └── site-summary.xlsx
+```
+
+- Korean / Japanese site / project names are preserved as-is (only `\ / : * ? "
+  < > |` are sanitised to `_`). Two helpers in `lib/siteExportManifest.ts` —
+  `slugify` for ASCII-only IDs (Document IDs etc.) and `pathSafeName` for
+  filesystem names that should keep their original characters.
+- The zip filename stem and the inner top-level folder name are identical, so
+  unpacking several exports side-by-side never collides.
+
+### 17.4 Key files
+
+- `frontend/src/pages/SiteExportPage.tsx` — composes the picker + preview,
+  computes `bundleStem` (`site-export-<slug>-<stamp>`) once per render, passes
+  it to manifest + zip filename so they stay in sync.
+- `frontend/src/components/SiteExportPicker.tsx` — left 300 px column.
+  Checkboxes + Download CTA. No total-size display (the old `rand()`-based
+  estimate was removed; only `blob.size` after download would be honest, and
+  the OS file manager already shows that).
+- `frontend/src/components/SiteExportPreview.tsx` — right pane. Two tabs:
+  **Site summary** (Excel-style preview of the live workbook) and **Manifest**
+  (collapsible per-category file path list, no sizes).
+- `frontend/src/lib/siteExportManifest.ts` — the core. `buildManifest` (no
+  side effects), `generateZipBundle` (async, returns Blob),
+  `buildSiteSummaryWorkbook` (real data), `buildEmptyArtifactWorkbook`
+  (1-sheet placeholder Cover for Mapping / Validation), `pathSafeName`,
+  `slugify`, `triggerBlobDownload`, `fmtBytes`.
+
+### 17.5 What the next session must do for real data
+
+Before writing builders, agree the JSON shape with backend (the meta DB
+already has `mapping_snapshot`, `schema_diff`, `migration_run` — the export
+endpoint will pull from there). Suggested shape:
+
+```ts
+{ tableName: string;
+  mapping?:    { rules:  Array<{ sourceCol; sourceType; targetCol; targetType; ruleExpr; status: 'auto'|'lookup'|'custom'; note }> };
+  validation?: { checks: Array<{ check; scope; expected; actual; delta; verdict: 'PASS'|'WARN'|'FAIL'; note }> };
+  migration?:  { blocks: Array<{ kind: 'CREATE_TABLE'|'INDEX'|'FK'|'SEQUENCE'|'GRANT'; sql }> };
+}
+```
+
+Then add three builders in `siteExportManifest.ts` next to the existing
+`buildEmptyArtifactWorkbook`:
+
+```ts
+function buildMigrationSql(args, data): string
+function buildMappingWorkbook(args, data): Promise<ArrayBuffer>
+function buildValidationWorkbook(args, data): Promise<ArrayBuffer>
+```
+
+`generateZipBundle` already has clean branches per category — point them at
+the new builders when data is present, fall through to the empty workbook
+otherwise. The infrastructure (manifest, picker, zip assembly, file naming,
+download trigger) does **not** need to change.
+
+### 17.6 Pitfalls / decisions worth knowing
+
+- **No fake data, ever.** Several iterations during 2026-05-21 added sample
+  mapping / validation rows for meeting demos; all were removed before
+  commit. Future demos must use either real backend data or a clearly
+  branched demo route — not inline sample arrays.
+- **Cover sheet metadata is conservative.** Only Document ID / Issued /
+  Author. `Version` and `Classification` were removed because they had no
+  data source.
+- **Manifest entry has no `size` field.** Pre-download size estimation was
+  pseudo-random (`rand()` function) and misled users when the actual zip was
+  far smaller. The size display is gone from picker, button, and Manifest
+  tab.
+- **Excel chrome (title bar / ribbon / formula bar / sheet tabs) is shared
+  visually between ArtifactsPage and SiteExportPreview** — keep them in sync
+  when adjusting colours / fonts.
+- **`/mockup` route and `lib/artifactSamples.ts` are deleted history.** Do
+  not resurrect.
+
+### 17.7 Out of scope (intentionally deferred)
+
+- Backend Apache POI `/api/v1/sites/{id}/export` endpoint.
+- SHA-256 + GPG signing + audit log entry on download.
+- tar.gz bundle option (removed; zip only).
+- In-app inline preview of `.sql` / placeholder file contents inside the
+  Manifest tab — would need split-view layout; skipped because the workbook
+  in Site summary already shows the substantive deliverable.
+- Artifacts-page download (the project-scoped sibling of Site export). The
+  page currently shows only the empty Excel chrome; its `Download bundle`
+  button is disabled. When wired it will reuse `generateZipBundle` with a
+  single-project manifest.
+
+---
+
+## 18. Further Reading
 
 - `CLAUDE.md` — stack, conventions, domain glossary, local run.
 - `docs/handoff/` — time-stamped handoff notes (read the most recent first).
