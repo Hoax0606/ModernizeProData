@@ -692,7 +692,7 @@ the in-app UI.
 - **One global keypair**: HQ holds the single `private.pem`; every shipped
   backend binary embeds the matching `public.pem` at build time. New
   customers ≠ new keypair; new keypair = full backend rebuild + redeploy.
-- **Public key embed path**: `backend/src/main/resources/license/public-key.pem`.
+- **Public key embed path**: `backend/src/main/resources/license/public.pem` (same filename the issuer produces — drop the file as-is, no rename).
 - **Fingerprint** = first 16 bytes of SHA-256 over the public key DER, hex
   encoded. Stored in each `.lic` as `publicKeyFp` so corruption / wrong-key
   uploads can be diagnosed quickly.
