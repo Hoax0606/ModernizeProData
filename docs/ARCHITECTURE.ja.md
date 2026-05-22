@@ -224,7 +224,7 @@ sockjs-client + stompjs          WebSocket (STOMP)
   │  │  - ネイティブ窓 + React UI (webview 内蔵)     │ │
   │  │  - Spring Boot (同一プロセス)                │ │
   │  │  - DuckDB (埋め込み)                         │ │
-  │  │  - メタ DB (H2 または SQLite)                │ │
+  │  │  - メタ DB (PostgreSQL 18, バンドル設置)     │ │
   │  │  - スケジューラー (Quartz、埋め込み)         │ │
   │  │  - .lic 検証                                │ │
   │  │                                              │ │
@@ -260,7 +260,7 @@ sockjs-client + stompjs          WebSocket (STOMP)
 | **Worker** | worker 役割のみ: 抽出・変換・ロード・検証 | LAN PC N-1 台 |
 | **DuckDB** | 変換・検証 SQL エンジン | Coordinator + Worker 両方に埋め込み |
 | **スケジューラー (Quartz)** | 予約実行 (一回性・繰り返し)、タスク時間トリガー | Coordinator 内に埋め込み |
-| **メタ DB** | マッピング定義・監査ログ・ユーザー情報・スケジュール・通知 | Coordinator 内 (H2 または SQLite) |
+| **メタ DB** | マッピング定義・監査ログ・ユーザー情報・スケジュール | Coordinator がバンドル設置する PostgreSQL 18 |
 | **AS-IS CSV** | 入力データ | 各 PC ディスクまたは共有フォルダ |
 | **Parquet (一時)** | DuckDB 変換結果、ロード後削除 | 各 Worker ディスク |
 | **TO-BE RDBMS** | 最終ロード対象 | サイト別 (1次: PostgreSQL) |
@@ -269,12 +269,11 @@ sockjs-client + stompjs          WebSocket (STOMP)
 
 **アプリ内部 (UI ↔ ローカルバックエンド):**
 - React UI ↔ 同一プロセスの Spring Boot (localhost)
-- REST + WebSocket
-- WebSocket チャネル: リアルタイム進行状況、Lock 変更、通知
+- REST が主。WebSocket endpoint (`/ws`) は設置済だが PoC 1次では未使用 — 通知・進行状況は 10 秒 polling。
 
 **Coordinator ↔ Worker (LAN):**
-- REST API: Worker 登録・heartbeat、タスクキュー polling、結果報告、マッピング・設定照会
-- WebSocket: 進行状況 push、Lock 変更、通知 push
+- REST API: Worker 登録・heartbeat、タスクキュー polling、結果報告、マッピング・設定照会。
+- WebSocket: PoC 2次で実時間進行状況 push 用に導入予定。
 
 **Worker ↔ DB:**
 - AS-IS: ファイルシステム read (CSV)
@@ -282,43 +281,127 @@ sockjs-client + stompjs          WebSocket (STOMP)
 
 ### 4.4 認証・権限
 
-**ライセンス (.lic):**
-- Coordinator のみ使用。Worker は .lic 不要
-- 本社発行、Ed25519 署名
-- Coordinator 起動時に検証
-- サイト ID バインディング
+#### 4.4.1 ライセンス (.lic)
+- Coordinator のみ使用。Worker は .lic 不要。
+- 本社発行、Ed25519 署名、サイト ID バインディング。
+- Coordinator 起動時に検証。
 
-**ユーザー認証:**
-- Coordinator (master) で ID・名前・パスワード・ロール発行
-- ID 有効期限指定可 (選択、master が延長可能)
-- ログイン時 JWT トークン発行 (例: 8 時間有効)
-- 各リクエストに `Authorization: Bearer <token>`
+#### 4.4.2 JWT — 1 アカウント = 1 アクティブセッション
+- アルゴリズム HS512、デフォルト 8 時間有効 (`modernize.jwt.expiration-hours`)。
+- claims: `sub` (username)、`role` (master/admin/viewer)、`sid` (アクティブセッション UUID)、`iat`、`exp`。
+- `sid` は `users.current_session_id` と一致するときのみ認証有効。別の場所で新規ログインすると sid が更新され、以前のトークンは自動失効。
+- 各リクエストに `Authorization: Bearer <token>`。
 
-**ロール:**
+#### 4.4.3 ロール
 
 | ロール | 権限 |
 |---|---|
-| master | 全体管理。ユーザー作成・削除・延長、ライセンス、マッピング管理、実行、全データ照会 |
+| master | 全体管理。ユーザー作成・削除、ライセンス、マッピング管理、実行、全データ照会、他ユーザーセッションの強制終了 |
 | admin | マッピング作成・実行、隔離処理、データ照会。ユーザー管理権限なし |
 | viewer | 照会のみ (マッピング・進行・ログ) |
 
 位置 (Coordinator/Worker) と無関 — 権限レベル。master ユーザーが Worker 席でログインしても同じ master 権限。
 
-**Worker 登録:**
-- Worker アプリ起動時に Coordinator URL に自動登録要求
-- Coordinator が worker 登録トークン発行 (ユーザー JWT とは別)
-- 各呼び出しにトークン使用
+#### 4.4.4 ログインポリシー — confirm-to-evict
 
-**ID → トークンフロー:**
+1 アカウントで 2 箇所で同時にログインすることはできない。2 回目のログイン試行時、backend がユーザーに確認を求める。
+
+**正常フロー:**
 ```
-1. master が Coordinator で ID・パスワード・ロール・有効期限を作成
-2. ユーザーが Worker PC の ModernizeProData.exe を実行
-3. アプリ窓で ID・パスワード入力 → ログイン試行
-4. Coordinator が検証 (パスワード OK + ID 有効期限内)
-5. JWT トークン発行 (8 時間有効)
-6. トークンで UI 使用
-7. トークン期限切れ時に再ログインまたは自動更新
+1. ユーザーが ID・パスワード入力 → POST /api/v1/auth/login
+2. Coordinator が BCrypt で検証
+3. アクティブセッションがなければ新 sid (UUID) 発行 + JWT 返却 + LOGIN audit
+4. クライアントがトークンを localStorage に保存
 ```
+
+**競合フロー:**
+```
+1. ユーザーが別 PC で同じアカウントでログイン試行
+2. Coordinator が users.current_session_expires_at が未来であることを検出
+3. 409 AUTH_SESSION_ACTIVE_ELSEWHERE 応答 + LOGIN_REJECTED audit
+4. フロントが confirm カード表示 —「切断してログイン / キャンセル」
+5. 「切断してログイン」選択時 POST /api/v1/auth/force-self-logout (パスワード再認証)
+   → 別の場所のセッション無効化 + FORCE_LOGOUT_SELF audit
+6. フロントが自動で login 再試行 → 成功
+```
+
+既存 PC でログアウトせずブラウザを閉じても、別 PC からの明示的な確認で解除できる。
+
+#### 4.4.5 トークン検証 — JwtAuthFilter
+
+各リクエストごとに:
+1. `Authorization: Bearer` ヘッダーをパース + 署名検証。
+2. `findByUsername(sub)` でユーザー取得。
+3. **token.sid ≠ user.current_session_id** なら明示的に `401` + `{code: AUTH_SESSION_INVALIDATED}` を返してフィルターチェーン中断。
+4. 一致すれば SecurityContext に認証注入して通過。
+
+フロントの axios interceptor が 401 を受け取ると `useAuthStore.logout()` を呼び出し → `ProtectedRoute` が `/login` にリダイレクト。最悪遅延 = AppShell polling 周期 (10 秒)。
+
+#### 4.4.6 ログアウトの種類
+
+| エンドポイント | 誰が | 効果 | audit |
+|---|---|---|---|
+| `POST /api/v1/auth/logout` | 本人 (トークン保持) | 自分のセッション無効化 | `LOGOUT` |
+| `POST /api/v1/auth/force-self-logout` | 本人 (パスワード再認証) | 自分のセッション無効化 — 別の場所でログイン中の場合 | `FORCE_LOGOUT_SELF` |
+| `POST /api/v1/users/{id}/force-logout` | master | 対象ユーザーのアクティブセッション強制終了 (盗難・緊急時) | `FORCE_LOGOUT` (actor 記録、target は details) |
+
+#### 4.4.7 パスワード変更
+
+| エンドポイント | 誰が | 備考 |
+|---|---|---|
+| `POST /api/v1/users/me/password` | 本人 | 現在のパスワード + 新パスワード。同一拒否。最小 4 文字 |
+| `POST /api/v1/users/{id}/password` | master | 対象ユーザーのパスワード強制リセット。対象のアクティブセッションも同時に無効化 |
+
+#### 4.4.8 Worker 登録
+- Worker アプリ起動時に Coordinator URL に自動登録要求。
+- Coordinator が worker 登録トークン発行 (ユーザー JWT とは別)。
+- 各呼び出しにトークン使用。
+
+#### 4.4.9 Audit log
+認証関連のすべてのイベントが `audit_log` テーブルに記録 (site_id / project_id は NULL)。
+- `LOGIN`、`LOGOUT`、`LOGIN_REJECTED`、`FORCE_LOGOUT_SELF`、`FORCE_LOGOUT`。
+
+#### 4.4.10 意図的に未対応
+- WebSocket push による即時強制ログアウト — polling で十分。
+- Idle timeout (N 分無活動で自動ログアウト) — 顧客要求があれば。
+- Refresh token — 8 時間有効で PoC には十分。
+- Token blacklist — `sid` 比較で自動無効化されるため不要。
+
+### 4.5 ドメインモデル — Site / Project
+
+**Site (1 顧客サイトの 1 運用環境単位)**
+
+| フィールド | 意味 |
+|---|---|
+| `name` | サイト名 (unique) |
+| `asisEnv` / `tobeEnv` | AS-IS / TO-BE 環境ラベル (mainframe / midrange / cloud / on-prem / other) |
+| `asisEncoding` / `tobeEncoding` | エンコーディング (shift_jis / euc-jp / utf-8 / ebcdic) |
+| `csvPath` | AS-IS CSV ディレクトリパス |
+| `asisDbType` / `asisDbVersion` | AS-IS 抽出元 DB 情報 (表示用 — ツールは外部 DB に直接接続しない) |
+| `environment` | 現在のアクティブ運用ステージ (dev / test / staging / production) |
+| `tobeDbByEnv` | ステージ別 TO-BE DB 接続情報 (jsonb) |
+| `tobeDbLocks` | ステージ別 lock 状態 (保存時に自動 lock) |
+
+**Site Settings の 2-step lock**
+- per-stage **DB lock**: ステージ別 TO-BE DB 入力ロック。自動 or master トグル。
+- site-wide **Edit lock**: サイト全体の編集ロック。Save は site lock 状態でのみ許可。site lock ガード — サイト名が空または現在 stage の DB lock が解除されていれば拒否。
+- 保存時、データのある全 stage の DB lock が自動的に `true` に強制 — 再度モーダルを開くと全 DB stage が lock 状態でスタート。
+
+**Project (Site 内の移行単位)**
+
+| フィールド | 意味 |
+|---|---|
+| `name` | プロジェクト名 (site 内 unique) |
+| `phase` | 9 段階 phase (§ 1.1 参照) |
+| `assignee` | **開発/マッピング担当** — Site Overview のドロップダウンで指定 |
+| `executionAssignee` | **実行 (run) 担当** — Execution Overview のドロップダウンで指定。assignee と独立 |
+| `ddlFiles` | AS-IS / TO-BE DDL ファイルメタ |
+| `cutover` | cutover 実行メタ (開始・中断・完了) |
+| `runStatus` | test / rehearsal / cutover の sub-status |
+
+**Read-only project**
+- `master` 以外の worker が、自分が `assignee` でない project を開くと read-only。
+- サイドバー project 行に錠アイコン chip + dim、ページ上部に amber バナー、ページ内のすべての変更アクション (save / phase change / DDL import / snapshot 等) を disabled。
 
 ---
 
@@ -361,8 +444,12 @@ sockjs-client + stompjs          WebSocket (STOMP)
 ### 5.3 ステップ別詳細
 
 #### 5.3.1 入力受領
-- 運用チームが AS-IS システムから抽出したデータを閉鎖網内のディスク (Worker ディスクまたは共有フォルダ) に置く
-- ツールは運用 DB に直接接続しない
+- 運用チームが AS-IS システムから抽出したデータを閉鎖網内のディスク (Worker ディスクまたは共有フォルダ) に置く。ツールは運用 DB に直接接続しない。
+- **Source Reader SPI** で入力形式を抽象化 — 詳細実装は ONBOARDING § 7 参照:
+  - CSV — DuckDB `read_csv` でその場でクエリ。Shift-JIS / EUC-JP / UTF-8 は `encodings` extension。
+  - EBCDIC (IBM037 / IBM930 / JEF / KEIS) — 直接 COMP-3 unpack。
+  - FixedWidth — column offset ベースのパース。
+- Site の `asisDbType` / `asisDbVersion` で、どの運用 DB から出た CSV かのメタ情報を表示。
 
 #### 5.3.2 前処理 (選択的)
 
@@ -374,11 +461,15 @@ sockjs-client + stompjs          WebSocket (STOMP)
 | 非標準エンコーディング (EBCDIC variant — IBM037/IBM930/JEF/KEIS) | Java Charset で変換 |
 | Binary フィールド (COMP/PACKED/ZONED) | Java parser で numeric 変換 |
 
-#### 5.3.3 変換 (DuckDB SQL)
+#### 5.3.3 変換 (DuckDB SQL + Rule Engine)
 
-- マッピング定義 = DuckDB SQL (単純 1:1 も複雑 N:N も同じ形式)
-- DuckDB が CSV をその場でクエリ (エンコーディングオプション使用)
-- 結果を常に Parquet として出力
+- マッピング定義 = DuckDB SQL。DuckDB が CSV をその場でクエリ (エンコーディングオプション使用)。結果を常に Parquet として出力。
+- **処理順序 (1 SQL 内)**: JOIN → transform → Quarantine。Validation track は transform と並列。
+- **Rule Engine 3-tier ladder** (詳細定義は ONBOARDING § 4):
+  - Tier 1 — 型ベース自動マッピング (Type matrix)。
+  - Tier 2 — strategy library (2a シンプル戦略 / 2b 複合戦略)。
+  - Tier 3 — 自由 SQL (`custom_expr`)。PoC 2 次に deferred。
+- Snapshot が `compiled_expr` を凍結 — 同一入力 → 同一結果の再現性を保証。
 
 ```sql
 COPY (
@@ -388,14 +479,18 @@ COPY (
 ) TO 'output.parquet' (FORMAT PARQUET);
 ```
 
-#### 5.3.4 ロード (Java + JDBC)
+#### 5.3.4 ロード (Loader Adapter SPI)
 
-- Java が Parquet を読み TO-BE に COPY FROM (binary)
-- Target エンコーディング処理:
-  - TO-BE = UTF-8 → そのまま
-  - TO-BE = SJIS → JDBC `client_encoding` または DB encoding 設定で自動変換
-- Spring Batch chunk-oriented (例: 10000 row 単位 commit)
-- ロード前にインデックス drop / 後に再生成 (速度)
+- Java が Parquet を読み TO-BE にロード。**Loader Adapter SPI** が driverId ごとにアダプタを選択 (詳細実装は ONBOARDING § 8):
+  - PostgreSQL — `PgCopyManager` (COPY FROM, binary)
+  - Oracle — OCI bulk insert
+  - MySQL — JDBC `rewriteBatchedStatements`
+  - SQL Server — `SqlServerBulkCopy`
+  - その他 — JDBC batch fallback
+- JDBC ドライバ JAR は `data/drivers/` に配置。閉鎖網のため本社が USB で配送 → ツールが動的ロード。
+- Target エンコーディング処理はアダプタの責務 (PG = `client_encoding`、Oracle = NLS_LANG 等)。
+- Spring Batch chunk-oriented commit (例: 10000 row 単位)。
+- ロード前のインデックス drop / 後に再生成 — PG COPY 限定の最適化。他のアダプタは独自戦略。
 
 #### 5.3.5 検証 (DuckDB cross-source)
 
@@ -422,9 +517,10 @@ WHERE a.amount <> b.amount;
 
 #### 5.3.6 隔離 (Quarantine)
 
-- 検証失敗 row を Coordinator メタ DB の quarantine テーブルに保管
-- UI で運用者確認
-- マッピング修正 → 再変換・再ロード・再検証フロー
+- 検証失敗 row を Coordinator メタ DB の `run_quarantine` テーブルに保管。
+- UI で運用者確認。
+- マッピング修正 → 再変換・再ロード・再検証フロー。
+- パイプラインの 2 つの checkpoint (CP1: transform 後、CP2: 検証後) を基準に部分再実行可能。restart matrix は ONBOARDING § 2 参照。
 
 ### 5.4 エンコーディング処理まとめ
 
@@ -468,26 +564,23 @@ WHERE a.amount <> b.amount;
 - フィールド変換オプション (COMP → Numeric など)
 
 **ロック機能:**
-- 自動ロック — マッピング編集時に該当テーブル自動ロック (同時編集防止)。admin・master のみ発生
-- 管理ロック (master 専用):
-  - テーブル単位明示ロック
-  - 業務単位明示ロック (複数テーブル一括)
+- PoC 1 次現在で適用されているロックは § 4.5 の Site Settings 2-step lock (per-stage DB lock + site-wide edit lock) のみ。マッピングテーブル単位ロックは PoC 2 次 (multi-user マッピング協業段階) に導入予定。
 
 **スナップショット (バージョン管理):**
-- 作成: master・admin
+- 作成: master・admin (mapping snapshot / cutover snapshot の 2 種)
 - Rollback: master・admin
 - Approve (公式承認): master のみ
+- Cutover snapshot は production 環境でのみ作成可 (§ 1.3 参照)
 
 **権限まとめ:**
 
 | 作業 | master | admin | viewer |
 |---|---|---|---|
 | マッピング CRUD | ✓ | ✓ | 照会のみ |
-| 自動ロック | ✓ | ✓ | — |
-| 管理ロック (テーブル/業務) | ✓ | × | × |
 | スナップショット作成 | ✓ | ✓ | — |
 | スナップショット rollback | ✓ | ✓ | — |
 | スナップショット approve | ✓ | × | × |
+| マッピング協業ロック | (PoC 2 次) | (PoC 2 次) | — |
 
 ### 6.2 Run 実行管理
 
@@ -505,10 +598,11 @@ Run モード:
 
 ### 6.3 進行モニタリング
 
-- リアルタイム進行 (WebSocket push)
+- AppShell の定期 polling (10 秒) で site / project / snapshot / audit を同期。PoC 1 次では WebSocket push 未使用。
 - Worker 状態 (alive / busy / idle / down)
 - テーブル別進行 (待機 / 変換 / ロード / 検証 / 完了 / 失敗)
 - 全体統計 (総 row、処理 row、速度、ETA)
+- WebSocket 実時間 push は PoC 2 次 (大量 run + グラフ) に導入予定。
 
 権限: 全 role 照会可能
 
@@ -534,7 +628,9 @@ Run モード:
 ### 6.6 ログ・成果物出力
 
 **監査ログ:**
-- 全作業記録 (誰が・いつ・何を・どこに)
+- Backend `audit_log` テーブル (Flyway `V20260521133513`) — すべての作業が server-side に記録 (誰が・いつ・何を・どこに)。
+- サイト単位 fetch + AppShell 10 秒 polling で全アカウントが同じ audit を参照。通知パネルも audit の派生 (§ 6.10)。
+- 認証 audit (LOGIN / LOGOUT / LOGIN_REJECTED / FORCE_LOGOUT / FORCE_LOGOUT_SELF) は site_id NULL で記録。
 - フィルター・検索 (ユーザー別 / 作業種別 / 時間範囲)
 - Export (CSV)
 
@@ -548,13 +644,15 @@ Run モード:
 
 ### 6.7 ユーザー・ロール管理
 
-- ユーザー CRUD (ID・名前・パスワード・ロール・有効期限)
-- ロール付与 (master / admin / viewer)
-- ID 有効期限の設定・延長
-- パスワード初期化
-- 強制ログアウト
+PoC 1 次実装 (master のみ):
+- ユーザー CRUD (ID・パスワード・ロール)。User Management モーダルで発行/削除/ロール変更。
+- **パスワード強制リセット** — `POST /api/v1/users/{id}/password`。対象ユーザーのアクティブセッションも即時無効化。
+- **本人パスワード変更** — Account profile の Change password。`POST /api/v1/users/me/password` (現在パスワード検証 + 最小 4 文字 + 同一拒否)。
+- **強制ログアウト** — `POST /api/v1/users/{id}/force-logout`。盗難・緊急時に master が対象セッションを終了。
 
-権限: master のみ
+PoC 2 次 deferred: ID 有効期限の設定・延長。
+
+権限: 上記すべて master のみ。
 
 ### 6.8 Worker 管理
 
@@ -576,28 +674,29 @@ Run モード:
 
 ### 6.10 通知 (Notification)
 
-**通知種類:**
-
-| 分類 | 項目 |
-|---|---|
-| マッピング | Lock 発生/解除、変更、Approve 要請・完了 |
-| 実行 | Run 開始/完了、予約実行トリガー、中断・失敗 |
-| 検証・隔離 | 検証失敗、隔離 row 発生 |
-| システム | Worker ダウン/復帰、ライセンス期限間近、ユーザー ID 期限間近 |
-| ユーザー | 新規ユーザー作成、パスワード変更、強制ログアウト |
-
 **メカニズム:**
-- WebSocket リアルタイム push
-- メタ DB 永続化 (既読/未読状態)
-- ユーザー再ログイン時に未読通知配信
+- Backend `audit_log` が source of truth — 専用の通知テーブル/エンティティは持たない。
+- AppShell の 10 秒 polling でサイトの audit log を fetch → フロントがユーザー購読設定に従って通知パネル / toast に変換。
+- 既読/未読状態は client-side (`localStorage`) — ユーザー別・端末別に独立。
+- WebSocket 実時間 push は PoC 2 次 deferred。
+
+**通知種別 (現行 events):**
+
+| 分類 | event key | 発生する audit action |
+|---|---|---|
+| 実行 | `run.started` / `run.failed` / `run.finished` | `RUN_STARTED` / `RUN_FAILED` / `RUN_FINISHED` (実行エンジン接続後) |
+| スナップショット | `snapshot.pending` / `snapshot.approved` / `snapshot.rejected` | `REVIEW_REQUESTED` / `APPROVED` / `REJECTED` |
+| Cutover | (スナップショットと同じキーだが type=cutover) | `CUTOVER_SNAPSHOT_CREATED` 等 |
 
 **UI:**
 - ヘッダー bell icon + 未読通知数 badge
-- 通知クリック時に関連画面へ deep link
-- 通知センター (全体照会・フィルター・既読・削除)
+- 通知クリック時に関連画面へ deep link (`/versions?selectSnapshotId=...` 等)
+- 通知パネル (全体照会・フィルター・既読表示・dismiss)
+- 新規 audit 到着時に右下 toast 4 秒
 
 **フィルター・購読:**
-- ユーザー別通知種別 ON/OFF
+- ユーザー別 event 購読 ON/OFF (Project Settings > Notifications)。
+- Scope: 全体 (Solution Settings) とプロジェクト別。'mine-only' / 'all-project'。
 - 権限ベースの自動範囲:
   - master: 全通知
   - admin: 本人作業 + 隔離・検証
