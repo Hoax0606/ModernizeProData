@@ -14,7 +14,9 @@ import { CreateProjectModal } from '../components/CreateProjectModal';
 import { SignOutModal } from '../components/SignOutModal';
 import { ClusterAdminModal } from '../components/ClusterAdminModal';
 import { NotificationToast } from '../components/NotificationToast';
+import { LicenseBanner } from '../components/LicenseBanner';
 import { LockIcon } from '../components/LockIcon';
+import { useLicenseStore } from '../store/license';
 import { useWorkspaceStore } from '../store/workspace';
 import { isProjectReadOnly } from '../store/readOnly';
 import { useSnapshotsStore } from '../store/snapshots';
@@ -267,8 +269,18 @@ export function AppShell() {
     }
   }, [user?.role, user?.username, loadUsers]);
 
+  // 라이선스 상태 — 마운트 시 + 30분마다 polling. banner / write 차단 hint 용.
+  const refreshLicense = useLicenseStore((s) => s.refresh);
+  useEffect(() => {
+    void refreshLicense();
+    const id = setInterval(() => void refreshLicense(), 30 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [refreshLicense]);
+
   return (
-    <div style={styles.wrap}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+      <LicenseBanner />
+      <div style={styles.wrap}>
       {sidebarOpen && (
         <aside style={styles.sidebar}>
           {/* 브랜드 */}
@@ -792,6 +804,7 @@ export function AppShell() {
         onConfirm={() => { setSignOutOpen(false); handleLogout(); }}
       />
       <NotificationToast />
+      </div>
     </div>
   );
 }
