@@ -677,7 +677,166 @@ download trigger) does **not** need to change.
 
 ---
 
-## 18. Further Reading
+## 18. License (Ed25519 .lic verification — finalized 2026-05-22)
+
+### 18.1 Goals
+
+Stop unauthorized use of the tool after the agreed term, without depending on
+network reachability (target sites are fully air-gapped). The license is a
+signed JSON file (`.lic`) delivered to the site by USB and uploaded through
+the in-app UI.
+
+### 18.2 Cryptographic shape
+
+- **Signature**: Ed25519 (java.security built-in, no extra libs).
+- **One global keypair**: HQ holds the single `private.pem`; every shipped
+  backend binary embeds the matching `public.pem` at build time. New
+  customers ≠ new keypair; new keypair = full backend rebuild + redeploy.
+- **Public key embed path**: `backend/src/main/resources/license/public-key.pem`.
+- **Fingerprint** = first 16 bytes of SHA-256 over the public key DER, hex
+  encoded. Stored in each `.lic` as `publicKeyFp` so corruption / wrong-key
+  uploads can be diagnosed quickly.
+
+### 18.3 .lic file format
+
+```json
+{
+  "alg": "Ed25519",
+  "payload": {
+    "v": 1,
+    "licenseId": "MPD-2026-05-22-kdb-bank",
+    "customer": "KDB Bank",
+    "siteId": "kdb-prod-2026",
+    "edition": "standard",
+    "features": [],
+    "issuedAt": "2026-05-22",
+    "expiresAt": "2027-05-22",
+    "graceDays": 14,
+    "publicKeyFp": "a3f1...c920"
+  },
+  "signature": "base64(ed25519-sig-over-jackson-bytes(payload))"
+}
+```
+
+- `edition` is currently always `"standard"` (no tiering yet).
+- `features` is currently always `[]` — feature gating was implemented and
+  then removed because there is no second tier. The field is preserved to
+  keep the JSON shape stable in case tiers are introduced later.
+
+### 18.4 Lifecycle stages (`LicenseStatus`)
+
+```
+issued                expires           expires+grace      expires+grace+15d
+   │                     │                     │                  │
+   │ ACTIVE      ──►    │   IN_GRACE   ──►    │   READ_ONLY  ──►  │  EXPIRED
+   │ (60d before expiry: EXPIRING — banner, no functional change)
+```
+
+| Status      | Behavior                                                  |
+|-------------|-----------------------------------------------------------|
+| `ACTIVE`    | Normal.                                                   |
+| `EXPIRING`  | Amber banner; ≤60 days remaining.                         |
+| `IN_GRACE`  | Amber banner; past expiry, still within `graceDays`.      |
+| `READ_ONLY` | Write APIs return 403 `LICENSE_READ_ONLY`. 15-day window. |
+| `EXPIRED`   | All non-whitelisted APIs return 403.                      |
+| `MISSING`   | No `.lic` ever uploaded — same blocking as EXPIRED.       |
+| `INVALID`   | Signature failed or clock-rollback detected.              |
+
+`statusOf()` uses `ChronoUnit.DAYS.between(today, expires)` — not
+`Period.getDays()` (which returns only the day component of a Period).
+
+### 18.5 Enforcement filter (`LicenseEnforcementFilter`)
+
+Runs after `JwtAuthFilter`. Always-allowed path prefixes regardless of
+status (so the user can recover from MISSING/EXPIRED):
+
+```
+/api/v1/health/**
+/api/v1/auth/**
+/api/v1/license       (GET + master POST + master DELETE)
+/ws/**
+```
+
+For other paths it gates on `LicenseStatus.isFullyBlocked()` /
+`isWriteBlocked()`. Throttled `last_seen_at` touch (5-min) updates both the
+DB column and the sealed-clock file on each request.
+
+### 18.6 Clock-rollback detection (`LicenseSealedClock`)
+
+A tiny AES-GCM-sealed file written next to the live license tracks the
+last-seen wall-clock time. If the OS clock is later observed earlier than
+the sealed value by more than 5 minutes, the verifier flips the status to
+`INVALID` and emits a `LICENSE_CLOCK_TAMPER` audit row.
+
+- Sealed file lives at `${user.home}/.ksinfo-modernize/license-seen.bin`
+  (configurable via `modernize.license.sealed-file`).
+- AES-GCM key is derived from `SHA-256(public-key-fingerprint + fixed salt)`.
+  Defeating it requires source code or the keypair — sufficient for the
+  honest-operator threat model.
+
+### 18.7 Backend artefacts
+
+- `coordinator/license/` package — `License` entity, `LicenseRepository`,
+  `LicenseService`, `LicenseDocument` record, `LicenseStatus` enum,
+  `LicenseVerifier`, `LicenseSealedClock`, `LicenseEnforcementFilter`,
+  `LicenseStartupLoader`.
+- `coordinator/api/LicenseController` — `GET` returns status DTO,
+  `POST` uploads a `.lic` (master only, multipart), `DELETE` wipes
+  (master only, dev-mode shortcut).
+- Migration: `V20260522114140__license.sql` adds the `license` table with
+  `last_seen_at` and `imported_at` columns. Audit log gets two new actions:
+  `LICENSE_LOADED`, `LICENSE_INVALID_SIG`, plus `LICENSE_CLEARED` and
+  `LICENSE_CLOCK_TAMPER`.
+
+### 18.8 Frontend artefacts
+
+- `api/license.ts` — `get()`, `upload(File)`, `clear()` (dev).
+- `store/license.ts` — singleton zustand store with 30-min polling. Banner
+  reads from this; LicenseCard refreshes it after upload/clear so the
+  banner reacts immediately.
+- `components/LicenseBanner.tsx` — amber/red header band shown for any
+  non-`ACTIVE` status. Mounted by `AppShell` above the main flex column.
+- `components/SolutionSettingsModal.tsx` → `LicenseCard` — shows
+  customer / edition / dates / days-remaining badge / status chip. Master-
+  only `Update license` button triggers a hidden file picker. In Vite dev
+  builds, an extra red `Clear (dev)` button wipes the license server-side.
+
+### 18.9 Issuer module (`ModernizeProData/issuer/`)
+
+A standalone Maven module (Spring-free, Jackson only) that produces both a
+CLI and a Swing GUI for issuing `.lic` files. Build script `build-exe.ps1`
+packages it via jpackage `--type app-image` into a self-contained Windows
+bundle (LicenseIssuer\) with bundled JRE — no separate installer, no Inno
+Setup / WiX dependency.
+
+- Default key location: `LicenseIssuer\license\` (portable — copies with
+  the install folder, survives PC handover via USB).
+- jpackage's bundled JRE uses **System Look-and-Feel** so OS-level font
+  composite handles Korean/Japanese/Latin glyphs in the GUI without manual
+  fontconfig surgery.
+- `--icon mpd.ico` (generated from `mpd_lic.png` by `make-ico.ps1`) — sets
+  the Windows Explorer / taskbar / title-bar icon for both launchers.
+- `build-exe.ps1` preserves the `license\` folder across rebuilds by
+  moving it to `%TEMP%` before `jpackage` and restoring it after. Without
+  this, rebuilds would silently destroy the keypair.
+- Issuer keypair must never be regenerated except for security-incident
+  rotation. Rotation = full backend rebuild + redeployment to every
+  customer site. PC handover should be `license\` folder copy, not regen.
+
+### 18.10 Open items (intentionally deferred)
+
+- Per-customer keypair (currently one global key for all customers — same
+  fingerprint everywhere). Per-customer would isolate blast radius but
+  needs a per-customer backend build pipeline.
+- Hardware-bound license (e.g. tied to machine UUID). Not required by the
+  current threat model.
+- License rotation tooling — currently manual (delete `license\` folder,
+  regenerate, rebuild backend). A CLI/UI flow could automate the warning
+  about cascading rebuilds.
+
+---
+
+## 19. Further Reading
 
 - `CLAUDE.md` — stack, conventions, domain glossary, local run.
 - `docs/handoff/` — time-stamped handoff notes (read the most recent first).
