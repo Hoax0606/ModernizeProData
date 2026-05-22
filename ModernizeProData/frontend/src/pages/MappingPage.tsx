@@ -4,6 +4,7 @@ import { useWorkspaceStore } from '../store/workspace';
 import { useAsisDdlStore } from '../store/asisDdl';
 import { useTobeDdlStore } from '../store/tobeDdl';
 import { useMappingEditsStore } from '../store/mappingEdits';
+import { useUiStore } from '../store/ui';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
 import { projectApi } from '../api/workspace';
 import { MappingOnboarding } from './DashboardPage';
@@ -72,6 +73,10 @@ type AsisColumn = { name: string; type: string; pk?: boolean; nullPct?: number; 
 
 let ASIS_COLUMNS: Record<string, AsisColumn[]> = {};
 
+/** Site DB type 으로 결정된 DDL dialect — 백엔드 DdlImport.dialect 가 source of truth. */
+let ASIS_DIALECT: string = 'oracle';
+let TOBE_DIALECT: string = 'oracle';
+
 /** Convert DDL schema response → AsisTable[]. */
 function ddlToAsisTables(schema: DdlSchema | undefined | null): AsisTable[] {
   if (!schema) return [];
@@ -84,7 +89,7 @@ function ddlToAsisTables(schema: DdlSchema | undefined | null): AsisTable[] {
       rows: 0,
       routing: [],
       unrouted: true,
-      imported: true,  // TODO: 백엔드 CSV import 상태 API 가 생기면 실제 값으로 교체. 현재는 테스트용으로 모두 imported 처리.
+      imported: false,
     };
   });
 }
@@ -143,6 +148,64 @@ function ddlToMappingByTobe(tobe: DdlSchema | undefined | null): Record<string, 
 
 function qualifiedName(t: DdlTableWithColumns): string {
   return t.table.schemaName ? `${t.table.schemaName}.${t.table.physicalName}` : t.table.physicalName;
+}
+
+/** Site 의 raw DB type 문자열을 dialect 코드로 정규화. 빈 값/모름 → 'oracle' 폴백. */
+function normalizeDialect(raw: string | null | undefined): string {
+  if (!raw) return 'oracle';
+  const s = raw.trim().toLowerCase();
+  if (!s) return 'oracle';
+  if (s.includes('postgres')) return 'postgresql';
+  if (s.includes('sql server') || s === 'mssql' || s.includes('microsoft')) return 'mssql';
+  if (s.includes('mysql') || s.includes('mariadb')) return 'mysql';
+  if (s.includes('db2')) return 'db2';
+  if (s.includes('oracle')) return 'oracle';
+  return 'oracle';
+}
+
+/** dialect 코드 → UI 표시명. */
+function dialectLabel(d: string): string {
+  switch (d) {
+    case 'oracle':     return 'Oracle';
+    case 'postgresql': return 'PostgreSQL';
+    case 'mssql':      return 'SQL Server';
+    case 'mysql':      return 'MySQL';
+    case 'db2':        return 'DB2';
+    default:           return d || 'Oracle';
+  }
+}
+
+/**
+ * AS-IS type 문자열을 TO-BE dialect 의 동등 type 으로 변환.
+ *   예) VARCHAR2(60) + tobe=postgresql → VARCHAR(60)
+ *       NUMBER(11,2) + tobe=postgresql → NUMERIC(11,2)
+ *       CLOB         + tobe=postgresql → TEXT
+ * 동일/미지원 dialect 에는 입력값 그대로.
+ */
+function translateTypeToTobe(asisType: string, tobeDialect: string): string {
+  if (!asisType || asisType === '—') return asisType;
+  const t = asisType.trim();
+  const u = t.toUpperCase();
+  // Oracle → PostgreSQL
+  if (tobeDialect === 'postgresql') {
+    if (u.startsWith('VARCHAR2')) return t.replace(/^VARCHAR2/i, 'VARCHAR');
+    if (u.startsWith('NVARCHAR2')) return t.replace(/^NVARCHAR2/i, 'VARCHAR');
+    if (u.startsWith('NUMBER'))   return t.replace(/^NUMBER/i,   'NUMERIC');
+    if (u === 'CLOB' || u === 'NCLOB') return 'TEXT';
+    if (u === 'BLOB') return 'BYTEA';
+    if (u.startsWith('DATE')) return 'TIMESTAMP';  // Oracle DATE 는 시각 포함
+    if (u.startsWith('RAW')) return 'BYTEA';
+    if (u.startsWith('LONG RAW')) return 'BYTEA';
+  }
+  // Oracle → MSSQL / PostgreSQL → MSSQL
+  if (tobeDialect === 'mssql') {
+    if (u.startsWith('VARCHAR2')) return t.replace(/^VARCHAR2/i, 'VARCHAR');
+    if (u.startsWith('NUMBER'))   return t.replace(/^NUMBER/i,   'NUMERIC');
+    if (u === 'CLOB' || u === 'TEXT') return 'NVARCHAR(MAX)';
+    if (u === 'BOOLEAN') return 'BIT';
+  }
+  // 미지원 / 동일 dialect → 그대로
+  return t;
 }
 
 /**
@@ -204,13 +267,28 @@ export function MappingPage() {
   // Hydrate module-level fixtures whenever schemas change, then bump a state value
   // to force a re-render so children see the new ASIS_TABLES / TOBE_TABLES / etc.
   const [hydrationTick, setHydrationTick] = useState(0);
+  // dialect 는 site 의 DB type 을 1차 source 로 사용 (DDL 재임포트 없이 즉시 반영).
+  // site 정보가 없거나 type 이 비어있으면 ddl_imports.dialect 폴백.
+  const siteForDialect = useWorkspaceStore((s) => {
+    const p = s.projects.find((p) => p.id === s.activeProjectId);
+    return p ? s.sites.find((st) => st.id === p.siteId) ?? null : null;
+  });
   useEffect(() => {
     ASIS_TABLES = ddlToAsisTables(asisSchema);
+    // PoC: Site 의 csvPath 가 채워져 있으면 모든 AS-IS 테이블을 imported 로 간주.
+    // (실제 파일 존재 / 행 수 검증은 백엔드 CSV import API 가 생기면 그 응답으로 교체.)
+    if (siteForDialect?.csvPath && siteForDialect.csvPath.trim() !== '') {
+      ASIS_TABLES = ASIS_TABLES.map((t) => ({ ...t, imported: true }));
+    }
     TOBE_TABLES = ddlToTobeTables(tobeSchema);
     ASIS_COLUMNS = ddlToAsisColumns(asisSchema);
     MAPPING_BY_TOBE = ddlToMappingByTobe(tobeSchema);
+    const asisRaw = siteForDialect?.asisDbType;
+    const tobeRaw = siteForDialect?.tobeDbByEnv?.[siteForDialect.environment]?.type;
+    ASIS_DIALECT = asisRaw ? normalizeDialect(asisRaw) : (asisSchema?.latestImport?.dialect ?? 'oracle');
+    TOBE_DIALECT = tobeRaw ? normalizeDialect(tobeRaw) : (tobeSchema?.latestImport?.dialect ?? 'oracle');
     setHydrationTick((t) => t + 1);
-  }, [asisSchema, tobeSchema]);
+  }, [asisSchema, tobeSchema, siteForDialect]);
 
   const initialSelection: Selection = useMemo(() => {
     if (TOBE_TABLES.length > 0) {
@@ -224,12 +302,27 @@ export function MappingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrationTick]);
 
-  const [selected, setSelected] = useState<Selection>(initialSelection);
+  const [selected, setSelected] = useState<Selection>(null);
+  // 매핑 메뉴 초기 화면은 무조건 TO-BE 첫 테이블. 프로젝트가 바뀌면 다시 reset.
+  const didInitialSelectRef = useRef(false);
+  // 프로젝트 변경 시 selection lock 해제.
+  useEffect(() => {
+    didInitialSelectRef.current = false;
+    setSelected(null);
+  }, [activeProjectId]);
+  // hydrate 후 첫 TOBE 자동 선택 (프로젝트당 한 번).
+  useEffect(() => {
+    if (didInitialSelectRef.current) return;
+    if (TOBE_TABLES.length === 0) return;  // TO-BE 아직 안 옴 — 다음 tick 대기
+    const first = TOBE_TABLES[0];
+    setSelected({ side: 'tobe', name: first.name, internalName: first.internalName });
+    didInitialSelectRef.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrationTick]);
   // hydrate 된 데이터에 selected 가 존재하지 않으면 자동으로 첫 TOBE 로 reset.
-  // (selected 없음, 새 프로젝트, 또는 영속된 selection 이 이번 프로젝트 데이터에 없는 경우 모두 처리.)
   useEffect(() => {
     if (!initialSelection) return;
-    if (!selected) { setSelected(initialSelection); return; }
+    if (!selected) return;  // 위 effect 에서 처리
     const existsInTobe = selected.side === 'tobe' && TOBE_TABLES.some((t) => t.internalName === selected.internalName);
     const existsInAsis = selected.side === 'asis' && ASIS_TABLES.some((t) => t.name === selected.name);
     if (!existsInTobe && !existsInAsis) {
@@ -602,7 +695,16 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
 }) {
   const navigate = useNavigate();
   const [bindingOpen, setBindingOpen] = useState((bindingEdit?.sources ?? table.sources).length === 0);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [bindingPulse, setBindingPulse] = useState(false);
+  const triggerBindingHighlight = () => {
+    setBindingOpen(true);
+    setBindingPulse(true);
+    window.setTimeout(() => setBindingPulse(false), 1500);
+  };
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [importMappingOpen, setImportMappingOpen] = useState(false);
+  const [importYamlOpen, setImportYamlOpen] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
   const [q, setQ] = useState('');
   type RuleFilter = 'all' | 'unmapped' | 'auto' | 'rule' | 'null' | 'default';
   const [coverageFilter, setCoverageFilter] = useState<RuleFilter>('all');
@@ -699,9 +801,27 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   const missingImports = bindingSources
     .map((s) => ASIS_TABLES.find((a) => a.name === s.table))
     .filter((a): a is AsisTable => !!a && !a.imported);
-  const testDisabled = counts.unmapped > 0 || bindingSources.length === 0 || missingImports.length > 0;
+  // TO-BE Target DB 가 Site Settings 에서 "configured" 상태인지 검사 — Site Settings 의
+  // 녹색 stage 와 동일 로직 (type/host/database/username 4 개 필드 모두 채워졌는지).
+  // tobeDbLocks 는 저장 시 자동 true 가 되어 신뢰할 수 없어 사용하지 않는다.
+  const activeSite = useWorkspaceStore((s) => {
+    const ap = s.projects.find((p) => p.id === s.activeProjectId);
+    return ap ? (s.sites.find((st) => st.id === ap.siteId) ?? null) : null;
+  });
+  const tobeDb = activeSite ? activeSite.tobeDbByEnv?.[activeSite.environment] : undefined;
+  const tobeDbConnected = !!tobeDb
+    && !!tobeDb.type?.trim()
+    && !!tobeDb.host?.trim()
+    && !!tobeDb.database?.trim()
+    && !!tobeDb.username?.trim();
+  const testDisabled =
+    counts.unmapped > 0
+    || bindingSources.length === 0
+    || missingImports.length > 0
+    || !tobeDbConnected;
   const testDisabledReason =
-    bindingSources.length === 0 ? 'AS-IS source 가 연결되어 있지 않습니다.'
+    !tobeDbConnected ? 'TO-BE Target DB connection 정보가 Site Settings 에 완전히 채워져 있지 않습니다. (Site 의 현재 stage 가 녹색이어야 합니다.)'
+    : bindingSources.length === 0 ? 'AS-IS source 가 연결되어 있지 않습니다.'
     : missingImports.length > 0 ? `AS-IS extracted data 가 임포트되지 않았습니다: ${missingImports.map((a) => a.short).join(', ')}`
     : counts.unmapped > 0 ? `Unmapped 컬럼이 ${counts.unmapped}개 남아 있습니다.`
     : 'Run test migration for this table';
@@ -714,19 +834,49 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         <div style={styles.tableChip}>{table.name}</div>
         <div style={{ flex: 1 }} />
         <div style={styles.statusCounts}>
-          {counts.unmapped > 0 && <StatusBadge tone="queued">{counts.unmapped} unmapped</StatusBadge>}
-          {missingImports.length > 0 && (
-            <button
-              type="button"
-              onClick={() => navigate('/settings', { state: { highlightSide: 'asis-csv' } })}
-              title="Project Settings → AS-IS 의 CSV 카드로 이동합니다."
-              style={styles.csvMissingBtn}
-            >
-              <StatusBadge tone="warn">
-                {missingImports.length} CSV not imported →
-              </StatusBadge>
-            </button>
-          )}
+          {(() => {
+            // 우선순위 — 환경 설정부터 매핑 작업 순. 한 번에 하나씩만 표시.
+            if (!tobeDbConnected) {
+              return (
+                <button
+                  type="button"
+                  onClick={() => useUiStore.getState().requestOpenSiteSettings({ focus: 'tobe-db' })}
+                  title="Site Settings → TO-BE Target DB 카드를 엽니다."
+                  style={styles.csvMissingBtn}
+                >
+                  <StatusBadge tone="warn">TO-BE DB not configured →</StatusBadge>
+                </button>
+              );
+            }
+            if (bindingSources.length === 0) {
+              return (
+                <button
+                  type="button"
+                  onClick={triggerBindingHighlight}
+                  title="Table binding 패널을 엽니다."
+                  style={styles.csvMissingBtn}
+                >
+                  <StatusBadge tone="warn">AS-IS source not bound →</StatusBadge>
+                </button>
+              );
+            }
+            if (missingImports.length > 0) {
+              return (
+                <button
+                  type="button"
+                  onClick={() => useUiStore.getState().requestOpenSiteSettings({ focus: 'asis-csv' })}
+                  title="Site Settings → AS-IS CSV path 필드를 엽니다."
+                  style={styles.csvMissingBtn}
+                >
+                  <StatusBadge tone="warn">{missingImports.length} CSV not imported →</StatusBadge>
+                </button>
+              );
+            }
+            if (counts.unmapped > 0) {
+              return <StatusBadge tone="err">{counts.unmapped} unmapped</StatusBadge>;
+            }
+            return null;
+          })()}
         </div>
         <button
           style={(testDisabled || testStatus === 'running') ? styles.btnPrimaryDisabled : styles.btnPrimary}
@@ -738,37 +888,91 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
             : testDisabledReason
           }
         >
-          <Ic.play /> {testStatus === 'running' ? `Testing ${testProgress}%` : testStatus === 'completed' ? 'Re-test' : 'Test'}
+          <Ic.play /> {testStatus === 'running' ? `Testing ${testProgress}%` : 'Test'}
         </button>
+        {testStatus === 'completed' && (
+          <button
+            type="button"
+            onClick={() => setReportOpen(true)}
+            title="변환 룰을 적용한 TO-BE 데이터 미리보기를 봅니다."
+            style={styles.reportChip}
+          >
+            <Ic.arrow /> Report
+          </button>
+        )}
       </div>
 
-      {bindingSources.length === 0 && (
+      {!reportOpen && bindingSources.length === 0 && (
         <div style={styles.noSourceBanner}>
           <Ic.warn />
           <span>AS-IS 테이블이 매핑되지 않았습니다. <b>Table binding</b> 패널에서 <b>+ Add source</b>로 테이블을 추가하세요.</span>
         </div>
       )}
-      <CollapsibleBinding
-        table={table} open={bindingOpen} onToggle={() => setBindingOpen((o) => !o)}
-        sources={bindingSources}
-        onSourcesChange={(s) => { setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode }); }}
-        compositionMode={bindingMode}
-        onCompositionModeChange={(m) => { setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m }); }}
-      />
+      {!reportOpen && (
+        <CollapsibleBinding
+          table={table} open={bindingOpen} pulse={bindingPulse} onToggle={() => setBindingOpen((o) => !o)}
+          sources={bindingSources}
+          onSourcesChange={(s) => { setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode }); }}
+          compositionMode={bindingMode}
+          onCompositionModeChange={(m) => { setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m }); }}
+        />
+      )}
 
       {/* Toolbar */}
-      <div style={styles.toolbar}>
+      <div style={{ ...styles.toolbar, display: reportOpen ? 'none' : 'flex' }}>
         <div style={styles.toolbarSearch}>
           <Ic.search />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by field name…" style={styles.searchInput} />
         </div>
         <div style={{ flex: 1 }} />
-        <button style={styles.btnGhost}><Ic.download /> Import YAML</button>
-        <button style={styles.btnSecondary}>Auto-map unmapped</button>
+        <button
+          style={styles.btnGhost}
+          onClick={() => setImportYamlOpen(true)}
+        ><Ic.download /> Import YAML</button>
+        <button
+          style={styles.btnSecondary}
+          onClick={() => setImportMappingOpen(true)}
+        >Auto-map unmapped</button>
       </div>
+      {importMappingOpen && (
+        <ImportFileModal
+          title="Mapping Definition"
+          accept=".csv"
+          acceptLabel=".csv"
+          templateHref="/templates/mapping_definition_template.csv"
+          templateFilename="mapping_definition_template.csv"
+          hint="매칭된 unmapped 행만 자동 채워지고, 이미 매핑된 행은 덮어쓰지 않습니다."
+          onClose={() => setImportMappingOpen(false)}
+        />
+      )}
+      {importYamlOpen && (
+        <ImportFileModal
+          title="Import YAML"
+          accept=".yml,.yaml"
+          acceptLabel=".yml · .yaml"
+          hint="YAML 정의서로 매핑을 일괄 임포트합니다. 매칭된 unmapped 행만 채워지고, 이미 매핑된 행은 덮어쓰지 않습니다."
+          onClose={() => setImportYamlOpen(false)}
+        />
+      )}
+
+      {reportOpen && (
+        <ReportView
+          table={table}
+          rows={visibleRows}
+          onClose={() => setReportOpen(false)}
+          onPickColumn={(tgt) => {
+            const idx = visibleRows.findIndex((r) => r.tgt === tgt);
+            if (idx >= 0) {
+              setActiveIdx(idx);
+              setInspectorOpen(true);
+              setReportOpen(false);
+            }
+          }}
+        />
+      )}
 
       {/* Grid + inspector */}
-      <div style={styles.gridSplit}>
+      <div style={{ ...styles.gridSplit, display: reportOpen ? 'none' : 'flex' }}>
         <div style={styles.gridScroll}>
           <TobeCoverageBar
             total={counts.all}
@@ -816,7 +1020,14 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
                 return (
                   <tr
                     key={`${r.src}>${r.tgt}-${i}`}
-                    onClick={() => setActiveIdx(realIdx)}
+                    onClick={() => {
+                      if (inspectorOpen && realIdx === activeIdx) {
+                        setInspectorOpen(false);
+                      } else {
+                        setActiveIdx(realIdx);
+                        setInspectorOpen(true);
+                      }
+                    }}
                     style={{
                       background: isActive ? 'var(--navy-50)' : (i % 2 === 1 ? 'var(--zebra)' : 'var(--panel)'),
                       borderBottom: '1px solid var(--border)',
@@ -886,10 +1097,6 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
           </table>
         </div>
 
-        <InspectorRail
-          open={inspectorOpen}
-          onToggle={() => setInspectorOpen((o) => !o)}
-        />
         {inspectorOpen && (
           <Inspector
             active={active}
@@ -934,8 +1141,8 @@ function StatusFor({ row }: { row: MappingRow }) {
 
 // ── Collapsible binding ──────────────────────────────────────
 
-function CollapsibleBinding({ table, open, onToggle, sources, onSourcesChange, compositionMode, onCompositionModeChange }: {
-  table: TobeTable; open: boolean; onToggle: () => void;
+function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesChange, compositionMode, onCompositionModeChange }: {
+  table: TobeTable; open: boolean; pulse?: boolean; onToggle: () => void;
   sources: TobeTable['sources']; onSourcesChange: (s: TobeTable['sources']) => void;
   compositionMode: 'join' | 'union'; onCompositionModeChange: (m: 'join' | 'union') => void;
 }) {
@@ -975,7 +1182,10 @@ function CollapsibleBinding({ table, open, onToggle, sources, onSourcesChange, c
     onSourcesChange(sources.map((s) => s.alias === alias ? { ...s, ...patch } : s));
 
   return (
-    <div style={styles.bindingWrap}>
+    <div style={{
+      ...styles.bindingWrap,
+      ...(pulse ? { boxShadow: 'inset 0 0 0 3px var(--green)', transition: 'box-shadow 200ms' } : {}),
+    }}>
       <div onClick={onToggle} style={styles.bindingHeader}>
         <span style={{ color: 'var(--text-4)', fontSize: 10, width: 10 }}>{open ? '▾' : '▸'}</span>
         <span style={styles.bindingLabel}>Table binding</span>
@@ -1428,6 +1638,8 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   const [userFnOpen, setUserFnOpen] = useState(false);
   const [javaCode, setJavaCode] = useState('');
   useEffect(() => {
+    // 같은 컬럼이면 effective rule 갱신으로 active 객체 reference 가 새로 만들어져도
+    // 편집 모드를 종료하지 않는다 — active.tgt 만 dep 로 사용.
     setEditingRule(false); setRuleError(null);
     const re = rowEdit;
     setSavedRule(re?.savedRule ?? null);
@@ -1435,7 +1647,8 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     const src = re?.savedSrc ?? null;
     setSavedSrc(src);
     setSavedSrcType(src ? src.map((s) => resolveSrcType(s, sources)) : null);
-  }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active?.tgt]);
   if (!active) return null;
   const initSrc: string[] = active.src === '—' ? [] : [active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src];
   const resolveType = (s: string) => resolveSrcType(s, sources);
@@ -1449,19 +1662,21 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     const srcCol = firstSrc.includes('.') ? firstSrc.slice(firstSrc.indexOf('.') + 1) : firstSrc;
     const srcT = resolveSrcType(firstSrc, sources);
     if (!srcT || srcT === '—' || active.tgtType === '—') return '';
-    return (srcT === active.tgtType ? srcCol : `CAST(${srcCol} AS ${active.tgtType})`).toUpperCase();
+    // AS-IS type 을 TO-BE dialect 로 정규화한 결과가 TO-BE 컬럼 type 과 같으면 단순 컬럼.
+    const translatedSrcT = translateTypeToTobe(srcT, TOBE_DIALECT);
+    const same = translatedSrcT.toUpperCase() === active.tgtType.toUpperCase();
+    return (same ? srcCol : `CAST(${srcCol} AS ${active.tgtType})`).toUpperCase();
   };
 
   const handleEdit = () => {
     const inferredStrategy = savedStrategy ?? (active.rule === 'null' ? 'null' : active.rule === 'default' ? 'default' : 'expression');
     setEditStrategy(inferredStrategy);
-    const initialAutoCast =
-      active.src !== '—' && active.tgt !== '—'
-      && active.srcType !== '—' && active.tgtType !== '—'
-      && active.srcType !== active.tgtType
-        ? `CAST(${active.src} AS ${active.tgtType})`
-        : '';
-    prevAutoCastRef.current = initialAutoCast.toUpperCase();
+    // 자동 CAST 생성 — savedSrc 우선, 없으면 active.sourceAlias.src.
+    // computeAutoCast 헬퍼를 그대로 써서 TO-BE dialect 변환표가 동일하게 적용됨.
+    const firstSrcForCast = (savedSrc && savedSrc.find((s) => s && s.trim() !== ''))
+      || (active.src !== '—' ? (active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src) : undefined);
+    const initialAutoCast = computeAutoCast(firstSrcForCast);
+    prevAutoCastRef.current = initialAutoCast;
     setEditValue((savedRule ?? initialAutoCast).toUpperCase());
     // Filter out stale alias references no longer present in current binding
     const rawSrc = savedSrc ?? initSrc;
@@ -1518,7 +1733,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   const displaySrcArr = (savedSrc ?? initSrc).filter((s) => s && s.trim() !== '');
   const displaySrcName = displaySrcArr.length === 0
     ? '(unassigned)'
-    : displaySrcArr.map((s) => s.slice(s.lastIndexOf('.') + 1)).join(' + ');
+    : displaySrcArr.join(' + ');  // alias.col 형태 그대로 (예: tr.TX_ID + em.EMP_NM)
   const handleClear = () => {
     setSavedSrc(null);
     setSavedSrcType(null);
@@ -1807,18 +2022,391 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   );
 }
 
-function InspectorRail({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+function ImportFileModal({
+  title, accept, acceptLabel, templateHref, templateFilename, hint, onClose,
+}: {
+  title: string;
+  accept: string;
+  acceptLabel: string;
+  templateHref?: string;
+  templateFilename?: string;
+  hint: string;
+  onClose: () => void;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const handlePick = (f: File | null) => {
+    if (!f) return;
+    setFile(f);
+  };
   return (
-    <div
-      onClick={onToggle}
-      title={open ? 'Hide mapping detail' : 'Show mapping detail'}
-      style={styles.inspectorRail}
-    >
-      <div style={styles.inspectorRailLabel}>
-        {open ? '›' : '‹'} Mapping detail
+    <div style={styles.modalBackdrop} onClick={onClose}>
+      <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <div style={styles.modalTitle}>{title}</div>
+          <div style={{ flex: 1 }} />
+          {templateHref && (
+            <a
+              href={templateHref}
+              download={templateFilename}
+              style={styles.modalTemplateBtn}
+            >
+              <Ic.download /> Download template
+            </a>
+          )}
+        </div>
+        <div style={styles.modalBody}>
+          <div
+            onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging(false);
+              const f = e.dataTransfer.files?.[0];
+              if (f) handlePick(f);
+            }}
+            onClick={() => inputRef.current?.click()}
+            style={{
+              ...styles.modalDropZone,
+              borderColor: dragging ? 'var(--navy)' : 'var(--border-strong)',
+              background: dragging ? 'var(--navy-50)' : 'var(--panel-2)',
+            }}
+          >
+            <input
+              ref={inputRef}
+              type="file"
+              accept={accept}
+              onChange={(e) => handlePick(e.target.files?.[0] ?? null)}
+              style={{ display: 'none' }}
+            />
+            {file ? (
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontFamily: 'var(--mono)', fontWeight: 600, fontSize: 13 }}>{file.name}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 4 }}>
+                  {(file.size / 1024).toFixed(1)} KB · 다른 파일을 선택하려면 다시 클릭
+                </div>
+              </div>
+            ) : (
+              <div style={{ textAlign: 'center', color: 'var(--text-3)' }}>
+                <div style={{ fontSize: 13, marginBottom: 4 }}>파일을 끌어다 놓거나 클릭해서 선택</div>
+                <div style={{ fontSize: 11 }}>{acceptLabel}</div>
+              </div>
+            )}
+          </div>
+          <div style={styles.modalHint}>
+            <Ic.warn />
+            <span>{hint}</span>
+          </div>
+        </div>
+        <div style={styles.modalFooter}>
+          <button style={styles.btnSecondary} onClick={onClose}>Cancel</button>
+          <button
+            style={file ? styles.btnPrimary : styles.btnPrimaryDisabled}
+            disabled={!file}
+            onClick={() => {
+              // TODO: 백엔드 import API 가 생기면 여기서 호출.
+              console.log(`[${title}] would import`, file?.name);
+              onClose();
+            }}
+          >Import</button>
+        </div>
       </div>
     </div>
   );
+}
+
+// ── Report view (Test 결과 미리보기) ─────────────────────────
+
+function hashStr(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+/** 컬럼 타입과 row 인덱스로 결정적 더미 값 생성. test 결과를 가짜로 채움. */
+function previewValue(row: MappingRow, rowIdx: number): string {
+  if (row.rule === 'unmapped') return '';
+  if (row.rule === 'null') return 'NULL';
+  if (row.rule === 'default') return row.ddlDefault ?? 'DEFAULT';
+
+  const seed = hashStr(`${row.tgt}|${rowIdx}`);
+  const t = row.tgtType.toUpperCase();
+  // NULL probability for nullable cols
+  if (row.tgtNullable && seed % 17 === 0) return 'NULL';
+
+  if (t.startsWith('UUID')) {
+    const hex = (seed * 0x9E3779B1).toString(16).padStart(8, '0');
+    return `${hex}-${(seed % 0xffff).toString(16).padStart(4, '0')}-5${(seed % 0xfff).toString(16).padStart(3, '0')}-${(seed % 0xfff).toString(16).padStart(3, '0')}-${(seed * 7 % 0xffffff).toString(16).padStart(6, '0')}${(seed * 13 % 0xffffff).toString(16).padStart(6, '0')}`;
+  }
+  if (t.startsWith('DATE')) {
+    const y = 2018 + (seed % 8);
+    const m = 1 + (seed % 12);
+    const d = 1 + (seed % 27);
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }
+  if (t.startsWith('TIMESTAMP')) {
+    const y = 2023 + (seed % 2);
+    const m = 1 + (seed % 12);
+    const d = 1 + (seed % 27);
+    const hh = seed % 24;
+    const mm = (seed * 7) % 60;
+    const ss = (seed * 13) % 60;
+    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+  }
+  if (t.startsWith('BOOLEAN') || t === 'BIT') {
+    return seed % 2 === 0 ? 'false' : 'true';
+  }
+  if (t.includes('INT') || t === 'BIGSERIAL' || t === 'SERIAL') {
+    return String(1000 + (seed % 90000));
+  }
+  if (t.startsWith('NUMERIC') || t.startsWith('NUMBER') || t.startsWith('DECIMAL')) {
+    return ((1000 + (seed % 90000)) + (seed % 100) / 100).toFixed(2);
+  }
+  if (t === 'TEXT' || t.includes('CLOB')) {
+    return `(text payload ${seed % 9999})`;
+  }
+  if (t === 'BYTEA' || t.includes('BLOB')) {
+    return `(bytes ${seed % 9999})`;
+  }
+  if (t.startsWith('CHAR(1)') || t === 'CHAR') {
+    const choices = ['M', 'F', 'A', 'B'];
+    return choices[seed % choices.length];
+  }
+  if (t.includes('VARCHAR') || t.includes('CHAR')) {
+    const samples = ['active', 'CALL', 'EMAIL', 'VISIT', 'leave', '田中', '김유라', 'P01', 'D101'];
+    return samples[seed % samples.length];
+  }
+  return `v${seed % 9999}`;
+}
+
+function excelColLabel(i: number): string {
+  // 0 → A, 25 → Z, 26 → AA, ...
+  let s = '';
+  let n = i;
+  while (true) {
+    s = String.fromCharCode(65 + (n % 26)) + s;
+    n = Math.floor(n / 26) - 1;
+    if (n < 0) break;
+  }
+  return s;
+}
+
+function typeIconLabel(t: string): string {
+  const u = t.toLowerCase();
+  if (u === 'uuid') return 'UUID';
+  if (u.startsWith('varchar') || u.startsWith('char') || u === 'text' || u.includes('nvarchar')) return 'ABC';
+  if (u === 'int' || u === 'integer' || u === 'bigint' || u === 'smallint' || u === 'serial' || u === 'bigserial') return '123';
+  if (u.startsWith('numeric') || u.startsWith('decimal') || u.startsWith('number')) return '1.2';
+  if (u.startsWith('timestamp')) return 'TS';
+  if (u === 'date') return 'DT';
+  if (u === 'time') return 'TM';
+  if (u === 'bool' || u === 'boolean' || u === 'bit') return 'T/F';
+  if (u === 'bytea' || u.includes('blob') || u.includes('binary') || u === 'raw') return 'BIN';
+  if (u === 'json' || u === 'jsonb') return '{}';
+  return u.slice(0, 3).toUpperCase();
+}
+
+function isNumericType(t: string): boolean {
+  const u = t.toLowerCase();
+  return u === 'int' || u === 'integer' || u === 'bigint' || u === 'smallint'
+    || u.startsWith('numeric') || u.startsWith('number') || u.startsWith('decimal');
+}
+
+function ReportView({ table, rows, onClose, onPickColumn }: {
+  table: TobeTable;
+  rows: MappingRow[];
+  onClose: () => void;
+  onPickColumn: (tgt: string) => void;
+}) {
+  const PREVIEW_ROWS = 20;
+  const shortName = table.short || (table.name.includes('.') ? table.name.split('.').pop()! : table.name);
+  const tobeDbLabel = dialectLabel(TOBE_DIALECT);
+
+  const ws = useWorkspaceStore.getState();
+  const activeSiteName = ws.getActiveSite()?.name || 'modernize';
+  const activeProjectName = ws.getActiveProject()?.name || 'project';
+
+  return (
+    <div style={styles.dbvWindow}>
+      {/* ① 타이틀바 */}
+      <div style={styles.dbvTitlebar}>
+        <div style={styles.dbvTitlebarLeft}>
+          <img src="/mpd.png" alt="" style={styles.dbvLogo} />
+          <span style={styles.dbvTitleText}>{shortName} - Report</span>
+        </div>
+        <div style={styles.dbvTitlebarRight}>
+          <span style={styles.dbvTitleBtn}>─</span>
+          <span style={styles.dbvTitleBtn}>▢</span>
+          <button
+            type="button"
+            onClick={onClose}
+            title="Mapping 화면으로 돌아가기"
+            style={{ ...styles.dbvTitleBtn, ...styles.dbvTitleBtnClose }}
+            aria-label="Close report"
+          >✕</button>
+        </div>
+      </div>
+
+      {/* ② 메뉴바 */}
+      <div style={styles.dbvMenubar}>
+        {['File', 'Edit', 'Navigate', 'Search', 'SQL Editor', 'Database', 'Window', 'Help'].map((m) => (
+          <span key={m} style={styles.dbvMenuItem}>{m}</span>
+        ))}
+      </div>
+
+      {/* ③ 툴바 */}
+      <div style={styles.dbvToolbar}>
+        {['📄','📂','💾'].map((s, i) => <span key={`g1-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
+        <span style={styles.dbvToolSep} />
+        {['↶','↷'].map((s, i) => <span key={`g2-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
+        <span style={styles.dbvToolSep} />
+        {['▶','⏹'].map((s, i) => <span key={`g3-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
+        <span style={styles.dbvToolSep} />
+        <span style={styles.dbvToolDropdown}>Auto<span style={styles.dbvToolDropArrow}>▾</span></span>
+        <span style={styles.dbvToolDropdown}>{tobeDbLabel}<span style={styles.dbvToolDropArrow}>▾</span></span>
+        <span style={styles.dbvToolDropdown}>{activeProjectName}@{shortName}<span style={styles.dbvToolDropArrow}>▾</span></span>
+        <span style={styles.dbvToolSep} />
+        {['⚙','🔍','⤓','⤴'].map((s, i) => <span key={`g4-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
+      </div>
+
+      {/* ④ 탭바 — 프로젝트의 모든 TO-BE 테이블 */}
+      <div style={styles.dbvTabbar}>
+        {TOBE_TABLES.map((t) => {
+          const active = t.internalName === table.internalName;
+          const name = t.short || t.name.split('.').pop() || t.name;
+          return (
+            <div
+              key={t.internalName}
+              style={active
+                ? { ...styles.dbvTab, ...styles.dbvTabActive }
+                : styles.dbvTab}
+            >
+              <i className="fa-solid fa-table" style={{ color: '#2DBD96', fontSize: 12 }} />
+              <span>{name}</span>
+              {active && <span style={styles.dbvTabClose}>✕</span>}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ⑤ 서브탭 */}
+      <div style={styles.dbvSubtabs}>
+        <span style={styles.dbvSubtab}>Properties</span>
+        <span style={{ ...styles.dbvSubtab, ...styles.dbvSubtabActive }}>Data</span>
+        <span style={styles.dbvSubtab}>Diagram</span>
+      </div>
+
+      {/* ⑥ 필터바 */}
+      <div style={styles.dbvFilterbar}>
+        <span style={styles.dbvFilterShowSql}>Show SQL</span>
+        <span style={styles.dbvFilterInput}>이 데이터는 DB에 저장되지 않습니다.</span>
+        <span style={styles.dbvFilterIcons}>
+          {['▾','▶','✕','⟳','⊞','⚙'].map((s, i) => <span key={i} style={styles.dbvFilterIcon}>{s}</span>)}
+        </span>
+      </div>
+
+      {/* 데이터 그리드 */}
+      <div style={styles.dbvGridArea}>
+        <table style={styles.dbvGrid}>
+          <thead>
+            <tr>
+              <th style={styles.dbvGridCorner}> </th>
+              {rows.map((r) => (
+                <th
+                  key={r.tgt}
+                  onClick={() => onPickColumn(r.tgt)}
+                  title={`${r.tgt} (${r.tgtType}) · 클릭해서 매핑 상세 보기`}
+                  style={styles.dbvGridCol}
+                >
+                  <div style={styles.dbvColHeaderInner}>
+                    <span style={styles.dbvColTypeIcon}>{typeIconLabel(r.tgtType)}</span>
+                    <span>{r.tgt}</span>
+                    <span style={styles.dbvColCaret}>▾</span>
+                  </div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {Array.from({ length: PREVIEW_ROWS }, (_, i) => {
+              const zebra = i % 2 === 1;
+              return (
+                <tr key={i}>
+                  <td style={styles.dbvRowNum}>{i + 1}</td>
+                  {rows.map((r) => {
+                    const v = previewValue(r, i);
+                    const isNull = v === 'NULL' || v === '';
+                    const numeric = isNumericType(r.tgtType);
+                    return (
+                      <td
+                        key={r.tgt}
+                        style={{
+                          ...styles.dbvCell,
+                          ...(zebra ? styles.dbvCellZebra : {}),
+                          ...(numeric ? styles.dbvCellNum : {}),
+                        }}
+                      >
+                        {isNull
+                          ? <span style={styles.dbvCellNull}>[NULL]</span>
+                          : v}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* 하단 상태바 */}
+      <div style={styles.dbvStatusbar}>
+        <span style={{ ...styles.dbvStatusBtn, ...styles.dbvStatusBtnDropdown }}>Refresh</span>
+        <span style={styles.dbvStatusSep} />
+        <span style={styles.dbvStatusBtn}>💾 Save</span>
+        <span style={styles.dbvStatusBtn}>✕ Cancel</span>
+        <span style={styles.dbvStatusSep} />
+        <span style={styles.dbvStatusBtn}>⏮</span>
+        <span style={styles.dbvStatusBtn}>◀</span>
+        <span style={styles.dbvStatusBtn}>▶</span>
+        <span style={styles.dbvStatusBtn}>⏭</span>
+        <span style={styles.dbvStatusSep} />
+        <span style={{ ...styles.dbvStatusBtn, ...styles.dbvStatusBtnDropdown }}>Export data</span>
+        <span style={styles.dbvStatusSep} />
+        <span style={styles.dbvStatusBtn}>{PREVIEW_ROWS}</span>
+        <span style={styles.dbvStatusCenter}>
+          {PREVIEW_ROWS} row(s) fetched - 0.0s, on {fmtDate(new Date())} at {fmtTime(new Date())}
+        </span>
+        <span style={styles.dbvStatusRight}>{PREVIEW_ROWS}</span>
+      </div>
+
+      {/* 브레드크럼 */}
+      <div style={styles.dbvBreadcrumb}>
+        <span style={styles.dbvCrumb}>
+          <i className="fa-solid fa-database" style={{ color: '#2DBD96', fontSize: 12 }} />
+          <span>{tobeDbLabel} - {activeSiteName}</span>
+        </span>
+        <span style={styles.dbvCrumbSep}>▸</span>
+        <span style={styles.dbvCrumb}>
+          <i className="fa-solid" style={{ color: '#2DBD96', fontSize: 12 }}>&#xf46d;</i>
+          <span>{activeProjectName}</span>
+        </span>
+        <span style={styles.dbvCrumbSep}>▸</span>
+        <span style={styles.dbvCrumb}>
+          <i className="fa-solid fa-table" style={{ color: '#2DBD96', fontSize: 12 }} />
+          <span>{shortName}</span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function fmtDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function fmtTime(d: Date): string {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
 }
 
 function MetaRow({ k, children }: { k: string; children: React.ReactNode }) {
@@ -2889,9 +3477,655 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
     whiteSpace: 'nowrap',
   },
+  // Test 옆 Report chip
+  reportChip: {
+    display: 'inline-flex', alignItems: 'center', gap: 5,
+    height: 26, padding: '0 10px', marginLeft: -6,
+    background: 'var(--panel)', color: 'var(--navy)',
+    border: '1px solid var(--navy)', borderRadius: 4,
+    fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+    fontFamily: 'inherit',
+  },
+
+  // ── Report view (Excel UI prototype 그대로) ───────────────
+  // ── Report view (DBeaver UI prototype) ───────────────
+  dbvWindow: {
+    flex: 1, minHeight: 0, minWidth: 0,
+    margin: 10,
+    display: 'flex', flexDirection: 'column',
+    background: '#ffffff',
+    fontFamily: '"Segoe UI", "맑은 고딕", "Malgun Gothic", system-ui, sans-serif',
+    fontSize: 12, color: '#1f1f1f',
+    userSelect: 'none',
+    border: '1px solid #c8c6c4', borderRadius: 8, overflow: 'hidden',
+    boxShadow: '0 2px 10px rgba(0,0,0,0.06)',
+  },
+  dbvTitlebar: {
+    height: 28, background: '#FFFFFF', color: '#000',
+    display: 'flex', alignItems: 'center', padding: '0 8px',
+    fontSize: 12, flexShrink: 0,
+  },
+  dbvTitlebarLeft: { display: 'flex', alignItems: 'center', gap: 8 },
+  dbvLogo: { width: 18, height: 18, objectFit: 'contain', display: 'inline-block' },
+  dbvTitleText: { color: '#000', fontSize: 12, fontWeight: 500 },
+  dbvTitlebarRight: { marginLeft: 'auto', display: 'flex', alignItems: 'stretch', height: '100%' },
+  dbvTitleBtn: {
+    width: 40, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    color: '#555', fontSize: 13, cursor: 'default',
+    background: 'transparent', border: 'none', fontFamily: 'inherit',
+  },
+  dbvTitleBtnClose: { cursor: 'pointer' },
+
+  dbvMenubar: {
+    height: 24, background: '#FFFFFF', color: '#000',
+    display: 'flex', alignItems: 'center', padding: '0 8px',
+    fontSize: 12, flexShrink: 0,
+  },
+  dbvMenuItem: {
+    padding: '0 10px', height: 24, lineHeight: '24px',
+    cursor: 'default', color: '#000',
+  },
+
+  dbvToolbar: {
+    height: 32, background: '#ECECEC',
+    borderBottom: '1px solid #c8c8c8',
+    display: 'flex', alignItems: 'center', padding: '0 4px', gap: 4,
+    flexShrink: 0,
+  },
+  dbvToolBtn: {
+    width: 24, height: 24,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    color: '#555', fontSize: 12, borderRadius: 2, cursor: 'default',
+  },
+  dbvToolSep: { width: 1, height: 18, background: '#c0c0c0', margin: '0 2px' },
+  dbvToolDropdown: {
+    display: 'inline-flex', alignItems: 'center',
+    height: 22, padding: '0 6px',
+    background: '#ffffff', border: '1px solid #c0c0c0', borderRadius: 2,
+    fontSize: 11, color: '#1f1f1f', margin: '0 2px', gap: 4, cursor: 'default',
+  },
+  dbvToolDropArrow: { color: '#888', fontSize: 9 },
+
+  dbvTabbar: {
+    height: 28, background: '#ECECEC',
+    display: 'flex', alignItems: 'flex-end',
+    padding: '0 4px', flexShrink: 0,
+    overflowX: 'auto', overflowY: 'hidden',
+  },
+  dbvTab: {
+    height: 24, padding: '0 10px', marginTop: 4,
+    background: '#ECECEC', color: '#555', fontSize: 12,
+    display: 'inline-flex', alignItems: 'center', gap: 6,
+    cursor: 'default',
+    borderTopLeftRadius: 2, borderTopRightRadius: 2,
+    whiteSpace: 'nowrap', flexShrink: 0,
+  },
+  dbvTabActive: {
+    background: '#FFFFFF', color: '#000',
+    borderBottom: '2px solid #2DBD96',
+    height: 26, marginTop: 2,
+    fontWeight: 600,
+  },
+  dbvTabClose: { color: '#555', fontSize: 11, marginLeft: 2 },
+
+  dbvSubtabs: {
+    height: 28, background: '#ECECEC',
+    display: 'flex', alignItems: 'stretch', padding: 0,
+    flexShrink: 0,
+  },
+  dbvSubtab: {
+    padding: '0 14px', height: 28,
+    display: 'inline-flex', alignItems: 'center',
+    color: '#555', fontSize: 12, cursor: 'default',
+    background: '#ECECEC',
+  },
+  dbvSubtabActive: {
+    background: '#FFFFFF', color: '#000', fontWeight: 600,
+    boxShadow: 'inset 0 -2px 0 #2DBD96',
+  },
+
+  dbvFilterbar: {
+    height: 30, background: '#F5F5F5',
+    borderBottom: '1px solid #d0d0d0',
+    display: 'flex', alignItems: 'center', padding: '0 6px', gap: 6,
+    flexShrink: 0,
+  },
+  dbvFilterShowSql: {
+    height: 22, padding: '0 10px',
+    background: '#ffffff', border: '1px solid #c0c0c0', borderRadius: 2,
+    fontSize: 11, color: '#1f1f1f',
+    display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'default',
+  },
+  dbvFilterInput: {
+    flex: 1, height: 22,
+    background: '#ffffff', border: '1px solid #c0c0c0', borderRadius: 2,
+    padding: '0 8px',
+    fontSize: 11, color: '#a0a0a0', fontStyle: 'italic',
+    display: 'flex', alignItems: 'center',
+  },
+  dbvFilterIcons: { display: 'flex', alignItems: 'center', gap: 2 },
+  dbvFilterIcon: {
+    width: 22, height: 22,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    color: '#555', fontSize: 11, borderRadius: 2, cursor: 'default',
+  },
+
+  dbvGridArea: {
+    flex: 1, overflow: 'auto', background: '#ffffff', minHeight: 0, minWidth: 0,
+  },
+  dbvGrid: {
+    borderCollapse: 'collapse',
+    fontFamily: '"Segoe UI", "맑은 고딕", system-ui, sans-serif',
+    fontSize: 12, background: '#ffffff',
+    width: 'max-content', minWidth: '100%',
+  },
+  dbvGridCorner: {
+    position: 'sticky', top: 0, left: 0, zIndex: 3,
+    width: 44, height: 32,
+    background: '#F0F0F0',
+    borderRight: '1px solid #CCCCCC', borderBottom: '1px solid #CCCCCC',
+    padding: 0,
+  },
+  dbvGridCol: {
+    position: 'sticky', top: 0, zIndex: 1,
+    minWidth: 120, height: 32,
+    background: '#F0F0F0',
+    borderRight: '1px solid #CCCCCC', borderBottom: '1px solid #CCCCCC',
+    color: '#000', fontSize: 11.5, fontWeight: 600,
+    textAlign: 'left', padding: '0 6px',
+    whiteSpace: 'nowrap', cursor: 'pointer',
+  },
+  dbvColHeaderInner: { display: 'flex', alignItems: 'center', width: '100%' },
+  dbvColTypeIcon: {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    minWidth: 22, height: 16, padding: '0 2px',
+    color: '#2DBD96', fontSize: 10, fontWeight: 700,
+    fontFamily: '"Segoe UI", sans-serif',
+    marginRight: 5,
+    background: 'transparent',
+    letterSpacing: 0.2, textTransform: 'uppercase',
+  },
+  dbvColCaret: { color: '#2DBD96', fontSize: 9, marginLeft: 'auto', paddingLeft: 8 },
+
+  dbvRowNum: {
+    position: 'sticky', left: 0, zIndex: 1,
+    width: 44, height: 22,
+    background: '#F0F0F0',
+    borderRight: '1px solid #CCCCCC', borderBottom: '1px solid #ebebeb',
+    color: '#555', fontSize: 11, textAlign: 'center', padding: '0 4px',
+    fontFamily: '"Consolas", "Courier New", monospace',
+  },
+  dbvCell: {
+    minWidth: 120, height: 22, padding: '0 6px',
+    background: '#FFFFFF', color: '#000',
+    borderRight: '1px solid #ebebeb', borderBottom: '1px solid #ebebeb',
+    fontSize: 12, verticalAlign: 'middle',
+    whiteSpace: 'nowrap',
+    fontFamily: '"Consolas", "Segoe UI", monospace',
+  },
+  dbvCellZebra: { background: '#F0FBF7' },
+  dbvCellNum: { textAlign: 'right' },
+  dbvCellNull: { color: '#BBBBBB', fontStyle: 'italic' },
+
+  dbvStatusbar: {
+    height: 28, background: '#ECECEC',
+    borderTop: '1px solid #d0d0d0',
+    display: 'flex', alignItems: 'center', padding: '0 6px', gap: 4,
+    fontSize: 11, color: '#555555', flexShrink: 0,
+  },
+  dbvStatusBtn: {
+    display: 'inline-flex', alignItems: 'center', gap: 4,
+    height: 22, padding: '0 6px', borderRadius: 2,
+    background: 'transparent', color: '#555555', cursor: 'default',
+  },
+  dbvStatusBtnDropdown: {},  // 화살표는 텍스트로 직접 (CSS ::after 안 쓰는 인라인 한계)
+  dbvStatusSep: { width: 1, height: 16, background: '#c8c8c8', margin: '0 2px' },
+  dbvStatusCenter: { flex: 1, textAlign: 'center', color: '#555555', fontSize: 11 },
+  dbvStatusRight: { color: '#555555', fontSize: 11, padding: '0 8px' },
+
+  dbvBreadcrumb: {
+    height: 24, background: '#ECECEC',
+    borderTop: '1px solid #d0d0d0',
+    display: 'flex', alignItems: 'center', padding: '0 8px', gap: 4,
+    fontSize: 11, color: '#1A9E7A', flexShrink: 0,
+  },
+  dbvCrumb: { display: 'inline-flex', alignItems: 'center', gap: 4 },
+  dbvCrumbSep: { color: '#999', margin: '0 2px' },
+
+  xlWindow: {
+    flex: 1, minHeight: 0, minWidth: 0,
+    margin: 10,
+    display: 'flex', flexDirection: 'column',
+    background: '#ffffff',
+    fontFamily: '"Calibri", "Segoe UI", "맑은 고딕", "Malgun Gothic", system-ui, sans-serif',
+    fontSize: 11,
+    color: '#201f1e',
+    userSelect: 'none',
+    border: '1px solid #c8c6c4',
+    borderRadius: 8,
+    overflow: 'hidden',
+    boxShadow: '0 2px 10px rgba(0, 0, 0, 0.06)',
+  },
+  xlTitlebar: {
+    height: 28, background: '#217346', color: '#ffffff',
+    display: 'flex', alignItems: 'center', padding: 0,
+    fontSize: 11.5, flexShrink: 0, position: 'relative',
+  },
+  xlTitleCenter: {
+    position: 'absolute', left: '50%', transform: 'translateX(-50%)',
+    color: '#ffffff', fontSize: 11.5, letterSpacing: 0.2,
+  },
+  xlTitleRight: {
+    marginLeft: 'auto', display: 'flex', alignItems: 'stretch', height: '100%',
+  },
+  xlTitleBtn: {
+    width: 46, height: 28, padding: 0,
+    background: 'transparent', color: '#ffffff',
+    border: 'none', fontSize: 13,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    cursor: 'default',
+    fontFamily: 'inherit',
+  },
+  xlTitleBtnClose: { cursor: 'pointer' },
+
+  xlRibbon: {
+    height: 28, background: '#217346', color: '#ffffff',
+    display: 'flex', alignItems: 'flex-end',
+    padding: '0 8px', fontSize: 12, flexShrink: 0,
+  },
+  xlRibbonTab: {
+    padding: '4px 12px', height: 24, lineHeight: '16px',
+    color: 'rgba(255,255,255,0.92)', cursor: 'default',
+  },
+  xlRibbonTabFile: { background: '#185c37', fontWeight: 600 },
+  xlRibbonTabActive: {
+    background: '#f3f2f1', color: '#201f1e', fontWeight: 600,
+    borderTopLeftRadius: 2, borderTopRightRadius: 2,
+  },
+  xlRibbonBody: {
+    height: 4, background: '#f3f2f1',
+    borderBottom: '1px solid #d0d0d0', flexShrink: 0,
+  },
+
+  xlFormulaBar: {
+    height: 24, background: '#F3F3F3',
+    display: 'flex', alignItems: 'stretch',
+    borderBottom: '1px solid #D0D0D0',
+    flexShrink: 0, padding: '2px 4px', gap: 4,
+  },
+  xlNameBox: {
+    width: 110, background: '#FFFFFF',
+    border: '1px solid #D0D0D0',
+    display: 'flex', alignItems: 'center', padding: '0 8px',
+    fontSize: 11, color: '#201f1e',
+  },
+  xlNameBoxCaret: { marginLeft: 'auto', fontSize: 9, color: '#605e5c' },
+  xlFormulaButtons: {
+    display: 'flex', alignItems: 'center', gap: 2, padding: '0 4px',
+  },
+  xlFormulaBtn: {
+    width: 20, height: 18,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    background: 'transparent', color: '#888', fontSize: 11,
+    cursor: 'default',
+  },
+  xlFormulaBtnCancel: { color: '#b40000' },
+  xlFormulaBtnConfirm: { color: '#006400' },
+  xlFormulaBtnFx: {
+    color: '#605e5c',
+    fontFamily: '"Cambria Math", "Times New Roman", serif',
+    fontStyle: 'italic', fontSize: 12,
+  },
+  xlFormulaInput: {
+    flex: 1, background: '#FFFFFF', border: '1px solid #D0D0D0',
+    padding: '0 8px', display: 'flex', alignItems: 'center',
+    fontSize: 11, color: '#201f1e',
+    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+  },
+
+  xlSheetArea: {
+    flex: 1, overflow: 'auto', background: '#ffffff', minHeight: 0, minWidth: 0,
+  },
+  xlSheet: {
+    borderCollapse: 'collapse',
+    fontFamily: '"Calibri", "Segoe UI", system-ui, sans-serif',
+    fontSize: 11, background: '#ffffff',
+    width: 'max-content', minWidth: '100%',
+  },
+  xlCorner: {
+    position: 'sticky', top: 0, left: 0, zIndex: 3,
+    width: 32, height: 20, background: '#e1e1e1',
+    borderRight: '1px solid #b8b8b8', borderBottom: '1px solid #b8b8b8',
+    padding: 0,
+  },
+  xlColHeader: {
+    position: 'sticky', top: 0, zIndex: 1,
+    minWidth: 100, height: 20, background: '#e1e1e1', color: '#555',
+    borderRight: '1px solid #c8c8c8', borderBottom: '1px solid #b8b8b8',
+    fontSize: 11, fontWeight: 400, textAlign: 'center',
+  },
+  xlRowHeader: {
+    position: 'sticky', left: 0, zIndex: 1,
+    width: 32, height: 20, background: '#e1e1e1', color: '#555',
+    borderRight: '1px solid #b8b8b8', borderBottom: '1px solid #d8d8d8',
+    fontSize: 11, fontWeight: 400, textAlign: 'center', padding: 0,
+  },
+  xlRowHeaderName: { top: 20, left: 0, zIndex: 2, borderBottom: 'none' },
+  xlRowHeaderType: { top: 42, left: 0, zIndex: 2, borderBottom: '1px solid #b8b8b8' },
+  xlColName: {
+    position: 'sticky', top: 20, zIndex: 1,
+    minWidth: 100, height: 22,
+    padding: '3px 6px 0 6px',
+    background: '#f3f2f1', color: '#217346',
+    fontSize: 12, fontWeight: 700, textAlign: 'left',
+    borderRight: '1px solid #c8c8c8', borderBottom: 'none',
+    verticalAlign: 'bottom', whiteSpace: 'nowrap',
+    cursor: 'pointer',
+  },
+  xlColType: {
+    position: 'sticky', top: 42, zIndex: 1,
+    minWidth: 100, height: 20,
+    padding: '0 6px 3px 6px',
+    background: '#f3f2f1', color: '#605e5c',
+    fontSize: 10.5, fontWeight: 400, textAlign: 'left',
+    borderRight: '1px solid #c8c8c8', borderBottom: '1px solid #b8b8b8',
+    verticalAlign: 'top', whiteSpace: 'nowrap',
+    cursor: 'pointer',
+  },
+  xlCell: {
+    minWidth: 100, height: 20, padding: '0 6px',
+    background: '#ffffff', color: '#201f1e',
+    borderRight: '1px solid #e1e1e1', borderBottom: '1px solid #e1e1e1',
+    fontSize: 11, verticalAlign: 'middle',
+  },
+
+  xlSheetTabs: {
+    height: 22, background: '#f3f2f1',
+    borderTop: '1px solid #d0d0d0',
+    display: 'flex', alignItems: 'center', padding: '0 8px', gap: 4,
+    flexShrink: 0,
+  },
+  xlSheetTab: {
+    padding: '2px 14px', fontSize: 11, color: '#444',
+    background: '#ffffff', border: '1px solid #c8c8c8',
+    borderBottom: 'none', marginTop: 2, cursor: 'default',
+  },
+  xlSheetTabActive: {
+    color: '#217346', fontWeight: 700,
+    borderBottom: '2px solid #217346',
+  },
+  xlStatusBar: {
+    height: 22, background: '#217346', color: '#ffffff',
+    display: 'flex', alignItems: 'center', padding: '0 12px',
+    fontSize: 11, flexShrink: 0,
+  },
+
+  // ── 옛 report* (사용 안 함, 유지하면 컴파일 OK) ────────
+  reportWrap: {
+    flex: 1, minHeight: 0,
+    display: 'flex', flexDirection: 'column',
+    background: '#ffffff',
+    fontFamily: '"Segoe UI", "Calibri", system-ui, sans-serif',
+  },
+  // 짙은 녹색 Excel title bar (Artifacts 와 같은 #217346)
+  reportTitleBar: {
+    display: 'flex', alignItems: 'center', gap: 10,
+    height: 30,
+    padding: '0 0 0 0',
+    background: '#217346',
+    color: '#ffffff',
+    fontSize: 11.5, fontWeight: 400,
+    flexShrink: 0,
+  },
+  reportTitleText: {
+    fontSize: 11.5, color: '#ffffff', fontWeight: 400,
+    letterSpacing: 0.1,
+    textAlign: 'center',
+  },
+  // Formula bar — 진한 회색 (Artifacts formulaSpacer 와 같은 회색 tone 통일).
+  // Name box / fx 도 같은 회색.
+  reportFormulaBar: {
+    display: 'flex', alignItems: 'stretch', gap: 0,
+    height: 22,
+    background: '#e1e1e1',
+    borderBottom: '1px solid #d0cfce',
+    flexShrink: 0,
+  },
+  reportNameBox: {
+    display: 'inline-flex', alignItems: 'center',
+    width: 80, padding: '0 8px',
+    background: '#e1e1e1',
+    color: '#201f1e',
+    fontFamily: '"Calibri", "Segoe UI", system-ui, sans-serif',
+    fontSize: 11,
+    borderRight: '1px solid #d0cfce',
+  },
+  reportFxBtn: {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    width: 28,
+    background: '#e1e1e1',
+    color: '#605e5c',
+    fontFamily: '"Cambria Math", "Times New Roman", serif',
+    fontSize: 12, fontStyle: 'italic',
+    borderRight: '1px solid #d0cfce',
+  },
+  reportFormulaInput: {
+    flex: 1, padding: '0 10px',
+    background: '#ffffff',
+    display: 'flex', alignItems: 'center',
+    fontFamily: '"Calibri", "Segoe UI", system-ui, sans-serif',
+    fontSize: 11, color: '#201f1e',
+    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+  },
+  reportTitleClose: {
+    width: 46, height: 32, padding: 0,
+    background: 'transparent',
+    color: '#ffffff',
+    border: 'none',
+    fontSize: 16, fontWeight: 400,
+    cursor: 'pointer',
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    fontFamily: 'inherit',
+  },
+  // 시트 영역
+  reportBody: {
+    flex: 1, minHeight: 0, overflow: 'auto',
+    background: '#ffffff',
+  },
+  reportTable: {
+    borderCollapse: 'collapse',
+    fontFamily: '"Calibri", "Segoe UI", system-ui, sans-serif',
+    fontSize: 11,
+    width: 'max-content',
+    minWidth: '100%',
+    background: '#ffffff',
+  },
+  // 좌상단 corner cell (A 위, 1 왼쪽) — 진한 회색 (formula bar / 헤더 톤과 통일)
+  reportCornerCell: {
+    position: 'sticky', top: 0, left: 0, zIndex: 3,
+    width: 36, height: 20,
+    background: '#e1e1e1',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: '1px solid #d0cfce',
+    padding: 0,
+  },
+  // A B C ... 알파벳 컬럼 헤더 — 진한 회색
+  reportAlphaCell: {
+    position: 'sticky', top: 0, zIndex: 1,
+    minWidth: 110,
+    height: 20,
+    padding: '0 4px',
+    background: '#e1e1e1',
+    color: '#444',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: '1px solid #d0cfce',
+    fontSize: 11, fontWeight: 400,
+    textAlign: 'center',
+    userSelect: 'none',
+  },
+  // 데이터 row 번호 (3, 4, 5...) — 진한 회색 (헤더 톤)
+  reportRowNumCell: {
+    position: 'sticky', left: 0, zIndex: 1,
+    width: 36, height: 20,
+    background: '#e1e1e1',
+    color: '#444',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: '1px solid #e8e8e8',
+    fontSize: 11, fontWeight: 400,
+    textAlign: 'center',
+    padding: 0,
+  },
+  // Row 1: 컬럼명 — 옅은 회색 (Artifacts ribbon 톤), 셀 병합 효과로 아래 가로 border 제거
+  reportHeaderRowNumName: {
+    position: 'sticky', top: 20, left: 0, zIndex: 3,
+    width: 36, height: 22,
+    background: '#e1e1e1',
+    color: '#444',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: 'none',  // ← Row 2 와 셀 병합 효과
+    fontSize: 11, fontWeight: 400,
+    textAlign: 'center',
+    padding: 0,
+  },
+  reportHeaderNameOnly: {
+    position: 'sticky', top: 20, zIndex: 1,
+    minWidth: 110, height: 22,
+    padding: '4px 6px 0 6px',
+    background: '#f3f2f1',
+    color: '#217346',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: 'none',  // ← Row 2 와 셀 병합 효과
+    textAlign: 'left',
+    fontSize: 11.5, fontWeight: 700,
+    cursor: 'pointer',
+    userSelect: 'none',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden', textOverflow: 'ellipsis',
+    verticalAlign: 'bottom',
+  },
+  // Row 2: 타입 — 옅은 회색, sticky top 42
+  reportHeaderRowNumType: {
+    position: 'sticky', top: 42, left: 0, zIndex: 3,
+    width: 36, height: 20,
+    background: '#e1e1e1',
+    color: '#444',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: '1px solid #d0cfce',
+    fontSize: 11, fontWeight: 400,
+    textAlign: 'center',
+    padding: 0,
+  },
+  reportHeaderTypeOnly: {
+    position: 'sticky', top: 42, zIndex: 1,
+    minWidth: 110, height: 20,
+    padding: '0 6px 4px 6px',
+    background: '#f3f2f1',
+    color: '#605e5c',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: '1px solid #d0cfce',
+    textAlign: 'left',
+    fontSize: 10.5, fontWeight: 400,
+    cursor: 'pointer',
+    userSelect: 'none',
+    whiteSpace: 'nowrap',
+    verticalAlign: 'top',
+  },
+  reportCell: {
+    minWidth: 110, height: 20,
+    padding: '0 6px',
+    background: '#ffffff',
+    color: '#201f1e',
+    borderRight: '1px solid #e8e8e8',
+    borderBottom: '1px solid #e8e8e8',
+    fontSize: 11,
+    verticalAlign: 'middle',
+  },
+  reportStatusBar: {
+    height: 22,
+    padding: '0 12px',
+    borderTop: '1px solid #d0cfce',
+    background: '#217346',
+    fontSize: 11, color: '#ffffff',
+    display: 'flex', alignItems: 'center',
+    flexShrink: 0,
+    fontFamily: '"Segoe UI", "Calibri", system-ui, sans-serif',
+  },
+
+  dialectChip: {
+    display: 'inline-flex', alignItems: 'center',
+    padding: '2px 8px', borderRadius: 3,
+    fontFamily: 'var(--mono)', fontSize: 10.5, fontWeight: 600,
+    color: 'var(--text-3)', background: 'var(--panel-2)',
+    border: '1px solid var(--border-strong)',
+    whiteSpace: 'nowrap', letterSpacing: 0.3,
+  },
   csvMissingBtn: {
     background: 'transparent', border: 'none', padding: 0,
     cursor: 'pointer', display: 'inline-flex', alignItems: 'center',
+  },
+
+  // Import mapping spec modal
+  modalBackdrop: {
+    position: 'fixed', inset: 0, zIndex: 1000,
+    background: 'rgba(0, 0, 0, 0.45)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    padding: 20,
+  },
+  modalCard: {
+    background: 'var(--panel)',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 6,
+    width: 520, maxWidth: '100%',
+    display: 'flex', flexDirection: 'column',
+    boxShadow: '0 10px 32px rgba(0, 0, 0, 0.2)',
+  },
+  modalHeader: {
+    padding: '14px 16px',
+    borderBottom: '1px solid var(--border)',
+    display: 'flex', alignItems: 'center', gap: 8,
+  },
+  modalTemplateBtn: {
+    display: 'inline-flex', alignItems: 'center', gap: 5,
+    height: 26, padding: '0 10px',
+    border: '1px solid var(--border-strong)', borderRadius: 4,
+    background: 'var(--panel)', color: '#01589C',
+    fontSize: 11.5, fontFamily: 'var(--mono)', fontWeight: 600,
+    cursor: 'pointer', textDecoration: 'none',
+    whiteSpace: 'nowrap',
+  },
+  modalTitle: {
+    fontSize: 14, fontWeight: 700, color: 'var(--text)',
+    marginBottom: 4,
+  },
+  modalSubtitle: {
+    fontSize: 11.5, color: 'var(--text-3)',
+  },
+  modalBody: {
+    padding: 16,
+    display: 'flex', flexDirection: 'column', gap: 12,
+  },
+  modalDropZone: {
+    border: '2px dashed var(--border-strong)',
+    borderRadius: 6,
+    padding: '28px 16px',
+    cursor: 'pointer',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    minHeight: 100,
+    transition: 'background 120ms, border-color 120ms',
+  },
+  modalHint: {
+    display: 'flex', alignItems: 'flex-start', gap: 6,
+    padding: 10,
+    background: 'var(--amber-50)',
+    border: '1px solid var(--amber)',
+    borderRadius: 4,
+    color: 'var(--amber)',
+    fontSize: 11, lineHeight: 1.5,
+  },
+  modalFooter: {
+    padding: '12px 16px',
+    borderTop: '1px solid var(--border)',
+    display: 'flex', justifyContent: 'flex-end', gap: 6,
   },
   btnPrimaryDisabled: {
     display: 'inline-flex', alignItems: 'center', gap: 5,

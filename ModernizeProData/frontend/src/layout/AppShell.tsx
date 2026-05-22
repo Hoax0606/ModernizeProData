@@ -18,6 +18,7 @@ import { LicenseBanner } from '../components/LicenseBanner';
 import { LockIcon } from '../components/LockIcon';
 import { useLicenseStore } from '../store/license';
 import { useWorkspaceStore } from '../store/workspace';
+import { useUiStore } from '../store/ui';
 import { isProjectReadOnly } from '../store/readOnly';
 import { useSnapshotsStore } from '../store/snapshots';
 import { useAuditLogStore } from '../store/auditLog';
@@ -65,6 +66,7 @@ export function AppShell() {
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [clusterAdminOpen, setClusterAdminOpen] = useState(false);
   const [siteSettingsOpen, setSiteSettingsOpen] = useState(false);
+  const [siteSettingsFocus, setSiteSettingsFocus] = useState<import('../store/ui').SiteSettingsFocus>(undefined);
   const [siteMenuOpen, setSiteMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifTab, setNotifTab] = useState<'all' | 'unread'>('all');
@@ -82,6 +84,15 @@ export function AppShell() {
   const setActiveSite = useWorkspaceStore((s) => s.setActiveSite);
   const fetchSites = useWorkspaceStore((s) => s.fetchSites);
   const fetchProjects = useWorkspaceStore((s) => s.fetchProjects);
+
+  // 외부 페이지(MappingPage 등)에서 site settings 모달 open 요청 감지
+  const siteSettingsRequest = useUiStore((s) => s.siteSettingsRequest);
+  useEffect(() => {
+    if (!siteSettingsRequest) return;
+    setSiteSettingsFocus(siteSettingsRequest.focus);
+    setSiteSettingsOpen(true);
+    useUiStore.getState().consumeSiteSettingsRequest();
+  }, [siteSettingsRequest]);
 
   // 모달이 열려있으면 polling 일시 중지 (편집 중 서버 데이터로 덮어쓰기 방지)
   const isEditing = siteSettingsOpen || createSiteOpen || createProjectOpen;
@@ -142,6 +153,23 @@ export function AppShell() {
     production: 'PROD',
   };
   const stageShort = (env: string) => STAGE_SHORT[env] ?? env.slice(0, 4).toUpperCase();
+
+  // site 의 raw DB type 을 짧은 라벨로. 알 수 없으면 빈 문자열.
+  const dialectLabel = (raw: string | null | undefined): string => {
+    if (!raw) return '';
+    const s = raw.trim().toLowerCase();
+    if (!s) return '';
+    if (s.includes('postgres')) return 'PostgreSQL';
+    if (s.includes('sql server') || s === 'mssql' || s.includes('microsoft')) return 'SQL Server';
+    if (s.includes('mysql') || s.includes('mariadb')) return 'MySQL';
+    if (s.includes('db2')) return 'DB2';
+    if (s.includes('oracle')) return 'Oracle';
+    return raw.trim();
+  };
+  const siteDialects = (s: typeof sites[number]) => {
+    const tobeRaw = (s.tobeDbByEnv?.[s.environment] as { type?: string } | undefined)?.type;
+    return { asis: dialectLabel(s.asisDbType), tobe: dialectLabel(tobeRaw) };
+  };
 
   const projectSort = useSettingsStore((s) => s.projectSort);
   const setProjectSort = useSettingsStore((s) => s.setProjectSort);
@@ -584,7 +612,19 @@ export function AppShell() {
                   })()}
                 </div>
                 <div style={styles.topTitleSub}>
-                  {activeProject.tableCount} tables
+                  {activeSite && (() => {
+                    const d = siteDialects(activeSite);
+                    if (!d.asis && !d.tobe) return null;
+                    return (
+                      <span style={styles.topDialectChip} title={`AS-IS: ${d.asis || '?'}  →  TO-BE: ${d.tobe || '?'}`}>
+                        <span style={styles.topDialectName}>{d.asis || '?'}</span>
+                        <span style={styles.topDialectArrow}>→</span>
+                        <span style={styles.topDialectName}>{d.tobe || '?'}</span>
+                      </span>
+                    );
+                  })()}
+                  <span style={styles.topDialectSep}>·</span>
+                  <span>{activeProject.tableCount} tables</span>
                 </div>
               </>
             ) : activeSite ? (
@@ -795,7 +835,11 @@ export function AppShell() {
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
       <AccountProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
       <SolutionSettingsModal open={solutionOpen} onClose={() => setSolutionOpen(false)} />
-      <SiteSettingsModal open={siteSettingsOpen} onClose={() => setSiteSettingsOpen(false)} />
+      <SiteSettingsModal
+        open={siteSettingsOpen}
+        focus={siteSettingsFocus}
+        onClose={() => { setSiteSettingsOpen(false); setSiteSettingsFocus(undefined); }}
+      />
       <ClusterAdminModal open={clusterAdminOpen} onClose={() => setClusterAdminOpen(false)} />
       <CreateSiteModal open={createSiteOpen} onClose={() => setCreateSiteOpen(false)} />
       <CreateProjectModal open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} />
@@ -1324,6 +1368,18 @@ const styles: Record<string, React.CSSProperties> = {
   allProjectsLabel: { fontSize: 11.5, fontWeight: 500, color: 'var(--text)' },
   countMono: { fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-3)' },
 
+  topDialectChip: {
+    display: 'inline-flex', alignItems: 'center', gap: 4,
+    whiteSpace: 'nowrap',
+  },
+  topDialectName: {
+    fontFamily: 'var(--mono)', fontSize: 9.5, fontWeight: 500,
+    color: 'var(--text-4)', letterSpacing: 0.2,
+  },
+  topDialectArrow: {
+    fontSize: 9, color: 'var(--text-4)', fontFamily: 'var(--mono)',
+  },
+
   sectionHeader: {
     padding: '8px 14px 4px',
     display: 'flex',
@@ -1539,7 +1595,11 @@ const styles: Record<string, React.CSSProperties> = {
   },
   topTitle: { display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 },
   topTitleMain: { fontSize: 13, fontWeight: 600, letterSpacing: -0.1 },
-  topTitleSub: { fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
+  topTitleSub: {
+    fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)',
+    display: 'flex', alignItems: 'center', gap: 6,
+  },
+  topDialectSep: { color: 'var(--text-4)' },
 
   bellBtn: {
     position: 'relative',
