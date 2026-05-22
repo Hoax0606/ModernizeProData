@@ -4,6 +4,7 @@ import { useWorkspaceStore } from '../store/workspace';
 import { useAsisDdlStore } from '../store/asisDdl';
 import { useTobeDdlStore } from '../store/tobeDdl';
 import { useMappingEditsStore } from '../store/mappingEdits';
+import { useUiStore } from '../store/ui';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
 import { projectApi } from '../api/workspace';
 import { MappingOnboarding } from './DashboardPage';
@@ -72,6 +73,10 @@ type AsisColumn = { name: string; type: string; pk?: boolean; nullPct?: number; 
 
 let ASIS_COLUMNS: Record<string, AsisColumn[]> = {};
 
+/** Site DB type 으로 결정된 DDL dialect — 백엔드 DdlImport.dialect 가 source of truth. */
+let ASIS_DIALECT: string = 'oracle';
+let TOBE_DIALECT: string = 'oracle';
+
 /** Convert DDL schema response → AsisTable[]. */
 function ddlToAsisTables(schema: DdlSchema | undefined | null): AsisTable[] {
   if (!schema) return [];
@@ -84,7 +89,7 @@ function ddlToAsisTables(schema: DdlSchema | undefined | null): AsisTable[] {
       rows: 0,
       routing: [],
       unrouted: true,
-      imported: true,  // TODO: 백엔드 CSV import 상태 API 가 생기면 실제 값으로 교체. 현재는 테스트용으로 모두 imported 처리.
+      imported: false,
     };
   });
 }
@@ -143,6 +148,64 @@ function ddlToMappingByTobe(tobe: DdlSchema | undefined | null): Record<string, 
 
 function qualifiedName(t: DdlTableWithColumns): string {
   return t.table.schemaName ? `${t.table.schemaName}.${t.table.physicalName}` : t.table.physicalName;
+}
+
+/** Site 의 raw DB type 문자열을 dialect 코드로 정규화. 빈 값/모름 → 'oracle' 폴백. */
+function normalizeDialect(raw: string | null | undefined): string {
+  if (!raw) return 'oracle';
+  const s = raw.trim().toLowerCase();
+  if (!s) return 'oracle';
+  if (s.includes('postgres')) return 'postgresql';
+  if (s.includes('sql server') || s === 'mssql' || s.includes('microsoft')) return 'mssql';
+  if (s.includes('mysql') || s.includes('mariadb')) return 'mysql';
+  if (s.includes('db2')) return 'db2';
+  if (s.includes('oracle')) return 'oracle';
+  return 'oracle';
+}
+
+/** dialect 코드 → UI 표시명. */
+function dialectLabel(d: string): string {
+  switch (d) {
+    case 'oracle':     return 'Oracle';
+    case 'postgresql': return 'PostgreSQL';
+    case 'mssql':      return 'SQL Server';
+    case 'mysql':      return 'MySQL';
+    case 'db2':        return 'DB2';
+    default:           return d || 'Oracle';
+  }
+}
+
+/**
+ * AS-IS type 문자열을 TO-BE dialect 의 동등 type 으로 변환.
+ *   예) VARCHAR2(60) + tobe=postgresql → VARCHAR(60)
+ *       NUMBER(11,2) + tobe=postgresql → NUMERIC(11,2)
+ *       CLOB         + tobe=postgresql → TEXT
+ * 동일/미지원 dialect 에는 입력값 그대로.
+ */
+function translateTypeToTobe(asisType: string, tobeDialect: string): string {
+  if (!asisType || asisType === '—') return asisType;
+  const t = asisType.trim();
+  const u = t.toUpperCase();
+  // Oracle → PostgreSQL
+  if (tobeDialect === 'postgresql') {
+    if (u.startsWith('VARCHAR2')) return t.replace(/^VARCHAR2/i, 'VARCHAR');
+    if (u.startsWith('NVARCHAR2')) return t.replace(/^NVARCHAR2/i, 'VARCHAR');
+    if (u.startsWith('NUMBER'))   return t.replace(/^NUMBER/i,   'NUMERIC');
+    if (u === 'CLOB' || u === 'NCLOB') return 'TEXT';
+    if (u === 'BLOB') return 'BYTEA';
+    if (u.startsWith('DATE')) return 'TIMESTAMP';  // Oracle DATE 는 시각 포함
+    if (u.startsWith('RAW')) return 'BYTEA';
+    if (u.startsWith('LONG RAW')) return 'BYTEA';
+  }
+  // Oracle → MSSQL / PostgreSQL → MSSQL
+  if (tobeDialect === 'mssql') {
+    if (u.startsWith('VARCHAR2')) return t.replace(/^VARCHAR2/i, 'VARCHAR');
+    if (u.startsWith('NUMBER'))   return t.replace(/^NUMBER/i,   'NUMERIC');
+    if (u === 'CLOB' || u === 'TEXT') return 'NVARCHAR(MAX)';
+    if (u === 'BOOLEAN') return 'BIT';
+  }
+  // 미지원 / 동일 dialect → 그대로
+  return t;
 }
 
 /**
@@ -204,13 +267,23 @@ export function MappingPage() {
   // Hydrate module-level fixtures whenever schemas change, then bump a state value
   // to force a re-render so children see the new ASIS_TABLES / TOBE_TABLES / etc.
   const [hydrationTick, setHydrationTick] = useState(0);
+  // dialect 는 site 의 DB type 을 1차 source 로 사용 (DDL 재임포트 없이 즉시 반영).
+  // site 정보가 없거나 type 이 비어있으면 ddl_imports.dialect 폴백.
+  const siteForDialect = useWorkspaceStore((s) => {
+    const p = s.projects.find((p) => p.id === s.activeProjectId);
+    return p ? s.sites.find((st) => st.id === p.siteId) ?? null : null;
+  });
   useEffect(() => {
     ASIS_TABLES = ddlToAsisTables(asisSchema);
     TOBE_TABLES = ddlToTobeTables(tobeSchema);
     ASIS_COLUMNS = ddlToAsisColumns(asisSchema);
     MAPPING_BY_TOBE = ddlToMappingByTobe(tobeSchema);
+    const asisRaw = siteForDialect?.asisDbType;
+    const tobeRaw = siteForDialect?.tobeDbByEnv?.[siteForDialect.environment]?.type;
+    ASIS_DIALECT = asisRaw ? normalizeDialect(asisRaw) : (asisSchema?.latestImport?.dialect ?? 'oracle');
+    TOBE_DIALECT = tobeRaw ? normalizeDialect(tobeRaw) : (tobeSchema?.latestImport?.dialect ?? 'oracle');
     setHydrationTick((t) => t + 1);
-  }, [asisSchema, tobeSchema]);
+  }, [asisSchema, tobeSchema, siteForDialect]);
 
   const initialSelection: Selection = useMemo(() => {
     if (TOBE_TABLES.length > 0) {
@@ -224,17 +297,22 @@ export function MappingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrationTick]);
 
-  const [selected, setSelected] = useState<Selection>(initialSelection);
-  // 매핑 메뉴 진입 시 항상 첫 TOBE 테이블을 보여준다.
-  // 사용자가 메뉴 안에서 다른 테이블을 골라도 다른 메뉴로 나갔다 들어오면 다시 첫 TOBE.
+  const [selected, setSelected] = useState<Selection>(null);
+  // 매핑 메뉴 초기 화면은 무조건 TO-BE 첫 테이블. AS-IS schema 가 TO-BE 보다 먼저 도착하더라도
+  // TOBE_TABLES 가 채워질 때까지 기다린 후 한 번만 강제 set 한다.
+  const didInitialSelectRef = useRef(false);
   useEffect(() => {
-    if (initialSelection) setSelected(initialSelection);
+    if (didInitialSelectRef.current) return;
+    if (TOBE_TABLES.length === 0) return;  // TO-BE 아직 안 옴 — 다음 tick 대기
+    const first = TOBE_TABLES[0];
+    setSelected({ side: 'tobe', name: first.name, internalName: first.internalName });
+    didInitialSelectRef.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [hydrationTick]);
   // hydrate 된 데이터에 selected 가 존재하지 않으면 자동으로 첫 TOBE 로 reset.
   useEffect(() => {
     if (!initialSelection) return;
-    if (!selected) { setSelected(initialSelection); return; }
+    if (!selected) return;  // 위 effect 에서 처리
     const existsInTobe = selected.side === 'tobe' && TOBE_TABLES.some((t) => t.internalName === selected.internalName);
     const existsInAsis = selected.side === 'asis' && ASIS_TABLES.some((t) => t.name === selected.name);
     if (!existsInTobe && !existsInAsis) {
@@ -607,6 +685,12 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
 }) {
   const navigate = useNavigate();
   const [bindingOpen, setBindingOpen] = useState((bindingEdit?.sources ?? table.sources).length === 0);
+  const [bindingPulse, setBindingPulse] = useState(false);
+  const triggerBindingHighlight = () => {
+    setBindingOpen(true);
+    setBindingPulse(true);
+    window.setTimeout(() => setBindingPulse(false), 1500);
+  };
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [importMappingOpen, setImportMappingOpen] = useState(false);
   const [q, setQ] = useState('');
@@ -705,23 +789,26 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   const missingImports = bindingSources
     .map((s) => ASIS_TABLES.find((a) => a.name === s.table))
     .filter((a): a is AsisTable => !!a && !a.imported);
-  // TO-BE Target DB connection 가 site settings 에 채워져 있는지 검사
+  // TO-BE Target DB 가 Site Settings 에서 "configured" 상태인지 검사 — Site Settings 의
+  // 녹색 stage 와 동일 로직 (type/host/database/username 4 개 필드 모두 채워졌는지).
+  // tobeDbLocks 는 저장 시 자동 true 가 되어 신뢰할 수 없어 사용하지 않는다.
   const activeSite = useWorkspaceStore((s) => {
     const ap = s.projects.find((p) => p.id === s.activeProjectId);
     return ap ? (s.sites.find((st) => st.id === ap.siteId) ?? null) : null;
   });
   const tobeDb = activeSite ? activeSite.tobeDbByEnv?.[activeSite.environment] : undefined;
-  const tobeDbConfigured = !!tobeDb
+  const tobeDbConnected = !!tobeDb
     && !!tobeDb.type?.trim()
     && !!tobeDb.host?.trim()
+    && !!tobeDb.database?.trim()
     && !!tobeDb.username?.trim();
   const testDisabled =
     counts.unmapped > 0
     || bindingSources.length === 0
     || missingImports.length > 0
-    || !tobeDbConfigured;
+    || !tobeDbConnected;
   const testDisabledReason =
-    !tobeDbConfigured ? 'TO-BE Target DB connection 이 Site Settings 에 설정되어 있지 않습니다.'
+    !tobeDbConnected ? 'TO-BE Target DB connection 정보가 Site Settings 에 완전히 채워져 있지 않습니다. (Site 의 현재 stage 가 녹색이어야 합니다.)'
     : bindingSources.length === 0 ? 'AS-IS source 가 연결되어 있지 않습니다.'
     : missingImports.length > 0 ? `AS-IS extracted data 가 임포트되지 않았습니다: ${missingImports.map((a) => a.short).join(', ')}`
     : counts.unmapped > 0 ? `Unmapped 컬럼이 ${counts.unmapped}개 남아 있습니다.`
@@ -735,19 +822,49 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         <div style={styles.tableChip}>{table.name}</div>
         <div style={{ flex: 1 }} />
         <div style={styles.statusCounts}>
-          {counts.unmapped > 0 && <StatusBadge tone="queued">{counts.unmapped} unmapped</StatusBadge>}
-          {missingImports.length > 0 && (
-            <button
-              type="button"
-              onClick={() => navigate('/settings', { state: { highlightSide: 'asis-csv' } })}
-              title="Project Settings → AS-IS 의 CSV 카드로 이동합니다."
-              style={styles.csvMissingBtn}
-            >
-              <StatusBadge tone="warn">
-                {missingImports.length} CSV not imported →
-              </StatusBadge>
-            </button>
-          )}
+          {(() => {
+            // 우선순위 — 환경 설정부터 매핑 작업 순. 한 번에 하나씩만 표시.
+            if (!tobeDbConnected) {
+              return (
+                <button
+                  type="button"
+                  onClick={() => useUiStore.getState().requestOpenSiteSettings({ focus: 'tobe-db' })}
+                  title="Site Settings → TO-BE Target DB 카드를 엽니다."
+                  style={styles.csvMissingBtn}
+                >
+                  <StatusBadge tone="warn">TO-BE DB not configured →</StatusBadge>
+                </button>
+              );
+            }
+            if (bindingSources.length === 0) {
+              return (
+                <button
+                  type="button"
+                  onClick={triggerBindingHighlight}
+                  title="Table binding 패널을 엽니다."
+                  style={styles.csvMissingBtn}
+                >
+                  <StatusBadge tone="warn">AS-IS source not bound →</StatusBadge>
+                </button>
+              );
+            }
+            if (missingImports.length > 0) {
+              return (
+                <button
+                  type="button"
+                  onClick={() => useUiStore.getState().requestOpenSiteSettings({ focus: 'asis-csv' })}
+                  title="Site Settings → AS-IS CSV path 필드를 엽니다."
+                  style={styles.csvMissingBtn}
+                >
+                  <StatusBadge tone="warn">{missingImports.length} CSV not imported →</StatusBadge>
+                </button>
+              );
+            }
+            if (counts.unmapped > 0) {
+              return <StatusBadge tone="err">{counts.unmapped} unmapped</StatusBadge>;
+            }
+            return null;
+          })()}
         </div>
         <button
           style={(testDisabled || testStatus === 'running') ? styles.btnPrimaryDisabled : styles.btnPrimary}
@@ -770,7 +887,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         </div>
       )}
       <CollapsibleBinding
-        table={table} open={bindingOpen} onToggle={() => setBindingOpen((o) => !o)}
+        table={table} open={bindingOpen} pulse={bindingPulse} onToggle={() => setBindingOpen((o) => !o)}
         sources={bindingSources}
         onSourcesChange={(s) => { setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode }); }}
         compositionMode={bindingMode}
@@ -843,7 +960,14 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
                 return (
                   <tr
                     key={`${r.src}>${r.tgt}-${i}`}
-                    onClick={() => setActiveIdx(realIdx)}
+                    onClick={() => {
+                      if (inspectorOpen && realIdx === activeIdx) {
+                        setInspectorOpen(false);
+                      } else {
+                        setActiveIdx(realIdx);
+                        setInspectorOpen(true);
+                      }
+                    }}
                     style={{
                       background: isActive ? 'var(--navy-50)' : (i % 2 === 1 ? 'var(--zebra)' : 'var(--panel)'),
                       borderBottom: '1px solid var(--border)',
@@ -913,10 +1037,6 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
           </table>
         </div>
 
-        <InspectorRail
-          open={inspectorOpen}
-          onToggle={() => setInspectorOpen((o) => !o)}
-        />
         {inspectorOpen && (
           <Inspector
             active={active}
@@ -961,8 +1081,8 @@ function StatusFor({ row }: { row: MappingRow }) {
 
 // ── Collapsible binding ──────────────────────────────────────
 
-function CollapsibleBinding({ table, open, onToggle, sources, onSourcesChange, compositionMode, onCompositionModeChange }: {
-  table: TobeTable; open: boolean; onToggle: () => void;
+function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesChange, compositionMode, onCompositionModeChange }: {
+  table: TobeTable; open: boolean; pulse?: boolean; onToggle: () => void;
   sources: TobeTable['sources']; onSourcesChange: (s: TobeTable['sources']) => void;
   compositionMode: 'join' | 'union'; onCompositionModeChange: (m: 'join' | 'union') => void;
 }) {
@@ -1002,7 +1122,10 @@ function CollapsibleBinding({ table, open, onToggle, sources, onSourcesChange, c
     onSourcesChange(sources.map((s) => s.alias === alias ? { ...s, ...patch } : s));
 
   return (
-    <div style={styles.bindingWrap}>
+    <div style={{
+      ...styles.bindingWrap,
+      ...(pulse ? { boxShadow: 'inset 0 0 0 3px var(--green)', transition: 'box-shadow 200ms' } : {}),
+    }}>
       <div onClick={onToggle} style={styles.bindingHeader}>
         <span style={{ color: 'var(--text-4)', fontSize: 10, width: 10 }}>{open ? '▾' : '▸'}</span>
         <span style={styles.bindingLabel}>Table binding</span>
@@ -1455,6 +1578,8 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   const [userFnOpen, setUserFnOpen] = useState(false);
   const [javaCode, setJavaCode] = useState('');
   useEffect(() => {
+    // 같은 컬럼이면 effective rule 갱신으로 active 객체 reference 가 새로 만들어져도
+    // 편집 모드를 종료하지 않는다 — active.tgt 만 dep 로 사용.
     setEditingRule(false); setRuleError(null);
     const re = rowEdit;
     setSavedRule(re?.savedRule ?? null);
@@ -1462,7 +1587,8 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     const src = re?.savedSrc ?? null;
     setSavedSrc(src);
     setSavedSrcType(src ? src.map((s) => resolveSrcType(s, sources)) : null);
-  }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active?.tgt]);
   if (!active) return null;
   const initSrc: string[] = active.src === '—' ? [] : [active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src];
   const resolveType = (s: string) => resolveSrcType(s, sources);
@@ -1476,19 +1602,21 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     const srcCol = firstSrc.includes('.') ? firstSrc.slice(firstSrc.indexOf('.') + 1) : firstSrc;
     const srcT = resolveSrcType(firstSrc, sources);
     if (!srcT || srcT === '—' || active.tgtType === '—') return '';
-    return (srcT === active.tgtType ? srcCol : `CAST(${srcCol} AS ${active.tgtType})`).toUpperCase();
+    // AS-IS type 을 TO-BE dialect 로 정규화한 결과가 TO-BE 컬럼 type 과 같으면 단순 컬럼.
+    const translatedSrcT = translateTypeToTobe(srcT, TOBE_DIALECT);
+    const same = translatedSrcT.toUpperCase() === active.tgtType.toUpperCase();
+    return (same ? srcCol : `CAST(${srcCol} AS ${active.tgtType})`).toUpperCase();
   };
 
   const handleEdit = () => {
     const inferredStrategy = savedStrategy ?? (active.rule === 'null' ? 'null' : active.rule === 'default' ? 'default' : 'expression');
     setEditStrategy(inferredStrategy);
-    const initialAutoCast =
-      active.src !== '—' && active.tgt !== '—'
-      && active.srcType !== '—' && active.tgtType !== '—'
-      && active.srcType !== active.tgtType
-        ? `CAST(${active.src} AS ${active.tgtType})`
-        : '';
-    prevAutoCastRef.current = initialAutoCast.toUpperCase();
+    // 자동 CAST 생성 — savedSrc 우선, 없으면 active.sourceAlias.src.
+    // computeAutoCast 헬퍼를 그대로 써서 TO-BE dialect 변환표가 동일하게 적용됨.
+    const firstSrcForCast = (savedSrc && savedSrc.find((s) => s && s.trim() !== ''))
+      || (active.src !== '—' ? (active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src) : undefined);
+    const initialAutoCast = computeAutoCast(firstSrcForCast);
+    prevAutoCastRef.current = initialAutoCast;
     setEditValue((savedRule ?? initialAutoCast).toUpperCase());
     // Filter out stale alias references no longer present in current binding
     const rawSrc = savedSrc ?? initSrc;
@@ -1545,7 +1673,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   const displaySrcArr = (savedSrc ?? initSrc).filter((s) => s && s.trim() !== '');
   const displaySrcName = displaySrcArr.length === 0
     ? '(unassigned)'
-    : displaySrcArr.map((s) => s.slice(s.lastIndexOf('.') + 1)).join(' + ');
+    : displaySrcArr.join(' + ');  // alias.col 형태 그대로 (예: tr.TX_ID + em.EMP_NM)
   const handleClear = () => {
     setSavedSrc(null);
     setSavedSrcType(null);
@@ -1920,20 +2048,6 @@ function ImportMappingSpecModal({ onClose }: { onClose: () => void }) {
             }}
           >Import</button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-function InspectorRail({ open, onToggle }: { open: boolean; onToggle: () => void }) {
-  return (
-    <div
-      onClick={onToggle}
-      title={open ? 'Hide mapping detail' : 'Show mapping detail'}
-      style={styles.inspectorRail}
-    >
-      <div style={styles.inspectorRailLabel}>
-        {open ? '›' : '‹'} Mapping detail
       </div>
     </div>
   );
@@ -3006,6 +3120,14 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid var(--navy)', borderRadius: 4,
     fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
     whiteSpace: 'nowrap',
+  },
+  dialectChip: {
+    display: 'inline-flex', alignItems: 'center',
+    padding: '2px 8px', borderRadius: 3,
+    fontFamily: 'var(--mono)', fontSize: 10.5, fontWeight: 600,
+    color: 'var(--text-3)', background: 'var(--panel-2)',
+    border: '1px solid var(--border-strong)',
+    whiteSpace: 'nowrap', letterSpacing: 0.3,
   },
   csvMissingBtn: {
     background: 'transparent', border: 'none', padding: 0,
