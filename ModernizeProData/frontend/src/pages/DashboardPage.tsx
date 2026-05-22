@@ -136,7 +136,7 @@ function ProjectOnboarding({ siteName }: { siteName: string }) {
 
 /* ─── 3단계: 프로젝트 생성 직후 — DDL · 매핑 안내 ─────── */
 
-function MappingOnboarding({ project }: { project: Project }) {
+export function MappingOnboarding({ project }: { project: Project }) {
   const t = useT();
   const asisDone = project.tableCount > 0;
   const tobeDone = project.tobeTableCount > 0;

@@ -1,6 +1,7 @@
 package com.ksinfo.modernize_pro_data.common.config;
 
 import com.ksinfo.modernize_pro_data.coordinator.auth.JwtAuthFilter;
+import com.ksinfo.modernize_pro_data.coordinator.license.LicenseEnforcementFilter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -28,6 +29,7 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 public class SecurityConfig {
 
     private final JwtAuthFilter jwtAuthFilter;
+    private final LicenseEnforcementFilter licenseEnforcementFilter;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
@@ -41,7 +43,8 @@ public class SecurityConfig {
                         .requestMatchers("/ws/**").permitAll() // WebSocket handshake
                         .anyRequest().authenticated()
                 )
-                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterAfter(licenseEnforcementFilter, JwtAuthFilter.class);
 
         return http.build();
     }

@@ -79,8 +79,8 @@ export function actionToEventKey(action: string): string | null {
   if (a.includes('approval requested') || (a.includes('approval') && a.includes('request'))) return 'snapshot.pending';
   if (a === 'approved' || a.startsWith('approved ')) return 'snapshot.approved';
   if (a === 'rejected' || a.startsWith('rejected ')) return 'snapshot.rejected';
-  if (a.includes('cutover') && a.includes('start')) return 'cutover.started';
-  if (a.includes('cutover') && (a.includes('finish') || a.includes('complete'))) return 'cutover.finished';
   if (a.includes('run') && a.includes('fail')) return 'run.failed';
+  if (a.includes('run') && a.includes('start')) return 'run.started';
+  if (a.includes('run') && (a.includes('finish') || a.includes('complete'))) return 'run.finished';
   return null;
 }

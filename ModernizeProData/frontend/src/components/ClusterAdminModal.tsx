@@ -4,6 +4,7 @@ import { useUsersStore } from '../store/users';
 import { useWorkerNodesStore, type NodeStatus } from '../store/workerNodes';
 import { useAuthStore, roleLabel, type UserRole } from '../store/auth';
 import { ApiError } from '../api/client';
+import { usersApi } from '../api/users';
 import { useT, type TranslationKey } from '../i18n';
 
 interface Props {
@@ -76,6 +77,57 @@ function UsersTab() {
   const [submitting, setSubmitting] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
+  // Force logout (master 가 다른 user 의 활성 세션 강제 종료)
+  const [forceLogoutId, setForceLogoutId] = useState<string | null>(null);
+  const handleForceLogout = async (id: string, username: string) => {
+    if (!window.confirm(t('userMgmt.forceLogout.confirm', { name: username }))) return;
+    setForceLogoutId(id);
+    try {
+      await usersApi.forceLogout(id);
+      await loadUsers();
+    } catch (err) {
+      setError(formatApiError(err));
+    } finally {
+      setForceLogoutId(null);
+    }
+  };
+
+  // Reset password (master 가 다른 user 의 비번 강제 변경)
+  const [resetPwUserId, setResetPwUserId] = useState<string | null>(null);
+  const [resetPwValue, setResetPwValue] = useState('');
+  const [resetPwSaving, setResetPwSaving] = useState(false);
+  const [resetPwError, setResetPwError] = useState<string | null>(null);
+  const [resetPwSuccess, setResetPwSuccess] = useState<string | null>(null);
+  const resetPwTarget = users.find((u) => u.id === resetPwUserId) ?? null;
+
+  const closeResetPw = () => {
+    setResetPwUserId(null);
+    setResetPwValue('');
+    setResetPwError(null);
+    setResetPwSaving(false);
+  };
+
+  const handleResetPwSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetPwTarget) return;
+    const pw = resetPwValue.trim();
+    if (pw.length < 4) {
+      setResetPwError(t('userMgmt.resetPw.error.tooShort'));
+      return;
+    }
+    setResetPwSaving(true);
+    setResetPwError(null);
+    try {
+      await usersApi.resetPassword(resetPwTarget.id, pw);
+      setResetPwSuccess(t('userMgmt.resetPw.success', { name: resetPwTarget.username }));
+      closeResetPw();
+      setTimeout(() => setResetPwSuccess(null), 2500);
+    } catch (err) {
+      setResetPwError(formatApiError(err));
+      setResetPwSaving(false);
+    }
+  };
+
   // 탭 진입 시 최신 사용자 목록 fetch.
   useEffect(() => {
     void loadUsers();
@@ -147,26 +199,31 @@ function UsersTab() {
 
   return (
     <>
-      <div style={styles.toolbar}>
-        <div style={{ flex: 1 }} />
-        {!addOpen ? (
+      {!addOpen && (
+        <div style={styles.toolbar}>
+          <div style={{ flex: 1 }} />
           <button onClick={() => setAddOpen(true)} style={styles.btnPrimary}>
             {t('userMgmt.addUser')}
           </button>
-        ) : (
-          <button onClick={() => { setAddOpen(false); resetAddForm(); }} style={styles.btnGhost}>
-            {t('userMgmt.cancelAdd')}
-          </button>
-        )}
-      </div>
+        </div>
+      )}
 
       {addOpen && (
-        <form onSubmit={handleAdd} style={styles.addForm}>
-          <div style={styles.addRow3}>
-            <Field label={t('userMgmt.add.username')}>
-              <input value={newName} onChange={(e) => { setNewName(e.target.value); setError(null); }} style={styles.input} autoFocus required />
-            </Field>
-            <Field label={t('userMgmt.add.role')}>
+        <form onSubmit={handleAdd} style={styles.addCard}>
+          <div style={styles.addCardHeader}>{t('userMgmt.addUser')}</div>
+          <div style={styles.addCardBody}>
+            <div style={styles.formRow}>
+              <label style={styles.formRowLabel}>{t('userMgmt.add.username')}</label>
+              <input
+                value={newName}
+                onChange={(e) => { setNewName(e.target.value); setError(null); }}
+                style={styles.input}
+                autoFocus
+                required
+              />
+            </div>
+            <div style={styles.formRow}>
+              <label style={styles.formRowLabel}>{t('userMgmt.add.role')}</label>
               <select value={newRole} onChange={(e) => setNewRole(e.target.value as UserRole)} style={styles.input}>
                 {ROLE_OPTIONS.map((r) => (
                   <option key={r} value={r} disabled={r === 'master' && hasMaster}>
@@ -174,16 +231,30 @@ function UsersTab() {
                   </option>
                 ))}
               </select>
-            </Field>
-            <Field label={t('userMgmt.add.password')} hint={t('userMgmt.add.passwordHint')}>
-              <input type="text" value={newPw} onChange={(e) => setNewPw(e.target.value)} style={{ ...styles.input, fontFamily: 'var(--mono)' }} placeholder="••••••••" required />
-            </Field>
-          </div>
-          {error && <div style={styles.errorMsg}>{error}</div>}
-          <div style={styles.addActions}>
-            <button type="submit" style={{ ...styles.btnPrimary, ...(canSubmitAdd ? {} : styles.btnDisabled) }} disabled={!canSubmitAdd}>
-              {t('userMgmt.add.submit')}
-            </button>
+            </div>
+            <div style={styles.formRow}>
+              <label style={styles.formRowLabel}>{t('userMgmt.add.password')}</label>
+              <div style={styles.formRowControl}>
+                <input
+                  type="text"
+                  value={newPw}
+                  onChange={(e) => setNewPw(e.target.value)}
+                  style={{ ...styles.input, fontFamily: 'var(--mono)' }}
+                  placeholder="••••••••"
+                  required
+                />
+                <div style={styles.formRowHint}>{t('userMgmt.add.passwordHint')}</div>
+              </div>
+            </div>
+            {error && <div style={styles.errorMsg}>{error}</div>}
+            <div style={styles.addActions}>
+              <button type="button" onClick={() => { setAddOpen(false); resetAddForm(); }} style={styles.btnGhost}>
+                {t('userMgmt.cancelAdd')}
+              </button>
+              <button type="submit" style={{ ...styles.btnPrimary, ...(canSubmitAdd ? {} : styles.btnDisabled) }} disabled={!canSubmitAdd}>
+                {t('userMgmt.add.submit')}
+              </button>
+            </div>
           </div>
         </form>
       )}
@@ -269,8 +340,25 @@ function UsersTab() {
                     </td>
                     <td style={styles.td}>
                       <div style={{ display: 'flex', gap: 4 }}>
-                        <button style={{ ...styles.miniBtn, opacity: 0.55, cursor: 'not-allowed' }} disabled title={t('userMgmt.resetNotImpl')}>
+                        <button
+                          onClick={() => { setResetPwUserId(u.id); setResetPwValue(''); setResetPwError(null); }}
+                          disabled={isSelf}
+                          title={isSelf ? t('userMgmt.resetPw.selfHint') : t('userMgmt.resetPassword')}
+                          style={{ ...styles.miniBtn, ...(isSelf ? styles.btnDisabled : {}) }}
+                        >
                           {t('userMgmt.resetPassword')}
+                        </button>
+                        <button
+                          onClick={() => handleForceLogout(u.id, u.username)}
+                          disabled={isSelf || !u.hasActiveSession || forceLogoutId === u.id}
+                          title={
+                            isSelf ? t('userMgmt.forceLogout.selfHint')
+                            : !u.hasActiveSession ? t('userMgmt.forceLogout.noSession')
+                            : t('userMgmt.forceLogout')
+                          }
+                          style={{ ...styles.miniBtn, ...((isSelf || !u.hasActiveSession) ? styles.btnDisabled : {}) }}
+                        >
+                          {forceLogoutId === u.id ? '…' : t('userMgmt.forceLogout')}
                         </button>
                         <button
                           onClick={() => setConfirmDeleteId(u.id)}
@@ -289,6 +377,54 @@ function UsersTab() {
           </tbody>
         </table>
       </div>
+
+      {/* Reset password 모달 — master 가 다른 user 의 비번 강제 변경 */}
+      <Modal
+        open={!!resetPwUserId}
+        onClose={closeResetPw}
+        width={420}
+        title={t('userMgmt.resetPw.title')}
+      >
+        {resetPwTarget && (
+          <form onSubmit={handleResetPwSubmit}>
+            <div style={styles.resetPwTarget}>
+              <span style={styles.resetPwTargetLabel}>{t('userMgmt.resetPw.target')}</span>
+              <span style={styles.resetPwTargetName}>{resetPwTarget.username}</span>
+              <span style={styles.resetPwTargetRole}>{roleLabel(resetPwTarget.role)}</span>
+            </div>
+            <div style={styles.resetPwWarn}>{t('userMgmt.resetPw.warn')}</div>
+            <label style={styles.resetPwField}>
+              <span style={styles.fieldLabel}>{t('userMgmt.resetPw.newPassword')}</span>
+              <input
+                type="text"
+                value={resetPwValue}
+                onChange={(e) => { setResetPwValue(e.target.value); setResetPwError(null); }}
+                style={{ ...styles.input, fontFamily: 'var(--mono)' }}
+                placeholder="••••••••"
+                autoFocus
+                disabled={resetPwSaving}
+              />
+            </label>
+            {resetPwError && <div style={styles.errorMsg}>{resetPwError}</div>}
+            <div style={styles.addActions}>
+              <button type="button" onClick={closeResetPw} style={styles.btnGhost} disabled={resetPwSaving}>
+                {t('common.cancel')}
+              </button>
+              <button
+                type="submit"
+                disabled={resetPwSaving || resetPwValue.trim().length < 4}
+                style={{ ...styles.btnPrimary, ...((resetPwSaving || resetPwValue.trim().length < 4) ? styles.btnDisabled : {}) }}
+              >
+                {resetPwSaving ? t('userMgmt.resetPw.saving') : t('userMgmt.resetPw.submit')}
+              </button>
+            </div>
+          </form>
+        )}
+      </Modal>
+
+      {resetPwSuccess && (
+        <div style={styles.resetPwToast}>{resetPwSuccess}</div>
+      )}
     </>
   );
 }
@@ -506,6 +642,37 @@ const styles: Record<string, React.CSSProperties> = {
 
   toolbar: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 },
 
+  addCard: {
+    background: 'var(--panel)',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 5,
+    marginBottom: 12,
+    overflow: 'hidden',
+  },
+  addCardHeader: {
+    padding: '10px 16px',
+    background: 'var(--panel-2)',
+    color: 'var(--text)',
+    fontSize: 12.5,
+    fontWeight: 600,
+    borderBottom: '1px solid var(--border)',
+  },
+  addCardBody: { padding: '14px 16px 12px' },
+  formRow: {
+    display: 'grid',
+    gridTemplateColumns: '120px 1fr',
+    alignItems: 'center',
+    gap: 14,
+    padding: '8px 0',
+    borderBottom: '1px dashed var(--border)',
+  },
+  formRowLabel: {
+    fontSize: 11.5,
+    fontWeight: 500,
+    color: 'var(--text)',
+  },
+  formRowControl: { display: 'flex', flexDirection: 'column', gap: 4 },
+  formRowHint: { fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
   addForm: {
     background: 'var(--panel-2)',
     border: '1px solid var(--border)',
@@ -514,6 +681,7 @@ const styles: Record<string, React.CSSProperties> = {
     marginBottom: 12,
   },
   addRow3: { display: 'grid', gridTemplateColumns: '1fr 140px 1fr', gap: 10, alignItems: 'end' },
+  addRow2: { display: 'grid', gridTemplateColumns: '160px 1fr', gap: 12, alignItems: 'end', marginTop: 12 },
   field: { display: 'flex', flexDirection: 'column', gap: 4 },
   fieldLabel: { fontSize: 11.5, fontWeight: 600, color: 'var(--text)' },
   fieldHint: { fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
@@ -618,6 +786,35 @@ const styles: Record<string, React.CSSProperties> = {
     whiteSpace: 'nowrap',
   },
   btnDisabled: { opacity: 0.5, cursor: 'not-allowed' },
+
+  /* Reset password 모달 */
+  resetPwTarget: {
+    display: 'flex', alignItems: 'center', gap: 8,
+    padding: '8px 10px', background: 'var(--panel-2)',
+    border: '1px solid var(--border)', borderRadius: 4,
+    marginBottom: 10,
+  },
+  resetPwTargetLabel: { fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)', textTransform: 'uppercase', letterSpacing: 0.5 },
+  resetPwTargetName: { fontSize: 13, fontWeight: 700, color: 'var(--text)' },
+  resetPwTargetRole: { fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
+  resetPwWarn: {
+    padding: '8px 10px',
+    background: 'var(--amber-50)',
+    border: '1px solid var(--amber)',
+    color: 'var(--amber)',
+    borderRadius: 4,
+    fontSize: 11.5,
+    marginBottom: 12,
+    lineHeight: 1.5,
+  },
+  resetPwField: { display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 6 },
+  resetPwToast: {
+    position: 'fixed', bottom: 24, right: 24, zIndex: 9999,
+    padding: '10px 16px',
+    background: 'var(--green)', color: '#fff',
+    borderRadius: 5, fontSize: 12, fontWeight: 600,
+    boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+  },
   miniBtn: {
     padding: '3px 9px',
     fontSize: 11,

@@ -60,6 +60,7 @@ const PROJECT_ENV_LABEL: Record<ProjectEnvironment, TranslationKey> = {
 };
 
 const DB_TYPES = ['PostgreSQL', 'Oracle', 'MySQL', 'SQL Server', 'Db2'];
+const ASIS_DB_TYPES = ['Oracle', 'DB2', 'Mainframe DB2', 'SQL Server', 'PostgreSQL', 'MySQL', 'Other'];
 
 /**
  * Site settings — name·envs·encoding·notes·운영 단계·TO-BE DB 편집 + 삭제.
@@ -83,7 +84,8 @@ export function SiteSettingsModal({ open, onClose }: Props) {
   const [asisEncoding, setAsisEncoding] = useState<SourceEncoding>('shift_jis');
   const [tobeEncoding, setTobeEncoding] = useState<SourceEncoding>('utf-8');
   const [csvPath, setCsvPath] = useState('');
-  const [notes, setNotes] = useState('');
+  const [asisDbType, setAsisDbType] = useState('');
+  const [asisDbVersion, setAsisDbVersion] = useState('');
   const [stage, setStage] = useState<ProjectEnvironment>('dev');
   const [tobeDbByEnv, setTobeDbByEnv] = useState<TobeDbByEnv>({});
   const [tobeDbLocks, setTobeDbLocks] = useState<TobeDbLocks>({});
@@ -101,7 +103,8 @@ export function SiteSettingsModal({ open, onClose }: Props) {
     setAsisEncoding(site.asisEncoding);
     setTobeEncoding(site.tobeEncoding);
     setCsvPath(site.csvPath ?? '');
-    setNotes(site.notes ?? '');
+    setAsisDbType(site.asisDbType ?? '');
+    setAsisDbVersion(site.asisDbVersion ?? '');
     setStage(site.environment);
     setTobeDbByEnv({ ...site.tobeDbByEnv });
     setTobeDbLocks({ ...site.tobeDbLocks });
@@ -186,7 +189,8 @@ export function SiteSettingsModal({ open, onClose }: Props) {
     asisEncoding !== site.asisEncoding ||
     tobeEncoding !== site.tobeEncoding ||
     csvPath !== (site.csvPath ?? '') ||
-    (notes || '') !== (site.notes ?? '') ||
+    asisDbType !== (site.asisDbType ?? '') ||
+    asisDbVersion !== (site.asisDbVersion ?? '') ||
     stage !== site.environment ||
     JSON.stringify(tobeDbByEnv) !== JSON.stringify(site.tobeDbByEnv) ||
     JSON.stringify(tobeDbLocks) !== JSON.stringify(site.tobeDbLocks);
@@ -228,7 +232,8 @@ export function SiteSettingsModal({ open, onClose }: Props) {
       asisEncoding,
       tobeEncoding,
       csvPath: csvPath.trim(),
-      notes: notes.trim() || undefined,
+      asisDbType: asisDbType.trim(),
+      asisDbVersion: asisDbVersion.trim(),
       environment: stage,
       tobeDbByEnv: finalByEnv,
       tobeDbLocks: finalLocks,
@@ -345,17 +350,25 @@ export function SiteSettingsModal({ open, onClose }: Props) {
         </select>
       </Field>
 
+      <div style={styles.twoCol}>
+        <Field label={t('siteSettings.asisDbType')}>
+          <select value={asisDbType} onChange={(e) => setAsisDbType(e.target.value)} style={styles.input}>
+            <option value="">— {t('siteSettings.asisDbTypePlaceholder')} —</option>
+            {ASIS_DB_TYPES.map((d) => <option key={d}>{d}</option>)}
+          </select>
+        </Field>
+        <Field label={t('siteSettings.asisDbVersion')}>
+          <input
+            value={asisDbVersion}
+            onChange={(e) => setAsisDbVersion(e.target.value)}
+            placeholder={t('siteSettings.asisDbVersionPlaceholder')}
+            style={styles.input}
+          />
+        </Field>
+      </div>
+
       <Field label={t('siteSettings.csvPath')}>
         <CsvPathField value={csvPath} onChange={setCsvPath} />
-      </Field>
-
-      <Field label={t('siteSettings.notes')}>
-        <textarea
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          style={{ ...styles.input, resize: 'vertical', minHeight: 56, fontFamily: 'var(--mono)' }}
-          rows={2}
-        />
       </Field>
 
       <Field label={t('siteSettings.stage')}>

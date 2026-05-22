@@ -224,7 +224,7 @@ sockjs-client + stompjs          WebSocket (STOMP)
   │  │  - 네이티브 창 + React UI (webview 내장)     │ │
   │  │  - Spring Boot (같은 프로세스)               │ │
   │  │  - DuckDB (임베디드)                         │ │
-  │  │  - 메타 DB (H2 또는 SQLite)                  │ │
+  │  │  - 메타 DB (PostgreSQL 18, 동봉 설치)          │ │
   │  │  - 스케줄러 (Quartz, 임베디드)               │ │
   │  │  - .lic 검증                                 │ │
   │  │                                              │ │
@@ -260,7 +260,7 @@ sockjs-client + stompjs          WebSocket (STOMP)
 | **Worker** | worker 역할만: 추출·변환·적재·검증 | LAN PC N-1대 |
 | **DuckDB** | 변환·검증 SQL 엔진 | Coordinator + Worker 모두 임베디드 |
 | **스케줄러 (Quartz)** | 예약 실행 (일회성·반복), 작업 시간 트리거 | Coordinator 안 임베디드 |
-| **메타 DB** | 매핑 정의·audit log·사용자 정보·스케줄·알림 | Coordinator 안 (H2 또는 SQLite) |
+| **메타 DB** | 매핑 정의·audit log·사용자 정보·스케줄 | Coordinator 가 동봉 설치하는 PostgreSQL 18 |
 | **AS-IS CSV** | 입력 데이터 | 각 PC 디스크 또는 공유 폴더 |
 | **Parquet (임시)** | DuckDB 변환 결과, 적재 후 삭제 | 각 Worker 디스크 |
 | **TO-BE RDBMS** | 최종 적재 대상 | 사이트별 (1차: PostgreSQL) |
@@ -269,12 +269,11 @@ sockjs-client + stompjs          WebSocket (STOMP)
 
 **앱 내부 (UI ↔ 로컬 백엔드):**
 - React UI ↔ 같은 프로세스의 Spring Boot (localhost)
-- REST + WebSocket
-- WebSocket 채널: 실시간 진행상황, Lock 변경, 알림
+- REST 가 주. WebSocket endpoint (`/ws`) 는 설치되어 있으나 PoC 1차에선 미사용 — 알림·진행상황은 10초 polling.
 
 **Coordinator ↔ Worker (LAN):**
-- REST API: Worker 등록·heartbeat, 작업 큐 polling, 결과 보고, 매핑·설정 조회
-- WebSocket: 진행상황 push, Lock 변경, 알림 push
+- REST API: Worker 등록·heartbeat, 작업 큐 polling, 결과 보고, 매핑·설정 조회.
+- WebSocket: PoC 2차에 실시간 진행상황 push 용으로 도입 예정.
 
 **Worker ↔ DB:**
 - AS-IS: 파일 시스템 read (CSV)
@@ -282,43 +281,127 @@ sockjs-client + stompjs          WebSocket (STOMP)
 
 ### 4.4 인증·권한
 
-**라이선스 (.lic):**
-- Coordinator 만 사용. Worker 는 .lic 없음
-- 본사 발급, Ed25519 서명
-- Coordinator 기동 시 검증
-- 사이트 ID 바인딩
+#### 4.4.1 라이선스 (.lic)
+- Coordinator 만 사용. Worker 는 .lic 없음.
+- 본사 발급, Ed25519 서명, 사이트 ID 바인딩.
+- Coordinator 기동 시 검증.
 
-**사용자 인증:**
-- Coordinator (master) 에서 ID·이름·비밀번호·역할 발급
-- ID 만료일 지정 가능 (선택, master 가 연장 가능)
-- 로그인 시 JWT 토큰 발급 (예: 8시간 유효)
-- 매 요청에 `Authorization: Bearer <token>`
+#### 4.4.2 JWT — 한 계정 = 한 활성 세션
+- 알고리즘 HS512, 기본 8시간 만료 (`modernize.jwt.expiration-hours`).
+- claims: `sub` (username), `role` (master/admin/viewer), `sid` (활성 세션 UUID), `iat`, `exp`.
+- `sid` 는 `users.current_session_id` 와 매치되어야 인증 유효. 다른 곳에서 새 로그인하면 sid 가 갱신돼 이전 토큰은 자동 무효.
+- 매 요청에 `Authorization: Bearer <token>`.
 
-**역할:**
+#### 4.4.3 역할
 
 | 역할 | 권한 |
 |---|---|
-| master | 전체 관리. 사용자 생성·삭제·연장, 라이선스, 매핑 관리, 실행, 모든 데이터 조회 |
+| master | 전체 관리. 사용자 생성·삭제, 라이선스, 매핑 관리, 실행, 모든 데이터 조회, 다른 사용자 세션 강제 종료 |
 | admin | 매핑 작성·실행, 격리 처리, 데이터 조회. 사용자 관리 권한 없음 |
 | viewer | 조회만 (매핑·진행·로그) |
 
 위치(Coordinator/Worker) 와 무관 — 권한 등급. master 사용자가 Worker 자리에서 로그인해도 동일한 master 권한.
 
-**Worker 등록:**
-- Worker 앱 기동 시 Coordinator URL 로 자동 등록 요청
-- Coordinator 가 워커 등록 토큰 발급 (사용자 JWT 와 별도)
-- 매 호출에 토큰 사용
+#### 4.4.4 로그인 정책 — confirm-to-evict
 
-**ID → 토큰 흐름:**
+한 계정으로 두 곳에서 동시 로그인할 수 없다. 두 번째 로그인 시도 시 backend 가 사용자에게 확인을 요청한다.
+
+**정상 흐름:**
 ```
-1. master 가 Coordinator 에서 ID·비번·역할·만료일 생성
-2. 사용자가 Worker PC 의 ModernizeProData.exe 실행
-3. 앱 창에서 ID·비번 입력 → 로그인 시도
-4. Coordinator 가 검증 (비번 OK + ID 만료 안 됨)
-5. JWT 토큰 발급 (8시간 유효)
-6. 토큰으로 UI 사용
-7. 토큰 만료 시 재로그인 또는 자동 갱신
+1. 사용자가 ID·비번 입력 → POST /api/v1/auth/login
+2. Coordinator 가 BCrypt 검증
+3. 활성 세션 없으면 새 sid (UUID) 발급 + JWT 반환 + LOGIN audit
+4. 클라이언트가 토큰을 localStorage 에 저장
 ```
+
+**충돌 흐름:**
+```
+1. 사용자가 다른 PC 에서 같은 계정으로 로그인 시도
+2. Coordinator 가 users.current_session_expires_at 가 미래임을 발견
+3. 409 AUTH_SESSION_ACTIVE_ELSEWHERE 응답 + LOGIN_REJECTED audit
+4. 프론트가 confirm 카드 표시 — "끊고 로그인 / 취소"
+5. "끊고 로그인" 선택 시 POST /api/v1/auth/force-self-logout (비번 재인증)
+   → 다른 곳 세션 무효화 + FORCE_LOGOUT_SELF audit
+6. 프론트가 자동으로 login 재시도 → 성공
+```
+
+기존 PC 에서 로그아웃하지 않고 브라우저를 닫아도 다른 PC 에서 명시적 확인으로 풀 수 있다.
+
+#### 4.4.5 토큰 검증 — JwtAuthFilter
+
+매 요청마다:
+1. `Authorization: Bearer` 헤더 파싱 + 서명 검증.
+2. `findByUsername(sub)` 으로 사용자 조회.
+3. **token.sid ≠ user.current_session_id** 면 명시적 `401` + `{code: AUTH_SESSION_INVALIDATED}` 응답으로 필터 체인 중단.
+4. 일치하면 SecurityContext 에 인증 주입 후 통과.
+
+프론트의 axios interceptor 가 401 을 받으면 `useAuthStore.logout()` 을 호출 → `ProtectedRoute` 가 `/login` 으로 리다이렉트. 최악의 지연 = AppShell polling 주기 (10초).
+
+#### 4.4.6 로그아웃 종류
+
+| 엔드포인트 | 누가 | 효과 | audit |
+|---|---|---|---|
+| `POST /api/v1/auth/logout` | 본인 (토큰 보유) | 자기 세션 무효화 | `LOGOUT` |
+| `POST /api/v1/auth/force-self-logout` | 본인 (비번 재인증) | 자기 세션 무효화 — 다른 곳에서 로그인 중일 때 | `FORCE_LOGOUT_SELF` |
+| `POST /api/v1/users/{id}/force-logout` | master | 대상 사용자의 활성 세션 강제 종료 (도난·긴급 시) | `FORCE_LOGOUT` (actor 기록, target 은 details) |
+
+#### 4.4.7 비밀번호 변경
+
+| 엔드포인트 | 누가 | 비고 |
+|---|---|---|
+| `POST /api/v1/users/me/password` | 본인 | 현재 비번 + 새 비번. 동일 비번 거부. 최소 4자 |
+| `POST /api/v1/users/{id}/password` | master | 대상 사용자 비번 강제 재설정. 대상의 활성 세션도 함께 무효화 |
+
+#### 4.4.8 Worker 등록
+- Worker 앱 기동 시 Coordinator URL 로 자동 등록 요청.
+- Coordinator 가 워커 등록 토큰 발급 (사용자 JWT 와 별도).
+- 매 호출에 토큰 사용.
+
+#### 4.4.9 Audit log
+인증 관련 모든 이벤트가 `audit_log` 테이블에 기록 (site_id / project_id 는 NULL).
+- `LOGIN`, `LOGOUT`, `LOGIN_REJECTED`, `FORCE_LOGOUT_SELF`, `FORCE_LOGOUT`.
+
+#### 4.4.10 의도적 미지원
+- WebSocket 푸시로 즉시 강제 로그아웃 — polling 으로 충분.
+- Idle timeout (N분 무활동 자동 로그아웃) — 고객 요구 시.
+- Refresh token — 8시간 만료면 PoC 단계에는 충분.
+- Token blacklist — `sid` 비교로 자동 무효화되므로 불필요.
+
+### 4.5 도메인 모델 — Site / Project
+
+**Site (한 고객사의 한 운영 환경 단위)**
+
+| 필드 | 의미 |
+|---|---|
+| `name` | 사이트 이름 (unique) |
+| `asisEnv` / `tobeEnv` | AS-IS / TO-BE 환경 라벨 (mainframe / midrange / cloud / on-prem / other) |
+| `asisEncoding` / `tobeEncoding` | 인코딩 (shift_jis / euc-jp / utf-8 / ebcdic) |
+| `csvPath` | AS-IS CSV 디렉터리 경로 |
+| `asisDbType` / `asisDbVersion` | AS-IS 추출 원본 DB 정보 (표시용 — 도구는 외부 DB 직접 접속 X) |
+| `environment` | 현재 활성 운영 단계 (dev / test / staging / production) |
+| `tobeDbByEnv` | 단계별 TO-BE DB 접속 정보 (jsonb) |
+| `tobeDbLocks` | 단계별 lock 상태 (저장 시 자동 lock) |
+
+**Site Settings 의 2-step lock**
+- per-stage **DB lock**: 단계별 TO-BE DB 입력 잠금. 자동 또는 master 토글.
+- site-wide **Edit lock**: 사이트 전체 편집 잠금. Save 는 site lock 상태에서만 허용. site lock 가드 — 사이트 이름 비어있거나 현재 stage 의 DB lock 풀려있으면 거부.
+- 저장 시 데이터 있는 모든 stage 의 DB lock 이 자동 `true` 로 강제 — 다시 모달 열면 모든 DB stage 가 lock 상태로 시작.
+
+**Project (Site 안의 이행 단위)**
+
+| 필드 | 의미 |
+|---|---|
+| `name` | 프로젝트 이름 (site 안 unique) |
+| `phase` | 9단계 phase (§ 1.1 참조) |
+| `assignee` | **개발/매핑 담당** — Site Overview 의 dropdown 으로 지정 |
+| `executionAssignee` | **실행(run) 담당** — Execution Overview 의 dropdown 으로 지정. assignee 와 독립 |
+| `ddlFiles` | AS-IS / TO-BE DDL 파일 메타 |
+| `cutover` | cutover 실행 메타 (시작·중단·완료) |
+| `runStatus` | test / rehearsal / cutover 의 sub-status |
+
+**Read-only project**
+- `master` 가 아닌 worker 가 본인 `assignee` 가 아닌 project 를 열면 read-only.
+- 사이드바 project row 에 자물쇠 chip + dim, 페이지 상단 amber banner, 페이지 내부의 모든 변경 액션 (save / phase change / DDL import / snapshot 등) disabled.
 
 ---
 
@@ -361,8 +444,12 @@ sockjs-client + stompjs          WebSocket (STOMP)
 ### 5.3 단계별 상세
 
 #### 5.3.1 입력 수령
-- 운영팀이 AS-IS 시스템에서 추출한 데이터를 폐쇄망 안 디스크 (Worker 디스크 또는 공유 폴더) 에 둠
-- 도구는 운영 DB 직접 접속 안 함
+- 운영팀이 AS-IS 시스템에서 추출한 데이터를 폐쇄망 안 디스크 (Worker 디스크 또는 공유 폴더) 에 둠. 도구는 운영 DB 직접 접속 안 함.
+- **Source Reader SPI** 로 입력 형식 추상화 — 자세한 구현은 ONBOARDING § 7 참조:
+  - CSV — DuckDB `read_csv` 로 그 자리에서 쿼리. Shift-JIS / EUC-JP / UTF-8 은 `encodings` extension.
+  - EBCDIC (IBM037 / IBM930 / JEF / KEIS) — 직접 COMP-3 unpack.
+  - FixedWidth — column offset 기반 파싱.
+- Site 의 `asisDbType` / `asisDbVersion` 으로 어느 운영 DB 에서 나온 CSV 인지 메타정보 표시.
 
 #### 5.3.2 전처리 (선택적)
 
@@ -374,11 +461,15 @@ sockjs-client + stompjs          WebSocket (STOMP)
 | 비표준 인코딩 (EBCDIC variant — IBM037/IBM930/JEF/KEIS) | Java Charset 으로 변환 |
 | Binary 필드 (COMP/PACKED/ZONED) | Java parser 로 numeric 변환 |
 
-#### 5.3.3 변환 (DuckDB SQL)
+#### 5.3.3 변환 (DuckDB SQL + Rule Engine)
 
-- 매핑 정의 = DuckDB SQL (단순 1:1 도, 복잡 N:N 도 같은 형식)
-- DuckDB 가 CSV 를 그 자리에서 쿼리 (인코딩 옵션 사용)
-- 결과를 항상 Parquet 으로 출력
+- 매핑 정의 = DuckDB SQL. DuckDB 가 CSV 를 그 자리에서 쿼리 (인코딩 옵션 사용). 결과를 항상 Parquet 으로 출력.
+- **처리 순서 (한 SQL 안)**: JOIN → transform → Quarantine. Validation track 은 transform 과 병렬.
+- **Rule Engine 3-tier ladder** (자세한 정의는 ONBOARDING § 4):
+  - Tier 1 — 타입 기반 자동 매핑 (Type matrix).
+  - Tier 2 — strategy library (2a 단순 전략 / 2b 복합 전략).
+  - Tier 3 — 자유 SQL (`custom_expr`). PoC 2차로 deferred.
+- Snapshot 이 `compiled_expr` 를 동결 — 같은 입력 → 같은 결과 재현 보장.
 
 ```sql
 COPY (
@@ -388,14 +479,18 @@ COPY (
 ) TO 'output.parquet' (FORMAT PARQUET);
 ```
 
-#### 5.3.4 적재 (Java + JDBC)
+#### 5.3.4 적재 (Loader Adapter SPI)
 
-- Java 가 Parquet 읽어 TO-BE 에 COPY FROM (binary)
-- Target 인코딩 처리:
-  - TO-BE = UTF-8 → 그대로
-  - TO-BE = SJIS → JDBC `client_encoding` 또는 DB encoding 설정으로 자동 변환
-- Spring Batch chunk-oriented (예: 10000 row 단위 commit)
-- 적재 전 인덱스 drop / 후 재생성 (속도)
+- Java 가 Parquet 읽어 TO-BE 로 적재. **Loader Adapter SPI** 가 driverId 별로 어댑터 선택 (자세한 구현은 ONBOARDING § 8):
+  - PostgreSQL — `PgCopyManager` (COPY FROM, binary)
+  - Oracle — OCI bulk insert
+  - MySQL — JDBC `rewriteBatchedStatements`
+  - SQL Server — `SqlServerBulkCopy`
+  - 그 외 — JDBC batch fallback
+- JDBC 드라이버 JAR 는 `data/drivers/` 에 둠. 폐쇄망이라 본사가 USB 로 전달 → 도구가 동적 로드.
+- Target 인코딩 처리는 어댑터 책임 (PG = `client_encoding`, Oracle = NLS_LANG 등).
+- Spring Batch chunk-oriented commit (예: 10000 row 단위).
+- 적재 전 인덱스 drop / 후 재생성 — PG COPY 한정 최적화. 다른 어댑터는 자체 전략.
 
 #### 5.3.5 검증 (DuckDB cross-source)
 
@@ -422,9 +517,10 @@ WHERE a.amount <> b.amount;
 
 #### 5.3.6 격리 (Quarantine)
 
-- 검증 실패 row 를 Coordinator 메타 DB 의 quarantine 테이블에 보관
-- UI 에서 운영자 확인
-- 매핑 수정 → 재변환·재적재·재검증 흐름
+- 검증 실패 row 를 Coordinator 메타 DB 의 `run_quarantine` 테이블에 보관.
+- UI 에서 운영자 확인.
+- 매핑 수정 → 재변환·재적재·재검증 흐름.
+- 파이프라인의 두 checkpoint (CP1: transform 후, CP2: 검증 후) 기준으로 부분 재실행 가능. restart matrix 는 ONBOARDING § 2 참조.
 
 ### 5.4 인코딩 처리 정리
 
@@ -468,26 +564,23 @@ WHERE a.amount <> b.amount;
 - 필드 변환 옵션 (COMP → Numeric 등)
 
 **Lock 기능:**
-- 자동 lock — 매핑 편집 시 해당 테이블 자동 lock (동시 편집 방지). admin·master 만 발생
-- 관리 lock (master 전용):
-  - 테이블 단위 명시 lock
-  - 업무 단위 명시 lock (여러 테이블 한 번에)
+- PoC 1차 현재 적용된 lock 은 § 4.5 의 Site Settings 2-step lock (per-stage DB lock + site-wide edit lock) 뿐. 매핑 테이블 단위 lock 은 PoC 2차 (multi-user 매핑 협업 단계) 에 도입 예정.
 
 **스냅샷 (버전 관리):**
-- 생성: master · admin
+- 생성: master · admin (mapping snapshot / cutover snapshot 두 종)
 - Rollback: master · admin
 - Approve (공식 승인): master 만
+- Cutover snapshot 은 production 환경에서만 생성 가능 (§ 1.3 참조)
 
 **권한 요약:**
 
 | 작업 | master | admin | viewer |
 |---|---|---|---|
 | 매핑 CRUD | ✓ | ✓ | 조회만 |
-| 자동 lock | ✓ | ✓ | — |
-| 관리 lock (테이블/업무) | ✓ | × | × |
 | 스냅샷 생성 | ✓ | ✓ | — |
 | 스냅샷 rollback | ✓ | ✓ | — |
 | 스냅샷 approve | ✓ | × | × |
+| 매핑 협업 lock | (PoC 2차) | (PoC 2차) | — |
 
 ### 6.2 Run 실행 관리
 
@@ -505,10 +598,11 @@ Run 모드:
 
 ### 6.3 진행 모니터링
 
-- 실시간 진행 (WebSocket push)
+- AppShell 의 주기적 polling (10초) 으로 site / project / snapshot / audit 동기화. PoC 1차에는 WebSocket push 미사용.
 - Worker 상태 (alive / busy / idle / down)
 - 테이블별 진행 (대기 / 변환 / 적재 / 검증 / 완료 / 실패)
 - 전체 통계 (총 row, 처리 row, 속도, ETA)
+- WebSocket 실시간 push 는 PoC 2차 (대량 run + 그래프) 에 도입 예정.
 
 권한: 모든 role 조회 가능
 
@@ -534,7 +628,9 @@ Run 모드:
 ### 6.6 로그·산출물 출력
 
 **Audit log:**
-- 모든 작업 기록 (누가·언제·무엇·어디)
+- Backend `audit_log` 테이블 (Flyway `V20260521133513`) — 모든 작업이 server-side 에 기록 (누가·언제·무엇·어디).
+- 사이트 단위 fetch + AppShell 10초 polling 으로 모든 계정이 동일한 audit 조회. 알림 패널도 audit 의 파생 (§ 6.10).
+- 인증 audit (LOGIN / LOGOUT / LOGIN_REJECTED / FORCE_LOGOUT / FORCE_LOGOUT_SELF) 은 site_id NULL 로 기록.
 - 필터·검색 (사용자별 / 작업 종류별 / 시간 범위)
 - Export (CSV)
 
@@ -548,13 +644,15 @@ Run 모드:
 
 ### 6.7 사용자·역할 관리
 
-- 사용자 CRUD (ID·이름·비번·역할·만료일)
-- 역할 부여 (master / admin / viewer)
-- ID 만료일 설정·연장
-- 비밀번호 초기화
-- 강제 로그아웃
+PoC 1차 구현 (master 만):
+- 사용자 CRUD (ID·비번·역할). User Management 모달에서 발급/삭제/역할 변경.
+- **비밀번호 강제 재설정** — `POST /api/v1/users/{id}/password`. 대상 사용자의 활성 세션도 즉시 무효화.
+- **본인 비밀번호 변경** — Account profile 의 Change password. `POST /api/v1/users/me/password` (현재 비번 검증 + 최소 4자 + 동일 비번 거부).
+- **강제 로그아웃** — `POST /api/v1/users/{id}/force-logout`. 도난·긴급 시 master 가 대상 사용자 세션 종료.
 
-권한: master 만
+PoC 2차 deferred: ID 만료일 설정·연장.
+
+권한: 위 작업 모두 master 만.
 
 ### 6.8 워커 관리
 
@@ -576,28 +674,29 @@ Run 모드:
 
 ### 6.10 알림 (Notification)
 
-**알림 종류:**
-
-| 분류 | 항목 |
-|---|---|
-| 매핑 | Lock 발생/해제, 변경, Approve 요청·완료 |
-| 실행 | Run 시작/완료, 예약 실행 트리거, 중단·실패 |
-| 검증·격리 | 검증 실패, 격리 row 발생 |
-| 시스템 | Worker 다운/복귀, 라이선스 만료 임박, 사용자 ID 만료 임박 |
-| 사용자 | 새 사용자 생성, 비밀번호 변경, 강제 로그아웃 |
-
 **메커니즘:**
-- WebSocket 실시간 push
-- 메타 DB 영속 (읽음/안 읽음 상태)
-- 사용자 재로그인 시 미열람 알림 전달
+- Backend `audit_log` 가 source of truth — 별도 알림 테이블/엔티티 없음.
+- AppShell 의 10초 polling 으로 사이트의 audit log fetch → 프론트가 사용자 구독 설정에 따라 알림 패널 / toast 로 변환.
+- 읽음/안 읽음 상태는 client-side (`localStorage`) — 사용자별·기기별 독립.
+- WebSocket 실시간 push 는 PoC 2차 deferred.
+
+**알림 종류 (현재 events):**
+
+| 분류 | event key | 발생 audit action |
+|---|---|---|
+| 실행 | `run.started` / `run.failed` / `run.finished` | `RUN_STARTED` / `RUN_FAILED` / `RUN_FINISHED` (실행 엔진 연결 후) |
+| 스냅샷 | `snapshot.pending` / `snapshot.approved` / `snapshot.rejected` | `REVIEW_REQUESTED` / `APPROVED` / `REJECTED` |
+| Cutover | (스냅샷과 동일 키지만 type=cutover) | `CUTOVER_SNAPSHOT_CREATED` 등 |
 
 **UI:**
 - 헤더 bell icon + 읽지 않은 알림 수 badge
-- 알림 클릭 시 관련 화면 deep link
-- 알림 센터 (전체 조회·필터·읽음·삭제)
+- 알림 클릭 시 관련 화면 deep link (`/versions?selectSnapshotId=...` 등)
+- 알림 패널 (전체 조회·필터·읽음 표시·dismiss)
+- 새 audit 도착 시 우하단 toast 4초
 
 **필터·구독:**
-- 사용자별 알림 종류 ON/OFF
+- 사용자별 event 구독 ON/OFF (Project Settings > Notifications).
+- Scope: 전역 (Solution Settings) 와 프로젝트별. 'mine-only' / 'all-project'.
 - 권한 기반 자동 범위:
   - master: 모든 알림
   - admin: 본인 작업 + 격리·검증

@@ -1,6 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuthStore, roleLabel } from '../store/auth';
+import { authApi } from '../api/auth';
 import { useUsersStore } from '../store/users';
 import { BrandName } from '../components/BrandName';
 import { AboutModal } from '../components/AboutModal';
@@ -13,7 +14,9 @@ import { CreateProjectModal } from '../components/CreateProjectModal';
 import { SignOutModal } from '../components/SignOutModal';
 import { ClusterAdminModal } from '../components/ClusterAdminModal';
 import { NotificationToast } from '../components/NotificationToast';
+import { LicenseBanner } from '../components/LicenseBanner';
 import { LockIcon } from '../components/LockIcon';
+import { useLicenseStore } from '../store/license';
 import { useWorkspaceStore } from '../store/workspace';
 import { isProjectReadOnly } from '../store/readOnly';
 import { useSnapshotsStore } from '../store/snapshots';
@@ -142,8 +145,13 @@ export function AppShell() {
 
   const projectSort = useSettingsStore((s) => s.projectSort);
   const setProjectSort = useSettingsStore((s) => s.setProjectSort);
+  const [projectSearch, setProjectSearch] = useState('');
   const projects = useMemo(() => {
-    const list = allProjects.filter((p) => p.siteId === activeSiteId).slice();
+    const q = projectSearch.trim().toLowerCase();
+    const list = allProjects
+      .filter((p) => p.siteId === activeSiteId)
+      .filter((p) => !q || p.name.toLowerCase().includes(q))
+      .slice();
     list.sort((a, b) => {
       switch (projectSort) {
         case 'created-asc':  return a.createdAt.localeCompare(b.createdAt);
@@ -155,7 +163,7 @@ export function AppShell() {
       }
     });
     return list;
-  }, [allProjects, activeSiteId, projectSort]);
+  }, [allProjects, activeSiteId, projectSort, projectSearch]);
 
   const notifItems = useMemo(() => {
     // Solution settings 에서 Enable notifications 가 OFF 면 모든 프로젝트의 알림 일괄 비활성.
@@ -245,7 +253,10 @@ export function AppShell() {
     return () => window.removeEventListener('click', close);
   }, [notifOpen]);
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    // first-wins 정책: server-side 세션도 무효화해야 다음 로그인이 허용됨.
+    // 네트워크 실패/토큰 만료 등은 swallow — 클라이언트 정리는 그래도 진행.
+    try { await authApi.logout(); } catch { /* noop */ }
     logout();
     resetUsers();
     navigate('/login');
@@ -258,8 +269,18 @@ export function AppShell() {
     }
   }, [user?.role, user?.username, loadUsers]);
 
+  // 라이선스 상태 — 마운트 시 + 30분마다 polling. banner / write 차단 hint 용.
+  const refreshLicense = useLicenseStore((s) => s.refresh);
+  useEffect(() => {
+    void refreshLicense();
+    const id = setInterval(() => void refreshLicense(), 30 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [refreshLicense]);
+
   return (
-    <div style={styles.wrap}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+      <LicenseBanner />
+      <div style={styles.wrap}>
       {sidebarOpen && (
         <aside style={styles.sidebar}>
           {/* 브랜드 */}
@@ -361,7 +382,23 @@ export function AppShell() {
                 <line x1="9.2" y1="9.2" x2="12" y2="12" />
               </svg>
             </span>
-            <input style={styles.searchInput} placeholder={t('shell.searchPlaceholder')} />
+            <input
+              style={styles.searchInput}
+              placeholder={t('shell.searchPlaceholder')}
+              value={projectSearch}
+              onChange={(e) => setProjectSearch(e.target.value)}
+            />
+            {projectSearch && (
+              <button
+                type="button"
+                onClick={() => setProjectSearch('')}
+                style={styles.searchClear}
+                aria-label="Clear search"
+                title="Clear"
+              >
+                ×
+              </button>
+            )}
           </div>
 
           {/* All projects */}
@@ -406,7 +443,9 @@ export function AppShell() {
           <div style={styles.projectList}>
             {projects.length === 0 ? (
               <div style={styles.emptyState}>
-                {activeSite
+                {projectSearch.trim()
+                  ? t('shell.searchEmpty', { q: projectSearch.trim() })
+                  : activeSite
                   ? <>{t('shell.projectsEmpty.withSite.before')}<code style={styles.kbd}>+</code>{t('shell.projectsEmpty.withSite.after')}</>
                   : <>{t('shell.projectsEmpty.noSite')}</>}
               </div>
@@ -766,6 +805,7 @@ export function AppShell() {
         onConfirm={() => { setSignOutOpen(false); handleLogout(); }}
       />
       <NotificationToast />
+      </div>
     </div>
   );
 }
@@ -773,7 +813,7 @@ export function AppShell() {
 function notifTypeColor(type: string): string {
   switch (type) {
     case 'pending':       return 'var(--amber)';            // 황토색
-    case 'snapshot':      return 'var(--phase-analysis)';   // 하늘색 — 파란색
+    case 'snapshot':      return 'var(--snapshot)';         // royal blue — snapshot 전용 (phase-analysis 와 구분)
     case 'approved':      return 'var(--green)';            // 상세 페이지 approved 배지와 동일
     case 'rejected':      return 'var(--red)';
     case 'run-start':     return 'var(--gray)';
@@ -1230,10 +1270,28 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'center',
     pointerEvents: 'none',
   },
+  searchClear: {
+    position: 'absolute',
+    right: 14,
+    top: '50%',
+    transform: 'translateY(-50%)',
+    width: 16,
+    height: 16,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    border: 'none',
+    background: 'transparent',
+    color: 'var(--text-3)',
+    cursor: 'pointer',
+    fontSize: 14,
+    lineHeight: 1,
+    padding: 0,
+  },
   searchInput: {
     width: '100%',
     height: 24,
-    padding: '0 8px 0 24px',
+    padding: '0 22px 0 24px',
     border: '1px solid var(--border)',
     borderRadius: 4,
     background: 'var(--panel)',
