@@ -1,208 +1,213 @@
-"""
-ModernizeProData — Mapping Definition 템플릿 생성기 (CSV + YAML).
+#!/usr/bin/env python3
+"""ModernizeProData — Mapping Definition CSV generator.
 
-출력 위치:
-  - ModernizeProData/frontend/public/templates/mapping_definition_template.csv
-  - ModernizeProData/frontend/public/templates/mapping_definition_template.yaml
-  - <USER_SAMPLES>/mapping_definition_sample.csv
-  - <USER_SAMPLES>/mapping_definition_sample.yaml
-  (USER_SAMPLES = C:/Users/KS情報システム株式会社/Desktop/JIN/ModernizeProData/samples)
+Emits two files at ModernizeProData/frontend/public/templates/:
 
-CSV / YAML 모두 같은 행 집합. AS-IS Oracle → TO-BE PostgreSQL 시나리오와
-samples/ddl/ 더미 DDL 에 대응.
+  mapping_definition_template.csv   header row only — for users to download and fill in
+  mapping_definition_sample.csv     header + body — populated from db/asis/oracle_ddl.sql
+                                    and db/tobe/{stage}/init.sql (securities domain)
+
+Header format follows a project convention: Japanese label + English key
+in parentheses, e.g. "ASISテーブル(asis_table)". A future parser extracts
+the English key with `header.rsplit('(', 1)[1].rstrip(')')` so the
+Japanese visual label can be edited freely without breaking parsing.
+
+UTF-8 with BOM (Excel-friendly).
 """
+from __future__ import annotations
+
 import csv
-import io
 import os
+from pathlib import Path
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-PUBLIC_DIR = os.path.join(
-    HERE, "..",
-    "ModernizeProData", "frontend", "public", "templates",
-)
-USER_SAMPLES_DIR = r"C:/Users/KS情報システム株式会社/Desktop/JIN/ModernizeProData/samples"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PUBLIC_DIR = REPO_ROOT / "ModernizeProData" / "frontend" / "public" / "templates"
 
-os.makedirs(PUBLIC_DIR, exist_ok=True)
-os.makedirs(USER_SAMPLES_DIR, exist_ok=True)
-
-# ── 컬럼 정의 ──────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────
+# Header row — Japanese visible label + (english_key) for machine parsing.
+# Single attribute per column (no grouping) — easier for filters / pandas
+# / future parser. Keep in sync with any future server-side schema.
+# ───────────────────────────────────────────────────────────────────────────
 HEADERS = [
-    "asis_table",
-    "asis_column",
-    "asis_type",
-    "tobe_table",
-    "tobe_column",
-    "tobe_type",
-    "strategy",      # expression / null / default / skip
-    "rule_sql",
-    "default_value",
-    "notes",
+    "連番(no)",
+    "ASISテーブル(asis_table)",
+    "ASISカラム論理名(asis_column_logical)",
+    "ASISカラム物理名(asis_column_physical)",
+    "ASISデータ型(asis_data_type)",
+    "長さ(length)",
+    "NULL可否(nullable)",
+    "PK(pk)",
+    "TOBEテーブル(tobe_table)",
+    "TOBEカラム論理名(tobe_column_logical)",
+    "TOBEカラム物理名(tobe_column_physical)",
+    "TOBEデータ型(tobe_data_type)",
+    "変換規則(transformation_rule)",
+    "マスキング(masking)",
+    "備考(notes)",
 ]
 
-# ── 샘플 행 (samples/ddl/asis_oracle.sql ↔ tobe_postgres.sql 매핑) ─────
+
+# ───────────────────────────────────────────────────────────────────────────
+# Sample rows — securities domain.
+#
+# Source DDL:  db/asis/oracle_ddl.sql
+# Target DDL:  db/tobe/{stage}/init.sql
+#
+# Each row maps ONE AS-IS column to ONE TO-BE column (or marks a column
+# dropped / defaulted). Order: customer → product → account →
+# account_product → trade. Matches the FK creation order in load.sql.
+# ───────────────────────────────────────────────────────────────────────────
+
+def row(
+    no, atbl, alog, aphy, atyp, alen, anull, apk,
+    ttbl, tlog, tphy, ttyp, rule, mask, notes,
+):
+    return [no, atbl, alog, aphy, atyp, alen, anull, apk,
+            ttbl, tlog, tphy, ttyp, rule, mask, notes]
+
+
 ROWS = [
-    # M_EMPLOYEE → employees
-    ["HR.M_EMPLOYEE", "EMP_ID",       "CHAR(8)",        "public.employees", "employee_id",   "UUID",          "expression",
-        "uuid_generate_v5('hr-emp'::uuid, em.EMP_ID)", "", "CHAR(8) → UUID v5 채번."],
-    ["HR.M_EMPLOYEE", "EMP_ID",       "CHAR(8)",        "public.employees", "emp_no",        "CHAR(8)",       "expression",
-        "em.EMP_ID", "", "원본 사번 보존 (UNIQUE)."],
-    ["HR.M_EMPLOYEE", "EMP_NM",       "VARCHAR2(60)",   "public.employees", "full_name",     "VARCHAR(120)",  "expression",
-        "TRIM(em.EMP_NM)", "", "길이 확장 + TRIM."],
-    ["HR.M_EMPLOYEE", "EMP_NM_KANA",  "VARCHAR2(120)",  "public.employees", "full_name_kana","VARCHAR(120)",  "expression",
-        "em.EMP_NM_KANA", "", "passthrough."],
-    ["HR.M_EMPLOYEE", "HIRE_YMD",     "CHAR(8)",        "public.employees", "hire_date",     "DATE",          "expression",
-        "TO_DATE(em.HIRE_YMD, 'YYYYMMDD')", "", "YYYYMMDD → DATE."],
-    ["HR.M_EMPLOYEE", "BIRTH_YMD",    "CHAR(8)",        "public.employees", "birth_date",    "DATE",          "expression",
-        "TO_DATE(em.BIRTH_YMD, 'YYYYMMDD')", "", "nullable YYYYMMDD → DATE."],
-    ["HR.M_EMPLOYEE", "DEPT_CD",      "CHAR(4)",        "public.employees", "department_id", "INTEGER",       "expression",
-        "(SELECT d.department_id FROM public.departments d WHERE d.department_code = em.DEPT_CD)", "",
-        "LOOKUP: DEPT_CD → department_id."],
-    ["HR.M_EMPLOYEE", "POSITION_CD",  "CHAR(3)",        "public.employees", "position_code", "CHAR(3)",       "expression",
-        "em.POSITION_CD", "", "passthrough."],
-    ["HR.M_EMPLOYEE", "GENDER_CD",    "CHAR(1)",        "public.employees", "gender",        "CHAR(1)",       "expression",
-        "em.GENDER_CD", "", "passthrough."],
-    ["HR.M_EMPLOYEE", "EMAIL",        "VARCHAR2(64)",   "public.employees", "email",         "VARCHAR(255)",  "expression",
-        "em.EMAIL", "", "길이 확장만."],
-    ["HR.M_EMPLOYEE", "SALARY",       "NUMBER(11,2)",   "public.employees", "salary",        "NUMERIC(11,2)", "expression",
-        "em.SALARY", "", "NUMBER → NUMERIC."],
-    ["HR.M_EMPLOYEE", "ENTRY_TS",     "CHAR(14)",       "public.employees", "created_at",    "TIMESTAMP",     "expression",
-        "TO_TIMESTAMP(em.ENTRY_TS, 'YYYYMMDDHH24MISS')", "", "CHAR(14) → TIMESTAMP."],
-    ["HR.M_EMPLOYEE", "STATUS_CD",    "CHAR(1)",        "public.employees", "status",        "VARCHAR(16)",   "expression",
-        "CASE em.STATUS_CD WHEN 'A' THEN 'active' WHEN 'R' THEN 'retired' WHEN 'L' THEN 'leave' END",
-        "", "값 매핑 (A→active, R→retired, L→leave)."],
-    ["HR.M_EMPLOYEE", "PHONE",        "VARCHAR2(20)",   "public.employees", "phone",         "VARCHAR(32)",   "expression",
-        "em.PHONE", "", "길이 확장."],
-    ["HR.M_EMPLOYEE", "UPDATE_TS",    "CHAR(14)",       "public.employees", "updated_at",    "TIMESTAMP",     "expression",
-        "TO_TIMESTAMP(em.UPDATE_TS, 'YYYYMMDDHH24MISS')", "", ""],
-    ["HR.M_EMPLOYEE", "OBSOLETE_FLAG","CHAR(1)",        "",                  "",              "",              "skip",
-        "", "", "TO-BE 에서 폐기. status='retired' 로 충분."],
-    ["",              "",             "",               "public.employees", "tenant_id",     "INTEGER",       "default",
-        "", "1", "신규: 멀티 테넌트 시드값."],
-    ["",              "",             "",               "public.employees", "mfa_enabled",   "BOOLEAN",       "default",
-        "", "false", "신규: MFA 기본 비활성."],
-    ["",              "",             "",               "public.employees", "is_deleted",    "BOOLEAN",       "default",
-        "", "false", "신규: 논리 삭제 플래그."],
-    ["",              "",             "",               "public.employees", "version",       "INTEGER",       "default",
-        "", "1", "신규: 낙관적 락 초기값."],
+    # ─── 顧客マスタ → customer ────────────────────────────────────────────
+    row(1,  "M_CUSTOMER", "顧客ID",        "CUSTOMER_ID",      "NUMBER",   "10",  "N", "Y",
+        "customer", "顧客ID",        "customer_id",        "BIGINT",        "passthrough", "", "PK. NUMBER(10) → BIGINT."),
+    row(2,  "M_CUSTOMER", "顧客コード",    "CUSTOMER_CD",      "VARCHAR2", "20",  "N", "",
+        "customer", "顧客コード",    "customer_code",      "VARCHAR(20)",   "passthrough", "", "UNIQUE 制約維持."),
+    row(3,  "M_CUSTOMER", "顧客名",        "CUSTOMER_NM",      "VARCHAR2", "100", "N", "",
+        "customer", "顧客名",        "customer_name",      "VARCHAR(100)",  "passthrough",
+        "test stage のみ姓のみ残し、名は * でマスク", "個人情報。test stage で部分マスク。"),
+    row(4,  "M_CUSTOMER", "顧客名カナ",    "CUSTOMER_NM_KANA", "VARCHAR2", "200", "Y", "",
+        "customer", "顧客名カナ",    "customer_name_kana", "VARCHAR(200)",  "passthrough", "", ""),
+    row(5,  "M_CUSTOMER", "生年月日",      "BIRTH_DT",         "DATE",     "",    "Y", "",
+        "customer", "生年月日",      "birth_date",         "DATE",
+        "Oracle DATE → PG DATE (時刻不要)", "", ""),
+    row(6,  "M_CUSTOMER", "性別区分",      "GENDER_CD",        "CHAR",     "1",   "Y", "",
+        "customer", "性別",          "gender",             "CHAR(1)",       "passthrough", "", "M=男 / F=女"),
+    row(7,  "M_CUSTOMER", "メール",        "EMAIL",            "VARCHAR2", "128", "Y", "",
+        "customer", "メール",        "email",              "VARCHAR(128)",  "passthrough",
+        "test stage で local-part 先頭2字以外を * に置換", "個人情報。"),
+    row(8,  "M_CUSTOMER", "電話番号",      "PHONE",            "VARCHAR2", "20",  "Y", "",
+        "customer", "電話番号",      "phone",              "VARCHAR(20)",   "passthrough",
+        "test stage で中4桁を **** に置換", "個人情報。"),
+    row(9,  "M_CUSTOMER", "登録日時",      "ENTRY_TS",         "DATE",     "",    "N", "",
+        "customer", "登録日時",      "created_at",         "TIMESTAMP",
+        "Oracle DATE (= datetime) → TIMESTAMP", "", ""),
+    row(10, "M_CUSTOMER", "更新日時",      "UPDATE_TS",        "DATE",     "",    "Y", "",
+        "customer", "更新日時",      "updated_at",         "TIMESTAMP",
+        "Oracle DATE → TIMESTAMP", "", ""),
 
-    # M_DEPARTMENT → departments
-    ["HR.M_DEPARTMENT", "DEPT_CD",   "CHAR(4)",       "public.departments", "department_code","CHAR(4)",     "expression",
-        "de.DEPT_CD", "", "원본 코드 보존 (UNIQUE)."],
-    ["HR.M_DEPARTMENT", "DEPT_NM",   "VARCHAR2(80)",  "public.departments", "department_name","VARCHAR(120)","expression",
-        "TRIM(de.DEPT_NM)", "", "길이 확장 + TRIM."],
-    ["HR.M_DEPARTMENT", "PARENT_CD", "CHAR(4)",       "public.departments", "parent_id",      "INTEGER",     "expression",
-        "(SELECT d2.department_id FROM public.departments d2 WHERE d2.department_code = de.PARENT_CD)",
-        "", "LOOKUP self-reference."],
-    ["HR.M_DEPARTMENT", "LEVEL_NO",  "NUMBER(2)",     "public.departments", "level_no",       "SMALLINT",    "expression",
-        "de.LEVEL_NO", "", "NUMBER(2) → SMALLINT."],
-    ["HR.M_DEPARTMENT", "ENTRY_TS",  "CHAR(14)",      "public.departments", "created_at",     "TIMESTAMP",   "expression",
-        "TO_TIMESTAMP(de.ENTRY_TS, 'YYYYMMDDHH24MISS')", "", ""],
-    ["HR.M_DEPARTMENT", "UPDATE_TS", "CHAR(14)",      "public.departments", "updated_at",     "TIMESTAMP",   "expression",
-        "TO_TIMESTAMP(de.UPDATE_TS, 'YYYYMMDDHH24MISS')", "", ""],
-    ["",                "",          "",              "public.departments", "department_id",  "INTEGER",     "expression",
-        "NEXTVAL('departments_seq')", "", "BIGSERIAL 채번 (실 운영은 BIGSERIAL identity)."],
-    ["",                "",          "",              "public.departments", "is_deleted",     "BOOLEAN",     "default",
-        "", "false", "신규: 논리 삭제."],
+    # ─── 商品マスタ → product ─────────────────────────────────────────────
+    row(11, "M_PRODUCT", "商品ID",        "PRODUCT_ID",      "NUMBER",   "8",   "N", "Y",
+        "product", "商品ID",        "product_id",      "INTEGER",       "passthrough", "", "PK."),
+    row(12, "M_PRODUCT", "商品コード",    "PRODUCT_CD",      "VARCHAR2", "20",  "N", "",
+        "product", "商品コード",    "product_code",    "VARCHAR(20)",   "passthrough", "", "UNIQUE."),
+    row(13, "M_PRODUCT", "商品名",        "PRODUCT_NM",      "VARCHAR2", "100", "N", "",
+        "product", "商品名",        "product_name",    "VARCHAR(100)",  "passthrough", "", ""),
+    row(14, "M_PRODUCT", "商品種別",      "PRODUCT_KIND_CD", "CHAR",     "2",   "N", "",
+        "product", "商品種別",      "product_kind",    "CHAR(2)",       "passthrough",
+        "", "10=株式 / 20=債券 / 30=投資信託"),
+    row(15, "M_PRODUCT", "単価",          "UNIT_PRICE",      "NUMBER",   "15,4","Y", "",
+        "product", "単価",          "unit_price",      "NUMERIC(15,4)", "passthrough", "", ""),
+    row(16, "M_PRODUCT", "通貨コード",    "CURRENCY_CD",     "CHAR",     "3",   "N", "",
+        "product", "通貨コード",    "currency_code",   "CHAR(3)",       "passthrough", "", "ISO 4217 既定 JPY"),
+    row(17, "M_PRODUCT", "登録日時",      "ENTRY_TS",        "DATE",     "",    "N", "",
+        "product", "登録日時",      "created_at",      "TIMESTAMP",
+        "Oracle DATE → TIMESTAMP", "", ""),
 
-    # T_CONTACT_LOG → contact_log + contact_attachment (1→2 분할)
-    ["CRM.T_CONTACT_LOG", "CONTACT_ID",   "NUMBER(12)",   "public.contact_log", "contact_id",   "BIGINT",      "expression",
-        "cl.CONTACT_ID", "", "NUMBER(12) → BIGINT."],
-    ["CRM.T_CONTACT_LOG", "EMP_ID",       "CHAR(8)",      "public.contact_log", "employee_id",  "UUID",        "expression",
-        "(SELECT e.employee_id FROM public.employees e WHERE e.emp_no = cl.EMP_ID)",
-        "", "LOOKUP: EMP_ID → employees.employee_id."],
-    ["CRM.T_CONTACT_LOG", "CONTACT_DT",   "CHAR(14)",     "public.contact_log", "contact_at",   "TIMESTAMP",   "expression",
-        "TO_TIMESTAMP(cl.CONTACT_DT, 'YYYYMMDDHH24MISS')", "", ""],
-    ["CRM.T_CONTACT_LOG", "KIND_CD",      "CHAR(2)",      "public.contact_log", "kind",         "VARCHAR(16)", "expression",
-        "CASE cl.KIND_CD WHEN 'CL' THEN 'CALL' WHEN 'EM' THEN 'EMAIL' WHEN 'VS' THEN 'VISIT' END",
-        "", "코드 → 풀네임 매핑."],
-    ["CRM.T_CONTACT_LOG", "MEMO",         "CLOB",         "public.contact_log", "memo",         "TEXT",        "expression",
-        "cl.MEMO", "", "CLOB → TEXT."],
-    ["CRM.T_CONTACT_LOG", "ATTACHMENT_NM","VARCHAR2(200)","public.contact_log", "has_attachment","BOOLEAN",    "expression",
-        "(cl.ATTACHMENT_NM IS NOT NULL)", "", "boolean derive."],
-    ["CRM.T_CONTACT_LOG", "ENTRY_TS",     "CHAR(14)",     "public.contact_log", "created_at",   "TIMESTAMP",   "expression",
-        "TO_TIMESTAMP(cl.ENTRY_TS, 'YYYYMMDDHH24MISS')", "", ""],
+    # ─── 口座マスタ → account ─────────────────────────────────────────────
+    row(18, "M_ACCOUNT", "口座ID",        "ACCOUNT_ID",      "NUMBER",   "12",  "N", "Y",
+        "account", "口座ID",        "account_id",      "BIGINT",        "passthrough", "", "PK."),
+    row(19, "M_ACCOUNT", "顧客ID",        "CUSTOMER_ID",     "NUMBER",   "10",  "N", "",
+        "account", "顧客ID",        "customer_id",     "BIGINT",        "passthrough", "",
+        "FK → customer.customer_id. 1:N 関係。"),
+    row(20, "M_ACCOUNT", "口座番号",      "ACCOUNT_NO",      "VARCHAR2", "20",  "N", "",
+        "account", "口座番号",      "account_no",      "VARCHAR(20)",   "passthrough", "", "UNIQUE."),
+    row(21, "M_ACCOUNT", "口座種別",      "ACCOUNT_KIND_CD", "CHAR",     "2",   "N", "",
+        "account", "口座種別",      "account_kind",    "CHAR(2)",       "passthrough", "", "01=普通 / 02=特定"),
+    row(22, "M_ACCOUNT", "残高",          "BALANCE",         "NUMBER",   "15,2","N", "",
+        "account", "残高",          "balance",         "NUMERIC(15,2)", "passthrough", "", ""),
+    row(23, "M_ACCOUNT", "開設日",        "OPENED_DT",       "DATE",     "",    "N", "",
+        "account", "開設日",        "opened_date",     "DATE",
+        "Oracle DATE → PG DATE", "", ""),
+    row(24, "M_ACCOUNT", "状態",          "STATUS_CD",       "CHAR",     "1",   "N", "",
+        "account", "状態",          "status",          "CHAR(1)",       "passthrough", "",
+        "A=有効 / C=停止 / F=閉鎖"),
+    row(25, "M_ACCOUNT", "登録日時",      "ENTRY_TS",        "DATE",     "",    "N", "",
+        "account", "登録日時",      "created_at",      "TIMESTAMP",
+        "Oracle DATE → TIMESTAMP", "", ""),
+    row(26, "M_ACCOUNT", "更新日時",      "UPDATE_TS",       "DATE",     "",    "Y", "",
+        "account", "更新日時",      "updated_at",      "TIMESTAMP",
+        "Oracle DATE → TIMESTAMP", "", ""),
 
-    # split target 2: contact_attachment
-    ["CRM.T_CONTACT_LOG", "CONTACT_ID",    "NUMBER(12)",    "public.contact_attachment", "contact_id",  "BIGINT",      "expression",
-        "cl.CONTACT_ID", "", "분할 FK (ATTACHMENT_NM IS NOT NULL 행만)."],
-    ["CRM.T_CONTACT_LOG", "ATTACHMENT_NM", "VARCHAR2(200)", "public.contact_attachment", "filename",    "VARCHAR(200)","expression",
-        "cl.ATTACHMENT_NM", "", "분할 대상."],
-    ["CRM.T_CONTACT_LOG", "ATTACHMENT_BYTES","BLOB",        "public.contact_attachment", "content",     "BYTEA",       "expression",
-        "cl.ATTACHMENT_BYTES", "", "BLOB → BYTEA."],
-    ["CRM.T_CONTACT_LOG", "ENTRY_TS",      "CHAR(14)",      "public.contact_attachment", "created_at",  "TIMESTAMP",   "expression",
-        "TO_TIMESTAMP(cl.ENTRY_TS, 'YYYYMMDDHH24MISS')", "", ""],
-    ["",                  "",              "",              "public.contact_attachment", "attachment_id","BIGSERIAL",  "expression",
-        "NEXTVAL('contact_attachment_seq')", "", "BIGSERIAL 채번."],
+    # ─── 口座-商品 → account_product (N:N) ───────────────────────────────
+    row(27, "R_ACCOUNT_PRODUCT", "口座ID",       "ACCOUNT_ID",  "NUMBER",   "12",   "N", "Y",
+        "account_product", "口座ID",       "account_id",  "BIGINT",        "passthrough", "",
+        "複合 PK. FK → account."),
+    row(28, "R_ACCOUNT_PRODUCT", "商品ID",       "PRODUCT_ID",  "NUMBER",   "8",    "N", "Y",
+        "account_product", "商品ID",       "product_id",  "INTEGER",       "passthrough", "",
+        "複合 PK. FK → product."),
+    row(29, "R_ACCOUNT_PRODUCT", "保有数量",     "HOLDING_QTY", "NUMBER",   "15,4", "N", "",
+        "account_product", "保有数量",     "holding_qty", "NUMERIC(15,4)", "passthrough", "", ""),
+    row(30, "R_ACCOUNT_PRODUCT", "保有開始日",   "START_DT",    "DATE",     "",     "N", "",
+        "account_product", "保有開始日",   "start_date",  "DATE",
+        "Oracle DATE → PG DATE", "", ""),
+    row(31, "R_ACCOUNT_PRODUCT", "保有終了日",   "END_DT",      "DATE",     "",     "Y", "",
+        "account_product", "保有終了日",   "end_date",    "DATE",
+        "Oracle DATE → PG DATE", "", "NULL = 現在も保有中"),
+    row(32, "R_ACCOUNT_PRODUCT", "登録日時",     "ENTRY_TS",    "DATE",     "",     "N", "",
+        "account_product", "登録日時",     "created_at",  "TIMESTAMP",
+        "Oracle DATE → TIMESTAMP", "", ""),
+
+    # ─── 取引明細 → trade (N:1 account, N:1 product) ─────────────────────
+    row(33, "T_TRADE", "取引ID",        "TRADE_ID",      "NUMBER",   "14",   "N", "Y",
+        "trade", "取引ID",        "trade_id",      "BIGINT",        "passthrough", "", "PK."),
+    row(34, "T_TRADE", "口座ID",        "ACCOUNT_ID",    "NUMBER",   "12",   "N", "",
+        "trade", "口座ID",        "account_id",    "BIGINT",        "passthrough", "",
+        "FK → account. N:1 関係。"),
+    row(35, "T_TRADE", "商品ID",        "PRODUCT_ID",    "NUMBER",   "8",    "N", "",
+        "trade", "商品ID",        "product_id",    "INTEGER",       "passthrough", "",
+        "FK → product."),
+    row(36, "T_TRADE", "取引種別",      "TRADE_TYPE_CD", "CHAR",     "1",    "N", "",
+        "trade", "取引種別",      "trade_type",    "CHAR(1)",       "passthrough", "", "B=買付 / S=売却"),
+    row(37, "T_TRADE", "取引数量",      "TRADE_QTY",     "NUMBER",   "12",   "N", "",
+        "trade", "取引数量",      "trade_qty",     "NUMERIC(12)",   "passthrough", "", ""),
+    row(38, "T_TRADE", "約定単価",      "TRADE_PRICE",   "NUMBER",   "15,4", "N", "",
+        "trade", "約定単価",      "trade_price",   "NUMERIC(15,4)", "passthrough", "", ""),
+    row(39, "T_TRADE", "取引日",        "TRADE_DT",      "DATE",     "",     "N", "",
+        "trade", "取引日",        "trade_date",    "DATE",
+        "Oracle DATE → PG DATE", "", ""),
+    row(40, "T_TRADE", "登録日時",      "ENTRY_TS",      "DATE",     "",     "N", "",
+        "trade", "登録日時",      "created_at",    "TIMESTAMP",
+        "Oracle DATE → TIMESTAMP", "", ""),
 ]
 
 
-# ── CSV writer ───────────────────────────────────────────────
-def write_csv(path: str):
-    buf = io.StringIO()
-    w = csv.writer(buf, lineterminator='\n')
-    w.writerow(HEADERS)
-    for r in ROWS:
-        w.writerow(r)
-    # utf-8-sig: Excel 에서 한글이 깨지지 않도록 BOM 포함.
-    with open(path, 'w', encoding='utf-8-sig', newline='') as f:
-        f.write(buf.getvalue())
+def write_csv(path: Path, rows: list[list[str]]) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
+        w.writerow(HEADERS)
+        for r in rows:
+            w.writerow(r)
+    return os.path.getsize(path)
 
 
-# ── YAML writer (간단한 사람-친화적 포맷; PyYAML 없이 직접) ──────────────
-def yaml_escape(v: str) -> str:
-    if v is None:
-        return '""'
-    s = str(v)
-    if s == '':
-        return '""'
-    # double-quote 안에 들어가도 안전하게: " 와 \ 만 escape.
-    needs_quote = any(c in s for c in [':', '#', "'", '"', '\n', '{', '}', '[', ']', ',', '&', '*', '!', '|', '>', '%', '@', '`'])
-    needs_quote = needs_quote or s != s.strip()
-    if not needs_quote:
-        return s
-    escaped = s.replace('\\', '\\\\').replace('"', '\\"')
-    return f'"{escaped}"'
+def main() -> int:
+    template_path = PUBLIC_DIR / "mapping_definition_template.csv"
+    sample_path   = PUBLIC_DIR / "mapping_definition_sample.csv"
+
+    tsize = write_csv(template_path, [])     # header only
+    ssize = write_csv(sample_path, ROWS)     # header + body
+
+    # Clean up the YAML twin from the previous generation; it's no longer used.
+    old_yaml = PUBLIC_DIR / "mapping_definition_template.yaml"
+    if old_yaml.exists():
+        old_yaml.unlink()
+        print(f"removed obsolete: {old_yaml}")
+
+    print(f"wrote {template_path}  ({tsize:,} bytes, header only)")
+    print(f"wrote {sample_path}    ({ssize:,} bytes, {len(ROWS)} rows)")
+    return 0
 
 
-def write_yaml(path: str):
-    lines = []
-    lines.append("# ModernizeProData — Mapping Definition (YAML)")
-    lines.append("# CSV 와 동일한 데이터. unmapped 행만 자동 채워지고 이미 매핑된 행은 덮어쓰지 않음.")
-    lines.append("")
-    lines.append("version: 1")
-    lines.append("mappings:")
-    for r in ROWS:
-        rec = dict(zip(HEADERS, r))
-        lines.append("  - asis_table:    " + yaml_escape(rec['asis_table']))
-        lines.append("    asis_column:   " + yaml_escape(rec['asis_column']))
-        lines.append("    asis_type:     " + yaml_escape(rec['asis_type']))
-        lines.append("    tobe_table:    " + yaml_escape(rec['tobe_table']))
-        lines.append("    tobe_column:   " + yaml_escape(rec['tobe_column']))
-        lines.append("    tobe_type:     " + yaml_escape(rec['tobe_type']))
-        lines.append("    strategy:      " + yaml_escape(rec['strategy']))
-        lines.append("    rule_sql:      " + yaml_escape(rec['rule_sql']))
-        lines.append("    default_value: " + yaml_escape(rec['default_value']))
-        lines.append("    notes:         " + yaml_escape(rec['notes']))
-    with open(path, 'w', encoding='utf-8', newline='\n') as f:
-        f.write('\n'.join(lines) + '\n')
-
-
-# ── 4 곳에 출력 ─────────────────────────────────────────────
-outs = [
-    (os.path.join(PUBLIC_DIR, "mapping_definition_template.csv"),  'csv'),
-    (os.path.join(PUBLIC_DIR, "mapping_definition_template.yaml"), 'yaml'),
-    (os.path.join(USER_SAMPLES_DIR, "mapping_definition_sample.csv"),  'csv'),
-    (os.path.join(USER_SAMPLES_DIR, "mapping_definition_sample.yaml"), 'yaml'),
-]
-for path, fmt in outs:
-    if fmt == 'csv':
-        write_csv(path)
-    else:
-        write_yaml(path)
-    print(f"Generated: {path}  ({os.path.getsize(path):,} bytes)")
-
-# 기존 xlsx 템플릿은 더 이상 쓰지 않으므로 정리 (있으면 삭제).
-old_xlsx = os.path.join(PUBLIC_DIR, "mapping_definition_template.xlsx")
-if os.path.exists(old_xlsx):
-    os.remove(old_xlsx)
-    print(f"Removed obsolete: {old_xlsx}")
+if __name__ == "__main__":
+    raise SystemExit(main())
