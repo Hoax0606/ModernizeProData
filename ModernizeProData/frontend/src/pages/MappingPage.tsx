@@ -8,6 +8,7 @@ import { useUiStore } from '../store/ui';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
 import { projectApi } from '../api/workspace';
 import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
+import { mappingImportApi, type MappingStatus as MappingStatusDto } from '../api/mappingImport';
 import { MappingOnboarding } from './DashboardPage';
 
 /* ============================================================
@@ -706,11 +707,40 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   const [importMappingOpen, setImportMappingOpen] = useState(false);
   const [importYamlOpen, setImportYamlOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
+  // 슬롯별 현재 활성 파일명 — rules/code_maps 가 실제 비어있으면 null (삭제 후 반영)
+  const [mappingStatus, setMappingStatus] = useState<MappingStatusDto>({
+    columnFilename: null, codeFilename: null, ruleCount: 0, codeMapCount: 0,
+  });
+  const mappingImported = mappingStatus.columnFilename !== null || mappingStatus.codeFilename !== null;
   const [q, setQ] = useState('');
   type RuleFilter = 'all' | 'unmapped' | 'auto' | 'rule' | 'null' | 'default';
   const [coverageFilter, setCoverageFilter] = useState<RuleFilter>('all');
   const [activeIdx, setActiveIdx] = useState(0);
   const activeProjectIdForRow = useWorkspaceStore((s) => s.activeProjectId);
+
+  const refreshMappingStatus = useCallback(async () => {
+    if (!activeProjectIdForRow) return;
+    try {
+      const st = await mappingImportApi.status(activeProjectIdForRow);
+      setMappingStatus(st);
+    } catch {
+      setMappingStatus({ columnFilename: null, codeFilename: null, ruleCount: 0, codeMapCount: 0 });
+    }
+  }, [activeProjectIdForRow]);
+
+  useEffect(() => {
+    if (!activeProjectIdForRow) {
+      setMappingStatus({ columnFilename: null, codeFilename: null, ruleCount: 0, codeMapCount: 0 });
+      return;
+    }
+    let cancelled = false;
+    mappingImportApi.status(activeProjectIdForRow)
+      .then((st) => { if (!cancelled) setMappingStatus(st); })
+      .catch(() => {
+        if (!cancelled) setMappingStatus({ columnFilename: null, codeFilename: null, ruleCount: 0, codeMapCount: 0 });
+      });
+    return () => { cancelled = true; };
+  }, [activeProjectIdForRow]);
   const rowEdits = useMappingEditsStore(
     (s) => (activeProjectIdForRow ? s.rowEdits[activeProjectIdForRow]?.[table.internalName] : undefined) || EMPTY_ROW_EDITS,
   );
@@ -942,17 +972,14 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         <button
           style={styles.btnSecondary}
           onClick={() => setImportMappingOpen(true)}
-        >Auto-map unmapped</button>
+        >{mappingImported ? 'Auto-mapping' : 'Auto-map unmapped'}</button>
       </div>
       {importMappingOpen && (
-        <ImportFileModal
-          title="Mapping Definition"
-          accept=".csv"
-          acceptLabel=".csv"
-          templateHref="/templates/mapping_definition_template.csv"
-          templateFilename="mapping_definition_template.csv"
-          hint="매칭된 unmapped 행만 자동 채워지고, 이미 매핑된 행은 덮어쓰지 않습니다."
+        <MappingDefinitionImportModal
+          projectId={activeProjectIdForRow ?? ''}
+          activeFiles={{ column: mappingStatus.columnFilename, code: mappingStatus.codeFilename }}
           onClose={() => setImportMappingOpen(false)}
+          onChanged={refreshMappingStatus}
         />
       )}
       {importYamlOpen && (
@@ -2121,6 +2148,206 @@ function ImportFileModal({
             }}
           >Import</button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Mapping definition import modal (stage → save 모델) ──
+//
+// 폴더 아이콘으로 파일 픽 / 휴지통으로 슬롯 삭제 — 둘 다 일단 모달 안 state 에만
+// stage 됨. Save 누를 때 한꺼번에 DB 에 commit (POST /mapping/import + DELETE).
+// Close 누르면 staged 변경 전부 폐기.
+
+type SlotPending =
+  | { kind: 'none' }
+  | { kind: 'upload'; file: File }
+  | { kind: 'delete' };
+
+function MappingDefinitionImportModal({
+  projectId, activeFiles, onClose, onChanged,
+}: {
+  projectId: string;
+  activeFiles: { column: string | null; code: string | null };
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [columnPending, setColumnPending] = useState<SlotPending>({ kind: 'none' });
+  const [codePending, setCodePending]     = useState<SlotPending>({ kind: 'none' });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const hasPending = columnPending.kind !== 'none' || codePending.kind !== 'none';
+
+  const handleSave = async () => {
+    if (!projectId || !hasPending) return;
+    setSaving(true);
+    setError(null);
+    try {
+      // 1) 삭제부터 — 같은 슬롯에 upload + delete 동시 불가능하지만 안전하게 순서 분리
+      if (columnPending.kind === 'delete') await mappingImportApi.deleteRules(projectId);
+      if (codePending.kind === 'delete')   await mappingImportApi.deleteCodeMaps(projectId);
+      // 2) 업로드 — 둘 다 있으면 한 호출로
+      const colFile = columnPending.kind === 'upload' ? columnPending.file : null;
+      const codFile = codePending.kind   === 'upload' ? codePending.file   : null;
+      if (colFile || codFile) {
+        await mappingImportApi.importCsv(projectId, colFile, codFile);
+      }
+      onChanged();
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const displayName = (slot: 'column' | 'code'): { name: string | null; mode: 'normal' | 'pending' } => {
+    const pending = slot === 'column' ? columnPending : codePending;
+    const active = slot === 'column' ? activeFiles.column : activeFiles.code;
+    if (pending.kind === 'upload') return { name: pending.file.name, mode: 'pending' };
+    if (pending.kind === 'delete') return { name: null, mode: 'normal' };
+    return { name: active, mode: 'normal' };
+  };
+
+  const colDisp = displayName('column');
+  const codDisp = displayName('code');
+
+  return (
+    <div style={styles.modalBackdrop} onClick={saving ? undefined : onClose}>
+      <div style={{ ...styles.modalCard, width: 520 }} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <div style={styles.modalTitle}>Mapping Definition</div>
+          <div style={{ flex: 1 }} />
+          <a
+            href="/templates/mapping_definition_template.csv"
+            download="column_mapping_template.csv"
+            style={styles.modalTemplateBtn}
+          >
+            <Ic.download /> column template
+          </a>
+          <a
+            href="/templates/code_mapping_template.csv"
+            download="code_mapping_template.csv"
+            style={{ ...styles.modalTemplateBtn, marginLeft: 6 }}
+          >
+            <Ic.download /> code template
+          </a>
+        </div>
+        <div style={styles.modalBody}>
+          <MappingFileRow
+            label="Column mapping"
+            displayName={colDisp.name}
+            displayMode={colDisp.mode}
+            onPick={(f) => setColumnPending({ kind: 'upload', file: f })}
+            onDelete={() => setColumnPending({ kind: 'delete' })}
+            canDelete={activeFiles.column !== null && columnPending.kind !== 'delete'}
+          />
+          <MappingFileRow
+            label="Code mapping"
+            displayName={codDisp.name}
+            displayMode={codDisp.mode}
+            onPick={(f) => setCodePending({ kind: 'upload', file: f })}
+            onDelete={() => setCodePending({ kind: 'delete' })}
+            canDelete={activeFiles.code !== null && codePending.kind !== 'delete'}
+          />
+          {error && (
+            <div style={{ ...styles.modalHint, background: 'var(--red-50)', borderColor: 'var(--red)', color: 'var(--red)' }}>
+              <Ic.warn />
+              <span>{error}</span>
+            </div>
+          )}
+        </div>
+        <div style={styles.modalFooter}>
+          <button
+            style={(hasPending && !saving) ? styles.btnPrimary : styles.btnPrimaryDisabled}
+            disabled={!hasPending || saving}
+            onClick={handleSave}
+          >{saving ? 'Saving…' : 'Save'}</button>
+          <button style={styles.btnSecondary} disabled={saving} onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 한 슬롯의 행 — [라벨] [흰 박스: 파일명 ... 📁 🗑]
+ * 폴더 아이콘 / 휴지통은 흰 박스 내부의 단일 컨테이너에 묶여 있음.
+ */
+function MappingFileRow({
+  label, displayName, displayMode, onPick, onDelete, canDelete,
+}: {
+  label: string;
+  displayName: string | null;
+  displayMode: 'normal' | 'pending';
+  onPick: (f: File) => void;
+  onDelete: () => void;
+  canDelete: boolean;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const nameStyle: React.CSSProperties = {
+    flex: 1,
+    fontFamily: 'var(--mono)',
+    fontSize: 12,
+    color: displayName == null ? 'var(--text-4)' : 'var(--text)',
+    fontStyle: displayMode === 'pending' ? 'italic' : 'normal',
+    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  };
+
+  const iconBtnStyle: React.CSSProperties = {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    width: 22, height: 22,
+    background: 'transparent', border: 'none', borderRadius: 3,
+    cursor: 'pointer', color: 'var(--text-3)', fontSize: 12,
+  };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ minWidth: 110, fontSize: 11.5, color: 'var(--text-2)' }}>{label}</div>
+        {/* 흰 박스 — 파일명과 아이콘 모두 감싼다 */}
+        <div style={{
+          flex: 1,
+          display: 'flex', alignItems: 'center', gap: 4,
+          padding: '6px 10px',
+          background: 'var(--panel)',
+          border: '1px solid var(--border-strong)',
+          borderRadius: 4,
+          minHeight: 30,
+        }}>
+          <div style={nameStyle}>{displayName ?? '—'}</div>
+          {canDelete && (
+            <button
+              type="button"
+              onClick={onDelete}
+              title="이 슬롯 데이터 삭제"
+              style={iconBtnStyle}
+            >
+              <i className="fa-solid fa-trash" />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            title="파일 선택"
+            style={iconBtnStyle}
+          >
+            <i className="fa-solid fa-folder-open" />
+          </button>
+        </div>
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".csv"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) onPick(f);
+            e.target.value = '';
+          }}
+          style={{ display: 'none' }}
+        />
       </div>
     </div>
   );
@@ -4128,7 +4355,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'inline-flex', alignItems: 'center', gap: 5,
     height: 26, padding: '0 10px',
     border: '1px solid var(--border-strong)', borderRadius: 4,
-    background: 'var(--panel)', color: '#01589C',
+    background: 'var(--panel)', color: '#1A9E7A',
     fontSize: 11.5, fontFamily: 'var(--mono)', fontWeight: 600,
     cursor: 'pointer', textDecoration: 'none',
     whiteSpace: 'nowrap',
