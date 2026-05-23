@@ -7,6 +7,8 @@ import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.ParsedDdl;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.ParsedTable;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
+import com.ksinfo.modernize_pro_data.coordinator.site.Site;
+import com.ksinfo.modernize_pro_data.coordinator.site.SiteRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -42,6 +44,7 @@ public class DdlImportService {
     private final DdlTableRepository ddlTableRepo;
     private final DdlColumnRepository ddlColumnRepo;
     private final ProjectRepository projectRepo;
+    private final SiteRepository siteRepo;
     private final OracleDdlParser parser;
 
     @Transactional
@@ -68,9 +71,13 @@ public class DdlImportService {
         ddlImportRepo.deleteByProjectIdAndSide(projectId, side);
         ddlImportRepo.flush();
 
+        // Site 의 DB type 정보로 dialect 결정 (없으면 "oracle" 폴백).
+        // AS-IS → site.asisDbType, TO-BE → site.tobeDbByEnv[site.environment].type
+        String dialect = resolveDialect(project, side);
+
         DdlImport ddlImport = DdlImport.create(
                 projectId, side, filename, content.length,
-                sha256Hex(content), "oracle", importedBy);
+                sha256Hex(content), dialect, importedBy);
         ddlImport.setTableCount(parsed.getTables().size());
         ddlImport.setColumnCount(parsed.totalColumnCount());
         ddlImportRepo.save(ddlImport);
@@ -173,6 +180,45 @@ public class DdlImportService {
                     "side 는 'asis' 또는 'tobe' 여야 합니다 (입력: " + side + ")",
                     HttpStatus.BAD_REQUEST);
         }
+    }
+
+    /**
+     * Project 의 Site 정보로 DDL dialect 를 결정한다.
+     *   side=asis → site.asisDbType
+     *   side=tobe → site.tobeDbByEnv[site.environment].type
+     * Site 가 없거나 type 이 비어있으면 "oracle" 폴백 (기존 동작 유지).
+     */
+    private String resolveDialect(Project project, String side) {
+        if (project.getSiteId() == null) return "oracle";
+        Site site = siteRepo.findById(project.getSiteId()).orElse(null);
+        if (site == null) return "oracle";
+        String raw = null;
+        if (SIDE_ASIS.equals(side)) {
+            raw = site.getAsisDbType();
+        } else if (SIDE_TOBE.equals(side)) {
+            Map<String, Object> byEnv = site.getTobeDbByEnv();
+            if (byEnv != null && site.getEnvironment() != null) {
+                Object envConn = byEnv.get(site.getEnvironment());
+                if (envConn instanceof Map<?, ?> conn) {
+                    Object t = conn.get("type");
+                    if (t != null) raw = t.toString();
+                }
+            }
+        }
+        return normalizeDialect(raw);
+    }
+
+    /** UI 표시명을 dialect 코드로 정규화. 알려지지 않은 값은 "oracle" 폴백. */
+    private String normalizeDialect(String raw) {
+        if (raw == null) return "oracle";
+        String s = raw.trim().toLowerCase();
+        if (s.isEmpty()) return "oracle";
+        if (s.contains("postgres")) return "postgresql";
+        if (s.contains("sql server") || s.equals("mssql") || s.contains("microsoft")) return "mssql";
+        if (s.contains("mysql") || s.contains("mariadb")) return "mysql";
+        if (s.contains("db2")) return "db2";
+        if (s.contains("oracle")) return "oracle";
+        return "oracle";  // 모르면 폴백
     }
 
     private String sha256Hex(byte[] bytes) {

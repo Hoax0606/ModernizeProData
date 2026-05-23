@@ -30,7 +30,7 @@ public class LicenseVerifier {
     private final PublicKey publicKey;
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
 
-    public LicenseVerifier(@Value("${modernize.license.public-key:classpath:license/public-key.pem}") String publicKeyLocation) {
+    public LicenseVerifier(@Value("${modernize.license.public-key:classpath:license/public.pem}") String publicKeyLocation) {
         this.publicKey = loadPublicKey(publicKeyLocation);
     }
 
