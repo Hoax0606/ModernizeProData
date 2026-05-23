@@ -368,6 +368,7 @@ export const ko = {
   'execution.preflight.checking':                          '검사 진행 중…',
   'execution.preflight.trigger.start':                     'Pre-flight 검사',
   'execution.preflight.trigger.disabled':                  '테이블을 선택하세요',
+  'execution.preflight.trigger.reset':                     '초기화 (테스트용)',
   'execution.preflight.snapshot.skipReason':               '전체 선택 시에만 체크됩니다',
   'execution.preflight.tableSelector.title':               'TO-BE 테이블 선택',
   'execution.preflight.tableSelector.selectAll':           '전체 선택',
@@ -385,7 +386,7 @@ export const ko = {
   'execution.preflight.check.connTobe.title':              'TO-BE 접속 확인',
   'execution.preflight.check.connTobe.pass':               'latency 12 ms · 접속 정상',
   'execution.preflight.check.tobeBindings.title':          '모든 TO-BE 테이블 소스 바인딩',
-  'execution.preflight.check.tobeBindings.pass':           '{n}개 테이블 모두 컬럼 매핑 완료',
+  'execution.preflight.check.tobeBindings.pass':           '{n}개 테이블 모두 AS-IS 소스 바인딩 완료',
   'execution.preflight.check.asisUnmapped.title':          '선택된 AS-IS 테이블의 컬럼 unmapped 여부',
   'execution.preflight.check.asisUnmapped.pass':           '모든 AS-IS 컬럼 매핑됨',
   'execution.preflight.check.unmappedCols.title':          '모든 TO-BE 테이블의 컬럼 unmapped 여부',
@@ -396,8 +397,10 @@ export const ko = {
   'execution.preflight.demo.indicator':                    'Preview',
   'execution.preflight.demo.exit':                         '실데이터로 보기',
   'execution.preflight.demo.connTobe.fail':                'latency 412 ms · 응답 지연',
-  'execution.preflight.demo.tobeBindings.fail':            '2개 TO-BE 테이블에 미매핑 컬럼 존재',
+  'execution.preflight.demo.tobeBindings.fail':            '2개 TO-BE 테이블이 AS-IS 소스 미연결',
   'execution.preflight.demo.asisUnmapped.fail':            '3개 AS-IS 컬럼이 미매핑',
+  'execution.preflight.demo.csvArrived.fail':              '추출 파일 미도착 (시연용)',
+  'execution.preflight.demo.unmappedCols.fail':            '4개 TO-BE 컬럼 매핑 누락 (시연용)',
 
   /* Overall progress */
   'execution.progress.title':         'Overall progress',

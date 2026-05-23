@@ -369,6 +369,7 @@ export const ja: Record<TranslationKey, string> = {
   'execution.preflight.checking':                          '検査実行中…',
   'execution.preflight.trigger.start':                     'Pre-flight 検査',
   'execution.preflight.trigger.disabled':                  'テーブルを選択してください',
+  'execution.preflight.trigger.reset':                     'リセット (テスト用)',
   'execution.preflight.snapshot.skipReason':               '全選択時のみチェックされます',
   'execution.preflight.tableSelector.title':               'TO-BE テーブル選択',
   'execution.preflight.tableSelector.selectAll':           '全て選択',
@@ -386,7 +387,7 @@ export const ja: Record<TranslationKey, string> = {
   'execution.preflight.check.connTobe.title':              'TO-BE 接続確認',
   'execution.preflight.check.connTobe.pass':               'latency 12 ms · 接続正常',
   'execution.preflight.check.tobeBindings.title':          '全ての TO-BE テーブルのソースバインディング',
-  'execution.preflight.check.tobeBindings.pass':           '{n} テーブル全てカラム マッピング完了',
+  'execution.preflight.check.tobeBindings.pass':           '{n} テーブル全て AS-IS ソースバインディング完了',
   'execution.preflight.check.asisUnmapped.title':          '選択された AS-IS テーブルのカラム unmapped 検査',
   'execution.preflight.check.asisUnmapped.pass':           '全ての AS-IS カラムがマッピング済み',
   'execution.preflight.check.unmappedCols.title':          '全ての TO-BE テーブルのカラム unmapped 検査',
@@ -397,8 +398,10 @@ export const ja: Record<TranslationKey, string> = {
   'execution.preflight.demo.indicator':                    'Preview',
   'execution.preflight.demo.exit':                         '実データに戻る',
   'execution.preflight.demo.connTobe.fail':                'latency 412 ms · 応答遅延',
-  'execution.preflight.demo.tobeBindings.fail':            '2 TO-BE テーブルに未マッピングカラム存在',
+  'execution.preflight.demo.tobeBindings.fail':            '2 TO-BE テーブルが AS-IS ソース未連結',
   'execution.preflight.demo.asisUnmapped.fail':            '3 AS-IS カラムが未マッピング',
+  'execution.preflight.demo.csvArrived.fail':              '抽出ファイル未到着 (デモ用)',
+  'execution.preflight.demo.unmappedCols.fail':            '4 件の TO-BE カラムが未マッピング (デモ用)',
 
   /* Overall progress */
   'execution.progress.title':         'Overall progress',

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useWorkspaceStore } from '../store/workspace';
 import { useAsisDdlStore } from '../store/asisDdl';
 import { useTobeDdlStore } from '../store/tobeDdl';
@@ -7,6 +7,7 @@ import { useMappingEditsStore } from '../store/mappingEdits';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
 import { projectApi } from '../api/workspace';
 import { MappingOnboarding } from './DashboardPage';
+import { isDemoProjectId } from '../lib/demoFixtures';
 
 /* ============================================================
  * Mapping page — UI scaffold ported from Prototype/src/mapping.jsx.
@@ -197,6 +198,8 @@ export function MappingPage() {
 
   useEffect(() => {
     if (!activeProjectId) return;
+    // demo project 는 AppShell 이 schema 를 inject 했으므로 백엔드 fetch 를 건너뛴다.
+    if (isDemoProjectId(activeProjectId)) return;
     useAsisDdlStore.getState().fetch(activeProjectId).catch((e) => console.error('[mapping] asis-ddl fetch failed', e));
     useTobeDdlStore.getState().fetch(activeProjectId).catch((e) => console.error('[mapping] tobe-ddl fetch failed', e));
   }, [activeProjectId]);
@@ -211,6 +214,47 @@ export function MappingPage() {
     MAPPING_BY_TOBE = ddlToMappingByTobe(tobeSchema);
     setHydrationTick((t) => t + 1);
   }, [asisSchema, tobeSchema]);
+
+  // Pre-flight Fix → 첫 unmapped row 찾아 scrollIntoView + 1초 teal pulse.
+  // ExecutionPage 가 navigate('/mapping', { state: { fixTarget: { kind } } }) 로 진입.
+  const location = useLocation();
+  useEffect(() => {
+    const state = location.state as { fixTarget?: { kind: 'unmapped-tobe' | 'unmapped-asis' | 'unbound-tobe' } } | null;
+    const kind = state?.fixTarget?.kind;
+    if (!kind) return;
+    // unmapped-asis: AS-IS 사이드로 자동 전환해야 AsisTableDetail 이 mount 되고
+    // [data-fix-row="asis-unmapped"] 마커가 DOM 에 등장. 첫 AS-IS 테이블로 switch.
+    if (kind === 'unmapped-asis' && ASIS_TABLES.length > 0) {
+      setSelected({ side: 'asis', name: ASIS_TABLES[0].name });
+    }
+    // unbound-tobe: 첫 unbound TO-BE 테이블(sources 비어있는)을 활성으로 → CollapsibleBinding 렌더.
+    if (kind === 'unbound-tobe') {
+      const firstUnbound = effectiveTobe.find((t) => t.sources.length === 0);
+      if (firstUnbound) {
+        setSelected({ side: 'tobe', name: firstUnbound.name, internalName: firstUnbound.internalName });
+      }
+    }
+    const id = window.setTimeout(() => {
+      const sel = kind === 'unbound-tobe'
+        ? '[data-fix-block="tobe-binding"]'
+        : kind === 'unmapped-asis'
+          ? '[data-fix-row="asis-unmapped"]'
+          : '[data-fix-row="tobe-unmapped"]';
+      const els = document.querySelectorAll<HTMLElement>(sel);
+      if (els.length === 0) return;
+      // 첫 element 만 화면 중앙으로 스크롤 — 여러 곳 동시 점프는 혼란.
+      els[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // 강조는 모든 matching element 에 동시에.
+      els.forEach((el) => el.classList.add('mpd-fix-highlight'));
+      window.setTimeout(() => {
+        els.forEach((el) => el.classList.remove('mpd-fix-highlight'));
+      }, 1000);
+    }, 200);
+    window.history.replaceState({}, '');
+    return () => window.clearTimeout(id);
+    // effectiveTobe 는 closure 로 캡처 — deps 에 넣으면 binding 편집마다 effect 재실행됨.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state, hydrationTick]);
 
   const initialSelection: Selection = useMemo(() => {
     if (TOBE_TABLES.length > 0) {
@@ -816,6 +860,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
                 return (
                   <tr
                     key={`${r.src}>${r.tgt}-${i}`}
+                    data-fix-row={r.rule === 'unmapped' ? 'tobe-unmapped' : undefined}
                     onClick={() => setActiveIdx(realIdx)}
                     style={{
                       background: isActive ? 'var(--navy-50)' : (i % 2 === 1 ? 'var(--zebra)' : 'var(--panel)'),
@@ -975,7 +1020,7 @@ function CollapsibleBinding({ table, open, onToggle, sources, onSourcesChange, c
     onSourcesChange(sources.map((s) => s.alias === alias ? { ...s, ...patch } : s));
 
   return (
-    <div style={styles.bindingWrap}>
+    <div style={styles.bindingWrap} data-fix-block="tobe-binding">
       <div onClick={onToggle} style={styles.bindingHeader}>
         <span style={{ color: 'var(--text-4)', fontSize: 10, width: 10 }}>{open ? '▾' : '▸'}</span>
         <span style={styles.bindingLabel}>Table binding</span>
@@ -2028,7 +2073,9 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
                   const realMappings = ms.filter((m) => m.rule !== 'skip');
                   const notNull = (c.nullPct ?? 0) === 0;
                   return (
-                    <tr key={c.name} style={{
+                    <tr key={c.name}
+                      data-fix-row={status === 'unmapped' ? 'asis-unmapped' : undefined}
+                      style={{
                       background: i % 2 === 1 ? 'var(--zebra)' : 'var(--panel)',
                       borderBottom: '1px solid var(--border)',
                       opacity: status === 'skip' ? 0.62 : 1,

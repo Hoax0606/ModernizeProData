@@ -364,6 +364,7 @@ export const en: Record<TranslationKey, string> = {
   'execution.preflight.checking':                          'Checking…',
   'execution.preflight.trigger.start':                     'Pre-flight check',
   'execution.preflight.trigger.disabled':                  'Select tables first',
+  'execution.preflight.trigger.reset':                     'Reset (testing)',
   'execution.preflight.snapshot.skipReason':               'Checked only when all tables are selected',
   'execution.preflight.tableSelector.title':               'TO-BE table selection',
   'execution.preflight.tableSelector.selectAll':           'Select all',
@@ -381,7 +382,7 @@ export const en: Record<TranslationKey, string> = {
   'execution.preflight.check.connTobe.title':              'TO-BE DB reachable',
   'execution.preflight.check.connTobe.pass':               'latency 12 ms · connection ok',
   'execution.preflight.check.tobeBindings.title':          'All TO-BE tables source-bound',
-  'execution.preflight.check.tobeBindings.pass':           '{n} tables fully mapped',
+  'execution.preflight.check.tobeBindings.pass':           '{n} tables bound to AS-IS source',
   'execution.preflight.check.asisUnmapped.title':          'Selected AS-IS tables column unmapped check',
   'execution.preflight.check.asisUnmapped.pass':           'All AS-IS columns mapped',
   'execution.preflight.check.unmappedCols.title':          'All TO-BE tables column unmapped check',
@@ -392,8 +393,10 @@ export const en: Record<TranslationKey, string> = {
   'execution.preflight.demo.indicator':                    'Preview',
   'execution.preflight.demo.exit':                         'Back to real data',
   'execution.preflight.demo.connTobe.fail':                'latency 412 ms · slow response',
-  'execution.preflight.demo.tobeBindings.fail':            '2 TO-BE tables have unmapped columns',
+  'execution.preflight.demo.tobeBindings.fail':            '2 TO-BE tables not bound to AS-IS source',
   'execution.preflight.demo.asisUnmapped.fail':            '3 AS-IS columns are unmapped',
+  'execution.preflight.demo.csvArrived.fail':              'AS-IS extract not received (demo)',
+  'execution.preflight.demo.unmappedCols.fail':            '4 TO-BE columns unmapped (demo)',
 
   /* Overall progress */
   'execution.progress.title':         'Overall progress',

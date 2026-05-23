@@ -4,6 +4,7 @@ import { useSnapshotsStore, type SnapshotStatus, type SnapshotType } from '../st
 import { projectApi } from '../api/workspace';
 import { useAuthStore } from '../store/auth';
 import { useAuditLogStore } from '../store/auditLog';
+import { useDemoMode } from '../lib/useDemoMode';
 import { useT, type TranslationKey } from '../i18n';
 
 type StatusFilter = 'all' | SnapshotStatus;
@@ -14,6 +15,7 @@ type TypeFilter = 'all' | SnapshotType;
  */
 export function ApprovalsPage() {
   const t = useT();
+  const { isDemo } = useDemoMode();
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
   const sites = useWorkspaceStore((s) => s.sites);
@@ -72,7 +74,9 @@ export function ApprovalsPage() {
   // 프로젝트 활성 중이거나 site 없으면 본문 렌더하지 않음.
   // (redirect 는 sidebar 프로젝트 클릭 핸들러가 직접 처리 — 여기서 effect 로 redirect 시키면
   // 알림 navigate 와 race 가 발생함.)
-  if (activeProjectId || !site) return null;
+  // Demo 모드에서는 activeProjectId 가 DEMO_PROJECT_ID 로 유지되더라도 사이트 단위
+  // 페이지를 그대로 렌더 — Pre-flight `approved-snapshot` Fix 흐름 검증을 위해.
+  if ((activeProjectId && !isDemo) || !site) return null;
 
   const handleApprove = async (id: string) => {
     const snap = allSnapshots.find((s) => s.id === id);

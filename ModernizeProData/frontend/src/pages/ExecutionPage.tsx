@@ -1,21 +1,27 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useWorkspaceStore } from '../store/workspace';
 import type { Project, ProjectPhase } from '../store/workspace';
 import { useTobeDdlStore } from '../store/tobeDdl';
+import { useSnapshotsStore, type MappingSnapshot } from '../store/snapshots';
+import { useActiveProjectExecutionReadOnly } from '../store/readOnly';
+import {
+  useExecutionPreflightStore,
+  type PreflightCheck,
+  type PreflightPhase,
+  type CheckStatus,
+} from '../store/executionPreflight';
+import { useDemoMode } from '../lib/useDemoMode';
 import { useT, type TranslationKey } from '../i18n';
 import { Modal } from '../components/Modal';
 
 type T = (key: TranslationKey, vars?: Record<string, string | number>) => string;
 
 type StageTone = 'idle' | 'running' | 'ok';
-type CheckStatus = 'pass' | 'fail' | 'skip';
 type RunMode = 'rehearsal' | 'cutover';
 type RunResult = 'ok' | 'warn' | 'failed' | 'aborted' | 'running';
 type RunScope = 'all' | 'failed-only';
 type BadgeTone = 'ok' | 'running' | 'queued' | 'err' | 'warn' | 'info';
-
-type PreflightPhase = 'idle' | 'checking' | 'done';
 
 interface Stage {
   id: string;
@@ -26,14 +32,6 @@ interface Stage {
   color: string;
   rate: string;
   eta: string;
-}
-
-interface PreflightCheck {
-  id: string;
-  title: string;
-  detail: string;
-  status: CheckStatus;
-  affectedTables?: string[];
 }
 
 interface Run {
@@ -62,13 +60,7 @@ export function ExecutionPage() {
     [projects, activeProjectId],
   );
 
-  const [searchParams, setSearchParams] = useSearchParams();
-  const isDemo = searchParams.get('demo') === 'preflight';
-  const exitDemo = () => {
-    const next = new URLSearchParams(searchParams);
-    next.delete('demo');
-    setSearchParams(next, { replace: true });
-  };
+  const { isDemo, exitDemo } = useDemoMode();
 
   /* Simulated live tick — drives the running stage's pct upward for visual feedback. */
   const [tick, setTick] = useState(0);
@@ -91,16 +83,25 @@ export function ExecutionPage() {
   }, [project?.id, tobeSchema, fetchTobeDdl]);
   const tobeTables = tobeSchema?.tables.map((tc) => tc.table.physicalName) ?? [];
 
-  /* Pre-flight 워크플로 state — project 변경 시 초기화. */
-  const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
-  const [preflightPhase, setPreflightPhase] = useState<PreflightPhase>('idle');
-  const [preflightResults, setPreflightResults] = useState<PreflightCheck[]>([]);
+  /* approved-snapshot 체크는 phase 가 아니라 snapshots store 의 실제 데이터로 판정 — phase 는
+     단방향 전환이라 snapshot 삭제 후 sign-off 에 머무르는 케이스에서 거짓 pass 가 됐었음. */
+  const snapshots = useSnapshotsStore((s) => s.snapshots);
 
-  useEffect(() => {
-    setSelectedTables(new Set());
-    setPreflightPhase('idle');
-    setPreflightResults([]);
-  }, [project?.id]);
+  /* worker 가 본인이 executionAssignee 가 아닌 프로젝트에 들어왔을 때 모든 인터랙션 차단. */
+  const isExecReadOnly = useActiveProjectExecutionReadOnly();
+
+  /* Pre-flight 워크플로 state — store 에서 영속. project 별로 격리되어 자동 reset 효과. */
+  const entrySelected = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.selectedTables : undefined);
+  const entryPhase    = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.preflightPhase : undefined);
+  const entryResults  = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.preflightResults : undefined);
+  const selectedTables = useMemo(() => new Set(entrySelected ?? []), [entrySelected]);
+  const preflightPhase: PreflightPhase = entryPhase ?? 'idle';
+  const preflightResults: PreflightCheck[] = entryResults ?? [];
+
+  const setSelectedTables = (next: Set<string>) => {
+    if (!project) return;
+    useExecutionPreflightStore.getState().setSelected(project.id, [...next]);
+  };
 
   if (!project) {
     return (
@@ -113,14 +114,17 @@ export function ExecutionPage() {
   const isAll = tobeTables.length > 0 && selectedTables.size === tobeTables.length;
   const startPreflight = () => {
     if (selectedTables.size === 0 || preflightPhase === 'checking') return;
-    const checks = buildPreflightChecks(project, Array.from(selectedTables), isAll, t);
-    setPreflightPhase('checking');
-    setPreflightResults([]);
+    const checks = buildPreflightChecks(project, Array.from(selectedTables), isAll, t, snapshots);
+    const store = useExecutionPreflightStore.getState();
+    store.setPhase(project.id, 'checking');
+    store.setResults(project.id, []);
     /* 각 체크가 600ms 간격으로 순차 확정. fail 나도 끝까지 진행. */
     checks.forEach((check, i) => {
       window.setTimeout(() => {
-        setPreflightResults((prev) => [...prev, check]);
-        if (i === checks.length - 1) setPreflightPhase('done');
+        useExecutionPreflightStore.getState().setResults(project.id, (prev) => [...prev, check]);
+        if (i === checks.length - 1) {
+          useExecutionPreflightStore.getState().setPhase(project.id, 'done');
+        }
       }, (i + 1) * 600);
     });
   };
@@ -146,19 +150,26 @@ export function ExecutionPage() {
         running={running}
         onToggleRun={() => setRunning((v) => !v)}
         preflightPassed={preflightPassed}
+        readOnly={isExecReadOnly}
       />
       <TableSelector
         t={t}
         tables={tobeTables}
         selected={selectedTables}
         onChange={setSelectedTables}
+        disabled={isExecReadOnly}
       />
       <PreflightPanel
         t={t}
         checks={displayedResults}
         phase={displayedPhase}
-        canStart={!isDemo && selectedTables.size > 0}
+        canStart={!isDemo && selectedTables.size > 0 && !isExecReadOnly}
         onStart={startPreflight}
+        onReset={() => {
+          if (isExecReadOnly) return;
+          useExecutionPreflightStore.getState().resetForProject(project.id);
+        }}
+        canReset={!isExecReadOnly}
         isDemo={isDemo}
         onExitDemo={exitDemo}
       />
@@ -178,6 +189,7 @@ function RunHeader({
   running,
   onToggleRun,
   preflightPassed,
+  readOnly,
 }: {
   t: T;
   project: Project;
@@ -186,10 +198,11 @@ function RunHeader({
   running: boolean;
   onToggleRun: () => void;
   preflightPassed: boolean;
+  readOnly: boolean;
 }) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const mappingReady: ProjectPhase[] = ['rehearsal', 'sign-off', 'cutover', 'hypercare'];
-  const canStart = mappingReady.includes(project.phase) && preflightPassed;
+  const canStart = mappingReady.includes(project.phase) && preflightPassed && !readOnly;
   const isDone = project.phase === 'done';
 
   if (!activeRun) {
@@ -274,11 +287,13 @@ function TableSelector({
   tables,
   selected,
   onChange,
+  disabled,
 }: {
   t: T;
   tables: string[];
   selected: Set<string>;
   onChange: (next: Set<string>) => void;
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(true);
 
@@ -335,6 +350,7 @@ function TableSelector({
                 checked={allChecked}
                 ref={(el) => { if (el) el.indeterminate = !noneChecked && !allChecked; }}
                 onChange={toggleAll}
+                disabled={disabled}
               />
               {t('execution.preflight.tableSelector.selectAll')}
             </label>
@@ -353,6 +369,7 @@ function TableSelector({
                     type="checkbox"
                     checked={selected.has(name)}
                     onChange={() => toggleOne(name)}
+                    disabled={disabled}
                   />
                   {name}
                 </label>
@@ -367,24 +384,68 @@ function TableSelector({
 
 /* ───────────────────────── Pre-flight panel ────────────────────── */
 
-function PreflightPanel({ t, checks, phase, canStart, onStart, isDemo, onExitDemo }: {
+function PreflightPanel({ t, checks, phase, canStart, onStart, onReset, canReset, isDemo, onExitDemo }: {
   t: T;
   checks: PreflightCheck[];
   phase: PreflightPhase;
   canStart: boolean;
   onStart: () => void;
+  onReset: () => void;
+  canReset: boolean;
   isDemo?: boolean;
   onExitDemo?: () => void;
 }) {
+  // PreflightPanel 내부에서 navigate 시 search 보존을 위해 isDemo 를 그대로 사용.
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const counts: Record<CheckStatus, number> = { pass: 0, fail: 0, skip: 0 };
   checks.forEach((c) => { counts[c.status]++; });
   const hasBlocking = counts.fail > 0;
   const isChecking = phase === 'checking';
   const isDone = phase === 'done';
-  const [open, setOpen] = useState(false);
+  // 기본 펼친 상태 — 사용자가 Pre-flight 항목을 바로 볼 수 있게.
+  // checking / fail 발생 시에도 자동으로 펼치는 보조 effect 는 유지.
+  const [open, setOpen] = useState(true);
   useEffect(() => {
     if (isChecking || hasBlocking) setOpen(true);
   }, [isChecking, hasBlocking]);
+
+  // demo URL 로 진입한 상태였다면 도착 페이지도 demo 로 유지되도록 search 보존.
+  const search = isDemo ? '?demo=preflight' : '';
+  const handleFix = (c: PreflightCheck) => {
+    switch (c.id) {
+      case 'csv-arrived':
+      case 'conn-tobe': {
+        // 외부 인프라 영역이지만 1차 자연스러운 액션은 SiteSettings 의 해당 입력값 확인.
+        // 현재 페이지 유지 + URL 쿼리로 AppShell 이 SiteSettingsModal 자동 open + 섹션 강조.
+        const next = new URLSearchParams(searchParams);
+        next.set('siteSettings', c.id === 'csv-arrived' ? 'csv' : 'tobe-db');
+        setSearchParams(next);
+        return;
+      }
+      case 'ddl-asis':
+        navigate({ pathname: '/settings', search }, { state: { highlightSide: 'asis' } });
+        return;
+      case 'ddl-tobe':
+        navigate({ pathname: '/settings', search }, { state: { highlightSide: 'tobe' } });
+        return;
+      case 'tobe-bindings':
+        // table-level routing 누락 — Table binding 패널을 강조.
+        navigate({ pathname: '/mapping', search }, { state: { fixTarget: { kind: 'unbound-tobe' } } });
+        return;
+      case 'unmapped-cols':
+        // column-level mapping 누락 — 첫 unmapped TO-BE 컬럼 row 를 강조.
+        navigate({ pathname: '/mapping', search }, { state: { fixTarget: { kind: 'unmapped-tobe' } } });
+        return;
+      case 'asis-unmapped':
+        navigate({ pathname: '/mapping', search }, { state: { fixTarget: { kind: 'unmapped-asis' } } });
+        return;
+      case 'approved-snapshot':
+        // 프로젝트 단위 스냅샷 목록 = VersionsPage. site-level approvals 가 아니라 versions.
+        navigate({ pathname: '/versions', search });
+        return;
+    }
+  };
 
   const bg = hasBlocking ? 'var(--red-50)' : 'var(--panel)';
   const headColor = hasBlocking ? 'var(--red)' : 'var(--text-2)';
@@ -432,6 +493,15 @@ function PreflightPanel({ t, checks, phase, canStart, onStart, isDemo, onExitDem
         >
           ▶ {t('execution.preflight.trigger.start')}
         </button>
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onReset(); }}
+          disabled={isChecking || !canReset}
+          title={t('execution.preflight.trigger.reset')}
+          style={(isChecking || !canReset) ? styles.btnDisabled : styles.btnGhost}
+        >
+          ↺ {t('execution.preflight.trigger.reset')}
+        </button>
       </div>
 
       {open && (
@@ -462,7 +532,9 @@ function PreflightPanel({ t, checks, phase, canStart, onStart, isDemo, onExitDem
                 <span style={{ fontSize: 12, fontWeight: 500 }}>{c.title}</span>
                 <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: detailColorFor(c.status) }}>{c.detail}</span>
                 {c.status === 'fail' ? (
-                  <button type="button" style={styles.btnGhost}>{t('execution.preflight.fix')}</button>
+                  <button type="button" style={styles.btnGhost} onClick={() => handleFix(c)}>
+                    {t('execution.preflight.fix')}
+                  </button>
                 ) : <span />}
               </div>
             ))}
@@ -832,13 +904,16 @@ function buildPreflightChecks(
   selectedTables: string[],
   isAll: boolean,
   t: T,
+  snapshots: MappingSnapshot[],
 ): PreflightCheck[] {
-  const phase = project.phase;
   const asisDdl = project.tableCount > 0;
   const tobeDdl = project.tobeTableCount > 0;
   const bothDdl = asisDdl && tobeDdl;
-  const snapshotApproved: ProjectPhase[] = ['sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
-  const hasApproved = snapshotApproved.includes(phase);
+  // 실제 snapshots 데이터에서 approved 여부 직접 확인 — phase 기반 추론은 snapshot 삭제
+  // 후 phase 가 sign-off 에 머무르는 케이스에서 거짓 pass 가 됐었음.
+  const hasApproved = snapshots.some(
+    (s) => s.projectId === project.id && s.status === 'approved',
+  );
   const selectedCount = selectedTables.length;
 
   return [
@@ -909,17 +984,20 @@ function buildPreflightChecks(
   ];
 }
 
-/* Single curated demo: pass / fail / skip across the 8 checks. */
+/**
+ * Demo 결과 — 8개 체크 모두 fail. 사용자가 demo 한 번 진입으로 모든 Fix 흐름
+ * (도착지·강조) 을 검증할 수 있게 의도적으로 worst-case 시나리오로 통일.
+ */
 function buildDemoPreflightChecks(t: T): PreflightCheck[] {
   return [
-    { id: 'csv-arrived',       title: t('execution.preflight.check.csvArrived.title'),     detail: t('execution.preflight.check.csvArrived.pass'),                       status: 'pass' },
-    { id: 'ddl-asis',          title: t('execution.preflight.check.ddlAsis.title'),        detail: t('execution.preflight.check.ddlAsis.pass', { n: 42 }),               status: 'pass' },
-    { id: 'ddl-tobe',          title: t('execution.preflight.check.ddlTobe.title'),        detail: t('execution.preflight.check.ddlTobe.pass', { n: 38 }),               status: 'pass' },
-    { id: 'conn-tobe',         title: t('execution.preflight.check.connTobe.title'),       detail: t('execution.preflight.demo.connTobe.fail'),                          status: 'fail' },
-    { id: 'tobe-bindings',     title: t('execution.preflight.check.tobeBindings.title'),   detail: t('execution.preflight.demo.tobeBindings.fail'),                      status: 'fail' },
-    { id: 'asis-unmapped',     title: t('execution.preflight.check.asisUnmapped.title'),   detail: t('execution.preflight.demo.asisUnmapped.fail'),                      status: 'fail' },
-    { id: 'unmapped-cols',     title: t('execution.preflight.check.unmappedCols.title'),   detail: t('execution.preflight.check.unmappedCols.pass'),                     status: 'pass' },
-    { id: 'approved-snapshot', title: t('execution.preflight.check.approvedSnapshot.title'), detail: t('execution.preflight.snapshot.skipReason'),                       status: 'skip' },
+    { id: 'csv-arrived',       title: t('execution.preflight.check.csvArrived.title'),       detail: t('execution.preflight.demo.csvArrived.fail'),       status: 'fail' },
+    { id: 'ddl-asis',          title: t('execution.preflight.check.ddlAsis.title'),          detail: t('execution.preflight.check.ddlAsis.fail'),         status: 'fail' },
+    { id: 'ddl-tobe',          title: t('execution.preflight.check.ddlTobe.title'),          detail: t('execution.preflight.check.ddlTobe.fail'),         status: 'fail' },
+    { id: 'conn-tobe',         title: t('execution.preflight.check.connTobe.title'),         detail: t('execution.preflight.demo.connTobe.fail'),         status: 'fail' },
+    { id: 'tobe-bindings',     title: t('execution.preflight.check.tobeBindings.title'),     detail: t('execution.preflight.demo.tobeBindings.fail'),     status: 'fail' },
+    { id: 'asis-unmapped',     title: t('execution.preflight.check.asisUnmapped.title'),     detail: t('execution.preflight.demo.asisUnmapped.fail'),     status: 'fail' },
+    { id: 'unmapped-cols',     title: t('execution.preflight.check.unmappedCols.title'),     detail: t('execution.preflight.demo.unmappedCols.fail'),     status: 'fail' },
+    { id: 'approved-snapshot', title: t('execution.preflight.check.approvedSnapshot.title'), detail: t('execution.preflight.check.approvedSnapshot.fail'), status: 'fail' },
   ];
 }
 

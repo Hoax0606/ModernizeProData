@@ -1,5 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
-import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
+import { Outlet, NavLink, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuthStore, roleLabel } from '../store/auth';
 import { authApi } from '../api/auth';
 import { useUsersStore } from '../store/users';
@@ -18,6 +18,17 @@ import { LockIcon } from '../components/LockIcon';
 import { useWorkspaceStore } from '../store/workspace';
 import { isProjectReadOnly } from '../store/readOnly';
 import { useSnapshotsStore } from '../store/snapshots';
+import { useAsisDdlStore } from '../store/asisDdl';
+import { useTobeDdlStore } from '../store/tobeDdl';
+import {
+  DEMO_ASIS_SCHEMA,
+  DEMO_PROJECT,
+  DEMO_PROJECT_ID,
+  DEMO_SITE,
+  DEMO_SITE_ID,
+  DEMO_TOBE_SCHEMA,
+} from '../lib/demoFixtures';
+import { useDemoMode } from '../lib/useDemoMode';
 import { useAuditLogStore } from '../store/auditLog';
 import { useNotificationStore } from '../store/notifications';
 import { useNotificationPrefsStore, isEventEnabled, actionToEventKey } from '../store/notificationPreferences';
@@ -31,7 +42,69 @@ import { useT } from '../i18n';
 export function AppShell() {
   const navigate = useNavigate();
   const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
   const t = useT();
+
+  // `?demo=preflight` 진입 시 workspace + asisDdl + tobeDdl store 에 demo fixture 를
+  // 한 번 inject 하고, demo 가 빠질 때 정확히 원복. demo flag 는 sessionStorage
+  // 기반이라 URL 에서 query 가 빠져도 (다른 페이지로 navigate 해도) 유지된다.
+  const { isDemo } = useDemoMode();
+
+  // Pre-flight 의 csv-arrived / conn-tobe Fix 가 `?siteSettings=csv|tobe-db` 를 붙이면
+  // SiteSettingsModal 을 자동 open + 해당 섹션을 1초 강조. URL 쿼리는 즉시 정리해서
+  // 다음 navigate 시 또 트리거되지 않도록.
+  //
+  // 주의: highlight set + setSearchParams + setTimeout(reset) 을 한 effect 안에 두면
+  // setSearchParams 가 deps(searchParams) 를 바꿔 effect 재실행 + cleanup 이 setTimeout
+  // 을 취소 → highlight 가 영원히 reset 되지 않는다. 그래서 두 effect 로 분리한다.
+  const [siteSettingsHighlight, setSiteSettingsHighlight] = useState<'csv' | 'tobe-db' | null>(null);
+  useEffect(() => {
+    const h = searchParams.get('siteSettings');
+    if (h !== 'csv' && h !== 'tobe-db') return;
+    setSiteSettingsOpen(true);
+    setSiteSettingsHighlight(h);
+    const next = new URLSearchParams(searchParams);
+    next.delete('siteSettings');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+  useEffect(() => {
+    if (!siteSettingsHighlight) return;
+    const id = window.setTimeout(() => setSiteSettingsHighlight(null), 1000);
+    return () => window.clearTimeout(id);
+  }, [siteSettingsHighlight]);
+  useEffect(() => {
+    if (!isDemo) return;
+    const prevActiveSiteId    = useWorkspaceStore.getState().activeSiteId;
+    const prevActiveProjectId = useWorkspaceStore.getState().activeProjectId;
+    useWorkspaceStore.setState((s) => ({
+      sites:    s.sites.some((x) => x.id === DEMO_SITE_ID)       ? s.sites    : [...s.sites,    DEMO_SITE],
+      projects: s.projects.some((x) => x.id === DEMO_PROJECT_ID) ? s.projects : [...s.projects, DEMO_PROJECT],
+      activeSiteId:    DEMO_SITE_ID,
+      activeProjectId: DEMO_PROJECT_ID,
+    }));
+    useAsisDdlStore.setState((s) => ({
+      schemasByProject: { ...s.schemasByProject, [DEMO_PROJECT_ID]: DEMO_ASIS_SCHEMA },
+    }));
+    useTobeDdlStore.setState((s) => ({
+      schemasByProject: { ...s.schemasByProject, [DEMO_PROJECT_ID]: DEMO_TOBE_SCHEMA },
+    }));
+    return () => {
+      useWorkspaceStore.setState((s) => ({
+        sites:    s.sites.filter((x) => x.id !== DEMO_SITE_ID),
+        projects: s.projects.filter((x) => x.id !== DEMO_PROJECT_ID),
+        activeSiteId:    prevActiveSiteId,
+        activeProjectId: prevActiveProjectId,
+      }));
+      useAsisDdlStore.setState((s) => {
+        const { [DEMO_PROJECT_ID]: _drop, ...rest } = s.schemasByProject;
+        return { schemasByProject: rest };
+      });
+      useTobeDdlStore.setState((s) => {
+        const { [DEMO_PROJECT_ID]: _drop, ...rest } = s.schemasByProject;
+        return { schemasByProject: rest };
+      });
+    };
+  }, [isDemo]);
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
   const loadUsers = useUsersStore((s) => s.loadUsers);
@@ -782,7 +855,7 @@ export function AppShell() {
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
       <AccountProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
       <SolutionSettingsModal open={solutionOpen} onClose={() => setSolutionOpen(false)} />
-      <SiteSettingsModal open={siteSettingsOpen} onClose={() => setSiteSettingsOpen(false)} />
+      <SiteSettingsModal open={siteSettingsOpen} onClose={() => setSiteSettingsOpen(false)} highlight={siteSettingsHighlight} />
       <ClusterAdminModal open={clusterAdminOpen} onClose={() => setClusterAdminOpen(false)} />
       <CreateSiteModal open={createSiteOpen} onClose={() => setCreateSiteOpen(false)} />
       <CreateProjectModal open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} />
