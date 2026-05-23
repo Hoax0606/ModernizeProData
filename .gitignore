@@ -73,6 +73,7 @@ ModernizeProData/**/data/
 # ── 환경설정·자격증명 ──────────────────────────────────────────────
 .env
 .env.*
+!infra/.env.example
 *.local
 *.pem
 *.key
