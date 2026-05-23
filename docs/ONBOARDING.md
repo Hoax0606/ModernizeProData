@@ -4,7 +4,7 @@ A team-shared document summarizing the accumulated design decisions for the data
 
 **Prerequisite** — The one-line project intro, tech stack, directory map, and domain glossary live in the repo-root `CLAUDE.md`. This document covers the design details not (or only briefly) covered there.
 
-Updated: 2026-05-21
+Updated: 2026-05-22
 
 ---
 
@@ -677,7 +677,90 @@ download trigger) does **not** need to change.
 
 ---
 
-## 18. Further Reading
+## 18. Pre-flight Gate — Execution Readiness Checks (added 2026-05-22)
+
+The check panel that guards Start run on the Execution page. A run can only be
+started when every applicable check is in pass state.
+
+### 18.1 Check status model
+
+- `pass | fail | skip` — three-state. `skip` ("n/a") means the check is not
+  applicable to the current table selection (today: only `approved-snapshot`).
+- `fail` blocks Start run; the hint switches to "resolve the failing items
+  above first."
+- `RunHeader`'s `canStart` AND-gates `preflightPassed` on top of the existing
+  mapping-complete and phase gates.
+
+### 18.2 The eight checks
+
+| id | Title | Status when |
+|---|---|---|
+| `csv-arrived` | AS-IS extract data arrived | pass: customer's CSV received |
+| `ddl-asis` | AS-IS DDL import | pass: N tables registered / fail: not yet |
+| `ddl-tobe` | TO-BE DDL import | pass: N tables registered / fail: not yet |
+| `conn-tobe` | TO-BE DB reachable | pass: latency ok / fail: slow / fail: unreachable |
+| `tobe-bindings` | All TO-BE tables source-bound | pass: every TO-BE column has a source / fail: N unbound |
+| `asis-unmapped` | Selected AS-IS columns unmapped check | pass: all selected AS-IS columns mapped / fail: N unmapped |
+| `unmapped-cols` | All TO-BE columns unmapped check | pass: all TO-BE columns have a source / fail: N unmapped |
+| `approved-snapshot` | Snapshot approval check | pass: approved snapshot in place / fail: no snapshot / **skip: partial table selection** |
+
+`approved-snapshot` is the only check that uses `skip`: it is only meaningful
+when the user runs against all tables — partial selections cannot validate
+against a project-wide approved snapshot.
+
+### 18.3 Table selection
+
+- `TableSelector` lists TO-BE tables with a "select all" checkbox + per-table
+  checkboxes.
+- Empty state ("Register TO-BE DDL first") shown when `ddl-tobe` has not been
+  imported yet — the Pre-flight check button is disabled in that state.
+- Selection drives which AS-IS columns are inspected by `asis-unmapped`, and
+  whether `approved-snapshot` runs (all) or is skipped (subset).
+
+### 18.4 Trigger + mock simulation
+
+- "Pre-flight check" button starts the run. Each check resolves at a 600 ms
+  interval (mock `setTimeout`); the panel transitions `idle → checking → done`.
+- `?demo=preflight` URL param renders an instant preview state (4 pass + 3
+  fail + 1 skip) — used to verify the design without selecting tables. A
+  "Back to real data" link exits the preview.
+
+### 18.5 Fix → wiring (deferred)
+
+Each `fail` row carries a `Fix →` affordance pointing at the page that
+resolves it (Mapping for unbound TO-BE columns, Snapshots for missing
+approval, Settings for DDL import). The onClick wiring + a one-second teal
+pulse on the affected MappingPage column is **P3** — a new `fixTarget`
+zustand store will carry `{ tableId, columnId }` across navigation.
+
+### 18.6 Decision history
+
+- `CheckStatus` shipped as 4-state → 2-state → settled at 3-state. The third
+  value (`skip`) was introduced for the "snapshot only when ALL is selected"
+  requirement — needed a value distinct from `fail` for the not-applicable
+  case.
+- `snapshotApproved` initially missed `'sign-off'`. The truth lives in
+  `ApprovalsPage.tsx` ("Approve transitions phase: mapping → sign-off"), so a
+  sign-off phase project must read as pass for `approved-snapshot`.
+- `RunHistory` panel was removed (it duplicated `AuditLogPage` semantically).
+  Run history lives in the audit log.
+
+### 18.7 Out of scope (deferred)
+
+- **P2** — backend `POST /api/v1/projects/{id}/preflight/run` and each
+  check's real verification logic. Today the panel runs entirely on mocked
+  store data.
+- **P3** — Fix-button onClick wiring + MappingPage column pulse highlight via
+  the new `fixTarget` store.
+- `ExecutionPage.tsx` L578 `StartRunDialog` Confirm — backend wiring (today
+  `/* backend wiring TBD */`).
+- L202 Abort button onClick wiring.
+- Quarantine / Worker-pool side panels — intentionally excluded from the
+  initial Execution layout.
+
+---
+
+## 19. Further Reading
 
 - `CLAUDE.md` — stack, conventions, domain glossary, local run.
 - `docs/handoff/` — time-stamped handoff notes (read the most recent first).
