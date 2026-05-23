@@ -23,10 +23,13 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 맵핑정의서 (CSV) 임포트 서비스.
@@ -62,6 +65,7 @@ public class MappingImportService {
     private final MappingImportRepository importRepo;
     private final MappingRuleRepository ruleRepo;
     private final MappingCodeMapRepository codeRepo;
+    private final MappingTableBindingRepository bindingRepo;
 
     /**
      * @param columnCsv    column_mapping.csv 의 원본 바이트
@@ -109,6 +113,8 @@ public class MappingImportService {
             mi.setProjectId(projectId);
             mi.setFilename(hasColumn ? columnFilename : null);
             mi.setCodeFilename(hasCode ? codeFilename : null);
+            mi.setColumnCsvContent(hasColumn ? new String(columnCsv, java.nio.charset.StandardCharsets.UTF_8) : null);
+            mi.setCodeCsvContent(hasCode ? new String(codeCsv, java.nio.charset.StandardCharsets.UTF_8) : null);
             mi.setFileSize((hasColumn ? columnCsv.length : 0) + (hasCode ? codeCsv.length : 0));
             mi.setFileHash(sha256(hasColumn ? columnCsv : codeCsv));
             mi.setFormat("csv");
@@ -129,6 +135,12 @@ public class MappingImportService {
                     ruleEntities.add(toRuleEntity(row, projectId, mi.getId(), userName, now));
                 }
                 ruleRepo.saveAll(ruleEntities);
+
+                // 룰에서 테이블 바인딩 자동 derive — TO-BE 별로 사용된 AS-IS 테이블 그룹화.
+                bindingRepo.deleteAllByProjectId(projectId);
+                bindingRepo.flush();
+                List<MappingTableBinding> bindings = deriveBindings(parsed.rules, projectId, mi.getId(), userName, now);
+                bindingRepo.saveAll(bindings);
             }
             if (hasCode) {
                 codeRepo.deleteAllByProjectId(projectId);
@@ -221,9 +233,16 @@ public class MappingImportService {
                 String rule    = trimToNull(get(rs, headers, "rule_sql"));
                 String strat   = trimToNull(get(rs, headers, "strategy"));
                 String defVal  = trimToNull(get(rs, headers, "default_value"));
+                row.transformSql = trimToNull(get(rs, headers, "transform_sql"));
                 row.notes      = trimToNull(get(rs, headers, "notes"));
 
                 applyStrategy(row, strat, rule, defVal);
+
+                // transform_sql 폴백 — CSV 에 명시 안 됐고 strategy=expression 이면
+                // rule_sql 값을 그대로 복사. 현재는 두 컬럼 다 SQL 이라 같은 값.
+                if (row.transformSql == null && "expression".equals(row.strategy)) {
+                    row.transformSql = row.transformRule;
+                }
 
                 String dedupKey = row.tobeSchema + "|" + row.tobeTable + "|" + row.tobeColumn;
                 if (!seen.add(dedupKey)) {
@@ -334,6 +353,7 @@ public class MappingImportService {
         e.setAsisColumn(row.asisColumn);
         e.setStrategy(row.strategy);
         e.setTransformRule(row.transformRule);
+        e.setTransformSql(row.transformSql);
         e.setDefaultValue(row.defaultValue);
         e.setNotNullOverride(false);
         e.setRuleOrigin("imported");
@@ -341,6 +361,342 @@ public class MappingImportService {
         e.setCreatedBy(userName);
         e.setCreatedAt(now);
         return e;
+    }
+
+    /* ──────────────────────────────────────────────
+     * Re-apply latest import — 사용자가 파일 다시 안 골라도
+     * 마지막 임포트의 CSV 텍스트로 룰·바인딩·코드맵 모두 재생성. 수동 수정 사라짐.
+     * 저장된 CSV content 가 없으면 no-op.
+     * ────────────────────────────────────────────── */
+
+    @Transactional
+    public MappingImport reapplyLatest(String projectId, String userName) {
+        // 가장 최근의 column_csv_content 가 있는 row + code_csv_content 가 있는 row 각각
+        var history = importRepo.findByProjectIdOrderByImportedAtDesc(projectId);
+        String columnCsv = null, columnFilename = null;
+        String codeCsv = null, codeFilename = null;
+        for (MappingImport h : history) {
+            if (columnCsv == null && h.getColumnCsvContent() != null) {
+                columnCsv = h.getColumnCsvContent();
+                columnFilename = h.getFilename();
+            }
+            if (codeCsv == null && h.getCodeCsvContent() != null) {
+                codeCsv = h.getCodeCsvContent();
+                codeFilename = h.getCodeFilename();
+            }
+            if (columnCsv != null && codeCsv != null) break;
+        }
+        if (columnCsv == null && codeCsv == null) {
+            throw new ApiException("NO_PREVIOUS_IMPORT",
+                    "재적용할 이전 임포트 내역이 없습니다", HttpStatus.BAD_REQUEST);
+        }
+        byte[] columnBytes = columnCsv != null
+                ? columnCsv.getBytes(java.nio.charset.StandardCharsets.UTF_8) : null;
+        byte[] codeBytes = codeCsv != null
+                ? codeCsv.getBytes(java.nio.charset.StandardCharsets.UTF_8) : null;
+        return importFromCsv(projectId, columnBytes, columnFilename, codeBytes, codeFilename, userName);
+    }
+
+    /* ──────────────────────────────────────────────
+     * Rebuild bindings from current mapping_rules — Apply 시 매번 호출 (멱등)
+     * 파일 재업로드 없이도 룰만 보고 bindings 재생성. UI 가 사용.
+     * ────────────────────────────────────────────── */
+
+    @Transactional
+    public int rebuildBindings(String projectId, String userName) {
+        List<MappingRule> existing = ruleRepo.findByProjectId(projectId);
+        bindingRepo.deleteAllByProjectId(projectId);
+        bindingRepo.flush();
+        if (existing.isEmpty()) return 0;
+
+        List<RuleRow> rows = new ArrayList<>(existing.size());
+        for (MappingRule e : existing) {
+            RuleRow r = new RuleRow();
+            r.tobeSchema   = e.getTobeSchema() == null ? "" : e.getTobeSchema();
+            r.tobeTable    = e.getTobeTable();
+            r.tobeColumn   = e.getTobeColumn();
+            r.asisSchema   = e.getAsisSchema();
+            r.asisTable    = e.getAsisTable();
+            r.asisColumn   = e.getAsisColumn();
+            r.strategy     = e.getStrategy();
+            r.transformRule = e.getTransformRule();
+            r.transformSql  = e.getTransformSql();
+            r.defaultValue = e.getDefaultValue();
+            r.notes        = e.getNotes();
+            rows.add(r);
+        }
+        List<MappingTableBinding> bindings = deriveBindings(
+                rows, projectId, /* importId */ null, userName, OffsetDateTime.now());
+        bindingRepo.saveAll(bindings);
+        return bindings.size();
+    }
+
+    /* ──────────────────────────────────────────────
+     * Manual rule upsert — row 편집기에서 한 컬럼 룰 저장할 때 호출.
+     * 키: (project, tobeSchema, tobeTable, tobeColumn). 없으면 신규, 있으면 갱신.
+     * transform_sql 폴백 — 사용자가 명시 안 했고 strategy=expression 이면 rule 값 복사.
+     * ────────────────────────────────────────────── */
+
+    public record UpsertRuleRequest(
+            String tobeSchema,
+            String tobeTable,
+            String tobeColumn,
+            String asisSchema,
+            String asisTable,
+            String asisColumn,
+            String strategy,
+            String transformRule,
+            String transformSql,
+            String defaultValue,
+            Boolean notNullOverride
+    ) {}
+
+    @Transactional
+    public MappingRule upsertRule(String projectId, UpsertRuleRequest req, String userName) {
+        if (req == null || req.tobeTable() == null || req.tobeColumn() == null) {
+            throw new ApiException("RULE_INVALID",
+                    "tobeTable / tobeColumn 이 비어있습니다", HttpStatus.BAD_REQUEST);
+        }
+        String schema = req.tobeSchema() == null ? "" : req.tobeSchema();
+        OffsetDateTime now = OffsetDateTime.now();
+
+        MappingRule r = ruleRepo
+                .findByProjectIdAndTobeSchemaAndTobeTableAndTobeColumn(
+                        projectId, schema, req.tobeTable(), req.tobeColumn())
+                .orElseGet(() -> {
+                    MappingRule nr = new MappingRule();
+                    nr.setId("mr-" + UUID.randomUUID().toString().substring(0, 8));
+                    nr.setProjectId(projectId);
+                    nr.setTobeSchema(schema);
+                    nr.setTobeTable(req.tobeTable());
+                    nr.setTobeColumn(req.tobeColumn());
+                    nr.setCreatedBy(userName);
+                    nr.setCreatedAt(now);
+                    return nr;
+                });
+        r.setAsisSchema(req.asisSchema());
+        r.setAsisTable(req.asisTable());
+        r.setAsisColumn(req.asisColumn());
+        String strategy = req.strategy() != null ? req.strategy() : "expression";
+        r.setStrategy(strategy);
+        r.setTransformRule(req.transformRule());
+        // transform_sql 폴백 — 명시 안 됐고 expression 이면 rule 값 그대로 복사
+        if (req.transformSql() != null) {
+            r.setTransformSql(req.transformSql());
+        } else if ("expression".equals(strategy)) {
+            r.setTransformSql(req.transformRule());
+        } else {
+            r.setTransformSql(null);
+        }
+        r.setDefaultValue(req.defaultValue());
+        r.setNotNullOverride(Boolean.TRUE.equals(req.notNullOverride()));
+        r.setRuleOrigin("manual");
+        r.setUpdatedBy(userName);
+        r.setUpdatedAt(now);
+        return ruleRepo.save(r);
+    }
+
+    /* ──────────────────────────────────────────────
+     * Manual binding upsert — UI 에서 사용자가 편집할 때 호출
+     * ────────────────────────────────────────────── */
+
+    public record UpsertBindingRequest(
+            String tobeSchema,
+            String tobeTable,
+            String compositionKind,
+            String whereFilter,
+            List<UpsertSourceDto> sources
+    ) {}
+
+    public record UpsertSourceDto(
+            int ordinal,
+            String asisSchema,
+            String asisTable,
+            String alias,
+            String role,
+            String joinType,
+            String joinOn
+    ) {}
+
+    @Transactional
+    public MappingTableBinding upsertBinding(String projectId, UpsertBindingRequest req, String userName) {
+        if (req == null || req.tobeTable() == null || req.tobeTable().isBlank()) {
+            throw new ApiException("BINDING_INVALID", "tobeTable 이 비어있습니다", HttpStatus.BAD_REQUEST);
+        }
+        String schema = req.tobeSchema() == null ? "" : req.tobeSchema();
+        OffsetDateTime now = OffsetDateTime.now();
+
+        // 기존 binding 이 있으면 통째로 DELETE 후 flush — Hibernate 가 orphanRemoval
+        // 의 INSERT/DELETE 순서를 잘못 잡아서 alias unique 제약을 위반하는 케이스 회피.
+        // createdBy/createdAt 만 보존해서 새 row 에 옮김.
+        String createdBy = userName;
+        OffsetDateTime createdAt = now;
+        var existing = bindingRepo.findByProjectIdAndTobeSchemaAndTobeTable(
+                projectId, schema, req.tobeTable());
+        if (existing.isPresent()) {
+            createdBy  = existing.get().getCreatedBy();
+            createdAt  = existing.get().getCreatedAt();
+            bindingRepo.delete(existing.get());
+            bindingRepo.flush();
+        }
+
+        MappingTableBinding b = new MappingTableBinding();
+        b.setId("mb-" + UUID.randomUUID().toString().substring(0, 8));
+        b.setProjectId(projectId);
+        b.setTobeSchema(schema);
+        b.setTobeTable(req.tobeTable());
+        b.setCompositionKind(req.compositionKind() != null ? req.compositionKind() : "single");
+        b.setWhereFilter(req.whereFilter());
+        b.setBindingOrigin("manual");
+        b.setCreatedBy(createdBy);
+        b.setCreatedAt(createdAt);
+        b.setUpdatedBy(userName);
+        b.setUpdatedAt(now);
+
+        List<UpsertSourceDto> srcDtos = req.sources() == null ? List.of() : req.sources();
+        for (UpsertSourceDto s : srcDtos) {
+            MappingTableBindingSource src = new MappingTableBindingSource();
+            src.setId("ms-" + UUID.randomUUID().toString().substring(0, 8));
+            src.setOrdinal(s.ordinal());
+            src.setAsisSchema(s.asisSchema());
+            src.setAsisTable(s.asisTable());
+            src.setAlias(s.alias());
+            src.setRole(s.role());
+            src.setJoinType(s.joinType());
+            src.setJoinOn(s.joinOn());
+            b.addSource(src);
+        }
+        return bindingRepo.save(b);
+    }
+
+    /* ──────────────────────────────────────────────
+     * Auto table binding derivation
+     * ────────────────────────────────────────────── */
+
+    private static final Pattern ALIAS_REF = Pattern.compile(
+            "\\b([a-zA-Z_][a-zA-Z0-9_]{0,15})\\.([A-Za-z_][A-Za-z0-9_]*)\\b");
+
+    /**
+     * parsed rule row 들을 TO-BE 테이블 기준으로 그룹화해서 binding 생성.
+     *
+     *   - 1 distinct asis_table  → single + primary
+     *   - 2+ distinct asis_table → join + 첫번째 primary, 나머지 join (type/on 은 NULL → UI 에서)
+     *   - 0  distinct asis_table → none (added/default/null 룰만 있는 TO-BE)
+     *
+     * alias 도출: rule_sql 의 {alias}.{column} 토큰을 보고, column 이 그룹 내 row 의
+     * asis_column 과 일치하면 그 row 의 asis_table 과 묶음. 못 찾은 테이블은 첫글자 lowercase 폴백.
+     */
+    private List<MappingTableBinding> deriveBindings(
+            List<RuleRow> rules, String projectId, String importId, String userName, OffsetDateTime now
+    ) {
+        // Group by (tobeSchema, tobeTable) — LinkedHashMap 으로 순서 보존
+        Map<String, List<RuleRow>> grouped = new LinkedHashMap<>();
+        for (RuleRow r : rules) {
+            String key = (r.tobeSchema == null ? "" : r.tobeSchema) + "" + r.tobeTable;
+            grouped.computeIfAbsent(key, k -> new ArrayList<>()).add(r);
+        }
+
+        List<MappingTableBinding> result = new ArrayList<>();
+        for (var entry : grouped.entrySet()) {
+            List<RuleRow> grp = entry.getValue();
+            RuleRow first = grp.get(0);
+
+            // distinct asis_table preserving first-appearance order, skip null
+            LinkedHashMap<String, String> tableToSchema = new LinkedHashMap<>();
+            for (RuleRow r : grp) {
+                if (r.asisTable != null && !tableToSchema.containsKey(r.asisTable)) {
+                    tableToSchema.put(r.asisTable, r.asisSchema);
+                }
+            }
+
+            String compositionKind;
+            if (tableToSchema.isEmpty()) compositionKind = "none";
+            else if (tableToSchema.size() == 1) compositionKind = "single";
+            else compositionKind = "join";
+
+            // alias map (rule_sql token → asis_table)
+            Map<String, String> tableToAlias = extractAliases(grp, tableToSchema.keySet());
+
+            MappingTableBinding b = new MappingTableBinding();
+            b.setId("mb-" + UUID.randomUUID().toString().substring(0, 8));
+            b.setProjectId(projectId);
+            b.setImportId(importId);
+            b.setTobeSchema(first.tobeSchema == null ? "" : first.tobeSchema);
+            b.setTobeTable(first.tobeTable);
+            b.setCompositionKind(compositionKind);
+            b.setBindingOrigin("imported");
+            b.setCreatedBy(userName);
+            b.setCreatedAt(now);
+
+            int ord = 0;
+            boolean primaryAssigned = false;
+            Set<String> usedAliases = new HashSet<>(tableToAlias.values());
+            for (var te : tableToSchema.entrySet()) {
+                String tbl = te.getKey();
+                String schema = te.getValue();
+                String alias = tableToAlias.get(tbl);
+                if (alias == null) {
+                    alias = generateAlias(tbl, usedAliases);
+                    usedAliases.add(alias);
+                }
+
+                String role;
+                if (compositionKind.equals("union")) role = "union";
+                else if (!primaryAssigned) { role = "primary"; primaryAssigned = true; }
+                else role = "join";
+
+                MappingTableBindingSource s = new MappingTableBindingSource();
+                s.setId("ms-" + UUID.randomUUID().toString().substring(0, 8));
+                s.setAsisSchema(schema);
+                s.setAsisTable(tbl);
+                s.setAlias(alias);
+                s.setRole(role);
+                s.setOrdinal(ord++);
+                // joinType / joinOn 은 null — UI 에서 사용자가 채움
+                b.addSource(s);
+            }
+            result.add(b);
+        }
+        return result;
+    }
+
+    private static Map<String, String> extractAliases(List<RuleRow> rules, Set<String> validTables) {
+        // alias → first observed column referenced after that alias
+        Map<String, String> aliasToColumn = new LinkedHashMap<>();
+        for (RuleRow r : rules) {
+            if (r.transformRule == null) continue;
+            Matcher m = ALIAS_REF.matcher(r.transformRule);
+            while (m.find()) {
+                String alias = m.group(1);
+                String column = m.group(2);
+                aliasToColumn.putIfAbsent(alias, column);
+            }
+        }
+        // alias 의 column 이 그룹 내 어느 row 의 asis_column 과 일치하는지 봐서 → 그 row 의 asis_table 로 묶음
+        Map<String, String> tableToAlias = new HashMap<>();
+        for (var e : aliasToColumn.entrySet()) {
+            String alias = e.getKey();
+            String col = e.getValue();
+            for (RuleRow r : rules) {
+                if (r.asisTable != null && validTables.contains(r.asisTable)
+                        && col.equalsIgnoreCase(r.asisColumn)) {
+                    tableToAlias.putIfAbsent(r.asisTable, alias);
+                    break;
+                }
+            }
+        }
+        return tableToAlias;
+    }
+
+    private static String generateAlias(String tableName, Set<String> taken) {
+        if (tableName == null || tableName.isEmpty()) return "t";
+        String base = String.valueOf(Character.toLowerCase(tableName.charAt(0)));
+        if (!taken.contains(base)) return base;
+        for (int i = 2; i < 100; i++) {
+            String candidate = base + i;
+            if (!taken.contains(candidate)) return candidate;
+        }
+        return "t" + UUID.randomUUID().toString().substring(0, 4);
     }
 
     /* ──────────────────────────────────────────────
@@ -440,6 +796,7 @@ public class MappingImportService {
         String asisColumn;
         String strategy = "expression";
         String transformRule;
+        String transformSql;
         String defaultValue;
         String notes;
     }

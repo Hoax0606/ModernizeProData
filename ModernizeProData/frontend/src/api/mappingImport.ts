@@ -23,6 +23,50 @@ export interface MappingStatus {
   codeMapCount: number;
 }
 
+export interface MappingTableBindingSourceDto {
+  id: string;
+  ordinal: number;
+  asisSchema: string | null;
+  asisTable: string;
+  alias: string;
+  role: 'primary' | 'join' | 'union';
+  joinType: string | null;
+  joinOn: string | null;
+}
+
+export interface MappingRuleDto {
+  id: string;
+  projectId: string;
+  importId: string | null;
+  tobeSchema: string;
+  tobeTable: string;
+  tobeColumn: string;
+  asisSchema: string | null;
+  asisTable: string | null;
+  asisColumn: string | null;
+  strategy: 'expression' | 'null' | 'default' | 'skip';
+  transformRule: string | null;
+  transformSql: string | null;
+  defaultValue: string | null;
+  notNullOverride: boolean;
+  ruleOrigin: 'imported' | 'manual';
+  notes: string | null;
+}
+
+export interface MappingTableBindingDto {
+  id: string;
+  projectId: string;
+  importId: string | null;
+  tobeSchema: string;
+  tobeTable: string;
+  compositionKind: 'single' | 'join' | 'union' | 'none';
+  whereFilter: string | null;
+  bindingOrigin: 'imported' | 'manual';
+  createdBy: string;
+  createdAt: string;
+  sources: MappingTableBindingSourceDto[];
+}
+
 export const mappingImportApi = {
   /**
    * Upload column_mapping.csv and/or code_mapping.csv. At least one required.
@@ -61,9 +105,79 @@ export const mappingImportApi = {
       `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/rules`,
     )),
 
+  /** List all mapping_rules rows for the project. */
+  listRules: (projectId: string): Promise<MappingRuleDto[]> =>
+    unwrap(api.get<ApiResponse<MappingRuleDto[]>>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/rules`,
+    )),
+
+  /** Upsert one mapping_rules row (column-level rule edit from row editor). */
+  upsertRule: (projectId: string, payload: {
+    tobeSchema: string;
+    tobeTable: string;
+    tobeColumn: string;
+    asisSchema: string | null;
+    asisTable: string | null;
+    asisColumn: string | null;
+    strategy: 'expression' | 'null' | 'default' | 'skip';
+    transformRule: string | null;
+    transformSql: string | null;
+    defaultValue: string | null;
+    notNullOverride: boolean;
+  }): Promise<MappingRuleDto> =>
+    unwrap(api.post<ApiResponse<MappingRuleDto>>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/rules`,
+      payload,
+    )),
+
   /** Wipe all mapping_code_maps rows for the project. */
   deleteCodeMaps: (projectId: string): Promise<void> =>
     unwrap(api.delete<ApiResponse<void>>(
       `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/code-maps`,
+    )),
+
+  /** Table-level bindings (TO-BE ← AS-IS, with alias/role/join). */
+  listBindings: (projectId: string): Promise<MappingTableBindingDto[]> =>
+    unwrap(api.get<ApiResponse<MappingTableBindingDto[]>>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/bindings`,
+    )),
+
+  /** Rebuild all bindings from current mapping_rules (idempotent — safe to call any time). */
+  rebuildBindings: (projectId: string): Promise<number> =>
+    unwrap(api.post<ApiResponse<number>>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/rebuild-bindings`,
+    )),
+
+  /** Re-apply the latest stored CSV content — resets manual rule edits. */
+  reapplyLatest: (projectId: string): Promise<MappingImport> =>
+    unwrap(api.post<ApiResponse<MappingImport>>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/reapply`,
+    )),
+
+  /** Upsert one TO-BE table's binding (manual edit from UI). */
+  upsertBinding: (projectId: string, payload: {
+    tobeSchema: string;
+    tobeTable: string;
+    compositionKind: 'single' | 'join' | 'union' | 'none';
+    whereFilter: string | null;
+    sources: Array<{
+      ordinal: number;
+      asisSchema: string | null;
+      asisTable: string;
+      alias: string;
+      role: 'primary' | 'join' | 'union';
+      joinType: string | null;
+      joinOn: string | null;
+    }>;
+  }): Promise<MappingTableBindingDto> =>
+    unwrap(api.post<ApiResponse<MappingTableBindingDto>>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/bindings`,
+      payload,
+    )),
+
+  /** Wipe all mapping_table_bindings rows for the project. */
+  deleteBindings: (projectId: string): Promise<void> =>
+    unwrap(api.delete<ApiResponse<void>>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/bindings`,
     )),
 };

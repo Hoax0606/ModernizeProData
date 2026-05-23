@@ -13,6 +13,9 @@ public interface MappingRuleRepository extends JpaRepository<MappingRule, String
 
     List<MappingRule> findByProjectIdAndTobeTable(String projectId, String tobeTable);
 
+    java.util.Optional<MappingRule> findByProjectIdAndTobeSchemaAndTobeTableAndTobeColumn(
+            String projectId, String tobeSchema, String tobeTable, String tobeColumn);
+
     long countByProjectId(String projectId);
 
     @Modifying

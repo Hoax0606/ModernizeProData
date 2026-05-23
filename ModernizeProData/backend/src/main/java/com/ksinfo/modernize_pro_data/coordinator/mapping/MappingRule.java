@@ -63,6 +63,10 @@ public class MappingRule {
     @Column(name = "transform_rule", columnDefinition = "TEXT")
     private String transformRule;
 
+    /** 멀티라인 / 서브쿼리 / CTE 포함한 풀 SQL 단편 — 복잡한 변환식 보관용. */
+    @Column(name = "transform_sql", columnDefinition = "TEXT")
+    private String transformSql;
+
     @Column(name = "default_value", columnDefinition = "TEXT")
     private String defaultValue;
 

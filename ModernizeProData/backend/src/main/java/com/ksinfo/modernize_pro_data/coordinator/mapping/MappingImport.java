@@ -35,6 +35,14 @@ public class MappingImport {
     @Column(name = "code_filename", length = 256)
     private String codeFilename;
 
+    /** 임포트한 column_mapping CSV 의 텍스트 원본 — re-apply 에 사용. */
+    @Column(name = "column_csv_content", columnDefinition = "TEXT")
+    private String columnCsvContent;
+
+    /** 임포트한 code_mapping CSV 의 텍스트 원본. */
+    @Column(name = "code_csv_content", columnDefinition = "TEXT")
+    private String codeCsvContent;
+
     @Column(name = "file_size", nullable = false)
     private long fileSize;
 

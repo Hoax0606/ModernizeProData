@@ -9,6 +9,8 @@ import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingImportRepository
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingImportService;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRule;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRuleRepository;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -41,6 +43,7 @@ public class MappingImportController {
     private final MappingImportRepository importRepo;
     private final MappingRuleRepository ruleRepo;
     private final MappingCodeMapRepository codeRepo;
+    private final MappingTableBindingRepository bindingRepo;
 
     @PostMapping(path = "/{id}/mapping/import", consumes = "multipart/form-data")
     @PreAuthorize("hasAnyRole('MASTER','ADMIN')")
@@ -90,6 +93,16 @@ public class MappingImportController {
         return ApiResponse.ok(ruleRepo.findByProjectId(id));
     }
 
+    @PostMapping("/{id}/mapping/rules")
+    @PreAuthorize("hasAnyRole('MASTER','ADMIN')")
+    public ApiResponse<MappingRule> upsertRule(
+            @PathVariable String id,
+            @RequestBody MappingImportService.UpsertRuleRequest req,
+            Authentication auth
+    ) {
+        return ApiResponse.ok(importService.upsertRule(id, req, auth.getName()));
+    }
+
     @GetMapping("/{id}/mapping/code-maps")
     public ApiResponse<List<MappingCodeMap>> listCodeMaps(@PathVariable String id) {
         return ApiResponse.ok(codeRepo.findByProjectIdOrderByDomainAscOrdinalAsc(id));
@@ -135,6 +148,43 @@ public class MappingImportController {
     @Transactional
     public ApiResponse<Void> deleteCodeMaps(@PathVariable String id) {
         codeRepo.deleteAllByProjectId(id);
+        return ApiResponse.ok(null);
+    }
+
+    @GetMapping("/{id}/mapping/bindings")
+    public ApiResponse<List<MappingTableBinding>> listBindings(@PathVariable String id) {
+        return ApiResponse.ok(bindingRepo.findByProjectId(id));
+    }
+
+    @PostMapping("/{id}/mapping/rebuild-bindings")
+    @PreAuthorize("hasAnyRole('MASTER','ADMIN')")
+    public ApiResponse<Integer> rebuildBindings(@PathVariable String id, Authentication auth) {
+        int n = importService.rebuildBindings(id, auth.getName());
+        return ApiResponse.ok(n);
+    }
+
+    /** 가장 최근 임포트의 CSV 내용으로 룰·코드맵·바인딩 모두 재적용 (수동 수정 reset). */
+    @PostMapping("/{id}/mapping/reapply")
+    @PreAuthorize("hasAnyRole('MASTER','ADMIN')")
+    public ApiResponse<MappingImport> reapplyLatest(@PathVariable String id, Authentication auth) {
+        return ApiResponse.ok(importService.reapplyLatest(id, auth.getName()));
+    }
+
+    @PostMapping("/{id}/mapping/bindings")
+    @PreAuthorize("hasAnyRole('MASTER','ADMIN')")
+    public ApiResponse<MappingTableBinding> upsertBinding(
+            @PathVariable String id,
+            @RequestBody MappingImportService.UpsertBindingRequest req,
+            Authentication auth
+    ) {
+        return ApiResponse.ok(importService.upsertBinding(id, req, auth.getName()));
+    }
+
+    @DeleteMapping("/{id}/mapping/bindings")
+    @PreAuthorize("hasAnyRole('MASTER','ADMIN')")
+    @Transactional
+    public ApiResponse<Void> deleteBindings(@PathVariable String id) {
+        bindingRepo.deleteAllByProjectId(id);
         return ApiResponse.ok(null);
     }
 }
