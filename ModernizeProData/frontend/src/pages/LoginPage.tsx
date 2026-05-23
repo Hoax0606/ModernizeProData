@@ -34,6 +34,7 @@ export function LoginPage() {
         if (err.code === 'AUTH_USER_NOT_FOUND')                setError(t('login.error.userNotFound'));
         else if (err.code === 'AUTH_PASSWORD_INVALID')         setError(t('login.error.invalidPassword'));
         else if (err.code === 'AUTH_SESSION_ACTIVE_ELSEWHERE') setSessionConflict(true);
+        else if (err.code === 'AUTH_LICENSE_BLOCKED')          setError(t('login.error.licenseBlocked'));
         else                                                    setError(err.message || t('login.error'));
       } else {
         setError((err as Error).message ?? t('login.error'));
