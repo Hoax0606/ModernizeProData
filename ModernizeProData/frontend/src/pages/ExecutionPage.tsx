@@ -4,7 +4,6 @@ import { useWorkspaceStore } from '../store/workspace';
 import type { Project, ProjectPhase } from '../store/workspace';
 import { useTobeDdlStore } from '../store/tobeDdl';
 import { useSnapshotsStore, type MappingSnapshot } from '../store/snapshots';
-import { useActiveProjectExecutionReadOnly } from '../store/readOnly';
 import {
   useExecutionPreflightStore,
   type PreflightCheck,
@@ -87,14 +86,13 @@ export function ExecutionPage() {
      단방향 전환이라 snapshot 삭제 후 sign-off 에 머무르는 케이스에서 거짓 pass 가 됐었음. */
   const snapshots = useSnapshotsStore((s) => s.snapshots);
 
-  /* worker 가 본인이 executionAssignee 가 아닌 프로젝트에 들어왔을 때 모든 인터랙션 차단. */
-  const isExecReadOnly = useActiveProjectExecutionReadOnly();
-
   /* Pre-flight 워크플로 state — store 에서 영속. project 별로 격리되어 자동 reset 효과. */
   const entrySelected = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.selectedTables : undefined);
+  const entrySnapshot = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.selectedSnapshotId : undefined);
   const entryPhase    = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.preflightPhase : undefined);
   const entryResults  = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.preflightResults : undefined);
   const selectedTables = useMemo(() => new Set(entrySelected ?? []), [entrySelected]);
+  const selectedSnapshotId: string | null = entrySnapshot ?? null;
   const preflightPhase: PreflightPhase = entryPhase ?? 'idle';
   const preflightResults: PreflightCheck[] = entryResults ?? [];
 
@@ -102,6 +100,17 @@ export function ExecutionPage() {
     if (!project) return;
     useExecutionPreflightStore.getState().setSelected(project.id, [...next]);
   };
+
+  const setSelectedSnapshotId = (id: string | null) => {
+    if (!project) return;
+    useExecutionPreflightStore.getState().setSelectedSnapshot(project.id, id);
+  };
+
+  /* 현재 project 의 snapshot 만 (SnapshotSelector dropdown 옵션). */
+  const projectSnapshots = useMemo(
+    () => project ? snapshots.filter((s) => s.projectId === project.id) : [],
+    [snapshots, project],
+  );
 
   if (!project) {
     return (
@@ -114,7 +123,7 @@ export function ExecutionPage() {
   const isAll = tobeTables.length > 0 && selectedTables.size === tobeTables.length;
   const startPreflight = () => {
     if (selectedTables.size === 0 || preflightPhase === 'checking') return;
-    const checks = buildPreflightChecks(project, Array.from(selectedTables), isAll, t, snapshots);
+    const checks = buildPreflightChecks(project, Array.from(selectedTables), isAll, t, snapshots, selectedSnapshotId);
     const store = useExecutionPreflightStore.getState();
     store.setPhase(project.id, 'checking');
     store.setResults(project.id, []);
@@ -150,26 +159,26 @@ export function ExecutionPage() {
         running={running}
         onToggleRun={() => setRunning((v) => !v)}
         preflightPassed={preflightPassed}
-        readOnly={isExecReadOnly}
       />
       <TableSelector
         t={t}
         tables={tobeTables}
         selected={selectedTables}
         onChange={setSelectedTables}
-        disabled={isExecReadOnly}
+      />
+      <SnapshotSelector
+        t={t}
+        snapshots={projectSnapshots}
+        selectedId={selectedSnapshotId}
+        onChange={setSelectedSnapshotId}
       />
       <PreflightPanel
         t={t}
         checks={displayedResults}
         phase={displayedPhase}
-        canStart={!isDemo && selectedTables.size > 0 && !isExecReadOnly}
+        canStart={!isDemo && selectedTables.size > 0}
         onStart={startPreflight}
-        onReset={() => {
-          if (isExecReadOnly) return;
-          useExecutionPreflightStore.getState().resetForProject(project.id);
-        }}
-        canReset={!isExecReadOnly}
+        onReset={() => useExecutionPreflightStore.getState().resetForProject(project.id)}
         isDemo={isDemo}
         onExitDemo={exitDemo}
       />
@@ -189,7 +198,6 @@ function RunHeader({
   running,
   onToggleRun,
   preflightPassed,
-  readOnly,
 }: {
   t: T;
   project: Project;
@@ -198,11 +206,10 @@ function RunHeader({
   running: boolean;
   onToggleRun: () => void;
   preflightPassed: boolean;
-  readOnly: boolean;
 }) {
   const [dialogOpen, setDialogOpen] = useState(false);
-  const mappingReady: ProjectPhase[] = ['rehearsal', 'sign-off', 'cutover', 'hypercare'];
-  const canStart = mappingReady.includes(project.phase) && preflightPassed && !readOnly;
+  // Start run 활성 = Pre-flight 모든 체크 pass. phase 체크는 별도 정책 결정 시 추가.
+  const canStart = preflightPassed;
   const isDone = project.phase === 'done';
 
   if (!activeRun) {
@@ -287,13 +294,11 @@ function TableSelector({
   tables,
   selected,
   onChange,
-  disabled,
 }: {
   t: T;
   tables: string[];
   selected: Set<string>;
   onChange: (next: Set<string>) => void;
-  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(true);
 
@@ -350,7 +355,6 @@ function TableSelector({
                 checked={allChecked}
                 ref={(el) => { if (el) el.indeterminate = !noneChecked && !allChecked; }}
                 onChange={toggleAll}
-                disabled={disabled}
               />
               {t('execution.preflight.tableSelector.selectAll')}
             </label>
@@ -369,7 +373,6 @@ function TableSelector({
                     type="checkbox"
                     checked={selected.has(name)}
                     onChange={() => toggleOne(name)}
-                    disabled={disabled}
                   />
                   {name}
                 </label>
@@ -382,16 +385,84 @@ function TableSelector({
   );
 }
 
+/* ───────────────────────── Snapshot selector ───────────────────── */
+
+function SnapshotSelector({
+  t,
+  snapshots,
+  selectedId,
+  onChange,
+}: {
+  t: T;
+  snapshots: MappingSnapshot[];
+  selectedId: string | null;
+  onChange: (id: string | null) => void;
+}) {
+  const [open, setOpen] = useState(true);
+
+  if (snapshots.length === 0) {
+    return (
+      <div style={{ ...styles.section, background: 'var(--panel)' }}>
+        <div style={{ padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={styles.sectionLabel}>{t('execution.preflight.snapshotSelector.title')}</span>
+          <span style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>
+            {t('execution.preflight.snapshotSelector.noSnapshots')}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  const selected = selectedId ? snapshots.find((s) => s.id === selectedId) ?? null : null;
+  const headerLabel = selected
+    ? `${selected.name} (${selected.version} · ${selected.status})`
+    : t('execution.preflight.snapshotSelector.placeholder');
+
+  return (
+    <div style={{ ...styles.section, background: 'var(--panel)' }}>
+      <div onClick={() => setOpen((v) => !v)} style={styles.sectionToggle}>
+        <span style={styles.chev}>{open ? '▾' : '▸'}</span>
+        <span style={styles.sectionLabel}>{t('execution.preflight.snapshotSelector.title')}</span>
+        <span style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>{headerLabel}</span>
+        <div style={{ flex: 1 }} />
+      </div>
+      {open && (
+        <div style={{ padding: '4px 18px 14px' }}>
+          <select
+            value={selectedId ?? ''}
+            onChange={(e) => onChange(e.target.value || null)}
+            style={{
+              width: '100%',
+              padding: '8px 12px',
+              fontSize: 12,
+              fontFamily: 'var(--mono)',
+              border: '1px solid var(--border)',
+              borderRadius: 4,
+              background: 'var(--panel)',
+            }}
+          >
+            <option value="">— {t('execution.preflight.snapshotSelector.placeholder')} —</option>
+            {snapshots.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name} ({s.version} · {s.status})
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ───────────────────────── Pre-flight panel ────────────────────── */
 
-function PreflightPanel({ t, checks, phase, canStart, onStart, onReset, canReset, isDemo, onExitDemo }: {
+function PreflightPanel({ t, checks, phase, canStart, onStart, onReset, isDemo, onExitDemo }: {
   t: T;
   checks: PreflightCheck[];
   phase: PreflightPhase;
   canStart: boolean;
   onStart: () => void;
   onReset: () => void;
-  canReset: boolean;
   isDemo?: boolean;
   onExitDemo?: () => void;
 }) {
@@ -496,9 +567,9 @@ function PreflightPanel({ t, checks, phase, canStart, onStart, onReset, canReset
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onReset(); }}
-          disabled={isChecking || !canReset}
+          disabled={isChecking}
           title={t('execution.preflight.trigger.reset')}
-          style={(isChecking || !canReset) ? styles.btnDisabled : styles.btnGhost}
+          style={isChecking ? styles.btnDisabled : styles.btnGhost}
         >
           ↺ {t('execution.preflight.trigger.reset')}
         </button>
@@ -905,15 +976,16 @@ function buildPreflightChecks(
   isAll: boolean,
   t: T,
   snapshots: MappingSnapshot[],
+  selectedSnapshotId: string | null,
 ): PreflightCheck[] {
   const asisDdl = project.tableCount > 0;
   const tobeDdl = project.tobeTableCount > 0;
   const bothDdl = asisDdl && tobeDdl;
-  // 실제 snapshots 데이터에서 approved 여부 직접 확인 — phase 기반 추론은 snapshot 삭제
-  // 후 phase 가 sign-off 에 머무르는 케이스에서 거짓 pass 가 됐었음.
-  const hasApproved = snapshots.some(
-    (s) => s.projectId === project.id && s.status === 'approved',
-  );
+  // 사용자가 SnapshotSelector 로 직접 선택한 스냅샷의 status 가 'approved' 인지 검사.
+  // approved 가 아닌 스냅샷 (draft/pending/rejected) 도 선택은 가능하나 검사 결과는 fail.
+  const selectedSnap = selectedSnapshotId
+    ? snapshots.find((s) => s.id === selectedSnapshotId)
+    : undefined;
   const selectedCount = selectedTables.length;
 
   return [
@@ -976,10 +1048,16 @@ function buildPreflightChecks(
       title: t('execution.preflight.check.approvedSnapshot.title'),
       detail: !isAll
         ? t('execution.preflight.snapshot.skipReason')
-        : hasApproved
-          ? t('execution.preflight.check.approvedSnapshot.pass')
-          : t('execution.preflight.check.approvedSnapshot.fail'),
-      status: !isAll ? 'skip' : hasApproved ? 'pass' : 'fail',
+        : !selectedSnap
+          ? t('execution.preflight.check.approvedSnapshot.unselected')
+          : selectedSnap.status === 'approved'
+            ? t('execution.preflight.check.approvedSnapshot.passDetail', { name: selectedSnap.name, version: selectedSnap.version })
+            : t('execution.preflight.check.approvedSnapshot.notApproved', { name: selectedSnap.name, status: selectedSnap.status }),
+      status: !isAll
+        ? 'skip'
+        : !selectedSnap
+          ? 'fail'
+          : selectedSnap.status === 'approved' ? 'pass' : 'fail',
     },
   ];
 }

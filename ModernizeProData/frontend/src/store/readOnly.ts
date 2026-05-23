@@ -21,25 +21,3 @@ export function useActiveProjectReadOnly(): boolean {
   const project = projects.find((p) => p.id === activeProjectId) ?? null;
   return isProjectReadOnly(project, user);
 }
-
-/**
- * Execution 권한은 별도 — project.executionAssignee (실행 담당) 기준.
- * worker 가 본인이 executionAssignee 인 프로젝트만 ExecutionPage 의 인터랙션 가능.
- */
-export function isProjectExecutionReadOnly(
-  p: Project | null | undefined,
-  user: { role?: string; username?: string } | null | undefined,
-): boolean {
-  if (!p) return false;
-  if (!user) return true;
-  if (user.role === 'master') return false;
-  return p.executionAssignee !== user.username;
-}
-
-export function useActiveProjectExecutionReadOnly(): boolean {
-  const user = useAuthStore((s) => s.user);
-  const projects = useWorkspaceStore((s) => s.projects);
-  const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
-  const project = projects.find((p) => p.id === activeProjectId) ?? null;
-  return isProjectExecutionReadOnly(project, user);
-}

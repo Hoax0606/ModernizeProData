@@ -14,12 +14,14 @@ export interface PreflightCheck {
 
 interface PreflightEntry {
   selectedTables: string[];
+  selectedSnapshotId: string | null;
   preflightPhase: PreflightPhase;
   preflightResults: PreflightCheck[];
 }
 
 const EMPTY_ENTRY: PreflightEntry = Object.freeze({
   selectedTables: [],
+  selectedSnapshotId: null,
   preflightPhase: 'idle',
   preflightResults: [],
 }) as PreflightEntry;
@@ -29,6 +31,7 @@ interface ExecutionPreflightState {
 
   getEntry: (projectId: string | null | undefined) => PreflightEntry;
   setSelected: (projectId: string, tables: string[]) => void;
+  setSelectedSnapshot: (projectId: string, snapshotId: string | null) => void;
   setPhase: (projectId: string, phase: PreflightPhase) => void;
   setResults: (projectId: string, results: PreflightCheck[] | ((prev: PreflightCheck[]) => PreflightCheck[])) => void;
   resetForProject: (projectId: string) => void;
@@ -58,6 +61,18 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
             [projectId]: {
               ...(s.byProject[projectId] ?? EMPTY_ENTRY),
               selectedTables: tables,
+            },
+          },
+        }));
+      },
+
+      setSelectedSnapshot: (projectId, snapshotId) => {
+        set((s) => ({
+          byProject: {
+            ...s.byProject,
+            [projectId]: {
+              ...(s.byProject[projectId] ?? EMPTY_ENTRY),
+              selectedSnapshotId: snapshotId,
             },
           },
         }));
