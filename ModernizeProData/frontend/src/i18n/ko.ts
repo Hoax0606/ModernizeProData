@@ -20,6 +20,7 @@ export const ko = {
   'login.error': '로그인 실패',
   'login.error.userNotFound':    '존재하지 않는 아이디입니다.',
   'login.error.invalidPassword': '비밀번호가 일치하지 않습니다.',
+  'login.error.licenseBlocked':  '유효한 라이선스가 없어 로그인할 수 없습니다. 본사 담당자에게 라이선스 적용을 요청하세요.',
   'login.conflict.title':         '이미 다른 곳에서 로그인되어 있습니다',
   'login.conflict.desc':          '계속하시면 다른 곳의 세션이 종료되고 이곳에서 새로 로그인됩니다.',
   'login.conflict.evictAndLogin': '끊고 로그인',

@@ -21,6 +21,7 @@ export const ja: Record<TranslationKey, string> = {
   'login.error': 'サインインに失敗しました',
   'login.error.userNotFound':    '指定されたアカウントは存在しません。',
   'login.error.invalidPassword': 'パスワードが一致しません。',
+  'login.error.licenseBlocked':  'ライセンスが無効のためサインインできません。担当のコーディネーターにライセンスの適用を依頼してください。',
   'login.conflict.title':         '別の場所で既にログインされています',
   'login.conflict.desc':          '続行すると別の場所のセッションが終了し、こちらで新しくログインされます。',
   'login.conflict.evictAndLogin': '切断してログイン',

@@ -16,6 +16,7 @@ export const en: Record<TranslationKey, string> = {
   'login.error': 'Sign-in failed',
   'login.error.userNotFound':    'No account found with that username',
   'login.error.invalidPassword': 'Incorrect password',
+  'login.error.licenseBlocked':  'Sign-in unavailable — no valid license. Please ask your coordinator to apply a fresh license.',
   'login.conflict.title':         'Already signed in elsewhere',
   'login.conflict.desc':          'If you continue, the other session will end and you will sign in here.',
   'login.conflict.evictAndLogin': 'End other and sign in',
