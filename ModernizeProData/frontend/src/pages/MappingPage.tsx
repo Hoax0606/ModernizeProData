@@ -7,6 +7,7 @@ import { useMappingEditsStore } from '../store/mappingEdits';
 import { useUiStore } from '../store/ui';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
 import { projectApi } from '../api/workspace';
+import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
 import { MappingOnboarding } from './DashboardPage';
 
 /* ============================================================
@@ -783,6 +784,14 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
 
   const visibleRows = useMemo(() => allRows.filter((r) => r.rule !== 'skip'), [allRows]);
 
+  // For Test/Report: overlay user-picked source column into r.src so the CSV
+  // lookup (and transformation pipeline) sees the AS-IS column the user mapped.
+  const reportRows = useMemo(() => visibleRows.map((r) => {
+    const re = rowEdits[r.tgt];
+    const picked = re?.savedSrc?.find((s) => s && s.trim() !== '');
+    return picked ? { ...r, src: picked.trim() } : r;
+  }), [visibleRows, rowEdits]);
+
   const filtered = visibleRows.filter((r) =>
     (!q || (r.src + ' ' + r.tgt).toLowerCase().includes(q.toLowerCase())) &&
     (coverageFilter === 'all' || r.rule === coverageFilter),
@@ -831,7 +840,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
       {/* Context bar */}
       <div style={styles.contextBar}>
         <span style={{ ...styles.sidePill, color: 'var(--navy)', background: 'var(--navy-50)', borderColor: 'var(--navy)' }}>TO-BE</span>
-        <div style={styles.tableChip}>{table.name}</div>
+        <div style={styles.tableChip}>{table.short}</div>
         <div style={{ flex: 1 }} />
         <div style={styles.statusCounts}>
           {(() => {
@@ -879,11 +888,12 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
           })()}
         </div>
         <button
-          style={(testDisabled || testStatus === 'running') ? styles.btnPrimaryDisabled : styles.btnPrimary}
-          disabled={testDisabled || testStatus === 'running'}
+          style={(testDisabled || testStatus === 'running' || reportOpen) ? styles.btnPrimaryDisabled : styles.btnPrimary}
+          disabled={testDisabled || testStatus === 'running' || reportOpen}
           onClick={startTest}
           title={
-            testStatus === 'running' ? `Testing… ${testProgress}%`
+            reportOpen ? 'Close the Report to run Test again'
+            : testStatus === 'running' ? `Testing… ${testProgress}%`
             : testStatus === 'completed' ? 'Test completed. Click to re-run.'
             : testDisabledReason
           }
@@ -958,7 +968,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
       {reportOpen && (
         <ReportView
           table={table}
-          rows={visibleRows}
+          rows={reportRows}
           onClose={() => setReportOpen(false)}
           onPickColumn={(tgt) => {
             const idx = visibleRows.findIndex((r) => r.tgt === tgt);
@@ -1322,7 +1332,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
                 style={styles.addSourceSelect}
               >
                 {availableTables.map((t) => (
-                  <option key={t.name} value={t.name}>{t.name}</option>
+                  <option key={t.name} value={t.name}>{t.short}</option>
                 ))}
               </select>
               <span style={{ color: 'var(--text-4)', fontSize: 10.5, whiteSpace: 'nowrap' }}>alias</span>
@@ -2118,66 +2128,86 @@ function ImportFileModal({
 
 // ── Report view (Test 결과 미리보기) ─────────────────────────
 
-function hashStr(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
-  return Math.abs(h);
+/**
+ * Fetch the CSV preview for `{site.csvPath}/{tableName}.csv` via the backend
+ * (browsers can't read arbitrary local paths). Cached per (siteId, tableName).
+ * Returns null while loading, or when the file is missing / unreadable.
+ */
+const CSV_CACHE = new Map<string, CsvPreview | null>();
+
+function useTableCsv(siteId: string | null, tableShortName: string | undefined): CsvPreview | null {
+  const cacheKey = siteId && tableShortName ? `${siteId}::${tableShortName.toLowerCase()}` : null;
+  const [data, setData] = useState<CsvPreview | null>(() =>
+    cacheKey ? CSV_CACHE.get(cacheKey) ?? null : null,
+  );
+  useEffect(() => {
+    if (!siteId || !tableShortName) { setData(null); return; }
+    const key = `${siteId}::${tableShortName.toLowerCase()}`;
+    if (CSV_CACHE.has(key)) { setData(CSV_CACHE.get(key) ?? null); return; }
+    let cancelled = false;
+    csvPreviewApi.forTable(siteId, tableShortName.toLowerCase(), 50)
+      .then((preview) => {
+        CSV_CACHE.set(key, preview);
+        if (!cancelled) setData(preview);
+      })
+      .catch(() => {
+        CSV_CACHE.set(key, null);
+        if (!cancelled) setData(null);
+      });
+    return () => { cancelled = true; };
+  }, [siteId, tableShortName]);
+  return data;
 }
 
-/** 컬럼 타입과 row 인덱스로 결정적 더미 값 생성. test 결과를 가짜로 채움. */
-function previewValue(row: MappingRow, rowIdx: number): string {
-  if (row.rule === 'unmapped') return '';
-  if (row.rule === 'null') return 'NULL';
-  if (row.rule === 'default') return row.ddlDefault ?? 'DEFAULT';
+/**
+ * Pipe one AS-IS CSV row through the mapping rule for `r` and produce the TO-BE cell value.
+ * No DB write — purely in-memory preview of what the test run will emit.
+ *
+ *   rule = unmapped / null / default / added → rule-driven literal
+ *   rule = auto / rule with CSV loaded       → CSV[r.src] with applyTransform
+ *   anything else (no CSV, source missing)   → empty cell ([NULL])
+ *
+ * Dummies are intentionally never shown here — the Report is a Test-result view,
+ * and a blank means "no source row" which is a more honest signal than fake data.
+ */
+function computeReportCell(
+  r: MappingRow,
+  rowIdx: number,
+  csv: CsvPreview | null,
+  csvColIdx: Map<string, number> | null,
+): string {
+  if (r.rule === 'unmapped') return '';
+  if (r.rule === 'null')     return 'NULL';
+  if (r.rule === 'default')  return r.ddlDefault ?? 'DEFAULT';
+  if (r.rule === 'added')    return r.ddlDefault ?? 'NULL';
+  // 'auto' / 'rule'
+  if (!csv || !csvColIdx) return '';
+  if (!r.src || r.src === '—') return '';
+  // savedSrc 는 row editor 가 `{alias}.{column}` (예: "c.CUST_ID") 로 저장하므로
+  // CSV 헤더 (alias 없음) 와 맞추려면 마지막 세그먼트만 사용.
+  const colName = r.src.includes('.') ? r.src.split('.').pop()! : r.src;
+  const idx = csvColIdx.get(colName.trim().toLowerCase());
+  if (idx === undefined) return '';
+  const raw = csv.rows[rowIdx]?.[idx];
+  return raw === undefined ? '' : applyTransform(raw, r);
+}
 
-  const seed = hashStr(`${row.tgt}|${rowIdx}`);
-  const t = row.tgtType.toUpperCase();
-  // NULL probability for nullable cols
-  if (row.tgtNullable && seed % 17 === 0) return 'NULL';
-
-  if (t.startsWith('UUID')) {
-    const hex = (seed * 0x9E3779B1).toString(16).padStart(8, '0');
-    return `${hex}-${(seed % 0xffff).toString(16).padStart(4, '0')}-5${(seed % 0xfff).toString(16).padStart(3, '0')}-${(seed % 0xfff).toString(16).padStart(3, '0')}-${(seed * 7 % 0xffffff).toString(16).padStart(6, '0')}${(seed * 13 % 0xffffff).toString(16).padStart(6, '0')}`;
+/**
+ * Minimal AS-IS → TO-BE value transformation. Covers the common Oracle → PG
+ * cases the rule editor lets users express implicitly via type changes.
+ * Anything richer (code maps, unit conversion, regex split) should live in
+ * `RowEdit.savedRule` and ultimately be executed in DuckDB SQL — out of scope
+ * for this preview path.
+ */
+function applyTransform(raw: string, r: MappingRow): string {
+  if (raw === '') return r.tgtNullable === false ? '' : 'NULL'; // Oracle empty == NULL
+  const t = r.tgtType.toUpperCase();
+  if (t.startsWith('BOOL') || t === 'BIT') {
+    const u = raw.trim().toUpperCase();
+    if (u === 'Y' || u === 'TRUE' || u === '1' || u === 'T') return 'true';
+    if (u === 'N' || u === 'FALSE' || u === '0' || u === 'F') return 'false';
   }
-  if (t.startsWith('DATE')) {
-    const y = 2018 + (seed % 8);
-    const m = 1 + (seed % 12);
-    const d = 1 + (seed % 27);
-    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-  }
-  if (t.startsWith('TIMESTAMP')) {
-    const y = 2023 + (seed % 2);
-    const m = 1 + (seed % 12);
-    const d = 1 + (seed % 27);
-    const hh = seed % 24;
-    const mm = (seed * 7) % 60;
-    const ss = (seed * 13) % 60;
-    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
-  }
-  if (t.startsWith('BOOLEAN') || t === 'BIT') {
-    return seed % 2 === 0 ? 'false' : 'true';
-  }
-  if (t.includes('INT') || t === 'BIGSERIAL' || t === 'SERIAL') {
-    return String(1000 + (seed % 90000));
-  }
-  if (t.startsWith('NUMERIC') || t.startsWith('NUMBER') || t.startsWith('DECIMAL')) {
-    return ((1000 + (seed % 90000)) + (seed % 100) / 100).toFixed(2);
-  }
-  if (t === 'TEXT' || t.includes('CLOB')) {
-    return `(text payload ${seed % 9999})`;
-  }
-  if (t === 'BYTEA' || t.includes('BLOB')) {
-    return `(bytes ${seed % 9999})`;
-  }
-  if (t.startsWith('CHAR(1)') || t === 'CHAR') {
-    const choices = ['M', 'F', 'A', 'B'];
-    return choices[seed % choices.length];
-  }
-  if (t.includes('VARCHAR') || t.includes('CHAR')) {
-    const samples = ['active', 'CALL', 'EMAIL', 'VISIT', 'leave', '田中', '김유라', 'P01', 'D101'];
-    return samples[seed % samples.length];
-  }
-  return `v${seed % 9999}`;
+  return raw;
 }
 
 function excelColLabel(i: number): string {
@@ -2224,8 +2254,20 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
   const tobeDbLabel = dialectLabel(TOBE_DIALECT);
 
   const ws = useWorkspaceStore.getState();
-  const activeSiteName = ws.getActiveSite()?.name || 'modernize';
+  const activeSite = ws.getActiveSite();
+  const activeSiteName = activeSite?.name || 'modernize';
   const activeProjectName = ws.getActiveProject()?.name || 'project';
+
+  // CSV from {site.csvPath}/{shortName}.csv (resolved server-side).
+  // Each Report row corresponds to a CSV row; each MappingRow.src is looked up in the CSV header.
+  const csv = useTableCsv(activeSite?.id ?? null, shortName);
+  const csvColIdx = useMemo(() => {
+    if (!csv) return null;
+    const m = new Map<string, number>();
+    csv.headers.forEach((h, i) => m.set(h.trim().toLowerCase(), i));
+    return m;
+  }, [csv]);
+  const dataRowCount = csv ? Math.min(csv.rows.length, PREVIEW_ROWS) : PREVIEW_ROWS;
 
   return (
     <div style={styles.dbvWindow}>
@@ -2329,13 +2371,13 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
             </tr>
           </thead>
           <tbody>
-            {Array.from({ length: PREVIEW_ROWS }, (_, i) => {
+            {Array.from({ length: dataRowCount }, (_, i) => {
               const zebra = i % 2 === 1;
               return (
                 <tr key={i}>
                   <td style={styles.dbvRowNum}>{i + 1}</td>
                   {rows.map((r) => {
-                    const v = previewValue(r, i);
+                    const v = computeReportCell(r, i, csv, csvColIdx);
                     const isNull = v === 'NULL' || v === '';
                     const numeric = isNumericType(r.tgtType);
                     return (
@@ -2374,11 +2416,9 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
         <span style={styles.dbvStatusSep} />
         <span style={{ ...styles.dbvStatusBtn, ...styles.dbvStatusBtnDropdown }}>Export data</span>
         <span style={styles.dbvStatusSep} />
-        <span style={styles.dbvStatusBtn}>{PREVIEW_ROWS}</span>
         <span style={styles.dbvStatusCenter}>
-          {PREVIEW_ROWS} row(s) fetched - 0.0s, on {fmtDate(new Date())} at {fmtTime(new Date())}
+          {rows.length} column(s), {dataRowCount} row(s) fetched - 0.0s, on {fmtDate(new Date())} at {fmtTime(new Date())}
         </span>
-        <span style={styles.dbvStatusRight}>{PREVIEW_ROWS}</span>
       </div>
 
       {/* 브레드크럼 */}
@@ -2558,7 +2598,7 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
     <div style={styles.workspace}>
       <div style={styles.contextBar}>
         <span style={{ ...styles.sidePill, color: 'var(--amber)', background: 'var(--amber-50)', borderColor: 'var(--amber)' }}>AS-IS</span>
-        <div style={styles.tableChip}>{table.name}</div>
+        <div style={styles.tableChip}>{table.short}</div>
         <div style={{ flex: 1 }} />
       </div>
 
@@ -2574,7 +2614,7 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
               <div key={to.internalName} style={styles.routeRow} onClick={() => onJumpTobe(to.internalName, to.name)}>
                 <span style={{ color: 'var(--text-2)' }}>{table.short}</span>
                 <span style={{ color: 'var(--text-4)' }}><Ic.arrow /></span>
-                <span style={{ color: 'var(--navy)', fontWeight: 500 }}>{to.name}</span>
+                <span style={{ color: 'var(--navy)', fontWeight: 500 }}>{to.short}</span>
                 {to.whereFilter && (
                   <span style={styles.whereTag} title={`WHERE: ${to.whereFilter}`}>
                     WHERE {to.whereFilter.length > 40 ? to.whereFilter.slice(0, 40) + '…' : to.whereFilter}
