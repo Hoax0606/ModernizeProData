@@ -3,10 +3,12 @@ import { useNavigate } from 'react-router-dom';
 import { useWorkspaceStore } from '../store/workspace';
 import { useAsisDdlStore } from '../store/asisDdl';
 import { useTobeDdlStore } from '../store/tobeDdl';
-import { useMappingEditsStore } from '../store/mappingEdits';
+import { useMappingEditsStore, type TableBindingEdit } from '../store/mappingEdits';
 import { useUiStore } from '../store/ui';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
 import { projectApi } from '../api/workspace';
+import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
+import { mappingImportApi, type MappingStatus as MappingStatusDto } from '../api/mappingImport';
 import { MappingOnboarding } from './DashboardPage';
 
 /* ============================================================
@@ -344,6 +346,39 @@ export function MappingPage() {
   const handleBindingChange = useCallback((internalName: string, edit: TableBindingEdit) => {
     if (!activeProjectId) return;
     useMappingEditsStore.getState().setBindingEdit(activeProjectId, internalName, edit);
+
+    // DB 영속화 — TO-BE table name 으로 schema/table 분리, AS-IS source 도 동일하게.
+    const tobe = TOBE_TABLES.find((t) => t.internalName === internalName);
+    if (!tobe) return;
+    const splitQualified = (qn: string): { schema: string; table: string } => {
+      const i = qn.indexOf('.');
+      return i > 0 ? { schema: qn.slice(0, i), table: qn.slice(i + 1) } : { schema: '', table: qn };
+    };
+    const tobeSplit = splitQualified(tobe.name);
+    const sources = edit.sources.map((s, i) => {
+      const sp = splitQualified(s.table);
+      return {
+        ordinal: i,
+        asisSchema: sp.schema || null,
+        asisTable: sp.table,
+        alias: s.alias,
+        role: s.role,
+        joinType: s.joinType ?? null,
+        joinOn: s.joinOn ?? null,
+      };
+    });
+    const compositionKind: 'single' | 'join' | 'union' | 'none' =
+      sources.length === 0 ? 'none'
+      : sources.length === 1 ? 'single'
+      : edit.mode;
+
+    mappingImportApi.upsertBinding(activeProjectId, {
+      tobeSchema: tobeSplit.schema,
+      tobeTable: tobeSplit.table,
+      compositionKind,
+      whereFilter: edit.whereFilter ?? null,
+      sources,
+    }).catch((e) => console.warn('[mapping] upsertBinding failed', e));
   }, [activeProjectId]);
 
   const handleToggleAsisSkip = useCallback((tableName: string, colName: string, nextSkip: boolean) => {
@@ -361,6 +396,7 @@ export function MappingPage() {
         sources: srcs,
         unrouted: srcs.length === 0,
         compositionKind: (srcs.length === 0 ? 'none' : srcs.length === 1 ? 'single' : edit.mode) as TobeTable['compositionKind'],
+        whereFilter: edit.whereFilter ?? t.whereFilter,
       };
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -705,11 +741,152 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   const [importMappingOpen, setImportMappingOpen] = useState(false);
   const [importYamlOpen, setImportYamlOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
+  // 슬롯별 현재 활성 파일명 — rules/code_maps 가 실제 비어있으면 null (삭제 후 반영)
+  const [mappingStatus, setMappingStatus] = useState<MappingStatusDto>({
+    columnFilename: null, codeFilename: null, ruleCount: 0, codeMapCount: 0,
+  });
+  const mappingImported = mappingStatus.columnFilename !== null || mappingStatus.codeFilename !== null;
   const [q, setQ] = useState('');
   type RuleFilter = 'all' | 'unmapped' | 'auto' | 'rule' | 'null' | 'default';
   const [coverageFilter, setCoverageFilter] = useState<RuleFilter>('all');
   const [activeIdx, setActiveIdx] = useState(0);
   const activeProjectIdForRow = useWorkspaceStore((s) => s.activeProjectId);
+
+  /**
+   * DB 의 mapping_table_bindings → zustand 의 tableBindingEdits 로 hydrate.
+   * 임포트 직후 / 페이지 마운트 시 호출. 해당 project 의 binding edits 전부 교체.
+   * AS-IS 테이블명은 `{schema}.{table}` 형태로 변환 (frontend AsisTable.name 컨벤션).
+   */
+  /**
+   * Returns the list of DB binding qualified-names that didn't find a matching
+   * TOBE_TABLES entry (i.e., mapping definition references a TO-BE table that
+   * isn't in the imported TO-BE DDL).
+   */
+  const hydrateBindingsFromDb = useCallback(async (projectId: string): Promise<string[]> => {
+    if (TOBE_TABLES.length === 0) return [];
+    try {
+      const list = await mappingImportApi.listBindings(projectId);
+      // DB 가 source of truth. 빈 list 면 zustand 도 빈 상태로 — 삭제 후에도 UI 반영.
+      const edits: Record<string, TableBindingEdit> = {};
+      const unmatched: string[] = [];
+      for (const b of list) {
+        const tobeQualified = (b.tobeSchema ? b.tobeSchema + '.' : '') + b.tobeTable;
+        const tobe = TOBE_TABLES.find(
+          (t) => t.name.toLowerCase() === tobeQualified.toLowerCase()
+              || t.short.toLowerCase() === b.tobeTable.toLowerCase(),
+        );
+        if (!tobe) {
+          unmatched.push(tobeQualified);
+          continue;
+        }
+        const mode: 'join' | 'union' = b.compositionKind === 'union' ? 'union' : 'join';
+        edits[tobe.internalName] = {
+          mode,
+          whereFilter: b.whereFilter ?? undefined,
+          sources: b.sources.map((s) => ({
+            alias: s.alias,
+            table: (s.asisSchema ? s.asisSchema + '.' : '') + s.asisTable,
+            role: s.role,
+            joinType: s.joinType ?? undefined,
+            joinOn: s.joinOn ?? undefined,
+            rows: 0,
+          })),
+        };
+      }
+      useMappingEditsStore.getState().replaceBindingEdits(projectId, edits);
+      return unmatched;
+    } catch (e) {
+      console.warn('[mapping] failed to hydrate bindings', e);
+      return [];
+    }
+  }, []);
+
+  /**
+   * DB 의 mapping_rules → zustand 의 rowEdits 로 hydrate.
+   * Bindings 를 alias 매핑 소스로 사용 (asis_table → alias).
+   */
+  const hydrateRowEditsFromDb = useCallback(async (projectId: string) => {
+    if (TOBE_TABLES.length === 0) return;
+    try {
+      const [rules, bindings] = await Promise.all([
+        mappingImportApi.listRules(projectId),
+        mappingImportApi.listBindings(projectId),
+      ]);
+      // alias 룩업 — key: `{tobeSchema}|{tobeTable}|{asisTable}` → alias
+      const aliasMap = new Map<string, string>();
+      for (const b of bindings) {
+        for (const s of b.sources) {
+          aliasMap.set(`${b.tobeSchema}|${b.tobeTable}|${s.asisTable}`, s.alias);
+        }
+      }
+      // rules 를 internalName / tgtColumn 으로 그룹화
+      const edits: Record<string, Record<string, RowEdit>> = {};
+      for (const r of rules) {
+        const tobeQualified = (r.tobeSchema ? r.tobeSchema + '.' : '') + r.tobeTable;
+        const tobe = TOBE_TABLES.find(
+          (t) => t.name.toLowerCase() === tobeQualified.toLowerCase()
+              || t.short.toLowerCase() === r.tobeTable.toLowerCase(),
+        );
+        if (!tobe) continue;
+        const internalName = tobe.internalName;
+        if (!edits[internalName]) edits[internalName] = {};
+
+        // savedSrc: 가능하면 `{alias}.{column}`, alias 못 찾으면 column 만
+        let savedSrc: string[] | undefined;
+        if (r.asisColumn) {
+          const alias = r.asisTable
+            ? aliasMap.get(`${r.tobeSchema}|${r.tobeTable}|${r.asisTable}`)
+            : undefined;
+          savedSrc = [alias ? `${alias}.${r.asisColumn}` : r.asisColumn];
+        }
+
+        const strat = r.strategy === 'skip' ? undefined
+          : (r.strategy as 'expression' | 'null' | 'default');
+        edits[internalName][r.tobeColumn] = {
+          savedSrc,
+          savedRule: r.transformRule ?? undefined,
+          savedDefault: r.defaultValue ?? undefined,
+          savedNotNull: r.notNullOverride || undefined,
+          savedStrategy: strat,
+          ruleOrigin: r.ruleOrigin,
+        };
+      }
+      useMappingEditsStore.getState().replaceRowEdits(projectId, edits);
+    } catch (e) {
+      console.warn('[mapping] failed to hydrate rowEdits', e);
+    }
+  }, []);
+
+  const refreshMappingStatus = useCallback(async (): Promise<string[]> => {
+    if (!activeProjectIdForRow) return [];
+    try {
+      const st = await mappingImportApi.status(activeProjectIdForRow);
+      setMappingStatus(st);
+    } catch {
+      setMappingStatus({ columnFilename: null, codeFilename: null, ruleCount: 0, codeMapCount: 0 });
+    }
+    const unmatched = await hydrateBindingsFromDb(activeProjectIdForRow);
+    await hydrateRowEditsFromDb(activeProjectIdForRow);
+    return unmatched;
+  }, [activeProjectIdForRow, hydrateBindingsFromDb, hydrateRowEditsFromDb]);
+
+  useEffect(() => {
+    if (!activeProjectIdForRow) {
+      setMappingStatus({ columnFilename: null, codeFilename: null, ruleCount: 0, codeMapCount: 0 });
+      return;
+    }
+    let cancelled = false;
+    mappingImportApi.status(activeProjectIdForRow)
+      .then((st) => { if (!cancelled) setMappingStatus(st); })
+      .catch(() => {
+        if (!cancelled) setMappingStatus({ columnFilename: null, codeFilename: null, ruleCount: 0, codeMapCount: 0 });
+      });
+    // TobeMappingDetail 은 MappingPage 가 DDL 로드 완료 후에야 렌더되므로
+    // TOBE_TABLES 는 마운트 시점에 이미 채워져 있음. 추가 trigger 불필요.
+    hydrateBindingsFromDb(activeProjectIdForRow);
+    hydrateRowEditsFromDb(activeProjectIdForRow);
+    return () => { cancelled = true; };
+  }, [activeProjectIdForRow, hydrateBindingsFromDb, hydrateRowEditsFromDb]);
   const rowEdits = useMappingEditsStore(
     (s) => (activeProjectIdForRow ? s.rowEdits[activeProjectIdForRow]?.[table.internalName] : undefined) || EMPTY_ROW_EDITS,
   );
@@ -754,12 +931,58 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   }, [testStatus]);
   const handleSaveEdit = useCallback((r: MappingRow, edit: RowEdit) => {
     if (!activeProjectIdForRow) return;
-    useMappingEditsStore.getState().setRowEdit(activeProjectIdForRow, table.internalName, r.tgt, edit);
-  }, [activeProjectIdForRow, table.internalName]);
+    // 사용자가 row 편집기에서 저장한 것 = manual
+    const editWithOrigin: RowEdit = { ...edit, ruleOrigin: 'manual' };
+    useMappingEditsStore.getState().setRowEdit(activeProjectIdForRow, table.internalName, r.tgt, editWithOrigin);
+
+    // DB 영속화 — savedSrc 의 {alias}.{column} 에서 alias 룩업으로 asis_table 복원
+    const splitQ = (qn: string) => {
+      const i = qn.indexOf('.');
+      return i > 0 ? { schema: qn.slice(0, i), table: qn.slice(i + 1) } : { schema: '', table: qn };
+    };
+    const tobeSplit = splitQ(table.name);
+    let asisSchema: string | null = null;
+    let asisTable: string | null = null;
+    let asisColumn: string | null = null;
+    const firstSrc = edit.savedSrc?.find((s) => s && s.trim());
+    if (firstSrc) {
+      const parts = firstSrc.split('.');
+      asisColumn = parts[parts.length - 1];
+      if (parts.length >= 2 && bindingEdit) {
+        const alias = parts[0];
+        const source = bindingEdit.sources.find((s) => s.alias === alias);
+        if (source) {
+          const ssp = splitQ(source.table);
+          asisSchema = ssp.schema || null;
+          asisTable = ssp.table;
+        }
+      }
+    }
+    const strategy = edit.savedStrategy ?? 'expression';
+    mappingImportApi.upsertRule(activeProjectIdForRow, {
+      tobeSchema: tobeSplit.schema,
+      tobeTable: tobeSplit.table,
+      tobeColumn: r.tgt,
+      asisSchema, asisTable, asisColumn,
+      strategy,
+      transformRule: edit.savedRule ?? null,
+      transformSql: edit.savedRule ?? null,
+      defaultValue: edit.savedDefault ?? null,
+      notNullOverride: edit.savedNotNull ?? false,
+    }).catch((e) => console.warn('[mapping] upsertRule failed', e));
+  }, [activeProjectIdForRow, table.internalName, table.name, bindingEdit]);
   const [bindingSources, setBindingSources] = useState(bindingEdit?.sources ?? table.sources);
   const [bindingMode, setBindingMode] = useState<'join' | 'union'>(
     bindingEdit?.mode ?? (table.compositionKind === 'union' ? 'union' : 'join'),
   );
+  const [bindingWhere, setBindingWhere] = useState(bindingEdit?.whereFilter ?? table.whereFilter ?? '');
+  // Apply/hydrate 등으로 외부에서 bindingEdit 가 갱신되면 로컬 state 도 따라가게.
+  // (useState 는 첫 렌더의 prop 으로만 초기화되어 이후 prop 변경을 못 받음)
+  useEffect(() => {
+    setBindingSources(bindingEdit?.sources ?? table.sources);
+    setBindingMode(bindingEdit?.mode ?? (table.compositionKind === 'union' ? 'union' : 'join'));
+    setBindingWhere(bindingEdit?.whereFilter ?? table.whereFilter ?? '');
+  }, [bindingEdit, table.internalName, table.sources, table.compositionKind, table.whereFilter]);
   const allRows = useMemo(() => rows.map((r) => {
     const re = rowEdits[r.tgt];
     if (!re) return r;
@@ -769,7 +992,12 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
     if (re.savedStrategy === 'null') eff = 'null';
     else if (re.savedStrategy === 'default') eff = 'default';
     else if (re.savedStrategy === 'expression') {
-      if (hasRule || filledSrc) eff = filledSrc && !hasRule ? 'auto' : 'rule';
+      if (hasRule || filledSrc) {
+        // 임포트된 룰 = passthrough(auto), 사용자가 수정한 룰 = transform(rule)
+        if (filledSrc && !hasRule) eff = 'auto';
+        else if (re.ruleOrigin === 'imported') eff = 'auto';
+        else eff = 'rule';
+      }
     } else if (filledSrc && r.rule === 'unmapped') {
       eff = 'auto';
     }
@@ -782,6 +1010,14 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   }), [rows, rowEdits]);
 
   const visibleRows = useMemo(() => allRows.filter((r) => r.rule !== 'skip'), [allRows]);
+
+  // For Test/Report: overlay user-picked source column into r.src so the CSV
+  // lookup (and transformation pipeline) sees the AS-IS column the user mapped.
+  const reportRows = useMemo(() => visibleRows.map((r) => {
+    const re = rowEdits[r.tgt];
+    const picked = re?.savedSrc?.find((s) => s && s.trim() !== '');
+    return picked ? { ...r, src: picked.trim() } : r;
+  }), [visibleRows, rowEdits]);
 
   const filtered = visibleRows.filter((r) =>
     (!q || (r.src + ' ' + r.tgt).toLowerCase().includes(q.toLowerCase())) &&
@@ -831,7 +1067,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
       {/* Context bar */}
       <div style={styles.contextBar}>
         <span style={{ ...styles.sidePill, color: 'var(--navy)', background: 'var(--navy-50)', borderColor: 'var(--navy)' }}>TO-BE</span>
-        <div style={styles.tableChip}>{table.name}</div>
+        <div style={styles.tableChip}>{table.short}</div>
         <div style={{ flex: 1 }} />
         <div style={styles.statusCounts}>
           {(() => {
@@ -879,16 +1115,17 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
           })()}
         </div>
         <button
-          style={(testDisabled || testStatus === 'running') ? styles.btnPrimaryDisabled : styles.btnPrimary}
-          disabled={testDisabled || testStatus === 'running'}
+          style={(testDisabled || testStatus === 'running' || reportOpen) ? styles.btnPrimaryDisabled : styles.btnPrimary}
+          disabled={testDisabled || testStatus === 'running' || reportOpen}
           onClick={startTest}
           title={
-            testStatus === 'running' ? `Testing… ${testProgress}%`
-            : testStatus === 'completed' ? 'Test completed. Click to re-run.'
+            reportOpen ? 'Close the Report to run Trial again'
+            : testStatus === 'running' ? `Running… ${testProgress}%`
+            : testStatus === 'completed' ? 'Trial completed. Click to re-run.'
             : testDisabledReason
           }
         >
-          <Ic.play /> {testStatus === 'running' ? `Testing ${testProgress}%` : 'Test'}
+          <Ic.play /> {testStatus === 'running' ? `Running ${testProgress}%` : 'Trial'}
         </button>
         {testStatus === 'completed' && (
           <button
@@ -912,9 +1149,11 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         <CollapsibleBinding
           table={table} open={bindingOpen} pulse={bindingPulse} onToggle={() => setBindingOpen((o) => !o)}
           sources={bindingSources}
-          onSourcesChange={(s) => { setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode }); }}
+          onSourcesChange={(s) => { setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode, whereFilter: bindingWhere }); }}
           compositionMode={bindingMode}
-          onCompositionModeChange={(m) => { setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m }); }}
+          onCompositionModeChange={(m) => { setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m, whereFilter: bindingWhere }); }}
+          whereFilter={bindingWhere}
+          onWhereChange={(v) => { setBindingWhere(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: v }); }}
         />
       )}
 
@@ -932,17 +1171,14 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         <button
           style={styles.btnSecondary}
           onClick={() => setImportMappingOpen(true)}
-        >Auto-map unmapped</button>
+        >{mappingImported ? 'Auto-mapping' : 'Auto-map unmapped'}</button>
       </div>
       {importMappingOpen && (
-        <ImportFileModal
-          title="Mapping Definition"
-          accept=".csv"
-          acceptLabel=".csv"
-          templateHref="/templates/mapping_definition_template.csv"
-          templateFilename="mapping_definition_template.csv"
-          hint="매칭된 unmapped 행만 자동 채워지고, 이미 매핑된 행은 덮어쓰지 않습니다."
+        <MappingDefinitionImportModal
+          projectId={activeProjectIdForRow ?? ''}
+          activeFiles={{ column: mappingStatus.columnFilename, code: mappingStatus.codeFilename }}
           onClose={() => setImportMappingOpen(false)}
+          onChanged={refreshMappingStatus}
         />
       )}
       {importYamlOpen && (
@@ -958,7 +1194,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
       {reportOpen && (
         <ReportView
           table={table}
-          rows={visibleRows}
+          rows={reportRows}
           onClose={() => setReportOpen(false)}
           onPickColumn={(tgt) => {
             const idx = visibleRows.findIndex((r) => r.tgt === tgt);
@@ -1141,10 +1377,108 @@ function StatusFor({ row }: { row: MappingRow }) {
 
 // ── Collapsible binding ──────────────────────────────────────
 
-function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesChange, compositionMode, onCompositionModeChange }: {
+/**
+ * 단일 행 input 에 cursor-aware autocomplete 를 붙임.
+ * 사용자가 타이핑하는 현재 단어 ([\w.] 연속체) 가 completions 와 prefix 매칭되면 dropdown.
+ * Tab/Enter 로 선택, Esc 로 닫음, ↑↓ 로 이동.
+ */
+function AutocompleteInput({
+  value, onChange, completions, placeholder, style,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  completions: string[];
+  placeholder?: string;
+  style?: React.CSSProperties;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [focused, setFocused] = useState(false);
+  const [acItems, setAcItems] = useState<string[]>([]);
+  const [acIdx, setAcIdx] = useState(0);
+  const savedCursor = useRef<number | null>(null);
+
+  useLayoutEffect(() => {
+    if (savedCursor.current !== null && inputRef.current) {
+      inputRef.current.setSelectionRange(savedCursor.current, savedCursor.current);
+      savedCursor.current = null;
+    }
+  }, [value]);
+
+  useEffect(() => {
+    if (!focused || !completions.length || !inputRef.current) { setAcItems([]); return; }
+    const pos = inputRef.current.selectionStart ?? 0;
+    let s = pos;
+    while (s > 0 && /[\w.]/.test(value[s - 1])) s--;
+    const word = value.slice(s, pos);
+    if (word.length < 1) { setAcItems([]); return; }
+    const lo = word.toLowerCase();
+    const hits = completions.filter((c) => c.toLowerCase().startsWith(lo) && c.toLowerCase() !== lo).slice(0, 10);
+    setAcItems(hits);
+    setAcIdx(0);
+  }, [value, focused, completions]);
+
+  const applyAc = (item: string) => {
+    if (!inputRef.current) return;
+    const pos = inputRef.current.selectionStart ?? 0;
+    let s = pos;
+    while (s > 0 && /[\w.]/.test(value[s - 1])) s--;
+    const before = value.slice(0, s);
+    const after = value.slice(pos);
+    savedCursor.current = before.length + item.length;
+    onChange(before + item + after);
+    setAcItems([]);
+    inputRef.current.focus();
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!acItems.length) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); setAcIdx((i) => Math.min(i + 1, acItems.length - 1)); return; }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); setAcIdx((i) => Math.max(i - 1, 0)); return; }
+    if (e.key === 'Escape')    { setAcItems([]); return; }
+    if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); applyAc(acItems[acIdx]); return; }
+  };
+
+  return (
+    <div style={{ position: 'relative', flex: 1, minWidth: 0, width: '100%' }}>
+      <input
+        ref={inputRef}
+        value={value}
+        onChange={(e) => {
+          savedCursor.current = e.target.selectionStart;
+          onChange(e.target.value);
+        }}
+        onKeyDown={handleKeyDown}
+        onFocus={() => setFocused(true)}
+        onBlur={() => { setFocused(false); setAcItems([]); }}
+        placeholder={placeholder}
+        spellCheck={false}
+        style={{ width: '100%', boxSizing: 'border-box', ...style }}
+      />
+      {acItems.length > 0 && (
+        <div style={styles.acDropdown}>
+          {acItems.map((item, i) => (
+            <div
+              key={item}
+              onMouseDown={(e) => { e.preventDefault(); applyAc(item); }}
+              onMouseEnter={() => setAcIdx(i)}
+              style={{
+                ...styles.acItem,
+                background: i === acIdx ? 'var(--navy-50)' : 'transparent',
+                color: i === acIdx ? 'var(--navy)' : 'var(--text-2)',
+              }}
+            >{item}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesChange, compositionMode, onCompositionModeChange, whereFilter, onWhereChange }: {
   table: TobeTable; open: boolean; pulse?: boolean; onToggle: () => void;
   sources: TobeTable['sources']; onSourcesChange: (s: TobeTable['sources']) => void;
   compositionMode: 'join' | 'union'; onCompositionModeChange: (m: 'join' | 'union') => void;
+  whereFilter: string; onWhereChange: (v: string) => void;
 }) {
   const [addingSource, setAddingSource] = useState(false);
   const [pickTable, setPickTable] = useState('');
@@ -1153,6 +1487,17 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
   const op = compositionMode === 'union' ? '∪' : '⋈';
   const usedTables = new Set(sources.map((s) => s.table));
   const availableTables = ASIS_TABLES.filter((t) => !usedTables.has(t.name));
+
+  // {alias}.{column} 자동완성 후보 — 현재 binding 의 모든 source 의 컬럼들.
+  const datalistId = `mpd-cols-${table.internalName}`;
+  const aliasColumnOptions = useMemo(() => {
+    const opts: string[] = [];
+    for (const s of sources) {
+      const cols = ASIS_COLUMNS[s.table] || [];
+      for (const c of cols) opts.push(`${s.alias}.${c.name}`);
+    }
+    return opts;
+  }, [sources, table.internalName]);
 
   const startAdd = () => {
     const first = availableTables[0];
@@ -1297,9 +1642,10 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
                   {s.role === 'join' && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                       <span style={styles.joinOnLabel}>ON</span>
-                      <input
+                      <AutocompleteInput
+                        completions={aliasColumnOptions}
                         value={s.joinOn ?? ''}
-                        onChange={(e) => updateSource(s.alias, { joinOn: e.target.value })}
+                        onChange={(v) => updateSource(s.alias, { joinOn: v })}
                         placeholder={`${s.alias}.id = primary.id`}
                         style={styles.joinOnInput}
                       />
@@ -1322,7 +1668,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
                 style={styles.addSourceSelect}
               >
                 {availableTables.map((t) => (
-                  <option key={t.name} value={t.name}>{t.name}</option>
+                  <option key={t.name} value={t.name}>{t.short}</option>
                 ))}
               </select>
               <span style={{ color: 'var(--text-4)', fontSize: 10.5, whiteSpace: 'nowrap' }}>alias</span>
@@ -1343,26 +1689,29 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
                 <span>WHERE filter</span>
                 <span style={styles.whereHint}>이 TO-BE 에 포함할 행 조건. 비우면 전체 rows.</span>
               </div>
-              <input
-                defaultValue={table.whereFilter ?? ''}
+              <AutocompleteInput
+                completions={aliasColumnOptions}
+                value={whereFilter}
+                onChange={onWhereChange}
                 placeholder={`예: ${sources[0].alias}.party_type = 'P'`}
-                style={{
-                  ...styles.whereInput,
-                  borderColor: table.whereFilter ? 'var(--navy)' : 'var(--border)',
-                  background: table.whereFilter ? '#0e1a2b' : 'var(--panel)',
-                  color: table.whereFilter ? '#cad7e8' : 'var(--text)',
-                }}
+                style={styles.whereInput}
               />
             </div>
           )}
         </div>
       )}
+      {/* alias.column 자동완성 — joinOn / whereFilter input 의 list= 가 참조 */}
+      <datalist id={datalistId}>
+        {aliasColumnOptions.map((opt) => (
+          <option key={opt} value={opt} />
+        ))}
+      </datalist>
     </div>
   );
 }
 
 // Per-row saved edits (lifted to TobeMappingDetail so they survive row switches)
-type RowEdit = { savedSrc?: string[]; savedRule?: string; savedDefault?: string; savedNotNull?: boolean; savedStrategy?: 'expression' | 'null' | 'default' };
+type RowEdit = { savedSrc?: string[]; savedRule?: string; savedDefault?: string; savedNotNull?: boolean; savedStrategy?: 'expression' | 'null' | 'default'; ruleOrigin?: 'imported' | 'manual' };
 
 // Module-level helper so it can be called from useEffect closures
 function resolveSrcType(s: string, sources: TobeTable['sources']): string {
@@ -2116,68 +2465,312 @@ function ImportFileModal({
   );
 }
 
-// ── Report view (Test 결과 미리보기) ─────────────────────────
+// ── Mapping definition import modal (stage → save 모델) ──
+//
+// 폴더 아이콘으로 파일 픽 / 휴지통으로 슬롯 삭제 — 둘 다 일단 모달 안 state 에만
+// stage 됨. Save 누를 때 한꺼번에 DB 에 commit (POST /mapping/import + DELETE).
+// Close 누르면 staged 변경 전부 폐기.
 
-function hashStr(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
-  return Math.abs(h);
+type SlotPending =
+  | { kind: 'none' }
+  | { kind: 'upload'; file: File }
+  | { kind: 'delete' };
+
+function MappingDefinitionImportModal({
+  projectId, activeFiles, onClose, onChanged,
+}: {
+  projectId: string;
+  activeFiles: { column: string | null; code: string | null };
+  onClose: () => void;
+  /** Returns the list of TO-BE qualified names from DB bindings that didn't match TOBE_TABLES. */
+  onChanged: () => Promise<string[]>;
+}) {
+  const [columnPending, setColumnPending] = useState<SlotPending>({ kind: 'none' });
+  const [codePending, setCodePending]     = useState<SlotPending>({ kind: 'none' });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
+
+  /**
+   * Apply — pending 변경이 있으면 처리 + 매번 bindings 재구성 (멱등).
+   * pending 변경 없어도 활성. 파일 안 바꿔도 재맵핑 가능.
+   */
+  const handleApply = async () => {
+    if (!projectId) return;
+    setSaving(true);
+    setError(null);
+    setWarning(null);
+    try {
+      if (columnPending.kind === 'delete') await mappingImportApi.deleteRules(projectId);
+      if (codePending.kind === 'delete')   await mappingImportApi.deleteCodeMaps(projectId);
+      const colFile = columnPending.kind === 'upload' ? columnPending.file : null;
+      const codFile = codePending.kind   === 'upload' ? codePending.file   : null;
+      const anyPending = columnPending.kind !== 'none' || codePending.kind !== 'none';
+      if (colFile || codFile) {
+        await mappingImportApi.importCsv(projectId, colFile, codFile);
+      } else if (!anyPending && (activeFiles.column || activeFiles.code)) {
+        // 사용자가 파일 다시 안 고르고 Apply 만 누름 → 마지막 임포트 CSV 로 재적용
+        // (수동 수정된 룰 reset)
+        await mappingImportApi.reapplyLatest(projectId);
+      }
+      await mappingImportApi.rebuildBindings(projectId);
+      const unmatched = await onChanged();
+      if (unmatched.length > 0) {
+        const shown = unmatched.slice(0, 5).join(', ');
+        const more = unmatched.length > 5 ? ` 외 ${unmatched.length - 5}개` : '';
+        setWarning(
+          `맵핑정의서의 다음 TO-BE 테이블이 현재 임포트된 TO-BE DDL 에 없어서 그리드에 반영되지 않습니다: ${shown}${more}. DDL 을 보완하거나 맵핑정의서를 수정하세요.`
+        );
+        // 경고만 표시하고 모달은 그대로 유지 — 사용자가 직접 Close
+        return;
+      }
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const displayName = (slot: 'column' | 'code'): { name: string | null; mode: 'normal' | 'pending' } => {
+    const pending = slot === 'column' ? columnPending : codePending;
+    const active = slot === 'column' ? activeFiles.column : activeFiles.code;
+    if (pending.kind === 'upload') return { name: pending.file.name, mode: 'pending' };
+    if (pending.kind === 'delete') return { name: null, mode: 'normal' };
+    return { name: active, mode: 'normal' };
+  };
+
+  const colDisp = displayName('column');
+  const codDisp = displayName('code');
+
+  return (
+    <div style={styles.modalBackdrop} onClick={saving ? undefined : onClose}>
+      <div style={{ ...styles.modalCard, width: 520 }} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <div style={styles.modalTitle}>Mapping Definition</div>
+          <div style={{ flex: 1 }} />
+          <a
+            href="/templates/mapping_definition_template.csv"
+            download="column_mapping_template.csv"
+            style={styles.modalTemplateBtn}
+          >
+            <Ic.download /> column template
+          </a>
+          <a
+            href="/templates/code_mapping_template.csv"
+            download="code_mapping_template.csv"
+            style={{ ...styles.modalTemplateBtn, marginLeft: 6 }}
+          >
+            <Ic.download /> code template
+          </a>
+        </div>
+        <div style={styles.modalBody}>
+          <MappingFileRow
+            label="Column mapping"
+            displayName={colDisp.name}
+            displayMode={colDisp.mode}
+            onPick={(f) => setColumnPending({ kind: 'upload', file: f })}
+            onDelete={() => setColumnPending({ kind: 'delete' })}
+            canDelete={activeFiles.column !== null && columnPending.kind !== 'delete'}
+          />
+          <MappingFileRow
+            label="Code mapping"
+            displayName={codDisp.name}
+            displayMode={codDisp.mode}
+            onPick={(f) => setCodePending({ kind: 'upload', file: f })}
+            onDelete={() => setCodePending({ kind: 'delete' })}
+            canDelete={activeFiles.code !== null && codePending.kind !== 'delete'}
+          />
+          {warning && (
+            <div style={{ ...styles.modalHint, background: 'var(--amber-50)', borderColor: 'var(--amber)', color: 'var(--amber)' }}>
+              <Ic.warn />
+              <span>{warning}</span>
+            </div>
+          )}
+          {error && (
+            <div style={{ ...styles.modalHint, background: 'var(--red-50)', borderColor: 'var(--red)', color: 'var(--red)' }}>
+              <Ic.warn />
+              <span>{error}</span>
+            </div>
+          )}
+        </div>
+        <div style={styles.modalFooter}>
+          <button
+            style={!saving ? styles.btnPrimary : styles.btnPrimaryDisabled}
+            disabled={saving}
+            onClick={handleApply}
+          >{saving ? 'Applying…' : 'Apply'}</button>
+          <button style={styles.btnSecondary} disabled={saving} onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
-/** 컬럼 타입과 row 인덱스로 결정적 더미 값 생성. test 결과를 가짜로 채움. */
-function previewValue(row: MappingRow, rowIdx: number): string {
-  if (row.rule === 'unmapped') return '';
-  if (row.rule === 'null') return 'NULL';
-  if (row.rule === 'default') return row.ddlDefault ?? 'DEFAULT';
+/**
+ * 한 슬롯의 행 — [라벨] [흰 박스: 파일명 ... 📁 🗑]
+ * 폴더 아이콘 / 휴지통은 흰 박스 내부의 단일 컨테이너에 묶여 있음.
+ */
+function MappingFileRow({
+  label, displayName, displayMode, onPick, onDelete, canDelete,
+}: {
+  label: string;
+  displayName: string | null;
+  displayMode: 'normal' | 'pending';
+  onPick: (f: File) => void;
+  onDelete: () => void;
+  canDelete: boolean;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  const seed = hashStr(`${row.tgt}|${rowIdx}`);
-  const t = row.tgtType.toUpperCase();
-  // NULL probability for nullable cols
-  if (row.tgtNullable && seed % 17 === 0) return 'NULL';
+  const nameStyle: React.CSSProperties = {
+    flex: 1,
+    fontFamily: 'var(--mono)',
+    fontSize: 12,
+    color: displayName == null ? 'var(--text-4)' : 'var(--text)',
+    fontStyle: displayMode === 'pending' ? 'italic' : 'normal',
+    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  };
 
-  if (t.startsWith('UUID')) {
-    const hex = (seed * 0x9E3779B1).toString(16).padStart(8, '0');
-    return `${hex}-${(seed % 0xffff).toString(16).padStart(4, '0')}-5${(seed % 0xfff).toString(16).padStart(3, '0')}-${(seed % 0xfff).toString(16).padStart(3, '0')}-${(seed * 7 % 0xffffff).toString(16).padStart(6, '0')}${(seed * 13 % 0xffffff).toString(16).padStart(6, '0')}`;
+  const iconBtnStyle: React.CSSProperties = {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    width: 22, height: 22,
+    background: 'transparent', border: 'none', borderRadius: 3,
+    cursor: 'pointer', color: 'var(--text-3)', fontSize: 12,
+  };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ minWidth: 110, fontSize: 11.5, color: 'var(--text-2)' }}>{label}</div>
+        {/* 흰 박스 — 파일명과 아이콘 모두 감싼다 */}
+        <div style={{
+          flex: 1,
+          display: 'flex', alignItems: 'center', gap: 4,
+          padding: '6px 10px',
+          background: 'var(--panel)',
+          border: '1px solid var(--border-strong)',
+          borderRadius: 4,
+          minHeight: 30,
+        }}>
+          <div style={nameStyle}>{displayName ?? '—'}</div>
+          {canDelete && (
+            <button
+              type="button"
+              onClick={onDelete}
+              title="이 슬롯 데이터 삭제"
+              style={iconBtnStyle}
+            >
+              <i className="fa-solid fa-trash" />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            title="파일 선택"
+            style={iconBtnStyle}
+          >
+            <i className="fa-solid fa-folder-open" />
+          </button>
+        </div>
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".csv"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) onPick(f);
+            e.target.value = '';
+          }}
+          style={{ display: 'none' }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ── Report view (Test 결과 미리보기) ─────────────────────────
+
+/**
+ * Fetch the CSV preview for `{site.csvPath}/{tableName}.csv` via the backend
+ * (browsers can't read arbitrary local paths). Cached per (siteId, tableName).
+ * Returns null while loading, or when the file is missing / unreadable.
+ */
+const CSV_CACHE = new Map<string, CsvPreview | null>();
+
+function useTableCsv(siteId: string | null, tableShortName: string | undefined): CsvPreview | null {
+  const cacheKey = siteId && tableShortName ? `${siteId}::${tableShortName.toLowerCase()}` : null;
+  const [data, setData] = useState<CsvPreview | null>(() =>
+    cacheKey ? CSV_CACHE.get(cacheKey) ?? null : null,
+  );
+  useEffect(() => {
+    if (!siteId || !tableShortName) { setData(null); return; }
+    const key = `${siteId}::${tableShortName.toLowerCase()}`;
+    if (CSV_CACHE.has(key)) { setData(CSV_CACHE.get(key) ?? null); return; }
+    let cancelled = false;
+    csvPreviewApi.forTable(siteId, tableShortName.toLowerCase(), 50)
+      .then((preview) => {
+        CSV_CACHE.set(key, preview);
+        if (!cancelled) setData(preview);
+      })
+      .catch(() => {
+        CSV_CACHE.set(key, null);
+        if (!cancelled) setData(null);
+      });
+    return () => { cancelled = true; };
+  }, [siteId, tableShortName]);
+  return data;
+}
+
+/**
+ * Pipe one AS-IS CSV row through the mapping rule for `r` and produce the TO-BE cell value.
+ * No DB write — purely in-memory preview of what the test run will emit.
+ *
+ *   rule = unmapped / null / default / added → rule-driven literal
+ *   rule = auto / rule with CSV loaded       → CSV[r.src] with applyTransform
+ *   anything else (no CSV, source missing)   → empty cell ([NULL])
+ *
+ * Dummies are intentionally never shown here — the Report is a Test-result view,
+ * and a blank means "no source row" which is a more honest signal than fake data.
+ */
+function computeReportCell(
+  r: MappingRow,
+  rowIdx: number,
+  csv: CsvPreview | null,
+  csvColIdx: Map<string, number> | null,
+): string {
+  if (r.rule === 'unmapped') return '';
+  if (r.rule === 'null')     return 'NULL';
+  if (r.rule === 'default')  return r.ddlDefault ?? 'DEFAULT';
+  if (r.rule === 'added')    return r.ddlDefault ?? 'NULL';
+  // 'auto' / 'rule'
+  if (!csv || !csvColIdx) return '';
+  if (!r.src || r.src === '—') return '';
+  // savedSrc 는 row editor 가 `{alias}.{column}` (예: "c.CUST_ID") 로 저장하므로
+  // CSV 헤더 (alias 없음) 와 맞추려면 마지막 세그먼트만 사용.
+  const colName = r.src.includes('.') ? r.src.split('.').pop()! : r.src;
+  const idx = csvColIdx.get(colName.trim().toLowerCase());
+  if (idx === undefined) return '';
+  const raw = csv.rows[rowIdx]?.[idx];
+  return raw === undefined ? '' : applyTransform(raw, r);
+}
+
+/**
+ * Minimal AS-IS → TO-BE value transformation. Covers the common Oracle → PG
+ * cases the rule editor lets users express implicitly via type changes.
+ * Anything richer (code maps, unit conversion, regex split) should live in
+ * `RowEdit.savedRule` and ultimately be executed in DuckDB SQL — out of scope
+ * for this preview path.
+ */
+function applyTransform(raw: string, r: MappingRow): string {
+  if (raw === '') return r.tgtNullable === false ? '' : 'NULL'; // Oracle empty == NULL
+  const t = r.tgtType.toUpperCase();
+  if (t.startsWith('BOOL') || t === 'BIT') {
+    const u = raw.trim().toUpperCase();
+    if (u === 'Y' || u === 'TRUE' || u === '1' || u === 'T') return 'true';
+    if (u === 'N' || u === 'FALSE' || u === '0' || u === 'F') return 'false';
   }
-  if (t.startsWith('DATE')) {
-    const y = 2018 + (seed % 8);
-    const m = 1 + (seed % 12);
-    const d = 1 + (seed % 27);
-    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-  }
-  if (t.startsWith('TIMESTAMP')) {
-    const y = 2023 + (seed % 2);
-    const m = 1 + (seed % 12);
-    const d = 1 + (seed % 27);
-    const hh = seed % 24;
-    const mm = (seed * 7) % 60;
-    const ss = (seed * 13) % 60;
-    return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')} ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
-  }
-  if (t.startsWith('BOOLEAN') || t === 'BIT') {
-    return seed % 2 === 0 ? 'false' : 'true';
-  }
-  if (t.includes('INT') || t === 'BIGSERIAL' || t === 'SERIAL') {
-    return String(1000 + (seed % 90000));
-  }
-  if (t.startsWith('NUMERIC') || t.startsWith('NUMBER') || t.startsWith('DECIMAL')) {
-    return ((1000 + (seed % 90000)) + (seed % 100) / 100).toFixed(2);
-  }
-  if (t === 'TEXT' || t.includes('CLOB')) {
-    return `(text payload ${seed % 9999})`;
-  }
-  if (t === 'BYTEA' || t.includes('BLOB')) {
-    return `(bytes ${seed % 9999})`;
-  }
-  if (t.startsWith('CHAR(1)') || t === 'CHAR') {
-    const choices = ['M', 'F', 'A', 'B'];
-    return choices[seed % choices.length];
-  }
-  if (t.includes('VARCHAR') || t.includes('CHAR')) {
-    const samples = ['active', 'CALL', 'EMAIL', 'VISIT', 'leave', '田中', '김유라', 'P01', 'D101'];
-    return samples[seed % samples.length];
-  }
-  return `v${seed % 9999}`;
+  return raw;
 }
 
 function excelColLabel(i: number): string {
@@ -2224,8 +2817,20 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
   const tobeDbLabel = dialectLabel(TOBE_DIALECT);
 
   const ws = useWorkspaceStore.getState();
-  const activeSiteName = ws.getActiveSite()?.name || 'modernize';
+  const activeSite = ws.getActiveSite();
+  const activeSiteName = activeSite?.name || 'modernize';
   const activeProjectName = ws.getActiveProject()?.name || 'project';
+
+  // CSV from {site.csvPath}/{shortName}.csv (resolved server-side).
+  // Each Report row corresponds to a CSV row; each MappingRow.src is looked up in the CSV header.
+  const csv = useTableCsv(activeSite?.id ?? null, shortName);
+  const csvColIdx = useMemo(() => {
+    if (!csv) return null;
+    const m = new Map<string, number>();
+    csv.headers.forEach((h, i) => m.set(h.trim().toLowerCase(), i));
+    return m;
+  }, [csv]);
+  const dataRowCount = csv ? Math.min(csv.rows.length, PREVIEW_ROWS) : PREVIEW_ROWS;
 
   return (
     <div style={styles.dbvWindow}>
@@ -2329,13 +2934,13 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
             </tr>
           </thead>
           <tbody>
-            {Array.from({ length: PREVIEW_ROWS }, (_, i) => {
+            {Array.from({ length: dataRowCount }, (_, i) => {
               const zebra = i % 2 === 1;
               return (
                 <tr key={i}>
                   <td style={styles.dbvRowNum}>{i + 1}</td>
                   {rows.map((r) => {
-                    const v = previewValue(r, i);
+                    const v = computeReportCell(r, i, csv, csvColIdx);
                     const isNull = v === 'NULL' || v === '';
                     const numeric = isNumericType(r.tgtType);
                     return (
@@ -2374,11 +2979,9 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
         <span style={styles.dbvStatusSep} />
         <span style={{ ...styles.dbvStatusBtn, ...styles.dbvStatusBtnDropdown }}>Export data</span>
         <span style={styles.dbvStatusSep} />
-        <span style={styles.dbvStatusBtn}>{PREVIEW_ROWS}</span>
         <span style={styles.dbvStatusCenter}>
-          {PREVIEW_ROWS} row(s) fetched - 0.0s, on {fmtDate(new Date())} at {fmtTime(new Date())}
+          {rows.length} column(s), {dataRowCount} row(s) fetched - 0.0s, on {fmtDate(new Date())} at {fmtTime(new Date())}
         </span>
-        <span style={styles.dbvStatusRight}>{PREVIEW_ROWS}</span>
       </div>
 
       {/* 브레드크럼 */}
@@ -2558,7 +3161,7 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
     <div style={styles.workspace}>
       <div style={styles.contextBar}>
         <span style={{ ...styles.sidePill, color: 'var(--amber)', background: 'var(--amber-50)', borderColor: 'var(--amber)' }}>AS-IS</span>
-        <div style={styles.tableChip}>{table.name}</div>
+        <div style={styles.tableChip}>{table.short}</div>
         <div style={{ flex: 1 }} />
       </div>
 
@@ -2574,7 +3177,7 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
               <div key={to.internalName} style={styles.routeRow} onClick={() => onJumpTobe(to.internalName, to.name)}>
                 <span style={{ color: 'var(--text-2)' }}>{table.short}</span>
                 <span style={{ color: 'var(--text-4)' }}><Ic.arrow /></span>
-                <span style={{ color: 'var(--navy)', fontWeight: 500 }}>{to.name}</span>
+                <span style={{ color: 'var(--navy)', fontWeight: 500 }}>{to.short}</span>
                 {to.whereFilter && (
                   <span style={styles.whereTag} title={`WHERE: ${to.whereFilter}`}>
                     WHERE {to.whereFilter.length > 40 ? to.whereFilter.slice(0, 40) + '…' : to.whereFilter}
@@ -4088,7 +4691,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'inline-flex', alignItems: 'center', gap: 5,
     height: 26, padding: '0 10px',
     border: '1px solid var(--border-strong)', borderRadius: 4,
-    background: 'var(--panel)', color: '#01589C',
+    background: 'var(--panel)', color: '#1A9E7A',
     fontSize: 11.5, fontFamily: 'var(--mono)', fontWeight: 600,
     cursor: 'pointer', textDecoration: 'none',
     whiteSpace: 'nowrap',
