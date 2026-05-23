@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { healthApi, type HealthInfo } from '../api/auth';
+import { tobeDdlApi, type DdlSchema } from '../api/tobeDdl';
 import { useWorkspaceStore, type Project } from '../store/workspace';
 import { useUsersStore } from '../store/users';
 import { useAuthStore } from '../store/auth';
+import { useSnapshotsStore } from '../store/snapshots';
 import { CreateSiteModal } from '../components/CreateSiteModal';
 import { CreateProjectModal } from '../components/CreateProjectModal';
 import { DdlImportButton } from '../components/DdlImportButton';
@@ -135,7 +136,7 @@ function ProjectOnboarding({ siteName }: { siteName: string }) {
 
 /* ─── 3단계: 프로젝트 생성 직후 — DDL · 매핑 안내 ─────── */
 
-function MappingOnboarding({ project }: { project: Project }) {
+export function MappingOnboarding({ project }: { project: Project }) {
   const t = useT();
   const asisDone = project.tableCount > 0;
   const tobeDone = project.tobeTableCount > 0;
@@ -173,38 +174,109 @@ function MappingOnboarding({ project }: { project: Project }) {
 
 /* ─── 4단계: 정상 Dashboard ──────────────────────────────── */
 
+/**
+ * Per-TO-BE-table dashboard row.
+ *
+ * mapping 機能はまだ未実装なので、現状は全テーブルが 'unbound' に着地する.
+ * mapping データができたら mappedColumns/issuesCount をその値で埋めれば
+ * coverage / readiness が自然に推移する.
+ */
+interface DashboardRow {
+  tableId: string;
+  schemaName: string;
+  physicalName: string;
+  totalColumns: number;
+  mappedColumns: number;
+  issuesCount: number;
+  readiness: 'ready' | 'review' | 'unbound';
+}
+
 function ProjectDashboard({ project }: { project: import('../store/workspace').Project }) {
   const t = useT();
-  const [info, setInfo] = useState<HealthInfo | null>(null);
   const [filter, setFilter] = useState<'all' | 'ready' | 'review' | 'unbound'>('all');
+  const [tobeSchema, setTobeSchema] = useState<DdlSchema | null>(null);
+  const allSnapshots = useSnapshotsStore((s) => s.snapshots);
+  const fetchSnapshots = useSnapshotsStore((s) => s.fetchByProject);
+  const snapshots = useMemo(
+    () => allSnapshots.filter((sn) => sn.projectId === project.id),
+    [allSnapshots, project.id],
+  );
 
   useEffect(() => {
-    healthApi.info().then(setInfo).catch(() => {});
-  }, []);
+    let alive = true;
+    tobeDdlApi.get(project.id)
+      .then((s) => { if (alive) setTobeSchema(s); })
+      .catch(() => { if (alive) setTobeSchema({ latestImport: null, tables: [] }); });
+    fetchSnapshots(project.id);
+    return () => { alive = false; };
+  }, [project.id, fetchSnapshots]);
+
+  // 当該プロジェクトの承認済み snapshot 中の最新バージョン.
+  // per-table 関連付けはまだないので、全行に同じ値を表示する.
+  const latestApprovedVersion = useMemo(() => {
+    const approved = snapshots.filter((s) => s.status === 'approved');
+    if (approved.length === 0) return null;
+    // createdAt 降順の最新を採用
+    return approved.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0].version;
+  }, [snapshots]);
+
+  const rows: DashboardRow[] = useMemo(() => {
+    if (!tobeSchema) return [];
+    return tobeSchema.tables.map((tw) => {
+      const total = tw.columns.length;
+      const mapped = 0; // mapping 機能未実装
+      let readiness: DashboardRow['readiness'];
+      if (mapped === 0) readiness = 'unbound';
+      else if (mapped >= total) readiness = 'ready';
+      else readiness = 'review';
+      return {
+        tableId: tw.table.id,
+        schemaName: tw.table.schemaName ?? '',
+        physicalName: tw.table.physicalName,
+        totalColumns: total,
+        mappedColumns: mapped,
+        issuesCount: Math.max(total - mapped, 0),
+        readiness,
+      };
+    });
+  }, [tobeSchema]);
+
+  const counts = useMemo(() => ({
+    total: rows.length,
+    ready: rows.filter((r) => r.readiness === 'ready').length,
+    review: rows.filter((r) => r.readiness === 'review').length,
+    unbound: rows.filter((r) => r.readiness === 'unbound').length,
+  }), [rows]);
+
+  const filtered = filter === 'all' ? rows : rows.filter((r) => r.readiness === filter);
 
   return (
     <div>
       {/* Stat row */}
       <div style={styles.statRow}>
-        <Stat label="TO-BE TABLES" value={String(project.tableCount)} />
-        <Stat label="READY" value="0" sub="all checks pass" subColor="var(--green)" />
-        <Stat label="REVIEW" value="0" sub="errs / pending approval" subColor="var(--red)" />
-        <Stat label="UNBOUND" value="0" sub="no source assigned" subColor="var(--amber)" />
-        <Stat label="SNAPSHOT" value="—" sub="no snapshot" mono />
-        <Stat label="LAST RUN" value="—" sub="no run yet" mono />
+        <Stat label="TO-BE TABLES" value={String(counts.total)} />
+        <Stat label="READY"   value={String(counts.ready)}   tone="ok" />
+        <Stat label="REVIEW"  value={String(counts.review)}  tone="warn" />
+        <Stat label="UNBOUND" value={String(counts.unbound)} tone="err" />
+        <Stat
+          label="SNAPSHOT"
+          value={latestApprovedVersion ?? '—'}
+          sub={latestApprovedVersion ? 'approved' : 'no approved snapshot'}
+          tone={latestApprovedVersion ? 'ok' : 'idle'}
+          mono
+        />
+        <Stat label="LAST RUN" value="—" sub="no run yet" tone="idle" mono />
       </div>
 
-      {/* Filter + actions */}
+      {/* Filter */}
       <div style={styles.toolbar}>
         <div style={styles.filterGroup}>
-          <FilterPill active={filter === 'all'} onClick={() => setFilter('all')}>All <Cnt>0</Cnt></FilterPill>
-          <FilterPill active={filter === 'ready'} onClick={() => setFilter('ready')}>Ready <Cnt>0</Cnt></FilterPill>
-          <FilterPill active={filter === 'review'} onClick={() => setFilter('review')}>Review <Cnt>0</Cnt></FilterPill>
-          <FilterPill active={filter === 'unbound'} onClick={() => setFilter('unbound')}>Unbound <Cnt>0</Cnt></FilterPill>
+          <FilterPill active={filter === 'all'}     onClick={() => setFilter('all')}>All       <Cnt>{counts.total}</Cnt></FilterPill>
+          <FilterPill active={filter === 'ready'}   onClick={() => setFilter('ready')}>Ready   <Cnt>{counts.ready}</Cnt></FilterPill>
+          <FilterPill active={filter === 'review'}  onClick={() => setFilter('review')}>Review <Cnt>{counts.review}</Cnt></FilterPill>
+          <FilterPill active={filter === 'unbound'} onClick={() => setFilter('unbound')}>Unbound <Cnt>{counts.unbound}</Cnt></FilterPill>
         </div>
         <div style={{ flex: 1 }} />
-        <button style={styles.btnSecondary} disabled>Open Versions</button>
-        <button style={styles.btnPrimary2} disabled>Go to Execution</button>
       </div>
 
       {/* Table */}
@@ -212,53 +284,113 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
         <table style={styles.table}>
           <thead>
             <tr>
-              <Th>TO-BE TABLE</Th>
-              <Th>AS-IS SOURCE(S)</Th>
-              <Th>COLUMN COVERAGE</Th>
-              <Th align="right">ISSUES</Th>
-              <Th>APPROVAL</Th>
-              <Th>READINESS</Th>
-              <Th width={20} />
+              <Th width={28} align="center" />
+              <Th width={300}>TO-BE TABLE</Th>
+              <Th width={280}>AS-IS SOURCE</Th>
+              <Th width={260} align="center">COLUMN COVERAGE</Th>
+              <Th width={150} align="center">ISSUES</Th>
+              <Th width={130} align="center">READINESS</Th>
+              <Th width={36} />
             </tr>
           </thead>
           <tbody>
-            <tr>
-              <td colSpan={7} style={styles.emptyRow}>
-                <div style={styles.emptyTitle}>{t('dashboard.empty.title')}</div>
-                <div style={styles.emptyHint}>
-                  {t('dashboard.empty.hint')}
-                </div>
-              </td>
-            </tr>
+            {tobeSchema === null ? (
+              <tr>
+                <td colSpan={7} style={styles.emptyRow}>
+                  <div style={styles.emptyHint}>Loading…</div>
+                </td>
+              </tr>
+            ) : filtered.length === 0 ? (
+              <tr>
+                <td colSpan={7} style={styles.emptyRow}>
+                  <div style={styles.emptyTitle}>{t('dashboard.empty.title')}</div>
+                  <div style={styles.emptyHint}>{t('dashboard.empty.hint')}</div>
+                </td>
+              </tr>
+            ) : filtered.map((r, i) => (
+              <tr
+                key={r.tableId}
+                // TODO: mapping 画面ができたら navigate(`/mapping/${r.tableId}`) などに差し替える
+                onClick={() => { /* mapping 画面 未実装 */ }}
+                style={{
+                  background: i % 2 === 1 ? 'var(--zebra)' : 'var(--panel)',
+                  borderBottom: '1px solid var(--border)',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--panel-2)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = i % 2 === 1 ? 'var(--zebra)' : 'var(--panel)'; }}
+              >
+                <td style={{ ...styles.td, textAlign: 'center' }}><ReadinessDot kind={r.readiness} /></td>
+                <td style={{ ...styles.td, fontFamily: 'var(--mono)', fontWeight: 500 }}>
+                  {r.schemaName && (
+                    <span style={{ color: 'var(--text-4)', fontWeight: 400 }}>{r.schemaName}.</span>
+                  )}
+                  {r.physicalName}
+                </td>
+                <td style={{ ...styles.td, fontFamily: 'var(--mono)', fontSize: 11 }}>
+                  <span style={{ color: 'var(--text-4)', fontStyle: 'italic' }}>(no source)</span>
+                </td>
+                <td style={{ ...styles.td, textAlign: 'center' }}>
+                  {r.mappedColumns === 0 ? (
+                    <span style={{ color: 'var(--text-4)', fontFamily: 'var(--mono)', fontSize: 11 }}>—</span>
+                  ) : (
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, width: '100%', maxWidth: 240 }}>
+                      <ProgressBar pct={r.totalColumns > 0 ? (r.mappedColumns / r.totalColumns) * 100 : 0} />
+                      <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-2)', minWidth: 48, textAlign: 'right' }}>
+                        {r.mappedColumns}/{r.totalColumns}
+                      </span>
+                    </div>
+                  )}
+                </td>
+                <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)', fontSize: 11.5 }}>
+                  {r.readiness === 'ready' || r.issuesCount === 0
+                    ? <span style={{ color: 'var(--text-4)' }}>—</span>
+                    : <span style={{ color: 'var(--text-3)' }}>{r.issuesCount} unmapped</span>}
+                </td>
+                <td style={{ ...styles.td, textAlign: 'center' }}><ReadinessBadge kind={r.readiness} /></td>
+                <td style={{ ...styles.td, textAlign: 'center', color: 'var(--text-4)', fontSize: 16, lineHeight: 1 }}>›</td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
 
       <div style={styles.statusbar}>
-        <div>{project.tableCount} of {project.tableCount} tables · sort: name asc</div>
-        <div style={{ flex: 1 }} />
-        <div style={styles.dim}>
-          click a row → Mapping tab · click approval chip → Versions tab
-        </div>
+        <div>{filtered.length} of {rows.length} tables</div>
       </div>
-
-      {/* 개발 검증용 — 도구 정보 */}
-      {info && (
-        <div style={{ marginTop: 18 }}>
-          <div style={styles.devCard}>
-            <div style={styles.devCardHeader}>{t('dashboard.devCard.title')}</div>
-            <div style={styles.devCardBody}>
-              <div style={styles.devGrid}>
-                <Kv k="Name" v={info.name} />
-                <Kv k="Mode" v={info.mode} badge />
-                <Kv k="Java" v={info.javaVersion} mono />
-                <Kv k="OS" v={info.osName} />
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
+  );
+}
+
+function ProgressBar({ pct }: { pct: number }) {
+  return (
+    <div style={{
+      flex: 1, height: 6, background: 'var(--panel-2)',
+      border: '1px solid var(--border)', borderRadius: 3, overflow: 'hidden',
+    }}>
+      <div style={{ width: `${Math.min(100, Math.max(0, pct))}%`, height: '100%', background: 'var(--green)' }} />
+    </div>
+  );
+}
+
+function ReadinessDot({ kind }: { kind: DashboardRow['readiness'] }) {
+  const color = kind === 'ready' ? 'var(--green)'
+              : kind === 'unbound' ? 'var(--red)'
+              : 'var(--amber)';
+  return <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: color }} />;
+}
+
+function ReadinessBadge({ kind }: { kind: DashboardRow['readiness'] }) {
+  const tone = kind === 'ready' ? { bg: 'var(--green-50)', fg: 'var(--green)', br: 'var(--green)' }
+             : kind === 'unbound' ? { bg: 'var(--red-50)', fg: 'var(--red)', br: 'var(--red)' }
+             : { bg: 'var(--amber-50)', fg: 'var(--amber)', br: 'var(--amber)' };
+  return (
+    <span style={{
+      display: 'inline-block', padding: '2px 8px', fontSize: 10.5,
+      fontWeight: 700, fontFamily: 'var(--mono)',
+      background: tone.bg, color: tone.fg, border: `1px solid ${tone.br}`,
+      borderRadius: 3, textTransform: 'uppercase', letterSpacing: 0.4,
+    }}>{kind}</span>
   );
 }
 
@@ -282,12 +414,17 @@ function Step({ n, title, active, done }: { n: number; title: string; active?: b
   );
 }
 
-function Stat({ label, value, sub, subColor, mono }: { label: string; value: string; sub?: string; subColor?: string; mono?: boolean }) {
+function Stat({ label, value, sub, tone, mono }: { label: string; value: string; sub?: string; tone?: 'ok' | 'warn' | 'err' | 'idle'; mono?: boolean }) {
+  const valueColor = tone === 'ok'   ? 'var(--green)'
+                   : tone === 'warn' ? 'var(--amber)'
+                   : tone === 'err'  ? 'var(--red)'
+                   : tone === 'idle' ? 'var(--text-3)'
+                   : 'var(--text)';
   return (
     <div style={styles.stat}>
       <div style={styles.statLabel}>{label}</div>
-      <div style={{ ...styles.statValue, ...(mono ? { fontFamily: 'var(--mono)' } : {}) }}>{value}</div>
-      {sub && <div style={{ ...styles.statSub, ...(subColor ? { color: subColor } : {}) }}>{sub}</div>}
+      <div style={{ ...styles.statValue, color: valueColor, ...(mono ? { fontFamily: 'var(--mono)' } : {}) }}>{value}</div>
+      {sub && <div style={styles.statSub}>{sub}</div>}
     </div>
   );
 }
@@ -316,7 +453,7 @@ function Cnt({ children }: { children: React.ReactNode }) {
   return <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-4)' }}>{children}</span>;
 }
 
-function Th({ children, align, width }: { children?: React.ReactNode; align?: 'left' | 'right'; width?: number }) {
+function Th({ children, align, width }: { children?: React.ReactNode; align?: 'left' | 'right' | 'center'; width?: number }) {
   return (
     <th style={{
       padding: '6px 12px',
@@ -333,17 +470,6 @@ function Th({ children, align, width }: { children?: React.ReactNode; align?: 'l
   );
 }
 
-function Kv({ k, v, mono, badge }: { k: string; v: string; mono?: boolean; badge?: boolean }) {
-  return (
-    <div style={{ display: 'flex', gap: 10, padding: '4px 0' }}>
-      <span style={{ fontSize: 10.5, color: 'var(--text-3)', width: 70, textTransform: 'uppercase', letterSpacing: 0.4 }}>{k}</span>
-      <span style={{ fontSize: 12, color: 'var(--text)', ...(mono ? { fontFamily: 'var(--mono)' } : {}) }}>
-        {badge ? <span style={styles.modeBadge}>{v}</span> : v}
-      </span>
-    </div>
-  );
-}
-
 /* ─── Site overview: All projects (사이트 선택, 프로젝트 미선택) ── */
 
 const PHASES: Project['phase'][] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
@@ -356,11 +482,71 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
   const users = useUsersStore((s) => s.users);
+  // Coordinator(master) 만 dropdown 으로 변경 가능. 그 외 사용자는 본인 row 도 text 로 표시.
+  const canEditRow = (_p: Project) => isMaster;
+
+  // 담당자 변경 draft — Save 누르기 전까지는 backend / store 에 반영 안 됨.
+  const [assigneeDraft, setAssigneeDraft] = useState<Record<string, string>>({});
+  const [savingAssignees, setSavingAssignees] = useState(false);
+  const dirtyAssigneeIds = useMemo(() => Object.keys(assigneeDraft).filter((id) => {
+    const p = projects.find((pp) => pp.id === id);
+    if (!p) return false;
+    return (assigneeDraft[id] ?? '') !== (p.assignee ?? '');
+  }), [assigneeDraft, projects]);
+  const handleSaveAssignees = async () => {
+    if (dirtyAssigneeIds.length === 0 || savingAssignees) return;
+    setSavingAssignees(true);
+    try {
+      await Promise.all(
+        dirtyAssigneeIds.map((id) =>
+          setProjectAssignee(id, assigneeDraft[id] || undefined),
+        ),
+      );
+      setAssigneeDraft({});
+    } finally {
+      setSavingAssignees(false);
+    }
+  };
+  const handleDiscardAssignees = () => {
+    if (savingAssignees) return;
+    setAssigneeDraft({});
+  };
+
+  // ProjectDashboard 와 동일한 TO-BE schema 가 source of truth.
+  // 프로젝트마다 tobeDdlApi.get 으로 받아 tables/columns 카운트를 모아둔다.
+  const [schemaCounts, setSchemaCounts] = useState<Record<string, { tables: number; columns: number }>>({});
+  const projectIdsKey = useMemo(() => projects.map((p) => p.id).sort().join(','), [projects]);
+  useEffect(() => {
+    let alive = true;
+    Promise.all(
+      projects.map(async (p) => {
+        try {
+          const schema = await tobeDdlApi.get(p.id);
+          const tables = schema.tables.length;
+          const columns = schema.tables.reduce((s, tw) => s + tw.columns.length, 0);
+          return [p.id, { tables, columns }] as const;
+        } catch {
+          return [p.id, { tables: 0, columns: 0 }] as const;
+        }
+      }),
+    ).then((entries) => {
+      if (!alive) return;
+      setSchemaCounts(Object.fromEntries(entries));
+    });
+    return () => { alive = false; };
+    // projects 객체 reference 가 자주 바뀌므로 id key 만 dep 로.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectIdsKey]);
 
   // 필터 — 그리드 위에 표시. KPI · phase mix 는 전체 기준.
   const [phaseFilter, setPhaseFilter] = useState<string>('');
   const [userFilter, setUserFilter] = useState<string>('');
-  const filteredProjects = projects.filter((p) => {
+  // assignee 변경에도 행 순서가 바뀌지 않도록 createdAt asc 로 명시 정렬.
+  const sortedProjects = useMemo(
+    () => projects.slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    [projects],
+  );
+  const filteredProjects = sortedProjects.filter((p) => {
     if (phaseFilter && p.phase !== phaseFilter) return false;
     if (userFilter === '__unassigned') return !p.assignee;
     if (userFilter && p.assignee !== userFilter) return false;
@@ -371,13 +557,13 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
   const phaseCounts: Record<string, number> = {};
   for (const p of projects) phaseCounts[p.phase] = (phaseCounts[p.phase] ?? 0) + 1;
 
-  // KPI — placeholder (mapping UI 연결 전): tableCount 는 실데이터, mapped 는 0.
+  // KPI — TO-BE schema 기준. mapping engine 미연결 → mapped 는 0.
   const doneProjects = projects.filter((p) => p.phase === 'done').length;
-  const totalTables = projects.reduce((a, p) => a + p.tableCount, 0);
+  const totalTables = projects.reduce((a, p) => a + (schemaCounts[p.id]?.tables ?? 0), 0);
   const mappedTables = 0;
-  const totalRows = 0;
-  const mappedRows = 0;
-  const overallPct = totalRows > 0 ? (mappedRows / totalRows) * 100 : 0;
+  const totalColumns = projects.reduce((a, p) => a + (schemaCounts[p.id]?.columns ?? 0), 0);
+  const mappedColumns = 0;
+  const overallPct = totalColumns > 0 ? (mappedColumns / totalColumns) * 100 : 0;
 
   const openProject = (id: string) => {
     setActiveProject(id);
@@ -393,7 +579,7 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
           <div style={styles.kpiRow}>
             <KpiTile label={t('siteOverview.kpi.projects')} value={`${doneProjects} / ${projects.length}`} tone="info" />
             <KpiTile label={t('siteOverview.kpi.tables')}   value={`${mappedTables} / ${totalTables}`} />
-            <KpiTile label={t('siteOverview.kpi.rows')}     value={`${mappedRows.toLocaleString()} / ${totalRows.toLocaleString()}`} />
+            <KpiTile label={t('siteOverview.kpi.rows')}     value={`${mappedColumns.toLocaleString()} / ${totalColumns.toLocaleString()}`} />
           </div>
 
           {/* Overall mapping progress — Execution overview 와 같은 크기 */}
@@ -427,6 +613,32 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
               </select>
             </label>
             <div style={{ flex: 1 }} />
+            {dirtyAssigneeIds.length > 0 && (
+              <>
+                <button
+                  onClick={handleDiscardAssignees}
+                  disabled={savingAssignees}
+                  style={{ ...styles.btnGhost, ...(savingAssignees ? styles.btnDisabled : {}) }}
+                >
+                  {t('siteOverview.btn.discardAssignees')}
+                </button>
+                <button
+                  onClick={handleSaveAssignees}
+                  disabled={savingAssignees}
+                  style={{
+                    padding: '5px 14px',
+                    background: 'var(--navy)', color: '#fff',
+                    border: '1px solid var(--navy)', borderRadius: 3,
+                    fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+                    ...(savingAssignees ? styles.btnDisabled : {}),
+                  }}
+                >
+                  {savingAssignees
+                    ? t('siteOverview.btn.savingAssignees')
+                    : t('siteOverview.btn.saveAssignees', { n: dirtyAssigneeIds.length })}
+                </button>
+              </>
+            )}
             <span style={styles.filterCount}>
               {t('filter.count', { shown: filteredProjects.length, total: projects.length })}
             </span>
@@ -451,8 +663,10 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
                   <tr><td colSpan={7} style={styles.emptyRow}>{t('siteOverview.empty')}</td></tr>
                 ) : (
                   filteredProjects.map((p, i) => {
-                    const rowTotal = 0;   // placeholder — 매핑 UI 연결 전
-                    const rowMapped = 0;
+                    // TO-BE schema 기준 — Dashboard 와 동일한 source.
+                    const rowTotal = schemaCounts[p.id]?.columns ?? 0;
+                    const rowMapped = 0; // mapping engine 미연결
+                    const rowTableCount = schemaCounts[p.id]?.tables ?? 0;
                     const pct = rowTotal > 0 ? (rowMapped / rowTotal) * 100 : 0;
                     const pf = preflightStatus(p);
                     return (
@@ -466,31 +680,38 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
                         }}
                       >
                         <td style={styles.td}>
-                          <span style={{ ...styles.statusDot, ...statusDotColor(p.phase) }} />
-                          <span style={{ fontWeight: 500, marginLeft: 7 }}>{p.name}</span>
+                          <span style={{ fontWeight: 500 }}>{p.name}</span>
                         </td>
                         <td style={styles.td}>
                           <span style={{ ...styles.phaseChip, ...phaseChipColor(p.phase, p.runStatus) }}>{p.phase}</span>
                         </td>
                         <td style={styles.td} onClick={(e) => e.stopPropagation()}>
-                          {isMaster ? (
-                            <select
-                              value={p.assignee ?? ''}
-                              onChange={(e) => setProjectAssignee(p.id, e.target.value || undefined)}
-                              style={styles.assigneeSelect}
-                            >
-                              <option value="">— {t('siteOverview.unassigned')} —</option>
-                              {users.map((u) => (
-                                <option key={u.id} value={u.username}>{u.username}</option>
-                              ))}
-                            </select>
+                          {canEditRow(p) ? (
+                            (() => {
+                              const draftValue = assigneeDraft[p.id];
+                              const effective = draftValue !== undefined ? draftValue : (p.assignee ?? '');
+                              const isDirty = draftValue !== undefined && (draftValue ?? '') !== (p.assignee ?? '');
+                              return (
+                                <select
+                                  value={effective}
+                                  onChange={(e) => setAssigneeDraft((cur) => ({ ...cur, [p.id]: e.target.value }))}
+                                  disabled={savingAssignees}
+                                  style={{ ...styles.assigneeSelect, ...(isDirty ? styles.assigneeSelectDirty : {}) }}
+                                >
+                                  <option value="">— {t('siteOverview.unassigned')} —</option>
+                                  {users.map((u) => (
+                                    <option key={u.id} value={u.username}>{u.username}</option>
+                                  ))}
+                                </select>
+                              );
+                            })()
                           ) : (
                             <span style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: p.assignee ? 'var(--text)' : 'var(--text-4)' }}>
                               {p.assignee ?? t('siteOverview.unassigned')}
                             </span>
                           )}
                         </td>
-                        <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--mono)' }}>{p.tableCount}</td>
+                        <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--mono)' }}>{rowTableCount}</td>
                         <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text-4)' }}>
                           {rowMapped.toLocaleString()} / {rowTotal.toLocaleString()}
                         </td>
@@ -709,26 +930,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     cursor: 'pointer',
   },
-  btnPrimary2: {
-    padding: '6px 12px',
-    background: 'var(--navy)',
-    color: '#fff',
-    border: '1px solid var(--navy)',
-    borderRadius: 4,
-    fontSize: 12,
-    fontWeight: 600,
-    cursor: 'pointer',
-  },
-  btnSecondary: {
-    padding: '6px 12px',
-    background: 'var(--panel)',
-    color: 'var(--text)',
-    border: '1px solid var(--border-strong)',
-    borderRadius: 4,
-    fontSize: 12,
-    fontWeight: 500,
-    cursor: 'pointer',
-  },
 
   /* Stat row */
   statRow: {
@@ -764,6 +965,17 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--panel)', color: 'var(--text)', fontSize: 12,
     outline: 'none', fontFamily: 'var(--mono)', minWidth: 110,
   },
+  assigneeSelectDirty: {
+    background: 'var(--amber-50)',
+    borderColor: 'var(--amber)',
+    color: 'var(--amber)',
+    fontWeight: 600,
+  },
+  btnGhost: {
+    padding: '5px 10px', border: '1px solid var(--border-strong)', borderRadius: 3,
+    background: 'var(--panel)', color: 'var(--text-2)', fontSize: 11.5, cursor: 'pointer',
+  },
+  btnDisabled: { opacity: 0.45, cursor: 'not-allowed' },
   mappingProgressOuter: {
     width: 140, height: 6, background: 'var(--panel-2)',
     border: '1px solid var(--border)', borderRadius: 3, overflow: 'hidden',
@@ -1098,18 +1310,4 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: 'var(--mono)',
   },
   dim: { color: 'var(--text-4)' },
-
-  /* Dev card */
-  devCard: { background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' },
-  devCardHeader: {
-    padding: '8px 14px', background: 'var(--panel-2)', borderBottom: '1px solid var(--border)',
-    fontSize: 11, fontWeight: 600, color: 'var(--text-2)', textTransform: 'uppercase', letterSpacing: 0.5,
-  },
-  devCardBody: { padding: 14 },
-  devGrid: { display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 4 },
-  modeBadge: {
-    display: 'inline-block', padding: '1px 7px', fontSize: 10, fontWeight: 700, fontFamily: 'var(--mono)',
-    background: 'var(--navy-50)', color: 'var(--navy)', border: '1px solid var(--navy)', borderRadius: 3,
-    textTransform: 'uppercase', letterSpacing: 0.4,
-  },
 };

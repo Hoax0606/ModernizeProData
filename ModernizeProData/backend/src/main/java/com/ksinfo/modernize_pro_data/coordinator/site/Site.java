@@ -44,6 +44,14 @@ public class Site {
     @Column(name = "csv_path", nullable = false, length = 512)
     private String csvPath;
 
+    /** AS-IS 측 추출 원본 DB 종류 (Oracle / DB2 / SQL Server / PostgreSQL / MySQL / Mainframe DB2 / Other). 표시용. */
+    @Column(name = "asis_db_type", length = 64)
+    private String asisDbType;
+
+    /** AS-IS 측 DB 버전 (예: "11g R2", "16.0"). 표시용. */
+    @Column(name = "asis_db_version", length = 64)
+    private String asisDbVersion;
+
     @Column(columnDefinition = "TEXT")
     private String notes;
 

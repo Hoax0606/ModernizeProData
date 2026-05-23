@@ -12,7 +12,10 @@ import { VersionsPage } from './pages/VersionsPage';
 import { ApprovalsPage } from './pages/ApprovalsPage';
 import { ExecutionPage } from './pages/ExecutionPage';
 import { ExecutionOverviewPage } from './pages/ExecutionOverviewPage';
+import { MappingPage } from './pages/MappingPage';
 import { ArtifactsPage } from './pages/ArtifactsPage';
+import { LogViewerPage } from './pages/LogViewerPage';
+import { SiteQuarantinePage } from './pages/SiteQuarantinePage';
 import { AppShell } from './layout/AppShell';
 import { ProtectedRoute } from './routes/ProtectedRoute';
 import { useSettingsStore } from './store/settings';
@@ -44,14 +47,15 @@ function App() {
             <Route element={<AppShell />}>
               <Route path="/" element={<DashboardPage />} />
               <Route path="/site/execution" element={<ExecutionOverviewPage />} />
+              <Route path="/site/quarantine" element={<SiteQuarantinePage />} />
               <Route path="/site/export" element={<SiteExportPage />} />
               <Route path="/site/approvals" element={<ApprovalsPage />} />
               <Route path="/site/audit" element={<AuditLogPage />} />
-              <Route path="/mapping" element={<PlaceholderPage title="Mapping" description="AS-IS → TO-BE 컬럼 매핑 정의" />} />
+              <Route path="/mapping" element={<MappingPage />} />
               <Route path="/versions" element={<VersionsPage />} />
               <Route path="/execution" element={<ExecutionPage />} />
               <Route path="/artifacts" element={<ArtifactsPage />} />
-              <Route path="/logs" element={<PlaceholderPage title="Log viewer" description="Audit log 조회·필터·검색·export" />} />
+              <Route path="/logs" element={<LogViewerPage />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Route>
           </Route>

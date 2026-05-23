@@ -11,6 +11,8 @@ interface Props {
   side: 'asis' | 'tobe';
   label?: string;
   disabled?: boolean;
+  /** 'navy' (default) for Dashboard / re-import; 'red' / 'green' for panel emphasis. */
+  tone?: 'navy' | 'red' | 'green';
   onSuccess?: (result: DdlImport) => void;
 }
 
@@ -18,7 +20,7 @@ interface Props {
  * AS-IS / TO-BE 양측에서 사용 가능한 DDL 인포트 버튼.
  * side 에 따라 useAsisDdlStore / useTobeDdlStore 를 분기 사용.
  */
-export function DdlImportButton({ projectId, siteId, side, label, disabled, onSuccess }: Props) {
+export function DdlImportButton({ projectId, siteId, side, label, disabled, tone = 'navy', onSuccess }: Props) {
   const t = useT();
 
   const asisImport = useAsisDdlStore((s) => s.import);
@@ -51,6 +53,9 @@ export function DdlImportButton({ projectId, siteId, side, label, disabled, onSu
   };
 
   const isDisabled = !!disabled || loading;
+  const accent = tone === 'red'   ? 'var(--red)'
+                : tone === 'green' ? 'var(--green)'
+                : 'var(--navy)';
 
   return (
     <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'stretch' }}>
@@ -66,14 +71,17 @@ export function DdlImportButton({ projectId, siteId, side, label, disabled, onSu
         disabled={isDisabled}
         onClick={() => fileInputRef.current?.click()}
         style={{
-          padding: '8px 16px',
-          background: isDisabled ? 'var(--panel-2)' : 'var(--navy)',
+          padding: '6px 12px',
+          minWidth: 148,
+          background: isDisabled ? 'var(--panel-2)' : accent,
           color: isDisabled ? 'var(--text-3)' : '#fff',
-          border: '1px solid ' + (isDisabled ? 'var(--border)' : 'var(--navy)'),
+          border: '1px solid ' + (isDisabled ? 'var(--border)' : accent),
           borderRadius: 4,
           fontSize: 12,
           fontWeight: 600,
           cursor: isDisabled ? 'not-allowed' : 'pointer',
+          whiteSpace: 'nowrap',
+          textAlign: 'center',
         }}
       >
         {loading ? loadingLabel : label ?? defaultLabel}

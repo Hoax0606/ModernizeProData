@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Navigate } from 'react-router-dom';
 import { useWorkspaceStore, type ProjectPhase } from '../store/workspace';
 import { useSnapshotsStore, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
 import { projectApi } from '../api/workspace';
@@ -70,8 +69,10 @@ export function ApprovalsPage() {
     return list.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }, [siteSnapshots, statusFilter, typeFilter, projectFilter, authorFilter]);
 
-  if (activeProjectId) return <Navigate to="/" replace />;
-  if (!site) return <Navigate to="/" replace />;
+  // 프로젝트 활성 중이거나 site 없으면 본문 렌더하지 않음.
+  // (redirect 는 sidebar 프로젝트 클릭 핸들러가 직접 처리 — 여기서 effect 로 redirect 시키면
+  // 알림 navigate 와 race 가 발생함.)
+  if (activeProjectId || !site) return null;
 
   const handleApprove = async (id: string) => {
     const snap = allSnapshots.find((s) => s.id === id);
@@ -91,6 +92,8 @@ export function ApprovalsPage() {
         action: 'approved',
         description: `Approved snapshot: ${snap.name}`,
         snapshotName: snap.version,
+        snapshotId: snap.id,
+        snapshotType: snap.type ?? 'mapping',
       });
     }
     setApproveId(null);
@@ -108,6 +111,8 @@ export function ApprovalsPage() {
         action: 'rejected',
         description: `Rejected snapshot: ${snap.name} — ${reason}`,
         snapshotName: snap.version,
+        snapshotId: snap.id,
+        snapshotType: snap.type ?? 'mapping',
       });
     }
     setRejectId(null);

@@ -156,17 +156,25 @@ export function ArtifactsPage() {
         <div style={styles.sidebarHeader}>
           <span style={styles.sidebarHeaderLabel}>Artifacts</span>
           <span style={styles.sidebarHeaderCount}>0</span>
-          <div style={{ flex: 1 }} />
-          <button style={styles.exportBtnDisabled} disabled title={t('artifacts.empty.hint')}>
-            {t('artifacts.exportAll')}
+        </div>
+        <div style={styles.sidebarBody}>
+          <ArtifactTree
+            openCats={openCats}
+            setOpenCats={setOpenCats}
+            selectedCat={selectedCat}
+            onSelect={(cat) => setSelectedCat(cat)}
+          />
+        </div>
+        <div style={styles.cta}>
+          <button
+            disabled
+            title={t('artifacts.empty.hint')}
+            style={{ ...styles.btnPrimary, ...styles.btnPrimaryDisabled }}
+          >
+            <span style={styles.btnIcon}>↓</span>
+            {t('siteExport.btn.download')}
           </button>
         </div>
-        <ArtifactTree
-          openCats={openCats}
-          setOpenCats={setOpenCats}
-          selectedCat={selectedCat}
-          onSelect={(cat) => setSelectedCat(cat)}
-        />
       </aside>
 
       {/* Excel workbook chrome — fills the right pane completely */}
@@ -373,9 +381,9 @@ const styles: Record<string, React.CSSProperties> = {
     minWidth: 200,
     borderRight: '1px solid var(--border)',
     background: 'var(--panel)',
-    overflow: 'auto',
     display: 'flex',
     flexDirection: 'column',
+    minHeight: 0,
   },
   sidebarHeader: {
     padding: '8px 12px',
@@ -395,16 +403,43 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: 'var(--mono)',
     color: 'var(--text-4)',
   },
-  exportBtnDisabled: {
-    padding: '3px 10px',
-    fontSize: 10.5,
-    fontFamily: 'var(--mono)',
-    background: 'var(--panel-2)',
-    color: 'var(--text-4)',
-    border: '1px solid var(--border)',
+  sidebarBody: {
+    flex: 1,
+    overflow: 'auto',
+    minHeight: 0,
+  },
+
+  /* CTA — site export 의 picker 와 동일 패턴 */
+  cta: {
+    padding: '10px 14px',
+    borderTop: '1px solid var(--border)',
+    background: 'var(--panel-2, var(--panel))',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+  },
+  btnPrimary: {
+    width: '100%',
+    height: 32,
+    background: 'var(--navy)',
+    color: '#fff',
+    border: '1px solid var(--navy)',
     borderRadius: 3,
+    fontSize: 12.5,
+    fontWeight: 600,
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  btnPrimaryDisabled: {
+    background: 'var(--border-strong)',
+    color: 'var(--text-3)',
+    borderColor: 'var(--border-strong)',
     cursor: 'not-allowed',
   },
+  btnIcon: { fontSize: 13, lineHeight: 1 },
 
   tree: { fontFamily: 'var(--mono)', fontSize: 11, padding: '6px 0' },
   catRow: {

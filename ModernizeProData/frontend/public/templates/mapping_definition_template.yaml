@@ -1,0 +1,405 @@
+# ModernizeProData — Mapping Definition (YAML)
+# CSV 와 동일한 데이터. unmapped 행만 자동 채워지고 이미 매핑된 행은 덮어쓰지 않음.
+
+version: 1
+mappings:
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   EMP_ID
+    asis_type:     CHAR(8)
+    tobe_table:    public.employees
+    tobe_column:   employee_id
+    tobe_type:     UUID
+    strategy:      expression
+    rule_sql:      "uuid_generate_v5('hr-emp'::uuid, em.EMP_ID)"
+    default_value: ""
+    notes:         CHAR(8) → UUID v5 채번.
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   EMP_ID
+    asis_type:     CHAR(8)
+    tobe_table:    public.employees
+    tobe_column:   emp_no
+    tobe_type:     CHAR(8)
+    strategy:      expression
+    rule_sql:      em.EMP_ID
+    default_value: ""
+    notes:         원본 사번 보존 (UNIQUE).
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   EMP_NM
+    asis_type:     VARCHAR2(60)
+    tobe_table:    public.employees
+    tobe_column:   full_name
+    tobe_type:     VARCHAR(120)
+    strategy:      expression
+    rule_sql:      TRIM(em.EMP_NM)
+    default_value: ""
+    notes:         길이 확장 + TRIM.
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   EMP_NM_KANA
+    asis_type:     VARCHAR2(120)
+    tobe_table:    public.employees
+    tobe_column:   full_name_kana
+    tobe_type:     VARCHAR(120)
+    strategy:      expression
+    rule_sql:      em.EMP_NM_KANA
+    default_value: ""
+    notes:         passthrough.
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   HIRE_YMD
+    asis_type:     CHAR(8)
+    tobe_table:    public.employees
+    tobe_column:   hire_date
+    tobe_type:     DATE
+    strategy:      expression
+    rule_sql:      "TO_DATE(em.HIRE_YMD, 'YYYYMMDD')"
+    default_value: ""
+    notes:         YYYYMMDD → DATE.
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   BIRTH_YMD
+    asis_type:     CHAR(8)
+    tobe_table:    public.employees
+    tobe_column:   birth_date
+    tobe_type:     DATE
+    strategy:      expression
+    rule_sql:      "TO_DATE(em.BIRTH_YMD, 'YYYYMMDD')"
+    default_value: ""
+    notes:         nullable YYYYMMDD → DATE.
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   DEPT_CD
+    asis_type:     CHAR(4)
+    tobe_table:    public.employees
+    tobe_column:   department_id
+    tobe_type:     INTEGER
+    strategy:      expression
+    rule_sql:      (SELECT d.department_id FROM public.departments d WHERE d.department_code = em.DEPT_CD)
+    default_value: ""
+    notes:         "LOOKUP: DEPT_CD → department_id."
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   POSITION_CD
+    asis_type:     CHAR(3)
+    tobe_table:    public.employees
+    tobe_column:   position_code
+    tobe_type:     CHAR(3)
+    strategy:      expression
+    rule_sql:      em.POSITION_CD
+    default_value: ""
+    notes:         passthrough.
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   GENDER_CD
+    asis_type:     CHAR(1)
+    tobe_table:    public.employees
+    tobe_column:   gender
+    tobe_type:     CHAR(1)
+    strategy:      expression
+    rule_sql:      em.GENDER_CD
+    default_value: ""
+    notes:         passthrough.
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   EMAIL
+    asis_type:     VARCHAR2(64)
+    tobe_table:    public.employees
+    tobe_column:   email
+    tobe_type:     VARCHAR(255)
+    strategy:      expression
+    rule_sql:      em.EMAIL
+    default_value: ""
+    notes:         길이 확장만.
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   SALARY
+    asis_type:     "NUMBER(11,2)"
+    tobe_table:    public.employees
+    tobe_column:   salary
+    tobe_type:     "NUMERIC(11,2)"
+    strategy:      expression
+    rule_sql:      em.SALARY
+    default_value: ""
+    notes:         NUMBER → NUMERIC.
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   ENTRY_TS
+    asis_type:     CHAR(14)
+    tobe_table:    public.employees
+    tobe_column:   created_at
+    tobe_type:     TIMESTAMP
+    strategy:      expression
+    rule_sql:      "TO_TIMESTAMP(em.ENTRY_TS, 'YYYYMMDDHH24MISS')"
+    default_value: ""
+    notes:         CHAR(14) → TIMESTAMP.
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   STATUS_CD
+    asis_type:     CHAR(1)
+    tobe_table:    public.employees
+    tobe_column:   status
+    tobe_type:     VARCHAR(16)
+    strategy:      expression
+    rule_sql:      "CASE em.STATUS_CD WHEN 'A' THEN 'active' WHEN 'R' THEN 'retired' WHEN 'L' THEN 'leave' END"
+    default_value: ""
+    notes:         "값 매핑 (A→active, R→retired, L→leave)."
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   PHONE
+    asis_type:     VARCHAR2(20)
+    tobe_table:    public.employees
+    tobe_column:   phone
+    tobe_type:     VARCHAR(32)
+    strategy:      expression
+    rule_sql:      em.PHONE
+    default_value: ""
+    notes:         길이 확장.
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   UPDATE_TS
+    asis_type:     CHAR(14)
+    tobe_table:    public.employees
+    tobe_column:   updated_at
+    tobe_type:     TIMESTAMP
+    strategy:      expression
+    rule_sql:      "TO_TIMESTAMP(em.UPDATE_TS, 'YYYYMMDDHH24MISS')"
+    default_value: ""
+    notes:         ""
+  - asis_table:    HR.M_EMPLOYEE
+    asis_column:   OBSOLETE_FLAG
+    asis_type:     CHAR(1)
+    tobe_table:    ""
+    tobe_column:   ""
+    tobe_type:     ""
+    strategy:      skip
+    rule_sql:      ""
+    default_value: ""
+    notes:         "TO-BE 에서 폐기. status='retired' 로 충분."
+  - asis_table:    ""
+    asis_column:   ""
+    asis_type:     ""
+    tobe_table:    public.employees
+    tobe_column:   tenant_id
+    tobe_type:     INTEGER
+    strategy:      default
+    rule_sql:      ""
+    default_value: 1
+    notes:         "신규: 멀티 테넌트 시드값."
+  - asis_table:    ""
+    asis_column:   ""
+    asis_type:     ""
+    tobe_table:    public.employees
+    tobe_column:   mfa_enabled
+    tobe_type:     BOOLEAN
+    strategy:      default
+    rule_sql:      ""
+    default_value: false
+    notes:         "신규: MFA 기본 비활성."
+  - asis_table:    ""
+    asis_column:   ""
+    asis_type:     ""
+    tobe_table:    public.employees
+    tobe_column:   is_deleted
+    tobe_type:     BOOLEAN
+    strategy:      default
+    rule_sql:      ""
+    default_value: false
+    notes:         "신규: 논리 삭제 플래그."
+  - asis_table:    ""
+    asis_column:   ""
+    asis_type:     ""
+    tobe_table:    public.employees
+    tobe_column:   version
+    tobe_type:     INTEGER
+    strategy:      default
+    rule_sql:      ""
+    default_value: 1
+    notes:         "신규: 낙관적 락 초기값."
+  - asis_table:    HR.M_DEPARTMENT
+    asis_column:   DEPT_CD
+    asis_type:     CHAR(4)
+    tobe_table:    public.departments
+    tobe_column:   department_code
+    tobe_type:     CHAR(4)
+    strategy:      expression
+    rule_sql:      de.DEPT_CD
+    default_value: ""
+    notes:         원본 코드 보존 (UNIQUE).
+  - asis_table:    HR.M_DEPARTMENT
+    asis_column:   DEPT_NM
+    asis_type:     VARCHAR2(80)
+    tobe_table:    public.departments
+    tobe_column:   department_name
+    tobe_type:     VARCHAR(120)
+    strategy:      expression
+    rule_sql:      TRIM(de.DEPT_NM)
+    default_value: ""
+    notes:         길이 확장 + TRIM.
+  - asis_table:    HR.M_DEPARTMENT
+    asis_column:   PARENT_CD
+    asis_type:     CHAR(4)
+    tobe_table:    public.departments
+    tobe_column:   parent_id
+    tobe_type:     INTEGER
+    strategy:      expression
+    rule_sql:      (SELECT d2.department_id FROM public.departments d2 WHERE d2.department_code = de.PARENT_CD)
+    default_value: ""
+    notes:         LOOKUP self-reference.
+  - asis_table:    HR.M_DEPARTMENT
+    asis_column:   LEVEL_NO
+    asis_type:     NUMBER(2)
+    tobe_table:    public.departments
+    tobe_column:   level_no
+    tobe_type:     SMALLINT
+    strategy:      expression
+    rule_sql:      de.LEVEL_NO
+    default_value: ""
+    notes:         NUMBER(2) → SMALLINT.
+  - asis_table:    HR.M_DEPARTMENT
+    asis_column:   ENTRY_TS
+    asis_type:     CHAR(14)
+    tobe_table:    public.departments
+    tobe_column:   created_at
+    tobe_type:     TIMESTAMP
+    strategy:      expression
+    rule_sql:      "TO_TIMESTAMP(de.ENTRY_TS, 'YYYYMMDDHH24MISS')"
+    default_value: ""
+    notes:         ""
+  - asis_table:    HR.M_DEPARTMENT
+    asis_column:   UPDATE_TS
+    asis_type:     CHAR(14)
+    tobe_table:    public.departments
+    tobe_column:   updated_at
+    tobe_type:     TIMESTAMP
+    strategy:      expression
+    rule_sql:      "TO_TIMESTAMP(de.UPDATE_TS, 'YYYYMMDDHH24MISS')"
+    default_value: ""
+    notes:         ""
+  - asis_table:    ""
+    asis_column:   ""
+    asis_type:     ""
+    tobe_table:    public.departments
+    tobe_column:   department_id
+    tobe_type:     INTEGER
+    strategy:      expression
+    rule_sql:      "NEXTVAL('departments_seq')"
+    default_value: ""
+    notes:         BIGSERIAL 채번 (실 운영은 BIGSERIAL identity).
+  - asis_table:    ""
+    asis_column:   ""
+    asis_type:     ""
+    tobe_table:    public.departments
+    tobe_column:   is_deleted
+    tobe_type:     BOOLEAN
+    strategy:      default
+    rule_sql:      ""
+    default_value: false
+    notes:         "신규: 논리 삭제."
+  - asis_table:    CRM.T_CONTACT_LOG
+    asis_column:   CONTACT_ID
+    asis_type:     NUMBER(12)
+    tobe_table:    public.contact_log
+    tobe_column:   contact_id
+    tobe_type:     BIGINT
+    strategy:      expression
+    rule_sql:      cl.CONTACT_ID
+    default_value: ""
+    notes:         NUMBER(12) → BIGINT.
+  - asis_table:    CRM.T_CONTACT_LOG
+    asis_column:   EMP_ID
+    asis_type:     CHAR(8)
+    tobe_table:    public.contact_log
+    tobe_column:   employee_id
+    tobe_type:     UUID
+    strategy:      expression
+    rule_sql:      (SELECT e.employee_id FROM public.employees e WHERE e.emp_no = cl.EMP_ID)
+    default_value: ""
+    notes:         "LOOKUP: EMP_ID → employees.employee_id."
+  - asis_table:    CRM.T_CONTACT_LOG
+    asis_column:   CONTACT_DT
+    asis_type:     CHAR(14)
+    tobe_table:    public.contact_log
+    tobe_column:   contact_at
+    tobe_type:     TIMESTAMP
+    strategy:      expression
+    rule_sql:      "TO_TIMESTAMP(cl.CONTACT_DT, 'YYYYMMDDHH24MISS')"
+    default_value: ""
+    notes:         ""
+  - asis_table:    CRM.T_CONTACT_LOG
+    asis_column:   KIND_CD
+    asis_type:     CHAR(2)
+    tobe_table:    public.contact_log
+    tobe_column:   kind
+    tobe_type:     VARCHAR(16)
+    strategy:      expression
+    rule_sql:      "CASE cl.KIND_CD WHEN 'CL' THEN 'CALL' WHEN 'EM' THEN 'EMAIL' WHEN 'VS' THEN 'VISIT' END"
+    default_value: ""
+    notes:         코드 → 풀네임 매핑.
+  - asis_table:    CRM.T_CONTACT_LOG
+    asis_column:   MEMO
+    asis_type:     CLOB
+    tobe_table:    public.contact_log
+    tobe_column:   memo
+    tobe_type:     TEXT
+    strategy:      expression
+    rule_sql:      cl.MEMO
+    default_value: ""
+    notes:         CLOB → TEXT.
+  - asis_table:    CRM.T_CONTACT_LOG
+    asis_column:   ATTACHMENT_NM
+    asis_type:     VARCHAR2(200)
+    tobe_table:    public.contact_log
+    tobe_column:   has_attachment
+    tobe_type:     BOOLEAN
+    strategy:      expression
+    rule_sql:      (cl.ATTACHMENT_NM IS NOT NULL)
+    default_value: ""
+    notes:         boolean derive.
+  - asis_table:    CRM.T_CONTACT_LOG
+    asis_column:   ENTRY_TS
+    asis_type:     CHAR(14)
+    tobe_table:    public.contact_log
+    tobe_column:   created_at
+    tobe_type:     TIMESTAMP
+    strategy:      expression
+    rule_sql:      "TO_TIMESTAMP(cl.ENTRY_TS, 'YYYYMMDDHH24MISS')"
+    default_value: ""
+    notes:         ""
+  - asis_table:    CRM.T_CONTACT_LOG
+    asis_column:   CONTACT_ID
+    asis_type:     NUMBER(12)
+    tobe_table:    public.contact_attachment
+    tobe_column:   contact_id
+    tobe_type:     BIGINT
+    strategy:      expression
+    rule_sql:      cl.CONTACT_ID
+    default_value: ""
+    notes:         분할 FK (ATTACHMENT_NM IS NOT NULL 행만).
+  - asis_table:    CRM.T_CONTACT_LOG
+    asis_column:   ATTACHMENT_NM
+    asis_type:     VARCHAR2(200)
+    tobe_table:    public.contact_attachment
+    tobe_column:   filename
+    tobe_type:     VARCHAR(200)
+    strategy:      expression
+    rule_sql:      cl.ATTACHMENT_NM
+    default_value: ""
+    notes:         분할 대상.
+  - asis_table:    CRM.T_CONTACT_LOG
+    asis_column:   ATTACHMENT_BYTES
+    asis_type:     BLOB
+    tobe_table:    public.contact_attachment
+    tobe_column:   content
+    tobe_type:     BYTEA
+    strategy:      expression
+    rule_sql:      cl.ATTACHMENT_BYTES
+    default_value: ""
+    notes:         BLOB → BYTEA.
+  - asis_table:    CRM.T_CONTACT_LOG
+    asis_column:   ENTRY_TS
+    asis_type:     CHAR(14)
+    tobe_table:    public.contact_attachment
+    tobe_column:   created_at
+    tobe_type:     TIMESTAMP
+    strategy:      expression
+    rule_sql:      "TO_TIMESTAMP(cl.ENTRY_TS, 'YYYYMMDDHH24MISS')"
+    default_value: ""
+    notes:         ""
+  - asis_table:    ""
+    asis_column:   ""
+    asis_type:     ""
+    tobe_table:    public.contact_attachment
+    tobe_column:   attachment_id
+    tobe_type:     BIGSERIAL
+    strategy:      expression
+    rule_sql:      "NEXTVAL('contact_attachment_seq')"
+    default_value: ""
+    notes:         BIGSERIAL 채번.

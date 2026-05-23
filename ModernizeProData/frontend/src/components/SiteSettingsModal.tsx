@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Modal } from './Modal';
 import {
   useWorkspaceStore,
@@ -13,11 +13,31 @@ import {
   type TobeDbLocks,
 } from '../store/workspace';
 import { useAuthStore } from '../store/auth';
+import { tobeDbApi } from '../api/tobeDb';
 import { useT, type TranslationKey } from '../i18n';
 import { CsvPathField } from './CsvPathField';
+import { TestConnectionResult, type TestStatus } from './TestConnectionResult';
+import { LockIcon } from './LockIcon';
+
+function isDbConfigured(c: SiteDbConnection | undefined): boolean {
+  if (!c) return false;
+  return !!c.type?.trim() && !!c.host?.trim() && !!c.database?.trim() && !!c.username?.trim();
+}
+
+function siteInitials(name: string): string {
+  if (!name) return '·';
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '·';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
 
 interface Props {
   open: boolean;
+  /** 외부에서 특정 영역을 강조하며 모달을 열 때.
+   *    'tobe-db'  → TO-BE Target DB 카드
+   *    'asis-csv' → AS-IS CSV path 필드 */
+  focus?: 'tobe-db' | 'asis-csv' | 'general';
   onClose: () => void;
 }
 
@@ -44,11 +64,12 @@ const PROJECT_ENV_LABEL: Record<ProjectEnvironment, TranslationKey> = {
 };
 
 const DB_TYPES = ['PostgreSQL', 'Oracle', 'MySQL', 'SQL Server', 'Db2'];
+const ASIS_DB_TYPES = ['Oracle', 'DB2', 'Mainframe DB2', 'SQL Server', 'PostgreSQL', 'MySQL', 'Other'];
 
 /**
  * Site settings — name·envs·encoding·notes·운영 단계·TO-BE DB 편집 + 삭제.
  */
-export function SiteSettingsModal({ open, onClose }: Props) {
+export function SiteSettingsModal({ open, focus, onClose }: Props) {
   const t = useT();
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
@@ -67,12 +88,39 @@ export function SiteSettingsModal({ open, onClose }: Props) {
   const [asisEncoding, setAsisEncoding] = useState<SourceEncoding>('shift_jis');
   const [tobeEncoding, setTobeEncoding] = useState<SourceEncoding>('utf-8');
   const [csvPath, setCsvPath] = useState('');
-  const [notes, setNotes] = useState('');
+  const [asisDbType, setAsisDbType] = useState('');
+  const [asisDbVersion, setAsisDbVersion] = useState('');
   const [stage, setStage] = useState<ProjectEnvironment>('dev');
   const [tobeDbByEnv, setTobeDbByEnv] = useState<TobeDbByEnv>({});
   const [tobeDbLocks, setTobeDbLocks] = useState<TobeDbLocks>({});
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmText, setConfirmText] = useState('');
+  const [testStatus, setTestStatus] = useState<TestStatus>('idle');
+  const [testMessage, setTestMessage] = useState<string | null>(null);
+  const [siteUnlocked, setSiteUnlocked] = useState(false);
+  const [tobeDbPulse, setTobeDbPulse] = useState(false);
+  const tobeDbRef = useRef<HTMLDivElement | null>(null);
+  const [csvPathPulse, setCsvPathPulse] = useState(false);
+  const csvPathRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    if (focus === 'tobe-db') {
+      setTobeDbPulse(true);
+      const scrollT = window.setTimeout(() => {
+        tobeDbRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 50);
+      const pulseT = window.setTimeout(() => setTobeDbPulse(false), 1500);
+      return () => { window.clearTimeout(scrollT); window.clearTimeout(pulseT); };
+    }
+    if (focus === 'asis-csv') {
+      setCsvPathPulse(true);
+      const scrollT = window.setTimeout(() => {
+        csvPathRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 50);
+      const pulseT = window.setTimeout(() => setCsvPathPulse(false), 1500);
+      return () => { window.clearTimeout(scrollT); window.clearTimeout(pulseT); };
+    }
+  }, [open, focus]);
 
   useEffect(() => {
     if (!open || !site) return;
@@ -82,29 +130,83 @@ export function SiteSettingsModal({ open, onClose }: Props) {
     setAsisEncoding(site.asisEncoding);
     setTobeEncoding(site.tobeEncoding);
     setCsvPath(site.csvPath ?? '');
-    setNotes(site.notes ?? '');
+    setAsisDbType(site.asisDbType ?? '');
+    setAsisDbVersion(site.asisDbVersion ?? '');
     setStage(site.environment);
     setTobeDbByEnv({ ...site.tobeDbByEnv });
     setTobeDbLocks({ ...site.tobeDbLocks });
     setConfirmOpen(false);
     setConfirmText('');
+    setTestStatus('idle');
+    setTestMessage(null);
+    setSiteUnlocked(false);
   }, [open, site]);
 
   if (!site) return null;
 
-  // 현재 stage 의 DB — 저장된 것이 없으면 emptyDbConnection (사용자에게 빈 폼).
-  const tobeDb: SiteDbConnection = tobeDbByEnv[stage] ?? emptyDbConnection();
+  // 현재 stage 의 DB — 저장된 것이 없거나 일부 필드가 없으면 emptyDbConnection 으로 빈칸 채움.
+  // (백엔드 jsonb 에 database 필드가 없던 기존 사이트도 안전하게 로딩되도록.)
+  const tobeDb: SiteDbConnection = { ...emptyDbConnection(), ...(tobeDbByEnv[stage] ?? {}) };
   const stageLocked = !!tobeDbLocks[stage];
-  const dbFieldsDisabled = stageLocked;
+  const siteEditDisabled = !siteUnlocked;
+  const dbFieldsDisabled = stageLocked || siteEditDisabled;
 
   const patchTobeDb = (patch: Partial<SiteDbConnection>) => {
     if (stageLocked) return;
-    setTobeDbByEnv((cur) => ({ ...cur, [stage]: { ...(cur[stage] ?? emptyDbConnection()), ...patch } }));
+    setTobeDbByEnv((cur) => ({
+      ...cur,
+      [stage]: { ...emptyDbConnection(), ...(cur[stage] ?? {}), ...patch },
+    }));
+    setTestStatus('idle');
+    setTestMessage(null);
   };
 
-  const handleUnlock = () => {
+  const handleTest = async () => {
+    if (!site || testStatus === 'testing') return;
+    setTestStatus('testing');
+    setTestMessage(null);
+    try {
+      const result = await tobeDbApi.testConnection(site.id, {
+        dbType:   tobeDb.type,
+        host:     tobeDb.host.trim(),
+        port:     tobeDb.port.trim() || '5432',
+        database: tobeDb.database.trim(),
+        username: tobeDb.username.trim(),
+        password: tobeDb.password,
+      });
+      setTestStatus(result.success ? 'ok' : 'failed');
+      setTestMessage(result.message);
+    } catch (e) {
+      setTestStatus('failed');
+      setTestMessage((e as Error)?.message ?? 'Network error');
+    }
+  };
+
+  const toggleStageLock = () => {
     if (!isMaster) return;
-    setTobeDbLocks((cur) => ({ ...cur, [stage]: false }));
+    setTobeDbLocks((cur) => ({ ...cur, [stage]: !cur[stage] }));
+  };
+
+  // site lock 가드: site name 비어있거나 현재 stage 의 DB lock 풀려있으면 차단
+  const nameMissing = !name.trim();
+  const dbUnlockedNow = !tobeDbLocks[stage];
+  const siteLockBlocked = nameMissing || dbUnlockedNow;
+
+  const toggleSiteLock = () => {
+    if (siteUnlocked) {
+      // 잠그려는 시도
+      if (siteLockBlocked) {
+        window.alert(
+          nameMissing
+            ? t('siteSettings.siteLock.blockedNameMissing')
+            : t('siteSettings.siteLock.blockedDbUnlocked')
+        );
+        return;
+      }
+      setSiteUnlocked(false);
+    } else {
+      setSiteUnlocked(true);
+    }
   };
 
   const isDirty =
@@ -114,15 +216,27 @@ export function SiteSettingsModal({ open, onClose }: Props) {
     asisEncoding !== site.asisEncoding ||
     tobeEncoding !== site.tobeEncoding ||
     csvPath !== (site.csvPath ?? '') ||
-    (notes || '') !== (site.notes ?? '') ||
+    asisDbType !== (site.asisDbType ?? '') ||
+    asisDbVersion !== (site.asisDbVersion ?? '') ||
     stage !== site.environment ||
     JSON.stringify(tobeDbByEnv) !== JSON.stringify(site.tobeDbByEnv) ||
     JSON.stringify(tobeDbLocks) !== JSON.stringify(site.tobeDbLocks);
 
   // production 으로 전환은 master 만
   const blockedByProd = stage === 'production' && stage !== site.environment && !isMaster;
-  const canSave = isDirty && !!name.trim() && !blockedByProd;
-  const canTestConnection = !!tobeDb.host.trim() && !!tobeDb.username.trim() && !dbFieldsDisabled;
+  const canSave = isDirty && !!name.trim() && !blockedByProd && !siteUnlocked;
+  // lock 상태에서도 저장된 값으로 connection test 는 항상 허용 (편집만 잠금).
+  const canTestConnection =
+    !!tobeDb.host.trim() &&
+    !!tobeDb.username.trim() &&
+    !!tobeDb.database.trim() &&
+    testStatus !== 'testing';
+
+  const dbConfigured =
+    !!tobeDb.type.trim() &&
+    !!tobeDb.host.trim() &&
+    !!tobeDb.database.trim() &&
+    !!tobeDb.username.trim();
 
   const handleSave = async () => {
     if (!canSave) return;
@@ -132,12 +246,11 @@ export function SiteSettingsModal({ open, onClose }: Props) {
       const c = tobeDbByEnv[env];
       if (c && c.type.trim()) finalByEnv[env] = c;
     }
-    // 저장 시 현재 단계의 DB 가 채워져 있으면 자동 lock. 빈 단계는 lock 도 제거.
+    // 저장 시 데이터 있는 모든 stage 는 자동 lock — unlock 상태인 채로 저장되지 않도록.
     const finalLocks: TobeDbLocks = {};
     for (const env of PROJECT_ENVIRONMENTS) {
-      if (finalByEnv[env]) finalLocks[env] = tobeDbLocks[env] ?? true;
+      if (finalByEnv[env]) finalLocks[env] = true;
     }
-    if (finalByEnv[stage]) finalLocks[stage] = true;
 
     await updateSite(site.id, {
       name: name.trim(),
@@ -146,7 +259,8 @@ export function SiteSettingsModal({ open, onClose }: Props) {
       asisEncoding,
       tobeEncoding,
       csvPath: csvPath.trim(),
-      notes: notes.trim() || undefined,
+      asisDbType: asisDbType.trim(),
+      asisDbVersion: asisDbVersion.trim(),
       environment: stage,
       tobeDbByEnv: finalByEnv,
       tobeDbLocks: finalLocks,
@@ -160,11 +274,84 @@ export function SiteSettingsModal({ open, onClose }: Props) {
     onClose();
   };
 
+  const titleNode = (
+    <div style={styles.titleWrap}>
+      <div style={styles.eyebrow}>{t('siteSettings.title')}</div>
+      <div style={styles.siteNameRow}>
+        <span style={styles.siteBadge}>{siteInitials(site.name)}</span>
+        <span style={styles.siteName} title={site.name}>{site.name || '—'}</span>
+      </div>
+      <div style={styles.titleMeta}>
+        <span style={styles.titleMetaChip}>
+          <span style={styles.titleMetaValue}>{projectCount}</span>
+          <span style={styles.titleMetaLabel}>{t('siteSettings.projectCount')}</span>
+        </span>
+        <span style={styles.titleMetaSep}>·</span>
+        <span style={styles.titleMetaChip}>
+          <span style={styles.titleMetaLabel}>{t('siteSettings.createdAt')}</span>
+          <span style={styles.titleMetaValue}>{new Date(site.createdAt).toLocaleDateString()}</span>
+        </span>
+      </div>
+    </div>
+  );
+
+  const headerRight = (
+    <div style={styles.headerActions}>
+      {blockedByProd && <span style={styles.saveBlockMsg}>{t('siteSettings.prodCoordOnly')}</span>}
+      <button onClick={onClose} style={styles.btnGhostSm}>{t('common.close')}</button>
+      <button
+        onClick={handleSave}
+        disabled={!canSave}
+        title={blockedByProd ? t('siteSettings.prodCoordOnly') : t('common.save')}
+        style={{ ...styles.btnPrimarySm, ...(canSave ? {} : styles.btnDisabled) }}
+      >
+        {t('common.save')}
+      </button>
+    </div>
+  );
+
   return (
-    <Modal open={open} onClose={onClose} width={560} title={t('siteSettings.title')}>
-      <Field label={t('siteSettings.name')}>
-        <input value={name} onChange={(e) => setName(e.target.value)} style={styles.input} />
+    <Modal open={open} onClose={onClose} width={560} title={titleNode} headerRight={headerRight}>
+      <Field
+        label={t('siteSettings.name')}
+        labelRight={
+          (() => {
+            const lockBlocked = siteUnlocked && siteLockBlocked;
+            const chipStyle = siteUnlocked ? styles.siteLockChipOpen : styles.siteLockChipClosed;
+            const blockedTooltip = nameMissing
+              ? t('siteSettings.siteLock.blockedNameMissing')
+              : t('siteSettings.siteLock.blockedDbUnlocked');
+            return (
+              <button
+                type="button"
+                onClick={toggleSiteLock}
+                disabled={lockBlocked}
+                style={{ ...chipStyle, ...(lockBlocked ? styles.siteLockChipBlocked : {}) }}
+                title={
+                  lockBlocked
+                    ? blockedTooltip
+                    : siteUnlocked ? t('siteSettings.lock.title') : t('siteSettings.unlock.title')
+                }
+                aria-label={siteUnlocked ? t('siteSettings.lock.title') : t('siteSettings.unlock.title')}
+              >
+                <LockIcon open={siteUnlocked} color={siteUnlocked ? 'var(--amber)' : 'var(--green)'} size={13} />
+                <span style={styles.siteLockChipText}>
+                  {siteUnlocked ? t('siteSettings.siteLock.unlocked') : t('siteSettings.siteLock.locked')}
+                </span>
+              </button>
+            );
+          })()
+        }
+      >
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          style={{ ...styles.input, ...(siteEditDisabled ? styles.inputDisabled : {}) }}
+          disabled={siteEditDisabled}
+        />
       </Field>
+
+      <div style={{ opacity: siteEditDisabled ? 0.55 : 1, pointerEvents: siteEditDisabled ? 'none' : 'auto' }}>
 
       <Field label={t('siteSettings.asisEnv')}>
         <EnvPills value={asisEnv} onChange={setAsisEnv} t={t} />
@@ -174,7 +361,7 @@ export function SiteSettingsModal({ open, onClose }: Props) {
         <EnvPills value={tobeEnv} onChange={setTobeEnv} t={t} />
       </Field>
 
-      <Field label={t('siteSettings.asisEncoding')} hint={t('siteSettings.encodingHint')}>
+      <Field label={t('siteSettings.asisEncoding')}>
         <select value={asisEncoding} onChange={(e) => setAsisEncoding(e.target.value as SourceEncoding)} style={styles.input}>
           {ENCODING_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>{t(o.key)}</option>
@@ -190,95 +377,113 @@ export function SiteSettingsModal({ open, onClose }: Props) {
         </select>
       </Field>
 
-      <Field label={t('siteSettings.csvPath')} hint={t('siteSettings.csvPathHint')}>
-        <CsvPathField value={csvPath} onChange={setCsvPath} />
-      </Field>
+      <div style={styles.twoCol}>
+        <Field label={t('siteSettings.asisDbType')}>
+          <select value={asisDbType} onChange={(e) => setAsisDbType(e.target.value)} style={styles.input}>
+            <option value="">— {t('siteSettings.asisDbTypePlaceholder')} —</option>
+            {ASIS_DB_TYPES.map((d) => <option key={d}>{d}</option>)}
+          </select>
+        </Field>
+        <Field label={t('siteSettings.asisDbVersion')}>
+          <input
+            value={asisDbVersion}
+            onChange={(e) => setAsisDbVersion(e.target.value)}
+            placeholder={t('siteSettings.asisDbVersionPlaceholder')}
+            style={styles.input}
+          />
+        </Field>
+      </div>
 
-      <Field label={t('siteSettings.notes')} hint={t('siteSettings.notesHint')}>
-        <textarea
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          style={{ ...styles.input, resize: 'vertical', minHeight: 56, fontFamily: 'var(--mono)' }}
-          rows={2}
-        />
-      </Field>
+      <div
+        ref={csvPathRef}
+        style={csvPathPulse
+          ? { boxShadow: '0 0 0 3px var(--green)', borderRadius: 4, transition: 'box-shadow 200ms' }
+          : undefined}
+      >
+        <Field label={t('siteSettings.csvPath')}>
+          <CsvPathField value={csvPath} onChange={setCsvPath} />
+        </Field>
+      </div>
 
-      {/* 운영 단계 — TO-BE DB 바로 위 */}
-      <Field label={t('siteSettings.stage')} hint={t('siteSettings.stageHint')}>
+      <Field label={t('siteSettings.stage')}>
         <StagePills value={stage} onChange={setStage} byEnv={tobeDbByEnv} locks={tobeDbLocks} t={t} />
       </Field>
 
       {/* TO-BE DB */}
-      <div style={styles.dbCard}>
+      <div
+        ref={tobeDbRef}
+        style={{
+          ...styles.dbCard,
+          ...(tobeDbPulse ? { boxShadow: '0 0 0 3px var(--green)', transition: 'box-shadow 200ms' } : {}),
+        }}
+      >
         <div style={styles.dbHeader}>
           <span>{t('siteSettings.tobeDb')}</span>
-          <span style={styles.dbStageTag}>{t(PROJECT_ENV_LABEL[stage])}</span>
-          {stageLocked && <span style={styles.dbLockTag}>🔒 {t('siteSettings.locked')}</span>}
+          {dbConfigured
+            ? <span style={styles.dbStatusOk}><span style={styles.dbStatusDot} />{t('siteSettings.dbStatus.configured')}</span>
+            : <span style={styles.dbStatusNone}><span style={styles.dbStatusDotNone} />{t('siteSettings.dbStatus.notConfigured')}</span>}
           <div style={{ flex: 1 }} />
-          {stageLocked && (
-            isMaster ? (
-              <button type="button" onClick={handleUnlock} style={styles.dbUnlockBtn}>
-                {t('siteSettings.unlock')}
-              </button>
-            ) : (
-              <span style={styles.dbCoordOnly} title={t('siteSettings.unlockCoordOnly')}>
-                {t('siteSettings.unlockCoordOnly')}
+          {isMaster ? (
+            <button
+              type="button"
+              onClick={toggleStageLock}
+              style={styles.dbLockBtn}
+              title={stageLocked ? t('siteSettings.unlock') : t('siteSettings.lock.title')}
+              aria-label={stageLocked ? t('siteSettings.unlock') : t('siteSettings.lock.title')}
+            >
+              <LockIcon open={!stageLocked} color="var(--green)" size={14} />
+            </button>
+          ) : (
+            stageLocked && (
+              <span
+                style={styles.dbLockBtnDisabled}
+                title={t('siteSettings.unlockCoordOnly')}
+                aria-label={t('siteSettings.locked')}
+              >
+                <LockIcon open={false} color="var(--text-3)" size={14} />
               </span>
             )
           )}
         </div>
-        <div style={styles.dbDesc}>
-          {stageLocked ? t('siteSettings.lockedHint') : t('siteSettings.tobeDb.desc')}
-        </div>
 
         <div style={styles.dbGrid2}>
-          <select value={tobeDb.type} onChange={(e) => patchTobeDb({ type: e.target.value })} style={styles.input} disabled={dbFieldsDisabled}>
+          <select value={tobeDb.type} onChange={(e) => patchTobeDb({ type: e.target.value })} style={{ ...styles.input, ...(dbFieldsDisabled ? styles.inputDisabled : {}) }} disabled={dbFieldsDisabled}>
             <option value="" disabled>— {t('siteSettings.dbTypePlaceholder')} —</option>
             {DB_TYPES.map((d) => <option key={d}>{d}</option>)}
           </select>
-          <input value={tobeDb.version} onChange={(e) => patchTobeDb({ version: e.target.value })} placeholder={t('siteSettings.dbVersion')} style={styles.input} disabled={dbFieldsDisabled} />
+          <input value={tobeDb.version} onChange={(e) => patchTobeDb({ version: e.target.value })} placeholder={t('siteSettings.dbVersion')} style={{ ...styles.input, ...(dbFieldsDisabled ? styles.inputDisabled : {}) }} disabled={dbFieldsDisabled} />
         </div>
         <div style={styles.dbGridHostPort}>
-          <input value={tobeDb.host} onChange={(e) => patchTobeDb({ host: e.target.value })} placeholder={`${t('siteSettings.dbHost')} (10.20.30.40)`} style={styles.input} disabled={dbFieldsDisabled} />
-          <input value={tobeDb.port} onChange={(e) => patchTobeDb({ port: e.target.value })} placeholder={t('siteSettings.dbPort')} style={styles.input} disabled={dbFieldsDisabled} />
+          <input value={tobeDb.host} onChange={(e) => patchTobeDb({ host: e.target.value })} placeholder={`${t('siteSettings.dbHost')} (10.20.30.40)`} style={{ ...styles.input, ...(dbFieldsDisabled ? styles.inputDisabled : {}) }} disabled={dbFieldsDisabled} />
+          <input value={tobeDb.port} onChange={(e) => patchTobeDb({ port: e.target.value })} placeholder={t('siteSettings.dbPort')} style={{ ...styles.input, ...(dbFieldsDisabled ? styles.inputDisabled : {}) }} disabled={dbFieldsDisabled} />
         </div>
+        <input
+          value={tobeDb.database}
+          onChange={(e) => patchTobeDb({ database: e.target.value })}
+          placeholder={`${t('siteSettings.dbName')} (${t('siteSettings.dbNamePh')})`}
+          style={{ ...styles.input, width: '100%', ...(dbFieldsDisabled ? styles.inputDisabled : {}) }}
+          autoComplete="off"
+          disabled={dbFieldsDisabled}
+        />
         <div style={styles.dbGrid2}>
-          <input value={tobeDb.username} onChange={(e) => patchTobeDb({ username: e.target.value })} placeholder={t('siteSettings.dbUsername')} style={styles.input} autoComplete="off" disabled={dbFieldsDisabled} />
-          <input type="password" value={tobeDb.password} onChange={(e) => patchTobeDb({ password: e.target.value })} placeholder={t('siteSettings.dbPassword')} style={styles.input} autoComplete="new-password" disabled={dbFieldsDisabled} />
+          <input value={tobeDb.username} onChange={(e) => patchTobeDb({ username: e.target.value })} placeholder={t('siteSettings.dbUsername')} style={{ ...styles.input, ...(dbFieldsDisabled ? styles.inputDisabled : {}) }} autoComplete="off" disabled={dbFieldsDisabled} />
+          <input type="password" value={tobeDb.password} onChange={(e) => patchTobeDb({ password: e.target.value })} placeholder={t('siteSettings.dbPassword')} style={{ ...styles.input, ...(dbFieldsDisabled ? styles.inputDisabled : {}) }} autoComplete="new-password" disabled={dbFieldsDisabled} />
         </div>
         <div style={styles.dbTestRow}>
-          <span style={styles.dbTestHint}>{t('siteSettings.testConnectionHint')}</span>
+          <TestConnectionResult status={testStatus} message={testMessage} testingLabel={t('siteSettings.test.testing')} okLabel={t('siteSettings.test.success')} failedLabel={t('siteSettings.test.failed')} />
           <button
             type="button"
+            onClick={handleTest}
             disabled={!canTestConnection}
             title={canTestConnection ? t('siteSettings.testConnection') : t('siteSettings.testConnectionHint')}
-            style={{ ...styles.btnGhost, ...(canTestConnection ? {} : styles.btnDisabled) }}
+            style={{ ...styles.btnGhost, ...(canTestConnection ? styles.btnTestActive : styles.btnDisabled) }}
           >
-            {t('siteSettings.testConnection')}
+            {testStatus === 'testing' ? t('siteSettings.test.testing') : t('siteSettings.testConnection')}
           </button>
         </div>
       </div>
 
-      <Field label={t('siteSettings.projectCount')} hint={t('siteSettings.projectCountHint')}>
-        <div style={styles.readonly}>{projectCount}</div>
-      </Field>
-
-      <Field label={t('siteSettings.createdAt')}>
-        <div style={styles.readonly}>{new Date(site.createdAt).toLocaleString()}</div>
-      </Field>
-
-      <div style={styles.saveRow}>
-        {blockedByProd && <span style={styles.saveBlockMsg}>{t('siteSettings.prodCoordOnly')}</span>}
-        <button onClick={onClose} style={styles.btnGhost}>{t('common.close')}</button>
-        <button
-          onClick={handleSave}
-          disabled={!canSave}
-          title={blockedByProd ? t('siteSettings.prodCoordOnly') : t('common.save')}
-          style={{ ...styles.btnPrimary, ...(canSave ? {} : styles.btnDisabled) }}
-        >
-          {t('common.save')}
-        </button>
-      </div>
+      </div>{/* /siteEditDisabled wrap */}
 
       {/* Danger zone — Coordinator 만 삭제 가능 */}
       <div style={styles.dangerZone}>
@@ -374,7 +579,7 @@ function StagePills({
     <div style={styles.pillRow}>
       {PROJECT_ENVIRONMENTS.map((env) => {
         const isActive = value === env;
-        const hasData = !!byEnv[env];
+        const configured = isDbConfigured(byEnv[env]);
         const isLocked = !!locks[env];
         return (
           <button
@@ -383,9 +588,13 @@ function StagePills({
             onClick={() => onChange(env)}
             style={{ ...styles.pill, ...(isActive ? styles.pillActive : {}) }}
           >
-            {hasData && <span style={styles.stageDot} />}
+            <span style={{ ...styles.stageDot, background: configured ? 'var(--green)' : 'var(--red)' }} />
             {t(PROJECT_ENV_LABEL[env])}
-            {isLocked && <span style={styles.stageLockIcon}>🔒</span>}
+            {isLocked && (
+              <span style={styles.stageLockIcon}>
+                <LockIcon open={false} color="var(--green)" size={11} />
+              </span>
+            )}
           </button>
         );
       })}
@@ -393,10 +602,13 @@ function StagePills({
   );
 }
 
-function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
+function Field({ label, hint, children, labelRight }: { label: string; hint?: string; children: React.ReactNode; labelRight?: React.ReactNode }) {
   return (
     <div style={styles.field}>
-      <div style={styles.fieldLabel}>{label}</div>
+      <div style={styles.fieldLabelRow}>
+        <div style={styles.fieldLabel}>{label}</div>
+        {labelRight}
+      </div>
       {hint && <div style={styles.fieldHint}>{hint}</div>}
       {children}
     </div>
@@ -405,6 +617,7 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 
 const styles: Record<string, React.CSSProperties> = {
   field: { display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 },
+  fieldLabelRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   fieldLabel: { fontSize: 12, fontWeight: 600, color: 'var(--text)' },
   fieldHint: { fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
   twoCol: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 },
@@ -426,6 +639,12 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12.5,
     color: 'var(--text-2)',
     fontFamily: 'var(--mono)',
+  },
+  inputDisabled: {
+    background: 'var(--panel-2)',
+    color: 'var(--text-3)',
+    cursor: 'not-allowed',
+    borderColor: 'var(--border)',
   },
 
   /* env pills */
@@ -453,13 +672,14 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
   },
   stageDot: {
-    width: 5,
-    height: 5,
+    width: 6,
+    height: 6,
     borderRadius: '50%',
-    background: 'var(--navy)',
+    background: 'var(--green)',
     display: 'inline-block',
+    flexShrink: 0,
   },
-  stageLockIcon: { fontSize: 10, marginLeft: 2 },
+  stageLockIcon: { display: 'inline-flex', alignItems: 'center', marginLeft: 2 },
 
   /* TO-BE DB card */
   dbCard: {
@@ -482,17 +702,60 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: 8,
   },
-  dbStageTag: {
+  dbLockBtn: {
+    width: 24, height: 24,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    background: 'var(--panel)',
+    border: '1px solid var(--green)',
+    borderRadius: 3,
+    cursor: 'pointer',
+    padding: 0,
+    flexShrink: 0,
+  },
+  dbLockBtnDisabled: {
+    width: 24, height: 24,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    background: 'var(--panel-2)',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 3,
+    padding: 0,
+    flexShrink: 0,
+  },
+  dbStatusOk: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 5,
     fontSize: 10.5,
     fontWeight: 700,
     fontFamily: 'var(--mono)',
     padding: '1px 7px',
-    background: 'var(--panel)',
-    color: 'var(--navy)',
-    border: '1px solid var(--navy)',
+    background: 'var(--green-50)',
+    color: 'var(--green)',
+    border: '1px solid var(--green)',
     borderRadius: 3,
-    textTransform: 'none',
-    letterSpacing: 0,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  dbStatusNone: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 5,
+    fontSize: 10.5,
+    fontWeight: 700,
+    fontFamily: 'var(--mono)',
+    padding: '1px 7px',
+    background: 'var(--red-50)',
+    color: 'var(--red)',
+    border: '1px solid var(--red)',
+    borderRadius: 3,
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  dbStatusDot: {
+    width: 6, height: 6, borderRadius: '50%', background: 'var(--green)',
+  },
+  dbStatusDotNone: {
+    width: 6, height: 6, borderRadius: '50%', background: 'var(--red)',
   },
   dbLockTag: {
     fontSize: 10.5,
@@ -539,8 +802,124 @@ const styles: Record<string, React.CSSProperties> = {
   dbDesc: { fontSize: 11, color: 'var(--text-2)', fontFamily: 'var(--mono)', marginBottom: 2 },
   dbGrid2: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 },
   dbGridHostPort: { display: 'grid', gridTemplateColumns: '1fr 90px', gap: 8 },
-  dbTestRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 2 },
+  dbTestRow: { display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, marginTop: 2 },
+  btnTestActive: {
+    background: 'var(--navy)',
+    color: '#fff',
+    border: '1px solid var(--navy)',
+    fontWeight: 600,
+  },
   dbTestHint: { fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
+  titleWrap: { display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0, flex: 1 },
+  eyebrow: {
+    fontSize: 9.5,
+    fontWeight: 700,
+    fontFamily: 'var(--mono)',
+    color: 'var(--text-3)',
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  siteNameRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    minWidth: 0,
+  },
+  siteBadge: {
+    display: 'inline-grid',
+    placeItems: 'center',
+    width: 22, height: 22,
+    borderRadius: 4,
+    background: 'var(--navy)',
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: 700,
+    fontFamily: 'var(--mono)',
+    letterSpacing: 0.4,
+    flexShrink: 0,
+  },
+  siteName: {
+    fontSize: 16,
+    fontWeight: 700,
+    color: 'var(--text)',
+    letterSpacing: -0.2,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  titleMeta: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 2 },
+  titleMetaChip: { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text-3)' },
+  titleMetaLabel: { textTransform: 'uppercase', letterSpacing: 0.6, fontWeight: 600 },
+  titleMetaValue: { color: 'var(--text-2)', fontWeight: 700 },
+  titleMetaSep: { color: 'var(--text-4)', fontSize: 10 },
+
+  headerActions: { display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 },
+  btnPrimarySm: {
+    padding: '4px 12px',
+    background: 'var(--navy)', color: '#fff',
+    border: '1px solid var(--navy)', borderRadius: 3,
+    fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+  },
+  btnGhostSm: {
+    padding: '4px 10px',
+    background: 'var(--panel)', color: 'var(--text-2)',
+    border: '1px solid var(--border-strong)', borderRadius: 3,
+    fontSize: 11.5, cursor: 'pointer',
+  },
+  siteLockChipOpen: {
+    display: 'inline-flex', alignItems: 'center', gap: 5,
+    padding: '3px 9px',
+    border: '1px solid var(--amber)', background: 'var(--amber-50)',
+    color: 'var(--amber)',
+    cursor: 'pointer', borderRadius: 3,
+    fontSize: 10.5, fontWeight: 700, fontFamily: 'var(--mono)',
+    textTransform: 'uppercase', letterSpacing: 0.5,
+    flexShrink: 0,
+  },
+  siteLockChipClosed: {
+    display: 'inline-flex', alignItems: 'center', gap: 5,
+    padding: '3px 9px',
+    border: '1px solid var(--green)', background: 'var(--green-50)',
+    color: 'var(--green)',
+    cursor: 'pointer', borderRadius: 3,
+    fontSize: 10.5, fontWeight: 700, fontFamily: 'var(--mono)',
+    textTransform: 'uppercase', letterSpacing: 0.5,
+    flexShrink: 0,
+  },
+  siteLockChipText: { lineHeight: 1 },
+  siteLockChipBlocked: { opacity: 0.45, cursor: 'not-allowed' },
+
+  metaRow: {
+    display: 'flex',
+    gap: 1,
+    marginTop: 6,
+    background: 'var(--border)',
+    border: '1px solid var(--border)',
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  metaItem: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+    padding: '10px 14px',
+    background: 'var(--panel)',
+  },
+  metaLabel: {
+    fontSize: 10,
+    fontWeight: 700,
+    color: 'var(--text-3)',
+    fontFamily: 'var(--mono)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.7,
+  },
+  metaValue: {
+    fontSize: 14,
+    color: 'var(--text)',
+    fontFamily: 'var(--mono)',
+    lineHeight: 1.3,
+  },
 
   saveRow: { display: 'flex', justifyContent: 'flex-end', gap: 6, marginTop: 8, marginBottom: 14 },
   btnPrimary: {

@@ -22,6 +22,8 @@
   --red-50: #fce6e6;
   --gray: #678b86;
   --gray-50: #f2f4f3;
+  --snapshot:    #2563eb;  /* royal blue — snapshot 액션 전용 (phase-analysis 와 별개) */
+  --snapshot-50: #dbeafe;
 
   /* phase colors */
   --phase-planning:    #7c5dbf;  /* 연보라 */
@@ -69,6 +71,8 @@
   --red-50: #261212;
   --gray: #607d79;
   --gray-50: #1a2724;
+  --snapshot:    #60a5fa;
+  --snapshot-50: #142a4a;
 
   /* phase colors (dark) */
   --phase-planning:    #b59edd;
