@@ -9,6 +9,12 @@
 # Bind-mount paths below (`../db/...`) are resolved relative to THIS
 # compose file's location (infra/), not the working directory. That is
 # docker compose v2's default behavior.
+#
+# DDL is split into 6 Project modules (01_master / 02_organization /
+# 03_account / 04_trade / 05_market / 06_settlement) to mirror the
+# tool's Project = one DDL unit model. 07_load_sample.sql is the
+# sample-data \copy script, mounted last so it runs after every schema
+# module is applied.
 
 name: mpd-tobe
 
@@ -23,9 +29,14 @@ services:
     ports:
       - "${DEV_PORT:-5440}:5432"
     volumes:
-      - ../db/tobe/dev/init.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
-      - ../db/sample_data/dev/load.sql:/docker-entrypoint-initdb.d/02_load_sample.sql:ro
-      - ../db/sample_data/dev:/sample:ro
+      - ../db/tobe/dev/01_master.sql:/docker-entrypoint-initdb.d/01_master.sql:ro
+      - ../db/tobe/dev/02_organization.sql:/docker-entrypoint-initdb.d/02_organization.sql:ro
+      - ../db/tobe/dev/03_account.sql:/docker-entrypoint-initdb.d/03_account.sql:ro
+      - ../db/tobe/dev/04_trade.sql:/docker-entrypoint-initdb.d/04_trade.sql:ro
+      - ../db/tobe/dev/05_market.sql:/docker-entrypoint-initdb.d/05_market.sql:ro
+      - ../db/tobe/dev/06_settlement.sql:/docker-entrypoint-initdb.d/06_settlement.sql:ro
+      - ../db/sample_data/tobe/dev/load.sql:/docker-entrypoint-initdb.d/07_load_sample.sql:ro
+      - ../db/sample_data/tobe/dev:/sample:ro
       - mpd_tobe_dev:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${TOBE_USER:-tobe} -d tobe_dev"]
@@ -45,9 +56,14 @@ services:
     ports:
       - "${TEST_PORT:-5441}:5432"
     volumes:
-      - ../db/tobe/test/init.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
-      - ../db/sample_data/test/load.sql:/docker-entrypoint-initdb.d/02_load_sample.sql:ro
-      - ../db/sample_data/test:/sample:ro
+      - ../db/tobe/test/01_master.sql:/docker-entrypoint-initdb.d/01_master.sql:ro
+      - ../db/tobe/test/02_organization.sql:/docker-entrypoint-initdb.d/02_organization.sql:ro
+      - ../db/tobe/test/03_account.sql:/docker-entrypoint-initdb.d/03_account.sql:ro
+      - ../db/tobe/test/04_trade.sql:/docker-entrypoint-initdb.d/04_trade.sql:ro
+      - ../db/tobe/test/05_market.sql:/docker-entrypoint-initdb.d/05_market.sql:ro
+      - ../db/tobe/test/06_settlement.sql:/docker-entrypoint-initdb.d/06_settlement.sql:ro
+      - ../db/sample_data/tobe/test/load.sql:/docker-entrypoint-initdb.d/07_load_sample.sql:ro
+      - ../db/sample_data/tobe/test:/sample:ro
       - mpd_tobe_test:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${TOBE_USER:-tobe} -d tobe_test"]
@@ -67,9 +83,14 @@ services:
     ports:
       - "${STAGING_PORT:-5442}:5432"
     volumes:
-      - ../db/tobe/staging/init.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
-      - ../db/sample_data/staging/load.sql:/docker-entrypoint-initdb.d/02_load_sample.sql:ro
-      - ../db/sample_data/staging:/sample:ro
+      - ../db/tobe/staging/01_master.sql:/docker-entrypoint-initdb.d/01_master.sql:ro
+      - ../db/tobe/staging/02_organization.sql:/docker-entrypoint-initdb.d/02_organization.sql:ro
+      - ../db/tobe/staging/03_account.sql:/docker-entrypoint-initdb.d/03_account.sql:ro
+      - ../db/tobe/staging/04_trade.sql:/docker-entrypoint-initdb.d/04_trade.sql:ro
+      - ../db/tobe/staging/05_market.sql:/docker-entrypoint-initdb.d/05_market.sql:ro
+      - ../db/tobe/staging/06_settlement.sql:/docker-entrypoint-initdb.d/06_settlement.sql:ro
+      - ../db/sample_data/tobe/staging/load.sql:/docker-entrypoint-initdb.d/07_load_sample.sql:ro
+      - ../db/sample_data/tobe/staging:/sample:ro
       - mpd_tobe_staging:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${TOBE_USER:-tobe} -d tobe_staging"]
@@ -89,9 +110,14 @@ services:
     ports:
       - "${PROD_PORT:-5443}:5432"
     volumes:
-      - ../db/tobe/prod/init.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
-      - ../db/sample_data/prod/load.sql:/docker-entrypoint-initdb.d/02_load_sample.sql:ro
-      - ../db/sample_data/prod:/sample:ro
+      - ../db/tobe/prod/01_master.sql:/docker-entrypoint-initdb.d/01_master.sql:ro
+      - ../db/tobe/prod/02_organization.sql:/docker-entrypoint-initdb.d/02_organization.sql:ro
+      - ../db/tobe/prod/03_account.sql:/docker-entrypoint-initdb.d/03_account.sql:ro
+      - ../db/tobe/prod/04_trade.sql:/docker-entrypoint-initdb.d/04_trade.sql:ro
+      - ../db/tobe/prod/05_market.sql:/docker-entrypoint-initdb.d/05_market.sql:ro
+      - ../db/tobe/prod/06_settlement.sql:/docker-entrypoint-initdb.d/06_settlement.sql:ro
+      - ../db/sample_data/tobe/prod/load.sql:/docker-entrypoint-initdb.d/07_load_sample.sql:ro
+      - ../db/sample_data/tobe/prod:/sample:ro
       - mpd_tobe_prod:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${TOBE_USER:-tobe} -d tobe_prod"]
