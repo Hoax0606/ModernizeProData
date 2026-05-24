@@ -229,6 +229,7 @@ public class MappingImportService {
                     }
                 }
                 row.asisColumn  = trimToNull(get(rs, headers, "asis_column"));
+                row.asisType    = trimToNull(get(rs, headers, "asis_type"));
 
                 String rule    = trimToNull(get(rs, headers, "rule_sql"));
                 String strat   = trimToNull(get(rs, headers, "strategy"));
@@ -351,6 +352,7 @@ public class MappingImportService {
         e.setAsisSchema(row.asisSchema);
         e.setAsisTable(row.asisTable);
         e.setAsisColumn(row.asisColumn);
+        e.setAsisType(row.asisType);
         e.setStrategy(row.strategy);
         e.setTransformRule(row.transformRule);
         e.setTransformSql(row.transformSql);
@@ -418,6 +420,7 @@ public class MappingImportService {
             r.asisSchema   = e.getAsisSchema();
             r.asisTable    = e.getAsisTable();
             r.asisColumn   = e.getAsisColumn();
+            r.asisType     = e.getAsisType();
             r.strategy     = e.getStrategy();
             r.transformRule = e.getTransformRule();
             r.transformSql  = e.getTransformSql();
@@ -799,6 +802,7 @@ public class MappingImportService {
         String transformSql;
         String defaultValue;
         String notes;
+        String asisType;
     }
 
     private static class CodeRow {

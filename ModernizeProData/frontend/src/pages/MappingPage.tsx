@@ -8,7 +8,7 @@ import { useUiStore } from '../store/ui';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
 import { projectApi } from '../api/workspace';
 import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
-import { mappingImportApi, type MappingStatus as MappingStatusDto } from '../api/mappingImport';
+import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult } from '../api/mappingImport';
 import { MappingOnboarding } from './DashboardPage';
 
 /* ============================================================
@@ -2723,6 +2723,36 @@ function useTableCsv(siteId: string | null, tableShortName: string | undefined):
 }
 
 /**
+ * Run the mapping Report — call backend which executes the generated SELECT
+ * (transform_sql per rule + read_csv per binding source) via DuckDB.
+ * Returns transformed rows where columns are named by TO-BE column name.
+ */
+function useReportRows(
+  projectId: string | null,
+  tobeSchema: string,
+  tobeTable: string | undefined,
+): { result: MappingReportResult | null; loading: boolean } {
+  const [result, setResult] = useState<MappingReportResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    if (!projectId || !tobeTable) { setResult(null); return; }
+    let cancelled = false;
+    setLoading(true);
+    mappingImportApi.runReport(projectId, tobeSchema, tobeTable, 20)
+      .then((r) => { if (!cancelled) setResult(r); })
+      .catch((e) => {
+        if (!cancelled) setResult({
+          tobeSchema, tobeTable, headers: [], rows: [], rowCount: 0, truncated: false,
+          sql: null, error: e instanceof Error ? e.message : String(e),
+        });
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [projectId, tobeSchema, tobeTable]);
+  return { result, loading };
+}
+
+/**
  * Pipe one AS-IS CSV row through the mapping rule for `r` and produce the TO-BE cell value.
  * No DB write — purely in-memory preview of what the test run will emit.
  *
@@ -2819,18 +2849,37 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
   const ws = useWorkspaceStore.getState();
   const activeSite = ws.getActiveSite();
   const activeSiteName = activeSite?.name || 'modernize';
-  const activeProjectName = ws.getActiveProject()?.name || 'project';
+  const activeProject = ws.getActiveProject();
+  const activeProjectName = activeProject?.name || 'project';
 
-  // CSV from {site.csvPath}/{shortName}.csv (resolved server-side).
-  // Each Report row corresponds to a CSV row; each MappingRow.src is looked up in the CSV header.
-  const csv = useTableCsv(activeSite?.id ?? null, shortName);
-  const csvColIdx = useMemo(() => {
-    if (!csv) return null;
+  // Mapping report — 백엔드가 transform_sql 들을 묶어 read_csv 위에서 한 방에 실행.
+  // header 는 TO-BE 컬럼명, row 값은 변환식 적용 결과.
+  const tobeSplit = useMemo(() => {
+    const i = table.name.indexOf('.');
+    return i > 0
+      ? { schema: table.name.slice(0, i), table: table.name.slice(i + 1) }
+      : { schema: '', table: table.name };
+  }, [table.name]);
+  const { result: report, loading: reportLoading } = useReportRows(activeProject?.id ?? null, tobeSplit.schema, tobeSplit.table);
+  const reportColIdx = useMemo(() => {
+    if (!report) return null;
     const m = new Map<string, number>();
-    csv.headers.forEach((h, i) => m.set(h.trim().toLowerCase(), i));
+    report.headers.forEach((h, i) => m.set(h.trim().toLowerCase(), i));
     return m;
-  }, [csv]);
-  const dataRowCount = csv ? Math.min(csv.rows.length, PREVIEW_ROWS) : PREVIEW_ROWS;
+  }, [report]);
+  const dataRowCount = report ? Math.min(report.rows.length, PREVIEW_ROWS) : 0;
+  // 디버그 — 결과가 도착했을 때 한 번만 찍음
+  useEffect(() => {
+    if (!report) return;
+    console.log('[Report]', {
+      tobeSplit,
+      headers: report.headers,
+      rowCount: report.rowCount,
+      error: report.error,
+      sql: report.sql,
+      firstRow: report.rows[0],
+    });
+  }, [report, tobeSplit]);
 
   return (
     <div style={styles.dbvWindow}>
@@ -2911,6 +2960,19 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
         </span>
       </div>
 
+      {/* 상태 배너 — loading / error / 빈 결과 */}
+      {reportLoading && (
+        <div style={{ padding: '8px 14px', background: '#fff8e1', color: '#856404', borderBottom: '1px solid #e8e8e8', fontSize: 11.5 }}>
+          ⏳ Report 실행 중…
+        </div>
+      )}
+      {report && report.error && (
+        <div style={{ padding: '8px 14px', background: '#fde2e2', color: '#a02020', borderBottom: '1px solid #e8e8e8', fontSize: 11.5, fontFamily: 'var(--mono)' }}>
+          ⚠ {report.error}
+          {report.sql && <div style={{ marginTop: 4, fontSize: 10.5, opacity: 0.8 }}>SQL: {report.sql}</div>}
+        </div>
+      )}
+
       {/* 데이터 그리드 */}
       <div style={styles.dbvGridArea}>
         <table style={styles.dbvGrid}>
@@ -2940,7 +3002,12 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
                 <tr key={i}>
                   <td style={styles.dbvRowNum}>{i + 1}</td>
                   {rows.map((r) => {
-                    const v = computeReportCell(r, i, csv, csvColIdx);
+                    // TO-BE 컬럼명으로 report 결과에서 lookup
+                    let v = '';
+                    if (report && reportColIdx) {
+                      const idx = reportColIdx.get(r.tgt.toLowerCase());
+                      if (idx !== undefined) v = report.rows[i]?.[idx] ?? '';
+                    }
                     const isNull = v === 'NULL' || v === '';
                     const numeric = isNumericType(r.tgtType);
                     return (

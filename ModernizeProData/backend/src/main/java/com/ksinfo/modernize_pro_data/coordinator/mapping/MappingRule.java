@@ -56,6 +56,10 @@ public class MappingRule {
     @Column(name = "asis_column", length = 128)
     private String asisColumn;
 
+    /** AS-IS 원본 타입 (예: VARCHAR2(7), NUMBER(15)). read_csv 의 column_types 에 사용. */
+    @Column(name = "asis_type", length = 64)
+    private String asisType;
+
     /* ── 변환 전략 ── */
     @Column(nullable = false, length = 16)
     private String strategy = "expression";
