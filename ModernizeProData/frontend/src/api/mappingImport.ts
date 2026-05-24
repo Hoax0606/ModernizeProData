@@ -23,6 +23,17 @@ export interface MappingStatus {
   codeMapCount: number;
 }
 
+export interface MappingReportResult {
+  tobeSchema: string;
+  tobeTable: string;
+  headers: string[];
+  rows: string[][];
+  rowCount: number;
+  truncated: boolean;
+  sql: string | null;
+  error: string | null;
+}
+
 export interface MappingTableBindingSourceDto {
   id: string;
   ordinal: number;
@@ -152,6 +163,21 @@ export const mappingImportApi = {
   reapplyLatest: (projectId: string): Promise<MappingImport> =>
     unwrap(api.post<ApiResponse<MappingImport>>(
       `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/reapply`,
+    )),
+
+  /**
+   * Run the mapping report — generates SELECT SQL from rules + binding,
+   * executes via DuckDB on the AS-IS CSV files, returns transformed rows.
+   */
+  runReport: (
+    projectId: string,
+    tobeSchema: string,
+    tobeTable: string,
+    limit = 20,
+  ): Promise<MappingReportResult> =>
+    unwrap(api.get<ApiResponse<MappingReportResult>>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/report`,
+      { params: { tobeSchema, tobeTable, limit } },
     )),
 
   /** Upsert one TO-BE table's binding (manual edit from UI). */

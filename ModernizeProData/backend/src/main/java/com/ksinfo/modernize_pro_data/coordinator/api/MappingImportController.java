@@ -7,6 +7,7 @@ import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingCodeMapRepositor
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingImport;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingImportRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingImportService;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingReportService;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRule;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRuleRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
@@ -40,6 +41,7 @@ public class MappingImportController {
     private static final long MAX_FILE_SIZE = 50L * 1024 * 1024; // 50MB
 
     private final MappingImportService importService;
+    private final MappingReportService reportService;
     private final MappingImportRepository importRepo;
     private final MappingRuleRepository ruleRepo;
     private final MappingCodeMapRepository codeRepo;
@@ -186,5 +188,19 @@ public class MappingImportController {
     public ApiResponse<Void> deleteBindings(@PathVariable String id) {
         bindingRepo.deleteAllByProjectId(id);
         return ApiResponse.ok(null);
+    }
+
+    /**
+     * Report 실행 — 매핑 룰의 transform_sql 을 묶어 한 SELECT 로 DuckDB 에서 실행.
+     * GET /api/v1/projects/{id}/mapping/report?tobeSchema=&tobeTable=&limit=20
+     */
+    @GetMapping("/{id}/mapping/report")
+    public ApiResponse<MappingReportService.ReportResult> runReport(
+            @PathVariable String id,
+            @RequestParam(name = "tobeSchema", required = false, defaultValue = "") String tobeSchema,
+            @RequestParam(name = "tobeTable") String tobeTable,
+            @RequestParam(name = "limit", required = false, defaultValue = "20") int limit
+    ) {
+        return ApiResponse.ok(reportService.runReport(id, tobeSchema, tobeTable, limit));
     }
 }

@@ -1,1 +1,1 @@
-﻿連番(no),ASISテーブル(asis_table),ASISカラム論理名(asis_column_logical),ASISカラム物理名(asis_column_physical),ASISデータ型(asis_data_type),長さ(length),NULL可否(nullable),PK(pk),TOBEテーブル(tobe_table),TOBEカラム論理名(tobe_column_logical),TOBEカラム物理名(tobe_column_physical),TOBEデータ型(tobe_data_type),変換規則(transformation_rule),マスキング(masking),備考(notes)
+asis_table,asis_column,asis_type,tobe_table,tobe_column,tobe_type,code_domain,default_value,notes

@@ -1027,4 +1027,16 @@ export const en: Record<TranslationKey, string> = {
   'siteQuarantine.eyebrow':         'SITE QUARANTINE',
   'siteQuarantine.empty.noSite':    'Select a site first.',
   'siteQuarantine.pickProject.all': 'All projects',
+
+  /* Mapping page — import modal, binding panel, report */
+  'mapping.import.hint':                'Importing fully overwrites this project’s mapping rules and code conversions.',
+  'mapping.import.headerHint.column':   'Required headers: tobe_table, tobe_column',
+  'mapping.import.headerHint.code':     'Required headers: domain, source_value, target_value',
+  'mapping.import.reimportTooltip':     'Re-import file',
+  'mapping.import.deleteSlotTooltip':   'Delete this slot data',
+  'mapping.import.pickFileTooltip':     'Pick file',
+  'mapping.import.warning.uncoveredCols': 'The following TO-BE DDL columns are not specified in the mapping definition: {cols}. Please complete the mapping definition.',
+  'mapping.binding.noSourceHint':       'No AS-IS source is linked to this TO-BE table. Use [Add source] to add one.',
+  'mapping.binding.whereHint':          'Row filter for this TO-BE. Leave empty for all rows.',
+  'mapping.report.loading':             'Running report…',
 };

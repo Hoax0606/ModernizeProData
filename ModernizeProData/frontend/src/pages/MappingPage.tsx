@@ -3,12 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import { useWorkspaceStore } from '../store/workspace';
 import { useAsisDdlStore } from '../store/asisDdl';
 import { useTobeDdlStore } from '../store/tobeDdl';
+import { useT } from '../i18n';
 import { useMappingEditsStore, type TableBindingEdit } from '../store/mappingEdits';
 import { useUiStore } from '../store/ui';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
 import { projectApi } from '../api/workspace';
 import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
-import { mappingImportApi, type MappingStatus as MappingStatusDto } from '../api/mappingImport';
+import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult } from '../api/mappingImport';
 import { MappingOnboarding } from './DashboardPage';
 
 /* ============================================================
@@ -758,27 +759,20 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
    * AS-IS 테이블명은 `{schema}.{table}` 형태로 변환 (frontend AsisTable.name 컨벤션).
    */
   /**
-   * Returns the list of DB binding qualified-names that didn't find a matching
-   * TOBE_TABLES entry (i.e., mapping definition references a TO-BE table that
-   * isn't in the imported TO-BE DDL).
+   * Hydrate bindings from DB into zustand. (검증은 별도 — findUncoveredDdlColumns)
    */
-  const hydrateBindingsFromDb = useCallback(async (projectId: string): Promise<string[]> => {
-    if (TOBE_TABLES.length === 0) return [];
+  const hydrateBindingsFromDb = useCallback(async (projectId: string): Promise<void> => {
+    if (TOBE_TABLES.length === 0) return;
     try {
       const list = await mappingImportApi.listBindings(projectId);
-      // DB 가 source of truth. 빈 list 면 zustand 도 빈 상태로 — 삭제 후에도 UI 반영.
       const edits: Record<string, TableBindingEdit> = {};
-      const unmatched: string[] = [];
       for (const b of list) {
         const tobeQualified = (b.tobeSchema ? b.tobeSchema + '.' : '') + b.tobeTable;
         const tobe = TOBE_TABLES.find(
           (t) => t.name.toLowerCase() === tobeQualified.toLowerCase()
               || t.short.toLowerCase() === b.tobeTable.toLowerCase(),
         );
-        if (!tobe) {
-          unmatched.push(tobeQualified);
-          continue;
-        }
+        if (!tobe) continue; // 매핑정의서 > DDL — 정상 (다른 프로젝트용 룰)
         const mode: 'join' | 'union' = b.compositionKind === 'union' ? 'union' : 'join';
         edits[tobe.internalName] = {
           mode,
@@ -794,9 +788,40 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         };
       }
       useMappingEditsStore.getState().replaceBindingEdits(projectId, edits);
-      return unmatched;
     } catch (e) {
       console.warn('[mapping] failed to hydrate bindings', e);
+    }
+  }, []);
+
+  /**
+   * 검증: DDL 의 (TO-BE table.column) 중 매핑정의서 (mapping_rules) 에 없는 것 목록.
+   * 사이트의 맵핑정의서는 슈퍼셋이어야 하고, 프로젝트 DDL 은 부분집합. DDL 컬럼이
+   * 매핑정의서에 없으면 그 컬럼을 채울 명세가 없는 것 → 사용자에게 경고.
+   */
+  const findUncoveredDdlColumns = useCallback(async (projectId: string): Promise<string[]> => {
+    if (TOBE_TABLES.length === 0) return [];
+    try {
+      const rules = await mappingImportApi.listRules(projectId);
+      const ruleCols = new Map<string, Set<string>>();  // `${schema}|${table}` → Set<column>
+      for (const r of rules) {
+        const key = (r.tobeSchema || '') + '|' + r.tobeTable;
+        if (!ruleCols.has(key)) ruleCols.set(key, new Set());
+        ruleCols.get(key)!.add(r.tobeColumn);
+      }
+      const uncovered: string[] = [];
+      for (const tobe of TOBE_TABLES) {
+        const i = tobe.name.indexOf('.');
+        const schema = i > 0 ? tobe.name.slice(0, i) : '';
+        const table = i > 0 ? tobe.name.slice(i + 1) : tobe.name;
+        const haveCols = ruleCols.get(schema + '|' + table) || new Set();
+        const ddlCols = MAPPING_BY_TOBE[tobe.internalName] || [];
+        for (const c of ddlCols) {
+          if (!haveCols.has(c.tgt)) uncovered.push(`${tobe.name}.${c.tgt}`);
+        }
+      }
+      return uncovered;
+    } catch (e) {
+      console.warn('[mapping] failed to compute uncovered DDL columns', e);
       return [];
     }
   }, []);
@@ -865,10 +890,10 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
     } catch {
       setMappingStatus({ columnFilename: null, codeFilename: null, ruleCount: 0, codeMapCount: 0 });
     }
-    const unmatched = await hydrateBindingsFromDb(activeProjectIdForRow);
+    await hydrateBindingsFromDb(activeProjectIdForRow);
     await hydrateRowEditsFromDb(activeProjectIdForRow);
-    return unmatched;
-  }, [activeProjectIdForRow, hydrateBindingsFromDb, hydrateRowEditsFromDb]);
+    return await findUncoveredDdlColumns(activeProjectIdForRow);
+  }, [activeProjectIdForRow, hydrateBindingsFromDb, hydrateRowEditsFromDb, findUncoveredDdlColumns]);
 
   useEffect(() => {
     if (!activeProjectIdForRow) {
@@ -1480,6 +1505,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
   compositionMode: 'join' | 'union'; onCompositionModeChange: (m: 'join' | 'union') => void;
   whereFilter: string; onWhereChange: (v: string) => void;
 }) {
+  const t = useT();
   const [addingSource, setAddingSource] = useState(false);
   const [pickTable, setPickTable] = useState('');
   const [pickAlias, setPickAlias] = useState('');
@@ -1600,7 +1626,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
 
           {sources.length === 0 && !addingSource && (
             <div style={styles.bindingHint}>
-              이 TO-BE 테이블에 연결된 AS-IS 소스가 없습니다. [Add source] 로 추가하세요.
+              {t('mapping.binding.noSourceHint')}
             </div>
           )}
 
@@ -1687,7 +1713,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
             <div style={{ marginTop: 12 }}>
               <div style={styles.whereLabel}>
                 <span>WHERE filter</span>
-                <span style={styles.whereHint}>이 TO-BE 에 포함할 행 조건. 비우면 전체 rows.</span>
+                <span style={styles.whereHint}>{t('mapping.binding.whereHint')}</span>
               </div>
               <AutocompleteInput
                 completions={aliasColumnOptions}
@@ -2485,6 +2511,7 @@ function MappingDefinitionImportModal({
   /** Returns the list of TO-BE qualified names from DB bindings that didn't match TOBE_TABLES. */
   onChanged: () => Promise<string[]>;
 }) {
+  const t = useT();
   const [columnPending, setColumnPending] = useState<SlotPending>({ kind: 'none' });
   const [codePending, setCodePending]     = useState<SlotPending>({ kind: 'none' });
   const [saving, setSaving] = useState(false);
@@ -2518,9 +2545,7 @@ function MappingDefinitionImportModal({
       if (unmatched.length > 0) {
         const shown = unmatched.slice(0, 5).join(', ');
         const more = unmatched.length > 5 ? ` 외 ${unmatched.length - 5}개` : '';
-        setWarning(
-          `맵핑정의서의 다음 TO-BE 테이블이 현재 임포트된 TO-BE DDL 에 없어서 그리드에 반영되지 않습니다: ${shown}${more}. DDL 을 보완하거나 맵핑정의서를 수정하세요.`
-        );
+        setWarning(t('mapping.import.warning.uncoveredCols', { cols: shown + more }));
         // 경고만 표시하고 모달은 그대로 유지 — 사용자가 직접 Close
         return;
       }
@@ -2621,6 +2646,7 @@ function MappingFileRow({
   onDelete: () => void;
   canDelete: boolean;
 }) {
+  const t = useT();
   const inputRef = useRef<HTMLInputElement>(null);
 
   const nameStyle: React.CSSProperties = {
@@ -2658,7 +2684,7 @@ function MappingFileRow({
             <button
               type="button"
               onClick={onDelete}
-              title="이 슬롯 데이터 삭제"
+              title={t('mapping.import.deleteSlotTooltip')}
               style={iconBtnStyle}
             >
               <i className="fa-solid fa-trash" />
@@ -2667,7 +2693,7 @@ function MappingFileRow({
           <button
             type="button"
             onClick={() => inputRef.current?.click()}
-            title="파일 선택"
+            title={t('mapping.import.pickFileTooltip')}
             style={iconBtnStyle}
           >
             <i className="fa-solid fa-folder-open" />
@@ -2720,6 +2746,36 @@ function useTableCsv(siteId: string | null, tableShortName: string | undefined):
     return () => { cancelled = true; };
   }, [siteId, tableShortName]);
   return data;
+}
+
+/**
+ * Run the mapping Report — call backend which executes the generated SELECT
+ * (transform_sql per rule + read_csv per binding source) via DuckDB.
+ * Returns transformed rows where columns are named by TO-BE column name.
+ */
+function useReportRows(
+  projectId: string | null,
+  tobeSchema: string,
+  tobeTable: string | undefined,
+): { result: MappingReportResult | null; loading: boolean } {
+  const [result, setResult] = useState<MappingReportResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    if (!projectId || !tobeTable) { setResult(null); return; }
+    let cancelled = false;
+    setLoading(true);
+    mappingImportApi.runReport(projectId, tobeSchema, tobeTable, 20)
+      .then((r) => { if (!cancelled) setResult(r); })
+      .catch((e) => {
+        if (!cancelled) setResult({
+          tobeSchema, tobeTable, headers: [], rows: [], rowCount: 0, truncated: false,
+          sql: null, error: e instanceof Error ? e.message : String(e),
+        });
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [projectId, tobeSchema, tobeTable]);
+  return { result, loading };
 }
 
 /**
@@ -2812,6 +2868,7 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
   onClose: () => void;
   onPickColumn: (tgt: string) => void;
 }) {
+  const t = useT();
   const PREVIEW_ROWS = 20;
   const shortName = table.short || (table.name.includes('.') ? table.name.split('.').pop()! : table.name);
   const tobeDbLabel = dialectLabel(TOBE_DIALECT);
@@ -2819,18 +2876,37 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
   const ws = useWorkspaceStore.getState();
   const activeSite = ws.getActiveSite();
   const activeSiteName = activeSite?.name || 'modernize';
-  const activeProjectName = ws.getActiveProject()?.name || 'project';
+  const activeProject = ws.getActiveProject();
+  const activeProjectName = activeProject?.name || 'project';
 
-  // CSV from {site.csvPath}/{shortName}.csv (resolved server-side).
-  // Each Report row corresponds to a CSV row; each MappingRow.src is looked up in the CSV header.
-  const csv = useTableCsv(activeSite?.id ?? null, shortName);
-  const csvColIdx = useMemo(() => {
-    if (!csv) return null;
+  // Mapping report — 백엔드가 transform_sql 들을 묶어 read_csv 위에서 한 방에 실행.
+  // header 는 TO-BE 컬럼명, row 값은 변환식 적용 결과.
+  const tobeSplit = useMemo(() => {
+    const i = table.name.indexOf('.');
+    return i > 0
+      ? { schema: table.name.slice(0, i), table: table.name.slice(i + 1) }
+      : { schema: '', table: table.name };
+  }, [table.name]);
+  const { result: report, loading: reportLoading } = useReportRows(activeProject?.id ?? null, tobeSplit.schema, tobeSplit.table);
+  const reportColIdx = useMemo(() => {
+    if (!report) return null;
     const m = new Map<string, number>();
-    csv.headers.forEach((h, i) => m.set(h.trim().toLowerCase(), i));
+    report.headers.forEach((h, i) => m.set(h.trim().toLowerCase(), i));
     return m;
-  }, [csv]);
-  const dataRowCount = csv ? Math.min(csv.rows.length, PREVIEW_ROWS) : PREVIEW_ROWS;
+  }, [report]);
+  const dataRowCount = report ? Math.min(report.rows.length, PREVIEW_ROWS) : 0;
+  // 디버그 — 결과가 도착했을 때 한 번만 찍음
+  useEffect(() => {
+    if (!report) return;
+    console.log('[Report]', {
+      tobeSplit,
+      headers: report.headers,
+      rowCount: report.rowCount,
+      error: report.error,
+      sql: report.sql,
+      firstRow: report.rows[0],
+    });
+  }, [report, tobeSplit]);
 
   return (
     <div style={styles.dbvWindow}>
@@ -2911,6 +2987,19 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
         </span>
       </div>
 
+      {/* 상태 배너 — loading / error / 빈 결과 */}
+      {reportLoading && (
+        <div style={{ padding: '8px 14px', background: '#fff8e1', color: '#856404', borderBottom: '1px solid #e8e8e8', fontSize: 11.5 }}>
+          ⏳ {t('mapping.report.loading')}
+        </div>
+      )}
+      {report && report.error && (
+        <div style={{ padding: '8px 14px', background: '#fde2e2', color: '#a02020', borderBottom: '1px solid #e8e8e8', fontSize: 11.5, fontFamily: 'var(--mono)' }}>
+          ⚠ {report.error}
+          {report.sql && <div style={{ marginTop: 4, fontSize: 10.5, opacity: 0.8 }}>SQL: {report.sql}</div>}
+        </div>
+      )}
+
       {/* 데이터 그리드 */}
       <div style={styles.dbvGridArea}>
         <table style={styles.dbvGrid}>
@@ -2940,7 +3029,12 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
                 <tr key={i}>
                   <td style={styles.dbvRowNum}>{i + 1}</td>
                   {rows.map((r) => {
-                    const v = computeReportCell(r, i, csv, csvColIdx);
+                    // TO-BE 컬럼명으로 report 결과에서 lookup
+                    let v = '';
+                    if (report && reportColIdx) {
+                      const idx = reportColIdx.get(r.tgt.toLowerCase());
+                      if (idx !== undefined) v = report.rows[i]?.[idx] ?? '';
+                    }
                     const isNull = v === 'NULL' || v === '';
                     const numeric = isNumericType(r.tgtType);
                     return (

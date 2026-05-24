@@ -56,6 +56,17 @@ public class MappingRule {
     @Column(name = "asis_column", length = 128)
     private String asisColumn;
 
+    /** AS-IS 원본 타입 (예: VARCHAR2(7), NUMBER(15)). read_csv 의 column_types 에 사용. */
+    @Column(name = "asis_type", length = 64)
+    private String asisType;
+
+    /**
+     * 이 컬럼이 사용하는 code_map domain 이름 (예: 'GENDER', 'YN_BOOL').
+     * 임포트 시 mapping_code_maps 에서 해당 domain 조회 → CASE 자동 생성.
+     */
+    @Column(name = "code_domain", length = 64)
+    private String codeDomain;
+
     /* ── 변환 전략 ── */
     @Column(nullable = false, length = 16)
     private String strategy = "expression";
