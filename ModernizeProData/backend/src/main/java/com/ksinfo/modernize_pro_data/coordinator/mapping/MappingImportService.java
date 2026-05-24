@@ -24,6 +24,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -127,21 +128,8 @@ public class MappingImportService {
 
             // 2) 부분 덮어쓰기 — 업로드된 슬롯만 wipe + insert
             OffsetDateTime now = OffsetDateTime.now();
-            if (hasColumn) {
-                ruleRepo.deleteAllByProjectId(projectId);
-                ruleRepo.flush();
-                List<MappingRule> ruleEntities = new ArrayList<>(parsed.rules.size());
-                for (RuleRow row : parsed.rules) {
-                    ruleEntities.add(toRuleEntity(row, projectId, mi.getId(), userName, now));
-                }
-                ruleRepo.saveAll(ruleEntities);
 
-                // 룰에서 테이블 바인딩 자동 derive — TO-BE 별로 사용된 AS-IS 테이블 그룹화.
-                bindingRepo.deleteAllByProjectId(projectId);
-                bindingRepo.flush();
-                List<MappingTableBinding> bindings = deriveBindings(parsed.rules, projectId, mi.getId(), userName, now);
-                bindingRepo.saveAll(bindings);
-            }
+            // (a) code map 부터 처리 — column 의 transform_sql 자동 생성 (CASE) 시 lookup 필요
             if (hasCode) {
                 codeRepo.deleteAllByProjectId(projectId);
                 codeRepo.flush();
@@ -159,6 +147,70 @@ public class MappingImportService {
                     codeEntities.add(e);
                 }
                 codeRepo.saveAll(codeEntities);
+            }
+
+            // domain → entries 룩업 맵. 이번 업로드에 code 가 있으면 그걸, 없으면 DB 에 남아있는 것.
+            Map<String, List<CodeRow>> codeByDomain = new HashMap<>();
+            if (hasCode) {
+                for (CodeRow c : codes.codes) {
+                    codeByDomain.computeIfAbsent(c.domain, k -> new ArrayList<>()).add(c);
+                }
+            } else {
+                for (MappingCodeMap c : codeRepo.findByProjectIdOrderByDomainAscOrdinalAsc(projectId)) {
+                    CodeRow cr = new CodeRow();
+                    cr.domain = c.getDomain();
+                    cr.sourceValue = c.getSourceValue();
+                    cr.targetValue = c.getTargetValue();
+                    cr.description = c.getDescription();
+                    cr.ordinal = c.getOrdinal();
+                    codeByDomain.computeIfAbsent(c.getDomain(), k -> new ArrayList<>()).add(cr);
+                }
+            }
+
+            // (b) column rules
+            if (hasColumn) {
+                // alias 자동 할당 — (tobe_table 그룹 × asis_table) 마다 단일 alias.
+                Map<String, Map<String, String>> aliasMaps = buildAliasMaps(parsed.rules);
+
+                // expression 룰의 transform_sql 자동 생성
+                for (RuleRow row : parsed.rules) {
+                    if (!"expression".equals(row.strategy)) continue;
+                    if (row.transformSql != null && !row.transformSql.isBlank()) continue;
+                    if (row.transformRule != null && !row.transformRule.isBlank()) {
+                        row.transformSql = row.transformRule;
+                        continue;
+                    }
+                    if (row.asisColumn == null || row.asisTable == null) continue;
+                    String tobeKey = (row.tobeSchema == null ? "" : row.tobeSchema) + "|" + row.tobeTable;
+                    Map<String, String> aliasMap = aliasMaps.getOrDefault(tobeKey, Map.of());
+                    String alias = aliasMap.get(row.asisTable);
+                    if (alias == null) continue;
+                    String src = alias + "." + row.asisColumn;
+
+                    // code_domain 이 지정돼있고 해당 domain 의 entries 가 있으면 CASE 자동 생성
+                    if (row.codeDomain != null && codeByDomain.containsKey(row.codeDomain)) {
+                        row.transformSql = buildCaseFromCodeMap(src, codeByDomain.get(row.codeDomain));
+                    } else if (typeCategoriesMatch(row.asisType, row.tobeType)) {
+                        row.transformSql = src;
+                    } else {
+                        row.transformSql = "CAST(" + src + " AS " + (row.tobeType != null ? row.tobeType : "VARCHAR") + ")";
+                    }
+                    row.transformRule = row.transformSql;
+                }
+
+                ruleRepo.deleteAllByProjectId(projectId);
+                ruleRepo.flush();
+                List<MappingRule> ruleEntities = new ArrayList<>(parsed.rules.size());
+                for (RuleRow row : parsed.rules) {
+                    ruleEntities.add(toRuleEntity(row, projectId, mi.getId(), userName, now));
+                }
+                ruleRepo.saveAll(ruleEntities);
+
+                // 룰에서 테이블 바인딩 자동 derive
+                bindingRepo.deleteAllByProjectId(projectId);
+                bindingRepo.flush();
+                List<MappingTableBinding> bindings = deriveBindings(parsed.rules, projectId, mi.getId(), userName, now);
+                bindingRepo.saveAll(bindings);
             }
 
             log.info("Mapping import done — project={} rules={} codeMaps={} (column={}, code={})",
@@ -230,6 +282,8 @@ public class MappingImportService {
                 }
                 row.asisColumn  = trimToNull(get(rs, headers, "asis_column"));
                 row.asisType    = trimToNull(get(rs, headers, "asis_type"));
+                row.tobeType    = trimToNull(get(rs, headers, "tobe_type"));
+                row.codeDomain  = trimToNull(get(rs, headers, "code_domain"));
 
                 String rule    = trimToNull(get(rs, headers, "rule_sql"));
                 String strat   = trimToNull(get(rs, headers, "strategy"));
@@ -308,7 +362,7 @@ public class MappingImportService {
     }
 
     private void applyStrategy(RuleRow row, String stratColumn, String rule, String defVal) {
-        // 1) strategy 컬럼이 명시되어 있으면 그대로 사용
+        // 1) strategy 컬럼이 명시되어 있으면 그대로 사용 (이전 컨벤션 호환)
         if (stratColumn != null) {
             String s = stratColumn.toLowerCase();
             if (Arrays.asList("expression", "null", "default", "skip").contains(s)) {
@@ -318,7 +372,7 @@ public class MappingImportService {
                 return;
             }
         }
-        // 2) transform_rule 셀의 상수 마커로 추론
+        // 2) transform_rule 셀의 상수 마커로 추론 (이전 컨벤션 호환)
         if (rule != null) {
             String upper = rule.trim().toUpperCase();
             if (upper.equals("NULL")) {
@@ -334,10 +388,21 @@ public class MappingImportService {
                 return;
             }
         }
-        // 3) 기본
-        row.strategy = "expression";
-        row.transformRule = rule; // null 이어도 OK (pass-through)
-        row.defaultValue = defVal;
+        // 3) 새 컨벤션 — 데이터 존재 기반 자동 추론.
+        //    asis_column 있으면 expression / 없으면서 default_value 있으면 default / 둘 다 없으면 null
+        if (row.asisColumn != null && !row.asisColumn.isBlank()) {
+            row.strategy = "expression";
+            row.transformRule = rule; // null 이면 나중에 transform_sql 자동 생성에서 채움
+            row.defaultValue = defVal;
+        } else if (defVal != null && !defVal.isBlank()) {
+            row.strategy = "default";
+            row.transformRule = null;
+            row.defaultValue = defVal;
+        } else {
+            row.strategy = "null";
+            row.transformRule = null;
+            row.defaultValue = null;
+        }
     }
 
     private MappingRule toRuleEntity(RuleRow row, String projectId, String importId,
@@ -353,6 +418,7 @@ public class MappingImportService {
         e.setAsisTable(row.asisTable);
         e.setAsisColumn(row.asisColumn);
         e.setAsisType(row.asisType);
+        e.setCodeDomain(row.codeDomain);
         e.setStrategy(row.strategy);
         e.setTransformRule(row.transformRule);
         e.setTransformSql(row.transformSql);
@@ -421,6 +487,7 @@ public class MappingImportService {
             r.asisTable    = e.getAsisTable();
             r.asisColumn   = e.getAsisColumn();
             r.asisType     = e.getAsisType();
+            r.codeDomain   = e.getCodeDomain();
             r.strategy     = e.getStrategy();
             r.transformRule = e.getTransformRule();
             r.transformSql  = e.getTransformSql();
@@ -663,6 +730,111 @@ public class MappingImportService {
         return result;
     }
 
+    /**
+     * 각 TO-BE 테이블 그룹별로 (asis_table → alias) 맵을 일괄 생성.
+     * deriveBindings 와 자동 transform_sql 생성이 같은 alias 를 쓰도록.
+     */
+    private static Map<String, Map<String, String>> buildAliasMaps(List<RuleRow> rules) {
+        Map<String, List<RuleRow>> grouped = new LinkedHashMap<>();
+        for (RuleRow r : rules) {
+            String key = (r.tobeSchema == null ? "" : r.tobeSchema) + "|" + (r.tobeTable == null ? "" : r.tobeTable);
+            grouped.computeIfAbsent(key, k -> new ArrayList<>()).add(r);
+        }
+        Map<String, Map<String, String>> out = new LinkedHashMap<>();
+        for (var e : grouped.entrySet()) {
+            LinkedHashSet<String> asisTables = new LinkedHashSet<>();
+            for (RuleRow r : e.getValue()) {
+                if (r.asisTable != null) asisTables.add(r.asisTable);
+            }
+            Map<String, String> rulesSubset = extractAliases(e.getValue(), asisTables);
+            Map<String, String> aliasMap = new LinkedHashMap<>(rulesSubset);
+            Set<String> taken = new HashSet<>(aliasMap.values());
+            for (String t : asisTables) {
+                if (aliasMap.containsKey(t)) continue;
+                String alias = generateAlias(t, taken);
+                aliasMap.put(t, alias);
+                taken.add(alias);
+            }
+            out.put(e.getKey(), aliasMap);
+        }
+        return out;
+    }
+
+    /** AS-IS / TO-BE 타입이 같은 카테고리면 cast 불필요. */
+    private static boolean typeCategoriesMatch(String asisType, String tobeType) {
+        String a = typeCategory(asisType);
+        String t = typeCategory(tobeType);
+        if (a == null || t == null) return true; // 모르면 일단 passthrough
+        return a.equals(t);
+    }
+
+    /** 거친 타입 카테고리 — string/integer/decimal/boolean/date/timestamp/timestamptz/binary. */
+    private static String typeCategory(String type) {
+        if (type == null) return null;
+        String t = type.toUpperCase().trim();
+        if (t.startsWith("TIMESTAMP")) {
+            return t.contains("TIME ZONE") ? "timestamptz" : "timestamp";
+        }
+        if (t.equals("DATE")) return "timestamp"; // Oracle DATE = timestamp 와 동급
+        if (t.startsWith("NUMBER")) {
+            int lp = t.indexOf('('), rp = t.indexOf(')');
+            if (lp > 0 && rp > lp && t.substring(lp + 1, rp).contains(",")) {
+                String[] parts = t.substring(lp + 1, rp).split(",");
+                try {
+                    int scale = Integer.parseInt(parts[1].trim());
+                    return scale > 0 ? "decimal" : "integer";
+                } catch (NumberFormatException e) { return "integer"; }
+            }
+            return "integer";
+        }
+        if (t.startsWith("INT") || t.equals("BIGINT") || t.equals("SMALLINT")
+                || t.equals("INTEGER") || t.equals("TINYINT") || t.equals("SERIAL") || t.equals("BIGSERIAL")) {
+            return "integer";
+        }
+        if (t.startsWith("NUMERIC") || t.startsWith("DECIMAL") || t.equals("FLOAT")
+                || t.equals("REAL") || t.equals("DOUBLE") || t.equals("DOUBLE PRECISION")) {
+            return "decimal";
+        }
+        if (t.startsWith("VARCHAR") || t.startsWith("CHAR") || t.equals("TEXT")
+                || t.equals("CLOB") || t.startsWith("NVARCHAR")) {
+            return "string";
+        }
+        if (t.equals("BOOLEAN") || t.equals("BOOL") || t.equals("BIT")) {
+            return "boolean";
+        }
+        if (t.equals("BLOB") || t.equals("BYTEA") || t.startsWith("RAW")) {
+            return "binary";
+        }
+        return null;
+    }
+
+    /**
+     * code map entries → `CASE src WHEN s1 THEN t1 WHEN s2 THEN t2 ... END` 표현식.
+     * target_value 가 TRUE / FALSE / NULL 키워드면 unquoted (boolean / null literal),
+     * 그 외엔 single-quote string literal.
+     */
+    private static String buildCaseFromCodeMap(String src, List<CodeRow> entries) {
+        if (entries == null || entries.isEmpty()) return src;
+        StringBuilder sb = new StringBuilder("CASE ").append(src);
+        for (CodeRow e : entries) {
+            sb.append(" WHEN '").append(sqlEscape(e.sourceValue)).append("'")
+              .append(" THEN ").append(formatTargetLiteral(e.targetValue));
+        }
+        sb.append(" END");
+        return sb.toString();
+    }
+
+    private static String formatTargetLiteral(String value) {
+        if (value == null) return "NULL";
+        String u = value.trim().toUpperCase();
+        if (u.equals("TRUE") || u.equals("FALSE") || u.equals("NULL")) return u;
+        return "'" + sqlEscape(value) + "'";
+    }
+
+    private static String sqlEscape(String v) {
+        return v == null ? "" : v.replace("'", "''");
+    }
+
     private static Map<String, String> extractAliases(List<RuleRow> rules, Set<String> validTables) {
         // alias → first observed column referenced after that alias
         Map<String, String> aliasToColumn = new LinkedHashMap<>();
@@ -803,6 +975,8 @@ public class MappingImportService {
         String defaultValue;
         String notes;
         String asisType;
+        String tobeType;
+        String codeDomain;
     }
 
     private static class CodeRow {

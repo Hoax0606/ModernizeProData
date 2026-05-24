@@ -1034,6 +1034,18 @@ export const ko = {
   'siteQuarantine.eyebrow':         'SITE QUARANTINE',
   'siteQuarantine.empty.noSite':    '사이트를 먼저 선택하세요.',
   'siteQuarantine.pickProject.all': '모든 프로젝트',
+
+  /* Mapping page — import modal, binding panel, report */
+  'mapping.import.hint':                '임포트하면 이 프로젝트의 기존 매핑 룰과 코드 변환표가 전부 덮어쓰기 됩니다.',
+  'mapping.import.headerHint.column':   '필수 헤더: tobe_table, tobe_column',
+  'mapping.import.headerHint.code':     '필수 헤더: domain, source_value, target_value',
+  'mapping.import.reimportTooltip':     '파일 재임포트',
+  'mapping.import.deleteSlotTooltip':   '이 슬롯 데이터 삭제',
+  'mapping.import.pickFileTooltip':     '파일 선택',
+  'mapping.import.warning.uncoveredCols': '현재 프로젝트 TO-BE DDL 의 다음 컬럼이 맵핑정의서에 명세되어 있지 않습니다: {cols}. 맵핑정의서를 보완하세요.',
+  'mapping.binding.noSourceHint':       '이 TO-BE 테이블에 연결된 AS-IS 소스가 없습니다. [Add source] 로 추가하세요.',
+  'mapping.binding.whereHint':          '이 TO-BE 에 포함할 행 조건. 비우면 전체 rows.',
+  'mapping.report.loading':             'Report 실행 중…',
 } as const;
 
 export type TranslationKey = keyof typeof ko;

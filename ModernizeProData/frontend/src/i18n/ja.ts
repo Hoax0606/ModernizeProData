@@ -1032,4 +1032,16 @@ export const ja: Record<TranslationKey, string> = {
   'siteQuarantine.eyebrow':         'SITE QUARANTINE',
   'siteQuarantine.empty.noSite':    'サイトを先に選択してください。',
   'siteQuarantine.pickProject.all': 'すべてのプロジェクト',
+
+  /* Mapping page — import modal, binding panel, report */
+  'mapping.import.hint':                'インポートすると、このプロジェクトの既存のマッピングルールとコード変換表が完全に上書きされます。',
+  'mapping.import.headerHint.column':   '必須ヘッダ: tobe_table, tobe_column',
+  'mapping.import.headerHint.code':     '必須ヘッダ: domain, source_value, target_value',
+  'mapping.import.reimportTooltip':     'ファイル再インポート',
+  'mapping.import.deleteSlotTooltip':   'このスロットのデータを削除',
+  'mapping.import.pickFileTooltip':     'ファイル選択',
+  'mapping.import.warning.uncoveredCols': '現在のプロジェクトの TO-BE DDL の次のカラムがマッピング定義書に記載されていません: {cols}。マッピング定義書を補完してください。',
+  'mapping.binding.noSourceHint':       'この TO-BE テーブルに紐づく AS-IS ソースがありません。[Add source] から追加してください。',
+  'mapping.binding.whereHint':          'この TO-BE に含める行の条件。空欄なら全行。',
+  'mapping.report.loading':             'Report 実行中…',
 };

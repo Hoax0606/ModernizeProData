@@ -1,9 +1,1 @@
 domain,source_value,target_value,description
-GENDER,M,MALE,남성
-GENDER,F,FEMALE,여성
-GENDER,U,UNKNOWN,미응답
-YN_BOOL,Y,TRUE,참
-YN_BOOL,N,FALSE,거짓
-ACCT_TYPE,01,CHECKING,보통예금
-ACCT_TYPE,02,SAVINGS,저축예금
-ACCT_TYPE,03,TIME_DEPOSIT,정기예금
