@@ -74,35 +74,29 @@ export function AppShell() {
   }, [siteSettingsHighlight]);
   useEffect(() => {
     if (!isDemo) return;
-    const prevActiveSiteId    = useWorkspaceStore.getState().activeSiteId;
-    const prevActiveProjectId = useWorkspaceStore.getState().activeProjectId;
-    useWorkspaceStore.setState((s) => ({
-      sites:    s.sites.some((x) => x.id === DEMO_SITE_ID)       ? s.sites    : [...s.sites,    DEMO_SITE],
-      projects: s.projects.some((x) => x.id === DEMO_PROJECT_ID) ? s.projects : [...s.projects, DEMO_PROJECT],
-      activeSiteId:    DEMO_SITE_ID,
+    /* 실 데이터 백업 — exit 시 정확히 복원하기 위함. demo 동안엔 sandbox 처럼 real 숨김. */
+    const ws = useWorkspaceStore.getState();
+    const prev = {
+      sites: ws.sites,
+      projects: ws.projects,
+      activeSiteId: ws.activeSiteId,
+      activeProjectId: ws.activeProjectId,
+    };
+    const asisPrev = useAsisDdlStore.getState().schemasByProject;
+    const tobePrev = useTobeDdlStore.getState().schemasByProject;
+    /* demo 동안엔 real 숨기고 demo 만 노출. */
+    useWorkspaceStore.setState({
+      sites: [DEMO_SITE],
+      projects: [DEMO_PROJECT],
+      activeSiteId: DEMO_SITE_ID,
       activeProjectId: DEMO_PROJECT_ID,
-    }));
-    useAsisDdlStore.setState((s) => ({
-      schemasByProject: { ...s.schemasByProject, [DEMO_PROJECT_ID]: DEMO_ASIS_SCHEMA },
-    }));
-    useTobeDdlStore.setState((s) => ({
-      schemasByProject: { ...s.schemasByProject, [DEMO_PROJECT_ID]: DEMO_TOBE_SCHEMA },
-    }));
+    });
+    useAsisDdlStore.setState({ schemasByProject: { [DEMO_PROJECT_ID]: DEMO_ASIS_SCHEMA } });
+    useTobeDdlStore.setState({ schemasByProject: { [DEMO_PROJECT_ID]: DEMO_TOBE_SCHEMA } });
     return () => {
-      useWorkspaceStore.setState((s) => ({
-        sites:    s.sites.filter((x) => x.id !== DEMO_SITE_ID),
-        projects: s.projects.filter((x) => x.id !== DEMO_PROJECT_ID),
-        activeSiteId:    prevActiveSiteId,
-        activeProjectId: prevActiveProjectId,
-      }));
-      useAsisDdlStore.setState((s) => {
-        const { [DEMO_PROJECT_ID]: _drop, ...rest } = s.schemasByProject;
-        return { schemasByProject: rest };
-      });
-      useTobeDdlStore.setState((s) => {
-        const { [DEMO_PROJECT_ID]: _drop, ...rest } = s.schemasByProject;
-        return { schemasByProject: rest };
-      });
+      useWorkspaceStore.setState(prev);
+      useAsisDdlStore.setState({ schemasByProject: asisPrev });
+      useTobeDdlStore.setState({ schemasByProject: tobePrev });
     };
   }, [isDemo]);
   const user = useAuthStore((s) => s.user);
@@ -176,9 +170,13 @@ export function AppShell() {
     setActiveProject(st.activateProjectId ?? null);
   }, [location.key, setActiveProject]);
 
-  // 10초 간격으로 서버 동기화 (sites → projects → snapshots → audit logs 순서 보장)
+  // 10초 간격으로 서버 동기화 (sites → projects → snapshots → audit logs 순서 보장).
+  // demo 중엔 polling 전체 skip — 백업한 real data 를 서버 응답으로 덮어쓰지 않도록.
+  const isDemoRef = useRef(isDemo);
+  isDemoRef.current = isDemo;
   useEffect(() => {
     const sync = async () => {
+      if (isDemoRef.current) return;
       if (isEditingRef.current) return;
       await fetchSites();
       const siteId = useWorkspaceStore.getState().activeSiteId;

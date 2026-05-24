@@ -9,18 +9,24 @@ import {
   type PreflightCheck,
   type PreflightPhase,
   type CheckStatus,
+  type ActiveRunState,
 } from '../store/executionPreflight';
-import { useDemoMode } from '../lib/useDemoMode';
+import { useDemoMode, type DemoMode } from '../lib/useDemoMode';
 import { useT, type TranslationKey } from '../i18n';
-import { Modal } from '../components/Modal';
 
 type T = (key: TranslationKey, vars?: Record<string, string | number>) => string;
 
-type StageTone = 'idle' | 'running' | 'ok';
+type StageTone = 'idle' | 'running' | 'ok' | 'err';
 type RunMode = 'rehearsal' | 'cutover';
 type RunResult = 'ok' | 'warn' | 'failed' | 'aborted' | 'running';
 type RunScope = 'all' | 'failed-only';
 type BadgeTone = 'ok' | 'running' | 'queued' | 'err' | 'warn' | 'info';
+
+/* Frontend mock simulation 의 시간 모델. 각 stage 5초, 7 stage = 35초.
+   백엔드 run engine 연결 시점에 이 부분이 실제 진행률 / WS 이벤트로 교체된다. */
+const STAGE_MS = 5000;
+const TOTAL_STAGES = 7; /* BASE_STAGES.length — keep in sync */
+const TOTAL_RUN_MS = STAGE_MS * TOTAL_STAGES;
 
 interface Stage {
   id: string;
@@ -59,17 +65,34 @@ export function ExecutionPage() {
     [projects, activeProjectId],
   );
 
-  const { isDemo, exitDemo } = useDemoMode();
+  const { isDemo, demoMode, exitDemo } = useDemoMode();
 
-  /* Simulated live tick — drives the running stage's pct upward for visual feedback. */
+  /* activeRun (frontend mock simulation) — Pre-flight pass 후 Start 누르면 store 에 생성된다.
+     Stage 진행은 startedAt(절대 시각) 기반으로 derive — tick state 는 단순 re-render trigger. */
+  const storeActiveRun: ActiveRunState | null = useExecutionPreflightStore(
+    (s) => (project ? s.byProject[project.id]?.activeRun : null) ?? null,
+  );
   const [tick, setTick] = useState(0);
-  const [running, setRunning] = useState(true);
 
+  /* Re-render timer — run 이 진짜로 running 일 때만 (paused / completed / failed 면 멈춤). */
   useEffect(() => {
-    if (!running) return;
-    const id = window.setInterval(() => setTick((n) => n + 1), 1200);
+    if (!storeActiveRun) return;
+    if (storeActiveRun.runStatus !== 'running') return;
+    if (storeActiveRun.pausedAt !== null) return;
+    const id = window.setInterval(() => setTick((n) => n + 1), 250);
     return () => window.clearInterval(id);
-  }, [running]);
+  }, [storeActiveRun?.runId, storeActiveRun?.pausedAt, storeActiveRun?.runStatus]);
+
+  /* Finish 감지 — elapsed >= TOTAL_RUN_MS 면 completed. Fail 은 명시적 trigger (Demo 버튼 / 백엔드) 로만. */
+  const projectId = project?.id ?? null;
+  useEffect(() => {
+    if (!projectId || !storeActiveRun) return;
+    if (storeActiveRun.runStatus !== 'running') return;
+    if (computeElapsedMs(storeActiveRun) >= TOTAL_RUN_MS) {
+      useExecutionPreflightStore.getState().finishActiveRun(projectId);
+      useWorkspaceStore.getState().setProjectRunStatus(projectId, 'completed').catch(() => { /* mock; ignore */ });
+    }
+  }, [tick, storeActiveRun, projectId]);
 
   /* TO-BE DDL → 테이블 선택 목록. 캐시 미존재 시 자동 fetch. */
   const tobeSchema = useTobeDdlStore((s) => project ? s.schemasByProject[project.id] : undefined);
@@ -101,15 +124,14 @@ export function ExecutionPage() {
     useExecutionPreflightStore.getState().setSelected(project.id, [...next]);
   };
 
-  const setSelectedSnapshotId = (id: string | null) => {
-    if (!project) return;
-    useExecutionPreflightStore.getState().setSelectedSnapshot(project.id, id);
-  };
-
-  /* 현재 project 의 snapshot 만 (SnapshotSelector dropdown 옵션). */
+  /* 현재 project 의 snapshot 만 — SnapshotDisplay 가 selectedSnapshotId 로 찾을 때 사용. */
   const projectSnapshots = useMemo(
     () => project ? snapshots.filter((s) => s.projectId === project.id) : [],
     [snapshots, project],
+  );
+  const pinnedSnapshot = useMemo(
+    () => selectedSnapshotId ? projectSnapshots.find((s) => s.id === selectedSnapshotId) ?? null : null,
+    [projectSnapshots, selectedSnapshotId],
   );
 
   if (!project) {
@@ -120,10 +142,9 @@ export function ExecutionPage() {
     );
   }
 
-  const isAll = tobeTables.length > 0 && selectedTables.size === tobeTables.length;
   const startPreflight = () => {
     if (selectedTables.size === 0 || preflightPhase === 'checking') return;
-    const checks = buildPreflightChecks(project, Array.from(selectedTables), isAll, t, snapshots, selectedSnapshotId);
+    const checks = buildPreflightChecks(project, Array.from(selectedTables), t);
     const store = useExecutionPreflightStore.getState();
     store.setPhase(project.id, 'checking');
     store.setResults(project.id, []);
@@ -138,52 +159,143 @@ export function ExecutionPage() {
     });
   };
 
-  /* Demo 모드: trigger 없이 즉시 결과 표시. */
-  const displayedResults = isDemo ? buildDemoPreflightChecks(t) : preflightResults;
+  /* Demo 모드: trigger 없이 즉시 결과 표시. mode 별로 8 fail / 8 pass 분기. */
+  const displayedResults = demoMode === 'run-fail'
+    ? buildDemoPreflightPassChecks(t)
+    : demoMode === 'preflight'
+      ? buildDemoPreflightChecks(t)
+      : preflightResults;
   const displayedPhase: PreflightPhase = isDemo ? 'done' : preflightPhase;
   const preflightPassed = displayedPhase === 'done'
     && displayedResults.length > 0
     && displayedResults.every((c) => c.status !== 'fail');
 
-  const stages = animateStages(buildStages(project.phase), tick, running);
+  /* Stage 진행은 activeRun 기반 (mock simulation), 없으면 phase 기반 fallback (기존 동작). */
+  const stages = storeActiveRun
+    ? buildStagesFromActiveRun(storeActiveRun, TOTAL_RUN_MS)
+    : buildStages(project.phase);
   const runs = buildRuns(project);
-  const activeRun = runs.find((r) => r.result === 'running') ?? null;
+
+  /* ActiveRun 이 존재하면 (running / paused / completed / failed / aborted) 모든 컨트롤 잠금.
+     한 번 시작한 run 의 selection 은 고정 — 새 selection 으로 가려면 Discard 링크. */
+  const controlsLocked = storeActiveRun !== null;
+
+  const handleStartRun = () => {
+    if (!preflightPassed || selectedTables.size === 0) return;
+    /* 이전 run 이 completed / failed 상태라면 먼저 정리하고 새 run 생성. */
+    const current = useExecutionPreflightStore.getState().byProject[project.id]?.activeRun;
+    if (current && current.runStatus !== 'running') {
+      useExecutionPreflightStore.getState().clearActiveRun(project.id);
+    } else if (current && current.runStatus === 'running') {
+      /* 방어적 — 이론상 도달 안 함 (controlsLocked 라 Start 자체가 disabled). */
+      return;
+    }
+    const tables = Array.from(selectedTables);
+    useExecutionPreflightStore.getState().startActiveRun(project.id, tables);
+    /* Project phase 를 'test' 로, runStatus 'running' 으로. demo 모드면 fixture 가 일시적 — 영향 없음. */
+    useWorkspaceStore.getState().setProjectPhase(project.id, 'test').catch(() => { /* mock */ });
+    useWorkspaceStore.getState().setProjectRunStatus(project.id, 'running').catch(() => { /* mock */ });
+  };
+
+  const handlePauseToggle = () => {
+    if (!storeActiveRun) return;
+    if (storeActiveRun.pausedAt === null) {
+      useExecutionPreflightStore.getState().pauseActiveRun(project.id);
+    } else {
+      useExecutionPreflightStore.getState().resumeActiveRun(project.id);
+    }
+  };
+
+  /* Demo 모드 한정 — 현재 진행 중인 stage 에서 즉시 fail 처리.
+     실제 운영 환경에선 backend WS 이벤트 → failActiveRun store action 으로 진입한다. */
+  const handleTriggerFail = () => {
+    if (!storeActiveRun || storeActiveRun.runStatus !== 'running') return;
+    const elapsed = computeElapsedMs(storeActiveRun);
+    const stageIndex = Math.min(Math.floor(elapsed / STAGE_MS), TOTAL_STAGES - 1);
+    const stageName = BASE_STAGES[stageIndex]?.name ?? '?';
+    /* mock reason — 실 백엔드 연결 시 fail 페이로드의 reason 으로 교체된다. */
+    const reason = `Demo: ${stageName} 단계에서 PK 위반 3건 — accounts.account_id`;
+    useExecutionPreflightStore.getState().failActiveRun(project.id, stageIndex, reason);
+    useWorkspaceStore.getState().setProjectRunStatus(project.id, 'failed').catch(() => { /* mock */ });
+  };
+
+  const handleRetry = () => {
+    useExecutionPreflightStore.getState().retryActiveRun(project.id, STAGE_MS);
+    useWorkspaceStore.getState().setProjectRunStatus(project.id, 'running').catch(() => { /* mock */ });
+  };
+
+  /* halted (completed/failed/aborted) 상태에서만 노출 — activeRun 제거 + 컨트롤 잠금 해제. */
+  const handleDiscard = () => {
+    useExecutionPreflightStore.getState().clearActiveRun(project.id);
+    useWorkspaceStore.getState().setProjectRunStatus(project.id, 'idle').catch(() => { /* mock */ });
+  };
+
+  /* 사용자 명시 중단 — running / paused 중에만 가능. 현재 stage 에서 멈춤. */
+  const handleStopRun = () => {
+    if (!storeActiveRun || storeActiveRun.runStatus !== 'running') return;
+    const elapsed = computeElapsedMs(storeActiveRun);
+    const stageIndex = Math.min(Math.floor(elapsed / STAGE_MS), TOTAL_STAGES - 1);
+    const reason = t('execution.run.abortReason');
+    useExecutionPreflightStore.getState().abortActiveRun(project.id, stageIndex, reason);
+    useWorkspaceStore.getState().setProjectRunStatus(project.id, 'aborted').catch(() => { /* mock */ });
+  };
+
+  /* exitDemo 시 demo project 의 activeRun 도 정리 — 잔재 방지. */
+  const handleExitDemo = () => {
+    if (project) useExecutionPreflightStore.getState().clearActiveRun(project.id);
+    exitDemo();
+  };
 
   return (
     <div style={styles.page}>
       <RunHeader
         t={t}
         project={project}
-        activeRun={activeRun}
+        activeRun={storeActiveRun}
         runs={runs}
-        running={running}
-        onToggleRun={() => setRunning((v) => !v)}
         preflightPassed={preflightPassed}
-      />
-      <TableSelector
-        t={t}
-        tables={tobeTables}
-        selected={selectedTables}
-        onChange={setSelectedTables}
-      />
-      <SnapshotSelector
-        t={t}
-        snapshots={projectSnapshots}
-        selectedId={selectedSnapshotId}
-        onChange={setSelectedSnapshotId}
-      />
-      <PreflightPanel
-        t={t}
-        checks={displayedResults}
-        phase={displayedPhase}
-        canStart={!isDemo && selectedTables.size > 0}
-        onStart={startPreflight}
-        onReset={() => useExecutionPreflightStore.getState().resetForProject(project.id)}
+        selectedTablesCount={selectedTables.size}
         isDemo={isDemo}
-        onExitDemo={exitDemo}
+        onStart={handleStartRun}
+        onPauseToggle={handlePauseToggle}
+        onStop={handleStopRun}
+        onTriggerFail={handleTriggerFail}
+        onRetry={handleRetry}
+        onDiscard={handleDiscard}
       />
+      <DisabledOverlay disabled={controlsLocked}>
+        <TableSelector
+          t={t}
+          tables={tobeTables}
+          selected={selectedTables}
+          onChange={setSelectedTables}
+        />
+        <SnapshotDisplay t={t} pinned={pinnedSnapshot} />
+        <PreflightPanel
+          t={t}
+          checks={displayedResults}
+          phase={displayedPhase}
+          canStart={!isDemo && selectedTables.size > 0}
+          onStart={startPreflight}
+          onReset={() => useExecutionPreflightStore.getState().resetForProject(project.id)}
+          isDemo={isDemo}
+          demoMode={demoMode}
+          onExitDemo={handleExitDemo}
+        />
+      </DisabledOverlay>
       <OverallProgress t={t} stages={stages} />
       <PipelineStages t={t} stages={stages} />
+    </div>
+  );
+}
+
+/* ───────────────────────── Disabled overlay ─────────────────────── */
+
+/** Active run 중인 동안 선택 컨트롤을 비활성화 — pointer-events 차단 + opacity 표시. */
+function DisabledOverlay({ disabled, children }: { disabled: boolean; children: React.ReactNode }) {
+  return (
+    <div style={disabled ? { pointerEvents: 'none', opacity: 0.55, filter: 'saturate(0.7)' } : undefined}>
+      {children}
     </div>
   );
 }
@@ -195,95 +307,183 @@ function RunHeader({
   project,
   activeRun,
   runs,
-  running,
-  onToggleRun,
   preflightPassed,
+  selectedTablesCount,
+  isDemo,
+  onStart,
+  onPauseToggle,
+  onStop,
+  onTriggerFail,
+  onRetry,
+  onDiscard,
 }: {
   t: T;
   project: Project;
-  activeRun: Run | null;
+  activeRun: ActiveRunState | null;
   runs: Run[];
-  running: boolean;
-  onToggleRun: () => void;
   preflightPassed: boolean;
+  selectedTablesCount: number;
+  isDemo: boolean;
+  onStart: () => void;
+  onPauseToggle: () => void;
+  onStop: () => void;
+  onTriggerFail: () => void;
+  onRetry: () => void;
+  onDiscard: () => void;
 }) {
-  const [dialogOpen, setDialogOpen] = useState(false);
-  // Start run 활성 = Pre-flight 모든 체크 pass. phase 체크는 별도 정책 결정 시 추가.
-  const canStart = preflightPassed;
+  /* Start 활성 = Pre-flight 모든 체크 pass + 최소 1개 테이블 선택. */
+  const canStart = preflightPassed && selectedTablesCount > 0;
   const isDone = project.phase === 'done';
 
   if (!activeRun) {
     const lastRun = runs[0] ?? null;
     return (
-      <>
-        <section style={styles.runHeader}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={styles.runHeaderLabel}>{t('execution.run.noActive')}</div>
-            <div style={styles.runHeaderMono}>
-              {lastRun
-                ? t('execution.run.lastRun', { id: lastRun.id, when: lastRun.startedAt, result: lastRun.result })
-                : t('execution.run.noHistory')}
-            </div>
+      <section style={styles.runHeader}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={styles.runHeaderLabel}>{t('execution.run.noActive')}</div>
+          <div style={styles.runHeaderMono}>
+            {lastRun
+              ? t('execution.run.lastRun', { id: lastRun.id, when: lastRun.startedAt, result: lastRun.result })
+              : t('execution.run.noHistory')}
           </div>
-          {!isDone && (
-            <button
-              type="button"
-              onClick={() => canStart && setDialogOpen(true)}
-              disabled={!canStart}
-              title={canStart ? t('execution.run.startReadyHint') : t('execution.run.startBlockedHint')}
-              style={canStart ? styles.btnPrimary : styles.btnDisabled}
-            >
-              ▶ {t('execution.run.startBtn')}
-            </button>
-          )}
-        </section>
-        {dialogOpen && (
-          <StartRunDialog
-            t={t}
-            project={project}
-            onClose={() => setDialogOpen(false)}
-          />
+        </div>
+        {!isDone && (
+          <button
+            type="button"
+            onClick={() => { if (canStart) onStart(); }}
+            disabled={!canStart}
+            title={canStart ? t('execution.run.startReadyHint') : t('execution.run.startBlockedHint')}
+            style={canStart ? styles.btnPrimary : styles.btnDisabled}
+          >
+            ▶ {t('execution.run.startBtn')}
+          </button>
         )}
-      </>
+      </section>
     );
   }
 
-  const elapsedLabel = activeRun.eta
-    ? t('execution.run.elapsedEta', {
-        time: activeRun.startedAt.split(' ')[1] ?? activeRun.startedAt,
-        elapsed: activeRun.elapsed,
-        eta: activeRun.eta,
+  /* Active run 상태 = running / paused / completed / failed / aborted. */
+  const isPaused = activeRun.pausedAt !== null;
+  const isCompleted = activeRun.runStatus === 'completed';
+  const isFailed = activeRun.runStatus === 'failed';
+  const isAborted = activeRun.runStatus === 'aborted';
+  const isHalted = isCompleted || isFailed || isAborted;
+  const running = activeRun.runStatus === 'running' && !isPaused;
+  const elapsedMs = computeElapsedMs(activeRun);
+  const totalMs = STAGE_MS * BASE_STAGES.length;
+  const remainingMs = Math.max(0, totalMs - elapsedMs);
+  const elapsedLabel = isHalted
+    ? t('execution.run.elapsed', {
+        time: formatTimeOfDay(activeRun.startedAt),
+        elapsed: formatDuration(elapsedMs),
       })
-    : t('execution.run.elapsed', {
-        time: activeRun.startedAt.split(' ')[1] ?? activeRun.startedAt,
-        elapsed: activeRun.elapsed,
+    : t('execution.run.elapsedEta', {
+        time: formatTimeOfDay(activeRun.startedAt),
+        elapsed: formatDuration(elapsedMs),
+        eta: formatDuration(remainingMs),
       });
 
+  const phaseChipTone: BadgeTone =
+    isFailed ? 'err'
+    : isAborted ? 'warn'
+    : isCompleted ? 'queued'
+    : 'ok';
+  const statusChipTone: BadgeTone =
+    isFailed ? 'err'
+    : isAborted ? 'warn'
+    : isCompleted ? 'ok'
+    : running ? 'running'
+    : 'warn';
+  const statusChipText =
+    isFailed ? t('execution.run.status.failed')
+    : isAborted ? t('execution.run.status.aborted')
+    : isCompleted ? t('execution.run.status.completed')
+    : running ? t('execution.run.status.running')
+    : t('execution.run.status.paused');
+
+  /* Error/abort banner — failed / aborted 일 때 RunHeader 아래에 메시지 박스로 노출. */
+  const failedStageName = activeRun.failedStageIndex != null
+    ? BASE_STAGES[activeRun.failedStageIndex]?.name ?? '?'
+    : '?';
+  const showBanner = (isFailed || isAborted) && !!activeRun.failureReason;
+
   return (
-    <section style={styles.runHeader}>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={styles.runHeaderLabel}>{t('execution.run.active')}</div>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 16, fontWeight: 600 }}>{activeRun.id}</span>
-          <StatusBadge tone={running ? 'running' : 'warn'}>
-            {running ? t('execution.run.status.running') : t('execution.run.status.paused')}
-          </StatusBadge>
-          {activeRun.scope !== 'all' && (
-            <StatusBadge tone="info">{activeRun.scopeLabel ?? activeRun.scope}</StatusBadge>
-          )}
-          <span style={{ fontSize: 12, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>{elapsedLabel}</span>
+    <>
+      <section style={styles.runHeader}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={styles.runHeaderLabel}>{t('execution.run.active')}</div>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 16, fontWeight: 600 }}>{activeRun.runId}</span>
+            <StatusBadge tone={phaseChipTone}>{project.phase}</StatusBadge>
+            <StatusBadge tone={statusChipTone}>{statusChipText}</StatusBadge>
+            <span style={{ fontSize: 12, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>{elapsedLabel}</span>
+          </div>
+          <div style={{ fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: 3 }}>
+            {t('execution.run.triggeredBy')}{' '}
+            <b style={{ color: 'var(--text-2)' }}>{project.executionAssignee ?? project.owner ?? 'Admin'}</b>
+            <span> · {t('execution.run.tablesSummary', { n: activeRun.selectedTables.length })}</span>
+          </div>
         </div>
-        <div style={{ fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: 3 }}>
-          {t('execution.run.triggeredBy')}{' '}
-          <b style={{ color: 'var(--text-2)' }}>{activeRun.triggeredBy.actor}</b>
-          {activeRun.triggeredBy.source && <span> · {activeRun.triggeredBy.source}</span>}
+        {/* Demo 모드 + running 일 때만 노출 — 실 운영에선 fail 은 backend 이벤트가 trigger */}
+        {isDemo && running && (
+          <button type="button" onClick={onTriggerFail} style={styles.btnGhost} title={t('execution.run.demo.triggerFail')}>
+            {t('execution.run.demo.triggerFail')}
+          </button>
+        )}
+        {isHalted && (
+          <button
+            type="button"
+            onClick={onDiscard}
+            style={styles.btnGhost}
+            title={t('execution.run.discardHint')}
+          >
+            {t('execution.run.discard')}
+          </button>
+        )}
+        {(isFailed || isAborted) && (
+          <button
+            type="button"
+            onClick={onRetry}
+            style={{ ...styles.btnPrimary, minWidth: 80 }}
+            title={t('execution.run.retryHint')}
+          >
+            ↻ {t('execution.run.retry')}
+          </button>
+        )}
+        {isHalted && (
+          <button
+            type="button"
+            onClick={onStart}
+            style={{ ...styles.btnPrimary, minWidth: 80 }}
+            title={t('execution.run.startOverHint')}
+          >
+            ▶ {t('execution.run.startOver')}
+          </button>
+        )}
+        {!isHalted && (
+          <>
+            <button type="button" onClick={onPauseToggle} style={styles.btnSecondary}>
+              {running ? `⏸ ${t('execution.run.pause')}` : `▶ ${t('execution.run.resume')}`}
+            </button>
+            <button type="button" onClick={onStop} style={styles.btnDanger}>
+              ⏹ {t('execution.run.stop')}
+            </button>
+          </>
+        )}
+      </section>
+      {showBanner && (
+        <div style={isAborted ? styles.warnBanner : styles.errorBanner}>
+          <span style={{ fontSize: 14 }}>{isAborted ? '⏹' : '❌'}</span>
+          <span>
+            {t('execution.run.errorBanner', {
+              stage: (activeRun.failedStageIndex ?? 0) + 1,
+              name: failedStageName,
+              reason: activeRun.failureReason ?? '',
+            })}
+          </span>
         </div>
-      </div>
-      <button type="button" onClick={onToggleRun} style={styles.btnSecondary}>
-        {running ? `⏸ ${t('execution.run.pause')}` : `▶ ${t('execution.run.resume')}`}
-      </button>
-      <button type="button" style={styles.btnDanger}>⏹ {t('execution.run.abort')}</button>
-    </section>
+      )}
+    </>
   );
 }
 
@@ -385,78 +585,31 @@ function TableSelector({
   );
 }
 
-/* ───────────────────────── Snapshot selector ───────────────────── */
+/* ───────────────────────── Snapshot display (read-only) ────────── */
 
-function SnapshotSelector({
-  t,
-  snapshots,
-  selectedId,
-  onChange,
-}: {
-  t: T;
-  snapshots: MappingSnapshot[];
-  selectedId: string | null;
-  onChange: (id: string | null) => void;
-}) {
-  const [open, setOpen] = useState(true);
-
-  if (snapshots.length === 0) {
-    return (
-      <div style={{ ...styles.section, background: 'var(--panel)' }}>
-        <div style={{ padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={styles.sectionLabel}>{t('execution.preflight.snapshotSelector.title')}</span>
-          <span style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>
-            {t('execution.preflight.snapshotSelector.noSnapshots')}
-          </span>
-        </div>
-      </div>
-    );
-  }
-
-  const selected = selectedId ? snapshots.find((s) => s.id === selectedId) ?? null : null;
-  const headerLabel = selected
-    ? `${selected.name} (${selected.version} · ${selected.status})`
-    : t('execution.preflight.snapshotSelector.placeholder');
-
+/**
+ * 선택된 snapshot 의 이름·version·status 를 read-only 로 표시.
+ * 실제 snapshot 선택(pin)은 /versions 페이지에서 — 여기선 그 결과만 보여준다.
+ */
+function SnapshotDisplay({ t, pinned }: { t: T; pinned: MappingSnapshot | null }) {
+  const label = pinned
+    ? t('execution.snapshot.value', { name: pinned.name, version: pinned.version, status: pinned.status })
+    : t('execution.snapshot.empty');
   return (
     <div style={{ ...styles.section, background: 'var(--panel)' }}>
-      <div onClick={() => setOpen((v) => !v)} style={styles.sectionToggle}>
-        <span style={styles.chev}>{open ? '▾' : '▸'}</span>
-        <span style={styles.sectionLabel}>{t('execution.preflight.snapshotSelector.title')}</span>
-        <span style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>{headerLabel}</span>
-        <div style={{ flex: 1 }} />
+      <div style={{ padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={styles.sectionLabel}>{t('execution.snapshot.title')}</span>
+        <span style={{ fontSize: 11, color: pinned ? 'var(--text-2)' : 'var(--text-3)', fontFamily: 'var(--mono)' }}>
+          {label}
+        </span>
       </div>
-      {open && (
-        <div style={{ padding: '4px 18px 14px' }}>
-          <select
-            value={selectedId ?? ''}
-            onChange={(e) => onChange(e.target.value || null)}
-            style={{
-              width: '100%',
-              padding: '8px 12px',
-              fontSize: 12,
-              fontFamily: 'var(--mono)',
-              border: '1px solid var(--border)',
-              borderRadius: 4,
-              background: 'var(--panel)',
-            }}
-          >
-            <option value="">— {t('execution.preflight.snapshotSelector.placeholder')} —</option>
-            {snapshots.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name} ({s.version} · {s.status})
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
     </div>
   );
 }
 
 /* ───────────────────────── Pre-flight panel ────────────────────── */
 
-function PreflightPanel({ t, checks, phase, canStart, onStart, onReset, isDemo, onExitDemo }: {
+function PreflightPanel({ t, checks, phase, canStart, onStart, onReset, isDemo, demoMode, onExitDemo }: {
   t: T;
   checks: PreflightCheck[];
   phase: PreflightPhase;
@@ -464,6 +617,7 @@ function PreflightPanel({ t, checks, phase, canStart, onStart, onReset, isDemo, 
   onStart: () => void;
   onReset: () => void;
   isDemo?: boolean;
+  demoMode?: DemoMode | null;
   onExitDemo?: () => void;
 }) {
   // PreflightPanel 내부에서 navigate 시 search 보존을 위해 isDemo 를 그대로 사용.
@@ -482,7 +636,7 @@ function PreflightPanel({ t, checks, phase, canStart, onStart, onReset, isDemo, 
   }, [isChecking, hasBlocking]);
 
   // demo URL 로 진입한 상태였다면 도착 페이지도 demo 로 유지되도록 search 보존.
-  const search = isDemo ? '?demo=preflight' : '';
+  const search = demoMode ? `?demo=${demoMode}` : '';
   const handleFix = (c: PreflightCheck) => {
     switch (c.id) {
       case 'csv-arrived':
@@ -510,10 +664,6 @@ function PreflightPanel({ t, checks, phase, canStart, onStart, onReset, isDemo, 
         return;
       case 'asis-unmapped':
         navigate({ pathname: '/mapping', search }, { state: { fixTarget: { kind: 'unmapped-asis' } } });
-        return;
-      case 'approved-snapshot':
-        // 프로젝트 단위 스냅샷 목록 = VersionsPage. site-level approvals 가 아니라 versions.
-        navigate({ pathname: '/versions', search });
         return;
     }
   };
@@ -636,7 +786,11 @@ function OverallProgress({ t, stages }: { t: T; stages: Stage[] }) {
               style={{ flex: 1, background: 'var(--border)', position: 'relative', overflow: 'hidden' }}>
               <div style={{
                 width: `${st.pct}%`, height: '100%',
-                background: st.tone === 'ok' ? 'var(--green)' : st.tone === 'idle' ? 'var(--text-4)' : st.color,
+                background:
+                  st.tone === 'ok' ? 'var(--green)'
+                  : st.tone === 'err' ? 'var(--red)'
+                  : st.tone === 'idle' ? 'var(--text-4)'
+                  : st.color,
                 transition: 'width .4s ease',
               }} />
             </div>
@@ -671,7 +825,10 @@ function PipelineStages({ t, stages }: { t: T; stages: Stage[] }) {
                 gap: 14, alignItems: 'center',
                 padding: '10px 14px',
                 borderBottom: i < stages.length - 1 ? '1px solid var(--border)' : 'none',
-                background: st.tone === 'running' ? 'var(--amber-50)' : 'var(--panel)',
+                background:
+                  st.tone === 'running' ? 'var(--amber-50)'
+                  : st.tone === 'err' ? 'var(--red-50)'
+                  : 'var(--panel)',
               }}
             >
               <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-4)' }}>{String(i + 1).padStart(2, '0')}</div>
@@ -688,6 +845,7 @@ function PipelineStages({ t, stages }: { t: T; stages: Stage[] }) {
               <div>
                 {st.tone === 'ok' && <StatusBadge tone="ok">{t('execution.stages.status.done')}</StatusBadge>}
                 {st.tone === 'running' && <StatusBadge tone="running">{t('execution.stages.status.live')}</StatusBadge>}
+                {st.tone === 'err' && <StatusBadge tone="err">{t('execution.stages.status.failed')}</StatusBadge>}
                 {st.tone === 'idle' && <StatusBadge tone="queued">{t('execution.stages.status.queued')}</StatusBadge>}
               </div>
             </div>
@@ -695,184 +853,6 @@ function PipelineStages({ t, stages }: { t: T; stages: Stage[] }) {
         </div>
       </div>
     </div>
-  );
-}
-
-/* ───────────────────────── Start run dialog ────────────────────── */
-
-function StartRunDialog({
-  t,
-  project,
-  onClose,
-}: {
-  t: T;
-  project: Project;
-  onClose: () => void;
-}) {
-  const [mode, setMode] = useState<RunMode>('rehearsal');
-  const [scope, setScope] = useState<RunScope>('all');
-  const [confirmCutover, setConfirmCutover] = useState(false);
-
-  const isCut = mode === 'cutover';
-  const failedCount = 0; /* no source of failed-table list yet; wire to API later */
-  const failedDisabled = failedCount === 0;
-
-  useEffect(() => {
-    if (scope === 'failed-only' && failedDisabled) setScope('all');
-  }, [scope, failedDisabled]);
-
-  const canConfirm = !isCut || confirmCutover;
-
-  return (
-    <Modal
-      open
-      onClose={onClose}
-      width={460}
-      title={
-        <div>
-          <div style={{ fontSize: 13, fontWeight: 600 }}>{t('execution.dialog.title')}</div>
-          <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2, fontFamily: 'var(--mono)' }}>
-            {project.name} · {project.phase}
-          </div>
-        </div>
-      }
-    >
-      <div>
-        <div style={styles.dialogGroupLabel}>{t('execution.dialog.modeLabel')}</div>
-        <ModeOption
-          selected={mode === 'rehearsal'}
-          onSelect={() => setMode('rehearsal')}
-          title={t('execution.dialog.mode.rehearsal.title')}
-          desc={t('execution.dialog.mode.rehearsal.desc')}
-          tone="navy"
-        />
-        <ModeOption
-          selected={mode === 'cutover'}
-          onSelect={() => setMode('cutover')}
-          title={t('execution.dialog.mode.cutover.title')}
-          desc={t('execution.dialog.mode.cutover.desc')}
-          tone="red"
-        />
-
-        <div style={{ ...styles.dialogGroupLabel, marginTop: 14 }}>{t('execution.dialog.scopeLabel')}</div>
-        <ScopeOption
-          selected={scope === 'all'}
-          onSelect={() => setScope('all')}
-          title={t('execution.dialog.scope.all.title')}
-          desc={isCut
-            ? t('execution.dialog.scope.all.desc.cutover')
-            : t('execution.dialog.scope.all.desc.rehearsal')}
-        />
-        <ScopeOption
-          selected={scope === 'failed-only'}
-          onSelect={() => !failedDisabled && setScope('failed-only')}
-          title={t('execution.dialog.scope.failed.title', { n: failedCount })}
-          desc={isCut
-            ? (failedDisabled
-                ? t('execution.dialog.scope.failed.desc.cutoverEmpty')
-                : t('execution.dialog.scope.failed.desc.cutover'))
-            : (failedDisabled
-                ? t('execution.dialog.scope.failed.desc.rehearsalEmpty')
-                : t('execution.dialog.scope.failed.desc.rehearsal'))}
-          disabled={failedDisabled}
-        />
-
-        {isCut && (
-          <div
-            style={{
-              marginTop: 12, padding: 10,
-              border: '1px solid var(--red)', background: 'var(--red-50)',
-              borderRadius: 3, fontSize: 11, color: 'var(--red)', lineHeight: 1.55,
-            }}
-          >
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>{t('execution.dialog.confirmCutover.title')}</div>
-            <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer', color: 'var(--text-2)' }}>
-              <input
-                type="checkbox"
-                checked={confirmCutover}
-                onChange={(e) => setConfirmCutover(e.target.checked)}
-                style={{ marginTop: 2 }}
-              />
-              <span>{t('execution.dialog.confirmCutover.body')}</span>
-            </label>
-          </div>
-        )}
-      </div>
-
-      <div style={{ marginTop: 14, display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-        <button type="button" onClick={onClose} style={styles.btnSecondary}>{t('execution.dialog.cancel')}</button>
-        <button
-          type="button"
-          disabled={!canConfirm}
-          onClick={onClose} /* backend wiring TBD; closing for now */
-          style={canConfirm ? (isCut ? styles.btnDanger : styles.btnPrimary) : styles.btnDisabled}
-        >
-          ▶ {isCut ? t('execution.dialog.start.cutover') : t('execution.dialog.start.rehearsal')}
-        </button>
-      </div>
-    </Modal>
-  );
-}
-
-function ModeOption({
-  selected, onSelect, title, desc, tone,
-}: {
-  selected: boolean;
-  onSelect: () => void;
-  title: string;
-  desc: string;
-  tone: 'navy' | 'red';
-}) {
-  const accent = tone === 'red' ? 'var(--red)' : 'var(--navy)';
-  return (
-    <label
-      onClick={onSelect}
-      style={{
-        display: 'flex', gap: 10, alignItems: 'flex-start',
-        padding: '10px 12px',
-        border: `1px solid ${selected ? accent : 'var(--border)'}`,
-        background: selected ? (tone === 'red' ? 'var(--red-50)' : 'var(--navy-50)') : 'var(--panel)',
-        borderRadius: 4, marginBottom: 6, cursor: 'pointer',
-      }}
-    >
-      <input type="radio" checked={selected} onChange={onSelect} style={{ marginTop: 3 }} />
-      <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: selected ? accent : 'var(--text)' }}>{title}</div>
-        <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2, lineHeight: 1.5 }}>{desc}</div>
-      </div>
-    </label>
-  );
-}
-
-function ScopeOption({
-  selected, onSelect, title, desc, disabled,
-}: {
-  selected: boolean;
-  onSelect: () => void;
-  title: string;
-  desc: string;
-  disabled?: boolean;
-}) {
-  const accent = 'var(--navy)';
-  return (
-    <label
-      onClick={() => !disabled && onSelect()}
-      style={{
-        display: 'flex', gap: 10, alignItems: 'flex-start',
-        padding: '8px 12px',
-        border: `1px solid ${selected ? accent : 'var(--border)'}`,
-        background: selected ? 'var(--navy-50)' : 'var(--panel)',
-        borderRadius: 4, marginBottom: 6,
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.5 : 1,
-      }}
-    >
-      <input type="radio" checked={selected} disabled={disabled} onChange={() => !disabled && onSelect()} style={{ marginTop: 3 }} />
-      <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: selected ? accent : 'var(--text)' }}>{title}</div>
-        <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2, lineHeight: 1.5 }}>{desc}</div>
-      </div>
-    </label>
   );
 }
 
@@ -915,7 +895,11 @@ function StatusDot({ tone }: { tone: BadgeTone }) {
 }
 
 function ProgressBar({ pct, tone, color }: { pct: number; tone: StageTone; color: string }) {
-  const fill = tone === 'ok' ? 'var(--green)' : tone === 'idle' ? 'var(--text-4)' : color;
+  const fill =
+    tone === 'ok'  ? 'var(--green)'
+    : tone === 'err' ? 'var(--red)'
+    : tone === 'idle' ? 'var(--text-4)'
+    : color;
   return (
     <div style={{ flex: 1, height: 6, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
       <div style={{ width: `${Math.min(pct, 100)}%`, height: '100%', background: fill, transition: 'width .4s ease' }} />
@@ -936,56 +920,80 @@ const BASE_STAGES: Array<Omit<Stage, 'pct' | 'tone'> & { defaultPct: number; def
 ];
 
 function buildStages(phase: ProjectPhase): Stage[] {
-  /* Snapshot of stages shaped by the project's current phase. Pre-rehearsal phases keep
-     all idle; rehearsal/cutover phases simulate an in-flight pipeline; hypercare/done
-     show all complete. */
-  const runningPhases: ProjectPhase[] = ['rehearsal', 'cutover'];
+  /* activeRun 이 없을 때의 fallback. Pre-rehearsal phases 는 idle, hypercare/done 은 완료 표시. */
   const completePhases: ProjectPhase[] = ['hypercare', 'done'];
-
   if (completePhases.includes(phase)) {
     return BASE_STAGES.map((s) => ({ ...s, pct: 100, tone: 'ok', rate: '—', eta: 'done' }));
-  }
-  if (runningPhases.includes(phase)) {
-    return BASE_STAGES.map((s, i) => {
-      if (i < 2) return { ...s, pct: 100, tone: 'ok', rate: '12.4k rows/s', eta: 'done' };
-      if (i === 2) return { ...s, pct: 42, tone: 'running', rate: '8.1k rows/s', eta: '04:12' };
-      return { ...s, pct: 0, tone: 'idle', rate: '—', eta: '—' };
-    });
-  }
-  /* test / sign-off / ready — mostly idle with first stages possibly done. */
-  if (phase === 'test') {
-    return BASE_STAGES.map((s, i) => i < 2
-      ? { ...s, pct: 100, tone: 'ok', rate: '—', eta: 'done' }
-      : { ...s, pct: s.defaultPct, tone: s.defaultTone, rate: s.rate, eta: s.eta });
   }
   return BASE_STAGES.map((s) => ({ ...s, pct: s.defaultPct, tone: s.defaultTone }));
 }
 
-function animateStages(stages: Stage[], tick: number, running: boolean): Stage[] {
-  if (!running) return stages;
-  return stages.map((s) =>
-    s.tone === 'running'
-      ? { ...s, pct: Math.min(s.pct + ((tick * 0.4) % 3.5), 99) }
-      : s,
-  );
+/** activeRun 의 startedAt + pauseAccumMs 로부터 elapsed ms 를 derive. completed 면 즉시 max. */
+function computeElapsedMs(activeRun: ActiveRunState): number {
+  if (activeRun.runStatus === 'completed') return STAGE_MS * BASE_STAGES.length;
+  const ref = activeRun.pausedAt ?? Date.now();
+  const raw = ref - activeRun.startedAt - activeRun.pauseAccumMs;
+  return Math.max(0, Math.min(raw, STAGE_MS * BASE_STAGES.length));
+}
+
+/** Mock simulation 의 진행 상태를 stage 단위 progress 로 변환.
+ *  Failed: 멈춘 stage 가 'err' (빨강) / Aborted: 멈춘 stage 가 'idle' (회색). 그 외 stage 는 동일 규칙. */
+function buildStagesFromActiveRun(activeRun: ActiveRunState, totalMs: number): Stage[] {
+  const halted = (activeRun.runStatus === 'failed' || activeRun.runStatus === 'aborted')
+    && activeRun.failedStageIndex != null;
+  const haltIdx = activeRun.failedStageIndex ?? -1;
+  const haltedTone: StageTone = activeRun.runStatus === 'failed' ? 'err' : 'idle';
+  const haltedEta = activeRun.runStatus === 'failed' ? 'failed' : 'stopped';
+  const elapsed = computeElapsedMs(activeRun);
+
+  return BASE_STAGES.map((s, i) => {
+    if (halted) {
+      if (i < haltIdx) return { ...s, pct: 100, tone: 'ok' as StageTone, rate: 'mock', eta: 'done' };
+      if (i === haltIdx) {
+        /* 멈춘 stage 의 pct 는 정지 시점까지의 진행률 그대로. */
+        const stageStart = i * STAGE_MS;
+        const partial = Math.max(0, Math.min(elapsed - stageStart, STAGE_MS));
+        const pct = (partial / STAGE_MS) * 100;
+        return { ...s, pct, tone: haltedTone, rate: 'mock', eta: haltedEta };
+      }
+      return { ...s, pct: 0, tone: 'idle' as StageTone, rate: '—', eta: '—' };
+    }
+    const stageStart = i * STAGE_MS;
+    const stageEnd = stageStart + STAGE_MS;
+    if (elapsed >= stageEnd || elapsed >= totalMs) {
+      return { ...s, pct: 100, tone: 'ok' as StageTone, rate: 'mock', eta: 'done' };
+    }
+    if (elapsed > stageStart) {
+      const pct = ((elapsed - stageStart) / STAGE_MS) * 100;
+      const remainSec = Math.ceil((stageEnd - elapsed) / 1000);
+      return { ...s, pct, tone: 'running' as StageTone, rate: 'mock', eta: `00:${String(remainSec).padStart(2, '0')}` };
+    }
+    return { ...s, pct: 0, tone: 'idle' as StageTone, rate: '—', eta: '—' };
+  });
+}
+
+/** ms → MM:SS 문자열. RunHeader 의 elapsed/eta 표시용. */
+function formatDuration(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+/** epoch ms → HH:MM 문자열. startedAt 표시용 (현지 시각 기준). */
+function formatTimeOfDay(ts: number): string {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
 function buildPreflightChecks(
   project: Project,
   selectedTables: string[],
-  isAll: boolean,
   t: T,
-  snapshots: MappingSnapshot[],
-  selectedSnapshotId: string | null,
 ): PreflightCheck[] {
   const asisDdl = project.tableCount > 0;
   const tobeDdl = project.tobeTableCount > 0;
   const bothDdl = asisDdl && tobeDdl;
-  // 사용자가 SnapshotSelector 로 직접 선택한 스냅샷의 status 가 'approved' 인지 검사.
-  // approved 가 아닌 스냅샷 (draft/pending/rejected) 도 선택은 가능하나 검사 결과는 fail.
-  const selectedSnap = selectedSnapshotId
-    ? snapshots.find((s) => s.id === selectedSnapshotId)
-    : undefined;
   const selectedCount = selectedTables.length;
 
   return [
@@ -1043,27 +1051,11 @@ function buildPreflightChecks(
         : t('execution.preflight.check.unmappedCols.pass'),
       status: bothDdl ? 'pass' : 'fail',
     },
-    {
-      id: 'approved-snapshot',
-      title: t('execution.preflight.check.approvedSnapshot.title'),
-      detail: !isAll
-        ? t('execution.preflight.snapshot.skipReason')
-        : !selectedSnap
-          ? t('execution.preflight.check.approvedSnapshot.unselected')
-          : selectedSnap.status === 'approved'
-            ? t('execution.preflight.check.approvedSnapshot.passDetail', { name: selectedSnap.name, version: selectedSnap.version })
-            : t('execution.preflight.check.approvedSnapshot.notApproved', { name: selectedSnap.name, status: selectedSnap.status }),
-      status: !isAll
-        ? 'skip'
-        : !selectedSnap
-          ? 'fail'
-          : selectedSnap.status === 'approved' ? 'pass' : 'fail',
-    },
   ];
 }
 
 /**
- * Demo 결과 — 8개 체크 모두 fail. 사용자가 demo 한 번 진입으로 모든 Fix 흐름
+ * Demo 결과 — 7개 체크 모두 fail. 사용자가 demo 한 번 진입으로 모든 Fix 흐름
  * (도착지·강조) 을 검증할 수 있게 의도적으로 worst-case 시나리오로 통일.
  */
 function buildDemoPreflightChecks(t: T): PreflightCheck[] {
@@ -1075,7 +1067,22 @@ function buildDemoPreflightChecks(t: T): PreflightCheck[] {
     { id: 'tobe-bindings',     title: t('execution.preflight.check.tobeBindings.title'),     detail: t('execution.preflight.demo.tobeBindings.fail'),     status: 'fail' },
     { id: 'asis-unmapped',     title: t('execution.preflight.check.asisUnmapped.title'),     detail: t('execution.preflight.demo.asisUnmapped.fail'),     status: 'fail' },
     { id: 'unmapped-cols',     title: t('execution.preflight.check.unmappedCols.title'),     detail: t('execution.preflight.demo.unmappedCols.fail'),     status: 'fail' },
-    { id: 'approved-snapshot', title: t('execution.preflight.check.approvedSnapshot.title'), detail: t('execution.preflight.check.approvedSnapshot.fail'), status: 'fail' },
+  ];
+}
+
+/**
+ * `?demo=run-fail` 용 — 7개 체크 모두 pass. preflightPassed=true 가 되어 Start 활성화.
+ * 그 후 사용자가 ⚡ Simulate failure 로 실패 시연.
+ */
+function buildDemoPreflightPassChecks(t: T): PreflightCheck[] {
+  return [
+    { id: 'csv-arrived',       title: t('execution.preflight.check.csvArrived.title'),       detail: t('execution.preflight.demo.passDetail'),            status: 'pass' },
+    { id: 'ddl-asis',          title: t('execution.preflight.check.ddlAsis.title'),          detail: t('execution.preflight.demo.passDetail'),            status: 'pass' },
+    { id: 'ddl-tobe',          title: t('execution.preflight.check.ddlTobe.title'),          detail: t('execution.preflight.demo.passDetail'),            status: 'pass' },
+    { id: 'conn-tobe',         title: t('execution.preflight.check.connTobe.title'),         detail: t('execution.preflight.demo.passDetail'),            status: 'pass' },
+    { id: 'tobe-bindings',     title: t('execution.preflight.check.tobeBindings.title'),     detail: t('execution.preflight.demo.passDetail'),            status: 'pass' },
+    { id: 'asis-unmapped',     title: t('execution.preflight.check.asisUnmapped.title'),     detail: t('execution.preflight.demo.passDetail'),            status: 'pass' },
+    { id: 'unmapped-cols',     title: t('execution.preflight.check.unmappedCols.title'),     detail: t('execution.preflight.demo.passDetail'),            status: 'pass' },
   ];
 }
 
@@ -1135,14 +1142,28 @@ const styles: Record<string, React.CSSProperties> = {
   runHeaderLabel: { fontSize: 10.5, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 3 },
   runHeaderMono:  { fontSize: 12, color: 'var(--text-2)', fontFamily: 'var(--mono)' },
 
+  errorBanner: {
+    padding: '10px 18px',
+    borderBottom: '1px solid var(--red)',
+    background: 'var(--red-50)',
+    color: 'var(--red)',
+    fontSize: 12, fontWeight: 500, fontFamily: 'var(--mono)',
+    display: 'flex', alignItems: 'center', gap: 10,
+  },
+
+  warnBanner: {
+    padding: '10px 18px',
+    borderBottom: '1px solid var(--amber)',
+    background: 'var(--amber-50)',
+    color: 'var(--amber)',
+    fontSize: 12, fontWeight: 500, fontFamily: 'var(--mono)',
+    display: 'flex', alignItems: 'center', gap: 10,
+  },
+
   section:        { borderBottom: '1px solid var(--border)' },
   sectionToggle:  { padding: '9px 18px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' },
   sectionLabel:   { fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.6, color: 'var(--text-3)' },
   chev:           { color: 'var(--text-4)', fontSize: 10, width: 10 },
-
-  dialogGroupLabel: {
-    fontSize: 10.5, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8,
-  },
 
   btnPrimary: {
     padding: '6px 14px', border: '1px solid var(--navy)', background: 'var(--navy)', color: '#fff',
