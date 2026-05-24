@@ -193,7 +193,10 @@ public class MappingImportService {
                     } else if (typeCategoriesMatch(row.asisType, row.tobeType)) {
                         row.transformSql = src;
                     } else {
-                        row.transformSql = "CAST(" + src + " AS " + (row.tobeType != null ? row.tobeType : "VARCHAR") + ")";
+                        // CHAR(8) YYYYMMDD / CHAR(14) YYYYMMDDHH24MISS 같은 Oracle 컨벤션 패턴 우선
+                        String strDateSql = tryStringToDateSql(src, row.asisType, row.tobeType);
+                        row.transformSql = strDateSql != null ? strDateSql
+                                : "CAST(" + src + " AS " + (row.tobeType != null ? row.tobeType : "VARCHAR") + ")";
                     }
                     row.transformRule = row.transformSql;
                 }
@@ -758,6 +761,49 @@ public class MappingImportService {
             out.put(e.getKey(), aliasMap);
         }
         return out;
+    }
+
+    /**
+     * AS-IS 가 string 인데 TO-BE 가 DATE/TIMESTAMP 인 경우 — 단순 CAST 로는 변환 안 됨
+     * (DuckDB 가 'YYYYMMDD' 같은 임의 포맷 캐스트 못 함). 컬럼 길이로 Oracle 의 흔한
+     * 포맷 추론해서 STRPTIME 사용.
+     *  - CHAR(8)  → 'YYYYMMDD'
+     *  - CHAR(14) → 'YYYYMMDDHH24MISS'
+     *  - CHAR(10) → 'YYYY-MM-DD'
+     *  - CHAR(19) → 'YYYY-MM-DD HH:MI:SS'
+     * 매칭 안 되면 null 리턴 → 호출부가 일반 CAST 로 폴백.
+     */
+    private static String tryStringToDateSql(String src, String asisType, String tobeType) {
+        if (asisType == null || tobeType == null) return null;
+        if (!"string".equals(typeCategory(asisType))) return null;
+        String t = tobeType.toUpperCase().trim();
+        boolean isDate = t.equals("DATE");
+        boolean isTimestamp = t.startsWith("TIMESTAMP");
+        if (!isDate && !isTimestamp) return null;
+
+        int len = extractCharLength(asisType);
+        String fmt;
+        switch (len) {
+            case 8:  fmt = "%Y%m%d"; break;
+            case 14: fmt = "%Y%m%d%H%M%S"; break;
+            case 10: fmt = "%Y-%m-%d"; break;
+            case 19: fmt = "%Y-%m-%d %H:%M:%S"; break;
+            default: return null;  // unknown — fallback to CAST
+        }
+        String parsed = "STRPTIME(" + src + ", '" + fmt + "')";
+        return isDate ? parsed + "::DATE" : parsed;
+    }
+
+    /** "CHAR(8)" / "VARCHAR2(60 CHAR)" 같은 형식에서 숫자 부분만 추출. */
+    private static int extractCharLength(String type) {
+        if (type == null) return -1;
+        int lp = type.indexOf('('), rp = type.indexOf(')');
+        if (lp < 0 || rp <= lp) return -1;
+        String inside = type.substring(lp + 1, rp).trim();
+        // "8" / "8 CHAR" / "8 BYTE" / "60 CHAR"
+        String[] parts = inside.split("\\s+");
+        try { return Integer.parseInt(parts[0]); }
+        catch (NumberFormatException e) { return -1; }
     }
 
     /** AS-IS / TO-BE 타입이 같은 카테고리면 cast 불필요. */

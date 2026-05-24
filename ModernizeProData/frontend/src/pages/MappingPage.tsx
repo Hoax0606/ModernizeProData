@@ -874,6 +874,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
           savedNotNull: r.notNullOverride || undefined,
           savedStrategy: strat,
           ruleOrigin: r.ruleOrigin,
+          savedNotes: r.notes ?? undefined,
         };
       }
       useMappingEditsStore.getState().replaceRowEdits(projectId, edits);
@@ -1031,7 +1032,9 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         && re.savedStrategy !== 'null' && re.savedStrategy !== 'default') {
       eff = 'unmapped';
     }
-    return eff === r.rule ? r : { ...r, rule: eff };
+    const noteFromEdit = re.savedNotes && re.savedNotes.trim() ? re.savedNotes : undefined;
+    if (eff === r.rule && noteFromEdit === r.note) return r;
+    return { ...r, rule: eff, note: noteFromEdit ?? r.note };
   }), [rows, rowEdits]);
 
   const visibleRows = useMemo(() => allRows.filter((r) => r.rule !== 'skip'), [allRows]);
@@ -1737,7 +1740,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
 }
 
 // Per-row saved edits (lifted to TobeMappingDetail so they survive row switches)
-type RowEdit = { savedSrc?: string[]; savedRule?: string; savedDefault?: string; savedNotNull?: boolean; savedStrategy?: 'expression' | 'null' | 'default'; ruleOrigin?: 'imported' | 'manual' };
+type RowEdit = { savedSrc?: string[]; savedRule?: string; savedDefault?: string; savedNotNull?: boolean; savedStrategy?: 'expression' | 'null' | 'default'; ruleOrigin?: 'imported' | 'manual'; savedNotes?: string };
 
 // Module-level helper so it can be called from useEffect closures
 function resolveSrcType(s: string, sources: TobeTable['sources']): string {
@@ -1804,7 +1807,19 @@ const _cmt = (s: string) => `<span style="color:#7a8aa6">${_e(s)}</span>`;
 const _num = (s: string) => `<span style="color:#79c0ff">${_e(s)}</span>`;
 const _def = (s: string) => `<span style="color:#cad7e8">${_e(s)}</span>`;
 
-const SQL_KW = new Set(['SELECT','FROM','WHERE','AND','OR','NOT','IN','IS','NULL','AS','CAST','JOIN','LEFT','RIGHT','INNER','OUTER','FULL','ON','TO_DATE','TO_TIMESTAMP','ICONV','UNPACK_COMP3','DROP','DEFAULT','UNION','ALL','DISTINCT','CASE','WHEN','THEN','ELSE','END','TRUE','FALSE','WITH','INSERT','UPDATE','DELETE','LIKE','BETWEEN','EXISTS','COALESCE','NULLIF','TRIM','UPPER','LOWER','SUBSTR','SUBSTRING','LENGTH','CONCAT','EXTRACT','NOW','CURRENT_DATE','CURRENT_TIMESTAMP','NUMERIC','INTEGER','VARCHAR','CHAR','DATE','TIMESTAMP','BOOLEAN','UUID','TEXT','JSONB','INT','BIGINT','FLOAT','DOUBLE','USING','INTO','RETURNS','ORDER','GROUP','BY','HAVING','LIMIT','OFFSET']);
+const SQL_KW = new Set(['SELECT','FROM','WHERE','AND','OR','NOT','IN','IS','NULL','AS','CAST','TRY_CAST','JOIN','LEFT','RIGHT','INNER','OUTER','FULL','ON','TO_DATE','TO_TIMESTAMP','STRPTIME','ICONV','UNPACK_COMP3','DROP','DEFAULT','UNION','ALL','DISTINCT','CASE','WHEN','THEN','ELSE','END','TRUE','FALSE','WITH','INSERT','UPDATE','DELETE','LIKE','BETWEEN','EXISTS','COALESCE','NULLIF','TRIM','UPPER','LOWER','SUBSTR','SUBSTRING','LENGTH','CONCAT','EXTRACT','NOW','CURRENT_DATE','CURRENT_TIMESTAMP','NUMERIC','INTEGER','VARCHAR','CHAR','DATE','TIMESTAMP','BOOLEAN','UUID','TEXT','JSONB','INT','BIGINT','FLOAT','DOUBLE','USING','INTO','RETURNS','ORDER','GROUP','BY','HAVING','LIMIT','OFFSET']);
+
+/**
+ * SQL 키워드/함수만 대문자화. 문자열 리터럴('...') 과 식별자(컬럼/별칭) 는 원본 그대로.
+ * Transform 입력에서 사용자가 친 컬럼명/리터럴이 자동으로 대문자화되면 DB 데이터까지 망가지기 때문.
+ */
+function upperSqlKeywords(s: string): string {
+  return s.replace(/'(?:[^']|'')*'|[A-Za-z_][A-Za-z_0-9]*/g, (m) => {
+    if (m.startsWith("'")) return m;
+    const u = m.toUpperCase();
+    return SQL_KW.has(u) ? u : m;
+  });
+}
 
 function highlightSql(raw: string): string {
   const out: string[] = [];
@@ -2012,6 +2027,8 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   const [savedStrategy, setSavedStrategy] = useState<'expression' | 'null' | 'default' | null>(null);
   const [userFnOpen, setUserFnOpen] = useState(false);
   const [javaCode, setJavaCode] = useState('');
+  const [notesOpen, setNotesOpen] = useState(false);
+  useEffect(() => { setNotesOpen(false); }, [active?.tgt]);
   useEffect(() => {
     // 같은 컬럼이면 effective rule 갱신으로 active 객체 reference 가 새로 만들어져도
     // 편집 모드를 종료하지 않는다 — active.tgt 만 dep 로 사용.
@@ -2040,7 +2057,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     // AS-IS type 을 TO-BE dialect 로 정규화한 결과가 TO-BE 컬럼 type 과 같으면 단순 컬럼.
     const translatedSrcT = translateTypeToTobe(srcT, TOBE_DIALECT);
     const same = translatedSrcT.toUpperCase() === active.tgtType.toUpperCase();
-    return (same ? srcCol : `CAST(${srcCol} AS ${active.tgtType})`).toUpperCase();
+    return same ? srcCol : `CAST(${srcCol} AS ${active.tgtType})`;
   };
 
   const handleEdit = () => {
@@ -2052,7 +2069,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
       || (active.src !== '—' ? (active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src) : undefined);
     const initialAutoCast = computeAutoCast(firstSrcForCast);
     prevAutoCastRef.current = initialAutoCast;
-    setEditValue((savedRule ?? initialAutoCast).toUpperCase());
+    setEditValue(savedRule ?? initialAutoCast);
     // Filter out stale alias references no longer present in current binding
     const rawSrc = savedSrc ?? initSrc;
     const cleanedSrc = rawSrc.filter((s) => {
@@ -2216,6 +2233,52 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
             ? <span style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-2)' }}>{active.ddlDefault}</span>
             : <span style={{ color: 'var(--text-4)' }}>—</span>}
         </MetaRow>
+        <MetaRow k="Notes">
+          {active.note ? (
+            <button
+              type="button"
+              onClick={() => setNotesOpen((v) => !v)}
+              title={notesOpen ? 'Collapse' : 'Expand'}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                padding: 0,
+                cursor: 'pointer',
+                color: 'var(--navy)',
+                lineHeight: 1,
+                fontFamily: 'inherit',
+              }}
+            >
+              <i
+                className="fa-regular"
+                style={{
+                  fontSize: 13,
+                  color: 'var(--navy)',
+                  transform: notesOpen ? 'rotate(180deg)' : 'none',
+                  transition: 'transform 0.15s',
+                  display: 'inline-block',
+                }}
+              >&#xf150;</i>
+            </button>
+          ) : (
+            <span style={{ color: 'var(--text-4)' }}>—</span>
+          )}
+        </MetaRow>
+        {active.note && notesOpen && (
+          <div style={{
+            margin: '4px 0 8px',
+            padding: '6px 8px',
+            background: 'var(--panel-2)',
+            border: '1px solid var(--border-strong)',
+            borderRadius: 4,
+            fontSize: 11.5,
+            color: 'var(--text-2)',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}>
+            {active.note}
+          </div>
+        )}
       </div>
 
       <div style={styles.section}>
@@ -2269,7 +2332,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
                 <>
                   <HighlightEditor
                     value={editValue}
-                    onChange={(v) => { setEditValue(v.toUpperCase()); if (ruleError) setRuleError(null); }}
+                    onChange={(v) => { setEditValue(upperSqlKeywords(v)); if (ruleError) setRuleError(null); }}
                     language="sql"
                     placeholder={transformPlain(active)}
                     hasError={!!ruleError}

@@ -103,7 +103,6 @@ public class MappingReportService {
         }
 
         String sql = buildSql(binding, rules, baseDir, effLimit);
-        log.debug("Report SQL for {}.{}: {}", schema, tobeTable, sql);
 
         List<String> headers = new ArrayList<>();
         List<List<String>> outRows = new ArrayList<>();
