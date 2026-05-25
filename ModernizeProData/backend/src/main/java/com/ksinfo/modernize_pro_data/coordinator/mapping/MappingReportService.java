@@ -60,7 +60,8 @@ public class MappingReportService {
             String errorKind,        // EXPRESSION_FAILED | FROM_FAILED | NO_RULES | UNKNOWN | null
             String errorColumn,      // EXPRESSION_FAILED 일 때 컬럼명
             String errorExpression,  // EXPRESSION_FAILED 일 때 표현식
-            String errorType         // SYNTAX | BINDER | CATALOG | CONVERSION | IO | UNKNOWN | null
+            String errorType,        // SYNTAX | BINDER | CATALOG | CONVERSION | IO | UNKNOWN | null
+            String errorHint         // DuckDB raw 메시지의 첫 줄 (값/포맷/참조 등 결정적 힌트)
     ) {}
 
     @Transactional(readOnly = true)
@@ -104,7 +105,7 @@ public class MappingReportService {
         if (rules.isEmpty()) {
             return new ReportResult(schema, tobeTable, List.of(), List.of(), 0, false, null,
                     "이 TO-BE 테이블에 적용된 mapping_rules 가 없습니다. Mapping definition 임포트 후 다시 시도하세요.",
-                    "NO_RULES", null, null, null);
+                    "NO_RULES", null, null, null, null);
         }
 
         String sql = buildSql(binding, rules, baseDir, effLimit);
@@ -133,7 +134,7 @@ public class MappingReportService {
             return identifyFailingRule(schema, tobeTable, headers, sql, binding, rules, baseDir, e.getMessage());
         }
         return new ReportResult(schema, tobeTable, headers, outRows, outRows.size(), truncated, sql, null,
-                null, null, null, null);
+                null, null, null, null, null);
     }
 
     /**
@@ -150,13 +151,14 @@ public class MappingReportService {
                                              String sql, MappingTableBinding binding,
                                              List<MappingRule> rules, Path baseDir, String origMessage) {
         String origType = classifyDuckDbErrorCode(origMessage);
+        String origHint = extractHint(origMessage);
         if (binding == null || binding.getSources().isEmpty()) {
-            return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType,
+            return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType, origHint,
                     "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
         }
         String fromClause = buildFromClause(binding, rules, baseDir);
         if (fromClause.isEmpty()) {
-            return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType,
+            return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType, origHint,
                     "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
         }
         // 1. FROM 자체 검증
@@ -167,39 +169,59 @@ public class MappingReportService {
         } catch (SQLException e) {
             log.warn("Report FROM-clause probe failed: {}", e.getMessage());
             String t = classifyDuckDbErrorCode(e.getMessage());
-            return errorResult(schema, tobeTable, headers, sql, "FROM_FAILED", null, null, t,
+            return errorResult(schema, tobeTable, headers, sql, "FROM_FAILED", null, null, t, extractHint(e.getMessage()),
                     "AS-IS 데이터 로드 또는 JOIN/WHERE 절에서 오류가 발생했습니다.\n"
                             + "오류 종류: " + classifyDuckDbErrorMessage(e.getMessage()));
         }
-        // 2. expression 별 검증
+        // 2. expression 별 검증.
+        // LIMIT 0 은 parsing/binding 만 본다 — CAST/STRPTIME 같은 runtime conversion 실패는
+        // 데이터를 실제로 흘려야 잡힌다. PROBE_LIMIT rows 만큼 실제 변환을 시도하면
+        // "어느 컬럼" 까지 식별 가능. 컬럼 N 개 × PROBE_LIMIT rows 라 비용 미미.
+        final int PROBE_LIMIT = 20;
         for (MappingRule r : rules) {
             if ("skip".equals(r.getStrategy())) continue;
             String expr = exprForRule(r);
             if ("NULL".equals(expr)) continue;  // 상수 NULL 은 검증 의미 없음
-            String probe = "SELECT " + expr + " AS probe " + fromClause + " LIMIT 0";
+            String probe = "SELECT " + expr + " AS probe " + fromClause + " LIMIT " + PROBE_LIMIT;
             try (Statement st = duckDbService.statement();
                  ResultSet rs = st.executeQuery(probe)) {
-                // OK
+                // 데이터 실제로 끝까지 흘려서 row-level conversion 도 trigger.
+                while (rs.next()) { rs.getObject(1); }
             } catch (SQLException e) {
                 log.warn("Report expression probe failed for column {}: {}", r.getTobeColumn(), e.getMessage());
                 String t = classifyDuckDbErrorCode(e.getMessage());
                 return errorResult(schema, tobeTable, headers, sql,
-                        "EXPRESSION_FAILED", r.getTobeColumn(), expr, t,
+                        "EXPRESSION_FAILED", r.getTobeColumn(), expr, t, extractHint(e.getMessage()),
                         "컬럼 \"" + r.getTobeColumn() + "\" 의 변환식에서 오류가 발생했습니다.\n"
                                 + "표현식: " + expr + "\n"
                                 + "오류 종류: " + classifyDuckDbErrorMessage(e.getMessage()));
             }
         }
         // 식별 실패 — UNKNOWN
-        return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType,
+        return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType, origHint,
                 "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
     }
 
     private static ReportResult errorResult(String schema, String tobeTable, List<String> headers,
                                             String sql, String kind, String col, String expr,
-                                            String type, String legacy) {
+                                            String type, String hint, String legacy) {
         return new ReportResult(schema, tobeTable, headers, List.of(), 0, false, sql, legacy,
-                kind, col, expr, type);
+                kind, col, expr, type, hint);
+    }
+
+    /**
+     * DuckDB 의 raw 에러 메시지에서 결정적 힌트 한 줄만 추출.
+     *   예) "Conversion Error: Could not parse string \"2024/03/31\" according to format specifier \"%Y-%m-%d\""
+     *       → "Could not parse string \"2024/03/31\" according to format specifier \"%Y-%m-%d\""
+     * "{Type} Error:" prefix 제거, 첫 줄 + 길이 200 자 캡.
+     */
+    private static String extractHint(String msg) {
+        if (msg == null) return null;
+        String stripped = msg.replaceAll("(?i)^\\s*(parser|binder|catalog|conversion|io|runtime|invalid input|out of range)\\s+error:\\s*", "").trim();
+        int newline = stripped.indexOf('\n');
+        if (newline > 0) stripped = stripped.substring(0, newline).trim();
+        if (stripped.length() > 200) stripped = stripped.substring(0, 197) + "...";
+        return stripped.isEmpty() ? null : stripped;
     }
 
     /** DuckDB 메시지 → 구조화 type 코드 (프론트 i18n 키 매칭용). */

@@ -1412,7 +1412,7 @@ function AutocompleteInput({
     const word = value.slice(s, pos);
     if (word.length < 1) { setAcItems([]); return; }
     const lo = word.toLowerCase();
-    const hits = completions.filter((c) => c.toLowerCase().startsWith(lo) && c.toLowerCase() !== lo).slice(0, 10);
+    const hits = completions.filter((c) => c.toLowerCase().includes(lo) && c.toLowerCase() !== lo).slice(0, 10);
     setAcItems(hits);
     setAcIdx(0);
   }, [value, focused, completions]);
@@ -1927,7 +1927,7 @@ function HighlightEditor({
     const word = value.slice(s, pos);
     if (word.length < 1) { setAcItems([]); return; }
     const lo = word.toLowerCase();
-    const hits = completions.filter((c) => c.toLowerCase().startsWith(lo) && c.toLowerCase() !== lo).slice(0, 10);
+    const hits = completions.filter((c) => c.toLowerCase().includes(lo) && c.toLowerCase() !== lo).slice(0, 10);
     setAcItems(hits);
     setAcIdx(0);
   }, [value, isFocused]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -2050,6 +2050,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   onSave: (edit: RowEdit) => void;
   onClose: () => void;
 }) {
+  const t = useT();
   const [editingRule, setEditingRule] = useState(false);
   const [editValue, setEditValue] = useState('');
   const [savedRule, setSavedRule] = useState<string | null>(null);
@@ -2109,12 +2110,13 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     const filledSrcs = cleanedSrc.filter((s) => s && s.trim() !== '');
 
     // 자동 CAST 생성:
-    //   - source 가 2개 이상 (combine) → 자동 생성 X, '-- combine' 주석으로 사용자가 직접 입력 유도
-    //   - source 1개 → computeAutoCast 로 dialect 변환표 적용한 CAST
+    //   - source 가 2개 이상 (combine) → editValue 는 빈 칸. placeholder 가 '-- combine' 안내 표시.
+    //     클릭 시 placeholder 사라지고 사용자가 바로 입력 가능.
+    //   - source 1개 → computeAutoCast 로 dialect 변환표 적용한 CAST 를 editValue 에 채움 (편집 시작점)
     //   - source 0개 → 빈 자동값 (computeAutoCast 가 '' 반환)
     let initialAutoCast: string;
     if (filledSrcs.length > 1) {
-      initialAutoCast = t('mapping.inspector.combineHint');
+      initialAutoCast = '';
     } else {
       const firstSrcForCast = filledSrcs[0]
         || (active.src !== '—' ? (active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src) : undefined);
@@ -2161,11 +2163,12 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     const filledSrcs = nextEditSrc.filter((s) => s && s.trim() !== '');
     let newAutoCast: string;
     if (filledSrcs.length > 1) {
-      newAutoCast = t('mapping.inspector.combineHint');
+      // combine — 빈 칸으로 두고 placeholder 가 '-- combine' 안내 표시.
+      newAutoCast = '';
     } else if (filledSrcs.length === 1) {
       newAutoCast = computeAutoCast(filledSrcs[0]);
     } else {
-      newAutoCast = '-- NOT MAPPED YET — PICK A STRATEGY';
+      newAutoCast = '';
     }
     if (editValue === prevAutoCastRef.current) {
       setEditValue(newAutoCast);
@@ -3151,9 +3154,25 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
                     wordBreak: 'break-word',
                     verticalAlign: 'top',
                     borderBottom: '1px solid #f5b5b5',
+                    userSelect: 'text',
+                    cursor: 'text',
+                    position: 'relative',
                   }}
                 >
-                  ⚠ {buildReportErrorMessage(report, t)}
+                  <button
+                    type="button"
+                    onClick={() => { void navigator.clipboard.writeText(buildReportErrorMessage(report, t)); }}
+                    title="에러 메시지를 클립보드에 복사"
+                    style={{
+                      position: 'absolute', top: 8, right: 10,
+                      padding: '2px 8px', fontSize: 10.5,
+                      fontFamily: 'var(--mono)',
+                      color: '#a02020', background: '#fff5f5',
+                      border: '1px solid #f5b5b5', borderRadius: 3,
+                      cursor: 'pointer', userSelect: 'none',
+                    }}
+                  >Copy</button>
+                  <div style={{ userSelect: 'text' }}>⚠ {buildReportErrorMessage(report, t)}</div>
                 </td>
               </tr>
             ) : Array.from({ length: dataRowCount }, (_, i) => {
@@ -3250,19 +3269,22 @@ function buildReportErrorMessage(
   const typeKey = report.errorType ?? 'UNKNOWN';
   const typeLabel = t(`mapping.report.error.type.${typeKey}` as TranslationKey);
   const typeLine = `${t('mapping.report.error.typeLabel')}: ${typeLabel}`;
+  const hintLine = report.errorHint
+    ? `\n${t('mapping.report.error.hintLabel')}: ${report.errorHint}`
+    : '';
   if (report.errorKind === 'EXPRESSION_FAILED' && report.errorColumn) {
     const head = t('mapping.report.error.expressionFailed', { column: report.errorColumn });
     const expr = `${t('mapping.report.error.expressionLabel')}: ${report.errorExpression ?? ''}`;
-    return `${head}\n${expr}\n${typeLine}`;
+    return `${head}\n${expr}\n${typeLine}${hintLine}`;
   }
   if (report.errorKind === 'FROM_FAILED') {
-    return `${t('mapping.report.error.fromFailed')}\n${typeLine}`;
+    return `${t('mapping.report.error.fromFailed')}\n${typeLine}${hintLine}`;
   }
   if (report.errorKind === 'NO_RULES') {
     return t('mapping.report.error.noRules');
   }
-  // UNKNOWN 또는 누락 — 일반 메시지 + 분류 라벨
-  return `${t('mapping.report.error.unknown')}\n${typeLine}`;
+  // UNKNOWN 또는 누락 — 일반 메시지 + 분류 라벨 + 힌트
+  return `${t('mapping.report.error.unknown')}\n${typeLine}${hintLine}`;
 }
 
 function MetaRow({ k, children }: { k: string; children: React.ReactNode }) {
