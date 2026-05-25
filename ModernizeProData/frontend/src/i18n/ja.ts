@@ -100,6 +100,10 @@ export const ja: Record<TranslationKey, string> = {
   // Scheduler — Trigger examples docs (pre block comments)
   'scheduler.external.docs.bulkComment':        '# 全プロジェクト一斉実行',
   'scheduler.external.docs.singleComment':      '# 単一プロジェクト実行 (project 毎)',
+  'scheduler.external.docs.shellLabel':         'Shell',
+  'scheduler.external.docs.shellBash':          'Linux / Unix scheduler (cron, JP1, Control-M)',
+  'scheduler.external.docs.shellWindows':       'Windows scheduler (Task Scheduler, Windows agent)',
+  'scheduler.external.docs.shellPowershell':    'PowerShell (curl.exe)',
 
   'auditLog.title':              'Audit log',
   'auditLog.subtitle':           'サイト全体の audit イベント — ユーザー操作・システムイベント・実行履歴',
@@ -158,8 +162,8 @@ export const ja: Record<TranslationKey, string> = {
   'solution.notifications.enable': 'Enable notifications',
   'solution.notifications.enableDesc': 'オフにすると全プロジェクトのアプリ内通知が一括無効化されます。',
   'solution.internal': 'Internal scheduler',
-  'solution.internal.desc': 'Coordinator 内蔵の Quartz が毎日 Nightly rehearsal を自動実行します。ONの場合、Project Settings → Schedule で開始時刻が設定された project の trigger が発火します。External integrations と同時に ON にはできません (片方を ON にするともう片方は自動 OFF)。',
-  'solution.internal.activeHint':   '有効 — Project Settings → Schedule で開始時刻が設定された project が Quartz で発火',
+  'solution.internal.desc': 'Coordinator 内蔵の Quartz スケジューラが、対象プロジェクトの run を毎日 1 回自動起動します。Mode = Common なら全プロジェクトを同じ時刻に、Mode = Individual なら Project ごとに設定した時刻に発火。起動される run の種類はその時点の phase により決まります (test → test run / rehearsal → rehearsal run / ready → cutover run)。External integrations と同時には ON にできません (片方を ON にするともう片方は自動 OFF)。',
+  'solution.internal.activeHint':   '有効 — Mode の設定に従って全プロジェクト (Common) または Project ごと (Individual) に日次自動起動',
   'solution.internal.inactiveHint': '無効 — Quartz Nightly trigger は発火しない',
   'solution.external': 'External integrations',
   'solution.external.desc': '既存外部スケジューラー (Control-M / Airflow / Jenkins / cron) を運用中で、そちらから本ツールの run をトリガーしたい場合のみオン。オンにすると外部 CLI / API 入口が開き、同時に内蔵 Quartz Nightly が自動 OFF になります (mutex)。',
@@ -173,8 +177,8 @@ export const ja: Record<TranslationKey, string> = {
   'solution.external.tokenRevealWarning': 'このトークンは今回のみ表示されます。モーダルを閉じると再表示は不可能なので、外部スケジューラーの設定にすぐ貼り付けてください。紛失時は Regenerate で新トークン発行が必要 (旧トークンは即時無効化)。',
   'solution.external.tokenCopy': 'Copy',
   'solution.external.tokenCopied': 'Copied!',
-  'solution.external.triggerExamples.title': 'Trigger examples',
-  'solution.external.triggerExamples.desc':  '外部スケジューラから本ツールを trigger する curl コマンド例。下記の URL・token・project ID は上で入力した値が埋め込まれています。そのままコピペで実行可能。',
+  'solution.external.triggerExamples.title': 'Trigger commands',
+  'solution.external.triggerExamples.desc':  '外部スケジューラから本ツールを trigger する curl コマンド。URL と token は上で入力した値、project ID は本ツール内で作成済みの各 project の ID が埋め込まれています。そのままコピペで実行可能。',
   'solution.savedToast': '設定を保存しました。',
 
   'solution.license':            'License',

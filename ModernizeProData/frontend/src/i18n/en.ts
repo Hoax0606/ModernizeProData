@@ -94,6 +94,10 @@ export const en: Record<TranslationKey, string> = {
   // Scheduler — Trigger examples docs (pre block comments)
   'scheduler.external.docs.bulkComment':        '# Run ALL projects at once',
   'scheduler.external.docs.singleComment':      '# Run a single project (per project)',
+  'scheduler.external.docs.shellLabel':         'Shell',
+  'scheduler.external.docs.shellBash':          'Linux / Unix scheduler (cron, JP1, Control-M)',
+  'scheduler.external.docs.shellWindows':       'Windows scheduler (Task Scheduler, Windows agent)',
+  'scheduler.external.docs.shellPowershell':    'PowerShell (curl.exe)',
 
   'auditLog.title':              'Audit log',
   'auditLog.subtitle':           'Site-wide audit events — user actions, system events, run history',
@@ -152,8 +156,8 @@ export const en: Record<TranslationKey, string> = {
   'solution.notifications.enable': 'Enable notifications',
   'solution.notifications.enableDesc': 'Turning off disables in-app notifications across all projects.',
   'solution.internal': 'Internal scheduler',
-  'solution.internal.desc': 'Coordinator-embedded Quartz fires nightly rehearsal triggers. When ON, projects with a start_time set in Project Settings → Schedule will fire on that time. Cannot be ON at the same time as External integrations (turning one on automatically turns the other off).',
-  'solution.internal.activeHint':   'Enabled — projects with a start_time configured in Project Settings → Schedule will fire via Quartz',
+  'solution.internal.desc': 'The Coordinator-embedded Quartz scheduler fires a run for eligible projects once a day. With Mode = Common, all projects fire at the same time; with Mode = Individual, each project fires at its own configured time. The run type is decided by the current phase (test → test run, rehearsal → rehearsal run, ready → cutover run). Cannot be ON at the same time as External integrations (turning one on automatically turns the other off).',
+  'solution.internal.activeHint':   'Enabled — projects fire daily, either all at once (Common) or per project (Individual)',
   'solution.internal.inactiveHint': 'Disabled — Quartz nightly triggers will not fire',
   'solution.external': 'External integrations',
   'solution.external.desc': 'Turn on only if your ops team already uses an external scheduler (Control-M / Airflow / Jenkins / cron) and wants to trigger runs from there. Turning on opens the external CLI / API entrypoints AND automatically turns the internal Quartz scheduler off (mutex).',
@@ -167,8 +171,8 @@ export const en: Record<TranslationKey, string> = {
   'solution.external.tokenRevealWarning': 'This token is shown only this once. Closing this dialog destroys it — paste it into the external scheduler config immediately. If lost, use Regenerate to issue a new token (the previous one is revoked instantly).',
   'solution.external.tokenCopy': 'Copy',
   'solution.external.tokenCopied': 'Copied!',
-  'solution.external.triggerExamples.title': 'Trigger examples',
-  'solution.external.triggerExamples.desc':  'curl examples showing how an external scheduler triggers this tool. The URL, token, and project ID below are embedded from the values you entered above and can be copy-pasted as-is.',
+  'solution.external.triggerExamples.title': 'Trigger commands',
+  'solution.external.triggerExamples.desc':  'curl commands an external scheduler can use to trigger this tool. The URL and token come from the values you entered above; project IDs are populated from the projects created in this tool. Copy and run as-is.',
   'solution.savedToast': 'Settings saved',
 
   'solution.license':            'License',

@@ -67,6 +67,12 @@ export function SchedulerPage() {
   const [saving, setSaving] = useState(false);
   const [savedToast, setSavedToast] = useState(false);
 
+  // Trigger examples docs の shell type 切替.
+  //   bash       — `-d '{...}'`
+  //   windows    — `-d "{\"...\"}"` (cmd / Task Scheduler)
+  //   powershell — `curl.exe --% ...` + windows escape (PowerShell の引数加工を `--%` で回避)
+  const [shellMode, setShellMode] = useState<'bash' | 'windows' | 'powershell'>('bash');
+
   useEffect(() => {
     fetchSites().then(() => {
       useWorkspaceStore.getState().sites.forEach((s) => fetchProjects(s.id));
@@ -331,12 +337,21 @@ export function SchedulerPage() {
   //   - 未登録 / legacy row 等で plain 取れない場合は <YOUR_TOKEN> placeholder
   const tokenForDocs = credential?.tokenPlain ?? '<YOUR_TOKEN>';
 
-  // 単一プロジェクト実行コマンドを全 project 分展開.
+  // 1 行表記: bash の `\` line continuation は PowerShell/cmd で解釈が違うため避ける.
+  // curl の起動行と body のクォート形式を shellMode で切替.
+  //   bash         : curl ... -d '{...}'
+  //   windows      : curl ... -d "{\"...\"}"
+  //   powershell   : curl.exe --% ... -d "{\"...\"}"   (--% で PowerShell の引数加工を停止)
+  const curlCmd = shellMode === 'powershell' ? 'curl.exe --%' : 'curl';
+  const bulkCommand = `${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs/all -H "Authorization: Bearer ${tokenForDocs}"`;
   const singleProjectCommands = projects.length === 0
     ? '# (project 未作成 — All Projects 画面で project を作成すると単発実行コマンドがここに表示されます)'
-    : projects.map((p) =>
-        `# ${p.name} (phase=${p.phase})\ncurl -X POST ${coordinatorUrl}/api/v1/runs \\\n  -H "Authorization: Bearer ${tokenForDocs}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"projectId":"${p.id}"}'`
-      ).join('\n\n');
+    : projects.map((p) => {
+        const body = shellMode === 'bash'
+          ? `'{"projectId":"${p.id}"}'`
+          : `"{\\"projectId\\":\\"${p.id}\\"}"`;
+        return `# ${p.name} (phase=${p.phase})\n${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs -H "Authorization: Bearer ${tokenForDocs}" -H "Content-Type: application/json" -d ${body}`;
+      }).join('\n\n');
 
   return (
     <div style={styles.page}>
@@ -581,6 +596,24 @@ export function SchedulerPage() {
             <div style={{ fontSize: 11, color: 'var(--text-3)', lineHeight: 1.5, marginBottom: 8 }}>
               {t('solution.external.triggerExamples.desc')}
             </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <span style={{ fontSize: 11, color: 'var(--text-3)' }}>
+                {t('scheduler.external.docs.shellLabel')}:
+              </span>
+              <select
+                value={shellMode}
+                onChange={(e) => setShellMode(e.target.value as 'bash' | 'windows' | 'powershell')}
+                style={{
+                  fontSize: 11, padding: '2px 6px',
+                  background: 'var(--panel-2)', color: 'var(--text)',
+                  border: '1px solid var(--border)', borderRadius: 3,
+                }}
+              >
+                <option value="bash">{t('scheduler.external.docs.shellBash')}</option>
+                <option value="windows">{t('scheduler.external.docs.shellWindows')}</option>
+                <option value="powershell">{t('scheduler.external.docs.shellPowershell')}</option>
+              </select>
+            </div>
             <pre style={{
               padding: 10, margin: 0,
               background: '#0e1a2b', color: '#cad7e8',
@@ -589,8 +622,7 @@ export function SchedulerPage() {
               whiteSpace: 'pre-wrap',
             }}>
 {`${t('scheduler.external.docs.bulkComment')}
-curl -X POST ${coordinatorUrl}/api/v1/runs/all \\
-  -H "Authorization: Bearer ${tokenForDocs}"
+${bulkCommand}
 
 ${t('scheduler.external.docs.singleComment')}
 ${singleProjectCommands}`}

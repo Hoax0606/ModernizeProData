@@ -98,6 +98,10 @@ export const ko = {
   // Scheduler — Trigger examples docs (pre block comments)
   'scheduler.external.docs.bulkComment':        '# 전체 프로젝트 일괄 실행',
   'scheduler.external.docs.singleComment':      '# 단일 프로젝트 실행 (project 별)',
+  'scheduler.external.docs.shellLabel':         'Shell',
+  'scheduler.external.docs.shellBash':          'Linux / Unix scheduler (cron, JP1, Control-M)',
+  'scheduler.external.docs.shellWindows':       'Windows scheduler (Task Scheduler, Windows agent)',
+  'scheduler.external.docs.shellPowershell':    'PowerShell (curl.exe)',
 
   'auditLog.title':              'Audit log',
   'auditLog.subtitle':           '사이트 전체 audit 이벤트 — 사용자 액션·시스템 이벤트·실행 기록',
@@ -156,8 +160,8 @@ export const ko = {
   'solution.notifications.enable': 'Enable notifications',
   'solution.notifications.enableDesc': '끄면 모든 프로젝트의 인앱 알림이 일괄 비활성화됩니다.',
   'solution.internal': 'Internal scheduler',
-  'solution.internal.desc': 'Coordinator 내장 Quartz 가 매일 Nightly rehearsal 을 자동 실행합니다. 켜져 있으면 Project Settings → Schedule 에서 시작 시각이 설정된 project 의 trigger 가 발화합니다. External integrations 와 동시에 ON 으로 둘 수 없습니다 (한쪽 켜면 다른 쪽이 자동으로 OFF).',
-  'solution.internal.activeHint':   '활성화됨 — Project Settings → Schedule 에서 시작 시각이 설정된 project 가 Quartz 로 발화',
+  'solution.internal.desc': 'Coordinator 내장 Quartz 스케줄러가 대상 프로젝트의 run 을 매일 1 회 자동 기동합니다. Mode = Common 이면 전체 프로젝트를 같은 시각에, Mode = Individual 이면 Project 별로 설정한 시각에 발화. 기동되는 run 의 종류는 그 시점의 phase 에 따라 결정됩니다 (test → test run / rehearsal → rehearsal run / ready → cutover run). External integrations 와 동시에 ON 으로 둘 수 없습니다 (한쪽 켜면 다른 쪽이 자동 OFF).',
+  'solution.internal.activeHint':   '활성화됨 — Mode 설정에 따라 전체 프로젝트 (Common) 또는 Project 별 (Individual) 로 일일 자동 기동',
   'solution.internal.inactiveHint': '비활성화 — Quartz Nightly trigger 는 발화되지 않음',
   'solution.external': 'External integrations',
   'solution.external.desc': '기존 외부 스케줄러(Control-M / Airflow / Jenkins / cron)를 이미 운용 중이고 그쪽에서 본 도구의 run 을 트리거하고 싶을 때만 켜세요. 켜면 외부 CLI / API 진입점이 열리고 동시에 내장 Quartz Nightly 가 자동 OFF 됩니다 (mutex).',
@@ -171,8 +175,8 @@ export const ko = {
   'solution.external.tokenRevealWarning': '이 token 은 이번에만 표시됩니다. 모달을 닫으면 다시 볼 수 없으니, 외부 스케줄러 설정에 즉시 붙여 넣으세요. 분실 시에는 Regenerate 로 새 token 을 발급해야 합니다 (기존은 즉시 무효화).',
   'solution.external.tokenCopy': 'Copy',
   'solution.external.tokenCopied': 'Copied!',
-  'solution.external.triggerExamples.title': 'Trigger examples',
-  'solution.external.triggerExamples.desc':  '외부 스케줄러에서 본 도구를 trigger 하는 curl 커맨드 예시. 아래의 URL · token · project ID 는 위에서 입력한 값이 임베드되어 있어 그대로 복사하여 실행 가능합니다.',
+  'solution.external.triggerExamples.title': 'Trigger commands',
+  'solution.external.triggerExamples.desc':  '외부 스케줄러에서 본 도구를 trigger 하는 curl 명령. URL 과 token 은 위에서 입력한 값, project ID 는 본 도구에서 생성된 각 project 의 ID 가 들어가 있습니다. 그대로 복사하여 실행 가능.',
   'solution.savedToast': '설정이 저장되었습니다.',
 
   'solution.license':            'License',
