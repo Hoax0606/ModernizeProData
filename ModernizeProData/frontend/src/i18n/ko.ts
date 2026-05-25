@@ -876,6 +876,7 @@ export const ko = {
   'siteOverview.btn.savingAssignees': 'Saving…',
   'siteOverview.btn.discardAssignees':'Discard',
   'siteOverview.empty':        '프로젝트가 없습니다.',
+  'siteOverview.pendingSnapshotIcon.title': '스냅샷 승인 대기 중',
 
   'siteExport.title':       'Site export',
   'siteExport.subtitle':    '이 사이트의 모든 프로젝트·매핑·산출물 일괄 export',

@@ -871,6 +871,7 @@ export const en: Record<TranslationKey, string> = {
   'siteOverview.btn.savingAssignees': 'Saving…',
   'siteOverview.btn.discardAssignees':'Discard',
   'siteOverview.empty':        'No projects',
+  'siteOverview.pendingSnapshotIcon.title': 'Snapshot waiting for approval',
 
   'siteExport.title':       'Site export',
   'siteExport.subtitle':    'Bulk export of all projects, mappings, and artifacts in this site',

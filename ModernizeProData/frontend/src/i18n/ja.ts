@@ -876,6 +876,7 @@ export const ja: Record<TranslationKey, string> = {
   'siteOverview.btn.savingAssignees': 'Saving…',
   'siteOverview.btn.discardAssignees':'Discard',
   'siteOverview.empty':        'プロジェクトがありません。',
+  'siteOverview.pendingSnapshotIcon.title': 'スナップショット承認待ち',
 
   'siteExport.title':       'Site export',
   'siteExport.subtitle':    'このサイトの全プロジェクト・マッピング・成果物を一括 export',
