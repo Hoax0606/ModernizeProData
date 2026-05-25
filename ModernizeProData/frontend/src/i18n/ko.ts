@@ -1046,6 +1046,18 @@ export const ko = {
   'mapping.binding.noSourceHint':       '이 TO-BE 테이블에 연결된 AS-IS 소스가 없습니다. [Add source] 로 추가하세요.',
   'mapping.binding.whereHint':          '이 TO-BE 에 포함할 행 조건. 비우면 전체 rows.',
   'mapping.report.loading':             'Report 실행 중…',
+  'mapping.report.error.expressionFailed': '컬럼 "{column}" 의 변환식에서 오류가 발생했습니다.',
+  'mapping.report.error.fromFailed':       'AS-IS 데이터 로드 또는 JOIN/WHERE 절에서 오류가 발생했습니다.',
+  'mapping.report.error.noRules':          '이 TO-BE 테이블에 적용된 mapping_rules 가 없습니다. Mapping definition 임포트 후 다시 시도하세요.',
+  'mapping.report.error.unknown':          'Report 실행 중 오류가 발생했습니다.',
+  'mapping.report.error.expressionLabel':  '표현식',
+  'mapping.report.error.typeLabel':        '오류 종류',
+  'mapping.report.error.type.SYNTAX':      'SQL 문법 오류 (지원하지 않는 구문)',
+  'mapping.report.error.type.BINDER':      '참조 오류 (컬럼/별칭/타입을 찾을 수 없음)',
+  'mapping.report.error.type.CATALOG':     '함수 또는 타입을 찾을 수 없음',
+  'mapping.report.error.type.CONVERSION':  '타입 변환 실패',
+  'mapping.report.error.type.IO':          '파일 읽기 실패',
+  'mapping.report.error.type.UNKNOWN':     '실행 오류',
 } as const;
 
 export type TranslationKey = keyof typeof ko;

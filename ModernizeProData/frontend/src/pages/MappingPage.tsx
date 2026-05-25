@@ -3,11 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import { useWorkspaceStore } from '../store/workspace';
 import { useAsisDdlStore } from '../store/asisDdl';
 import { useTobeDdlStore } from '../store/tobeDdl';
-import { useT } from '../i18n';
+import { useT, type TranslationKey } from '../i18n';
 import { useMappingEditsStore, type TableBindingEdit } from '../store/mappingEdits';
 import { useUiStore } from '../store/ui';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
-import { projectApi } from '../api/workspace';
 import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
 import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult } from '../api/mappingImport';
 import { MappingOnboarding } from './DashboardPage';
@@ -919,19 +918,10 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   );
   const [testStatus, setTestStatus] = useState<'idle' | 'running' | 'completed'>('idle');
   const [testProgress, setTestProgress] = useState(0);
-  const startTest = useCallback(async () => {
+  // Trial 은 DuckDB 위 in-memory 미리보기 — TO-BE DB 적재도, project phase 변경도 하지 않는다.
+  const startTest = useCallback(() => {
     setTestStatus('running');
     setTestProgress(0);
-    const active = useWorkspaceStore.getState().getActiveProject();
-    if (active) {
-      try {
-        await projectApi.update(active.id, { phase: 'test', runStatus: 'running' });
-        const siteId = useWorkspaceStore.getState().activeSiteId;
-        if (siteId) await useWorkspaceStore.getState().fetchProjects(siteId);
-      } catch (e) {
-        console.error('[mapping] phase update (start) failed', e);
-      }
-    }
   }, []);
   useEffect(() => {
     if (testStatus !== 'running') return;
@@ -940,15 +930,6 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         if (p >= 100) {
           window.clearInterval(id);
           setTestStatus('completed');
-          const active = useWorkspaceStore.getState().getActiveProject();
-          if (active) {
-            projectApi.update(active.id, { phase: 'test', runStatus: 'completed' })
-              .then(() => {
-                const siteId = useWorkspaceStore.getState().activeSiteId;
-                if (siteId) return useWorkspaceStore.getState().fetchProjects(siteId);
-              })
-              .catch((e) => console.error('[mapping] phase update (complete) failed', e));
-          }
           return 100;
         }
         return Math.min(100, p + 4);
@@ -1067,29 +1048,16 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
     .map((s) => ASIS_TABLES.find((a) => a.name === s.table))
     .filter((a): a is AsisTable => !!a && !a.imported);
   // TO-BE Target DB 가 Site Settings 에서 "configured" 상태인지 검사 — Site Settings 의
-  // 녹색 stage 와 동일 로직 (type/host/database/username 4 개 필드 모두 채워졌는지).
-  // tobeDbLocks 는 저장 시 자동 true 가 되어 신뢰할 수 없어 사용하지 않는다.
-  const activeSite = useWorkspaceStore((s) => {
-    const ap = s.projects.find((p) => p.id === s.activeProjectId);
-    return ap ? (s.sites.find((st) => st.id === ap.siteId) ?? null) : null;
-  });
-  const tobeDb = activeSite ? activeSite.tobeDbByEnv?.[activeSite.environment] : undefined;
-  const tobeDbConnected = !!tobeDb
-    && !!tobeDb.type?.trim()
-    && !!tobeDb.host?.trim()
-    && !!tobeDb.database?.trim()
-    && !!tobeDb.username?.trim();
+  // Trial 은 in-memory 미리보기라 TO-BE DB 연결 여부와 무관 — 매핑 정합성만 검사.
   const testDisabled =
     counts.unmapped > 0
     || bindingSources.length === 0
-    || missingImports.length > 0
-    || !tobeDbConnected;
+    || missingImports.length > 0;
   const testDisabledReason =
-    !tobeDbConnected ? 'TO-BE Target DB connection 정보가 Site Settings 에 완전히 채워져 있지 않습니다. (Site 의 현재 stage 가 녹색이어야 합니다.)'
-    : bindingSources.length === 0 ? 'AS-IS source 가 연결되어 있지 않습니다.'
+    bindingSources.length === 0 ? 'AS-IS source 가 연결되어 있지 않습니다.'
     : missingImports.length > 0 ? `AS-IS extracted data 가 임포트되지 않았습니다: ${missingImports.map((a) => a.short).join(', ')}`
     : counts.unmapped > 0 ? `Unmapped 컬럼이 ${counts.unmapped}개 남아 있습니다.`
-    : 'Run test migration for this table';
+    : 'Run trial transformation for this table';
 
   return (
     <div style={styles.workspace}>
@@ -1100,19 +1068,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         <div style={{ flex: 1 }} />
         <div style={styles.statusCounts}>
           {(() => {
-            // 우선순위 — 환경 설정부터 매핑 작업 순. 한 번에 하나씩만 표시.
-            if (!tobeDbConnected) {
-              return (
-                <button
-                  type="button"
-                  onClick={() => useUiStore.getState().requestOpenSiteSettings({ focus: 'tobe-db' })}
-                  title="Site Settings → TO-BE Target DB 카드를 엽니다."
-                  style={styles.csvMissingBtn}
-                >
-                  <StatusBadge tone="warn">TO-BE DB not configured →</StatusBadge>
-                </button>
-              );
-            }
+            // 우선순위 — 매핑 작업 순. 한 번에 하나씩만 표시.
             if (bindingSources.length === 0) {
               return (
                 <button
@@ -3068,12 +3024,6 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
           ⏳ {t('mapping.report.loading')}
         </div>
       )}
-      {report && report.error && (
-        <div style={{ padding: '8px 14px', background: '#fde2e2', color: '#a02020', borderBottom: '1px solid #e8e8e8', fontSize: 11.5, fontFamily: 'var(--mono)' }}>
-          ⚠ {report.error}
-          {report.sql && <div style={{ marginTop: 4, fontSize: 10.5, opacity: 0.8 }}>SQL: {report.sql}</div>}
-        </div>
-      )}
 
       {/* 데이터 그리드 */}
       <div style={styles.dbvGridArea}>
@@ -3098,7 +3048,26 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
             </tr>
           </thead>
           <tbody>
-            {Array.from({ length: dataRowCount }, (_, i) => {
+            {report?.error ? (
+              <tr>
+                <td
+                  colSpan={rows.length + 1}
+                  style={{
+                    padding: '14px 16px',
+                    background: '#fde2e2',
+                    color: '#a02020',
+                    fontFamily: 'var(--mono)',
+                    fontSize: 11.5,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    verticalAlign: 'top',
+                    borderBottom: '1px solid #f5b5b5',
+                  }}
+                >
+                  ⚠ {buildReportErrorMessage(report, t)}
+                </td>
+              </tr>
+            ) : Array.from({ length: dataRowCount }, (_, i) => {
               const zebra = i % 2 === 1;
               return (
                 <tr key={i}>
@@ -3179,6 +3148,32 @@ function fmtDate(d: Date): string {
 }
 function fmtTime(d: Date): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+}
+
+/**
+ * 백엔드의 구조화된 ReportResult error 필드를 현재 언어 메시지로 합성.
+ * 키 정의: i18n/{ko,ja,en}.ts 의 `mapping.report.error.*`.
+ */
+function buildReportErrorMessage(
+  report: MappingReportResult,
+  t: ReturnType<typeof useT>,
+): string {
+  const typeKey = report.errorType ?? 'UNKNOWN';
+  const typeLabel = t(`mapping.report.error.type.${typeKey}` as TranslationKey);
+  const typeLine = `${t('mapping.report.error.typeLabel')}: ${typeLabel}`;
+  if (report.errorKind === 'EXPRESSION_FAILED' && report.errorColumn) {
+    const head = t('mapping.report.error.expressionFailed', { column: report.errorColumn });
+    const expr = `${t('mapping.report.error.expressionLabel')}: ${report.errorExpression ?? ''}`;
+    return `${head}\n${expr}\n${typeLine}`;
+  }
+  if (report.errorKind === 'FROM_FAILED') {
+    return `${t('mapping.report.error.fromFailed')}\n${typeLine}`;
+  }
+  if (report.errorKind === 'NO_RULES') {
+    return t('mapping.report.error.noRules');
+  }
+  // UNKNOWN 또는 누락 — 일반 메시지 + 분류 라벨
+  return `${t('mapping.report.error.unknown')}\n${typeLine}`;
 }
 
 function MetaRow({ k, children }: { k: string; children: React.ReactNode }) {

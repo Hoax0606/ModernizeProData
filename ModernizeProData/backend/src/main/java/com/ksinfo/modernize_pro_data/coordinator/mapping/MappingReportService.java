@@ -56,7 +56,11 @@ public class MappingReportService {
             int rowCount,
             boolean truncated,
             String sql,
-            String error      // SQL execution error message (null if OK)
+            String error,            // legacy 한국어 메시지 (i18n 전 fallback / 로그용)
+            String errorKind,        // EXPRESSION_FAILED | FROM_FAILED | NO_RULES | UNKNOWN | null
+            String errorColumn,      // EXPRESSION_FAILED 일 때 컬럼명
+            String errorExpression,  // EXPRESSION_FAILED 일 때 표현식
+            String errorType         // SYNTAX | BINDER | CATALOG | CONVERSION | IO | UNKNOWN | null
     ) {}
 
     @Transactional(readOnly = true)
@@ -99,7 +103,8 @@ public class MappingReportService {
 
         if (rules.isEmpty()) {
             return new ReportResult(schema, tobeTable, List.of(), List.of(), 0, false, null,
-                    "이 TO-BE 테이블에 적용된 mapping_rules 가 없습니다. Mapping definition 임포트 후 다시 시도하세요.");
+                    "이 TO-BE 테이블에 적용된 mapping_rules 가 없습니다. Mapping definition 임포트 후 다시 시도하세요.",
+                    "NO_RULES", null, null, null);
         }
 
         String sql = buildSql(binding, rules, baseDir, effLimit);
@@ -125,16 +130,105 @@ public class MappingReportService {
             }
         } catch (SQLException e) {
             log.warn("Report SQL failed: {}", e.getMessage());
-            return new ReportResult(schema, tobeTable, headers, List.of(), 0, false, sql,
-                    "SQL 실행 실패: " + e.getMessage());
+            return identifyFailingRule(schema, tobeTable, headers, sql, binding, rules, baseDir, e.getMessage());
         }
-        return new ReportResult(schema, tobeTable, headers, outRows, outRows.size(), truncated, sql, null);
+        return new ReportResult(schema, tobeTable, headers, outRows, outRows.size(), truncated, sql, null,
+                null, null, null, null);
+    }
+
+    /**
+     * 한 방의 SELECT 가 실패했을 때, FROM 절을 그대로 두고 컬럼별로 expression 만 바꿔
+     * probe 쿼리를 돌려서 어느 변환식이 문제인지 식별한다. 결과는 구조화된 ReportResult
+     * 로 반환 — 프론트가 i18n 키로 메시지를 합성한다 (errorKind / errorColumn /
+     * errorExpression / errorType). legacy `error` 필드는 한국어 fallback.
+     *
+     *   1. FROM 자체가 실패하면 → FROM_FAILED + errorType
+     *   2. FROM OK → 각 rule 의 expression 을 차례로 probe → 첫 실패 EXPRESSION_FAILED
+     *   3. 둘 다 식별 못 하면 UNKNOWN + 원본 메시지
+     */
+    private ReportResult identifyFailingRule(String schema, String tobeTable, List<String> headers,
+                                             String sql, MappingTableBinding binding,
+                                             List<MappingRule> rules, Path baseDir, String origMessage) {
+        String origType = classifyDuckDbErrorCode(origMessage);
+        if (binding == null || binding.getSources().isEmpty()) {
+            return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType,
+                    "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
+        }
+        String fromClause = buildFromClause(binding, rules, baseDir);
+        if (fromClause.isEmpty()) {
+            return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType,
+                    "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
+        }
+        // 1. FROM 자체 검증
+        String fromProbe = "SELECT 1 " + fromClause + " LIMIT 0";
+        try (Statement st = duckDbService.statement();
+             ResultSet rs = st.executeQuery(fromProbe)) {
+            // OK — FROM 은 문제 없음
+        } catch (SQLException e) {
+            log.warn("Report FROM-clause probe failed: {}", e.getMessage());
+            String t = classifyDuckDbErrorCode(e.getMessage());
+            return errorResult(schema, tobeTable, headers, sql, "FROM_FAILED", null, null, t,
+                    "AS-IS 데이터 로드 또는 JOIN/WHERE 절에서 오류가 발생했습니다.\n"
+                            + "오류 종류: " + classifyDuckDbErrorMessage(e.getMessage()));
+        }
+        // 2. expression 별 검증
+        for (MappingRule r : rules) {
+            if ("skip".equals(r.getStrategy())) continue;
+            String expr = exprForRule(r);
+            if ("NULL".equals(expr)) continue;  // 상수 NULL 은 검증 의미 없음
+            String probe = "SELECT " + expr + " AS probe " + fromClause + " LIMIT 0";
+            try (Statement st = duckDbService.statement();
+                 ResultSet rs = st.executeQuery(probe)) {
+                // OK
+            } catch (SQLException e) {
+                log.warn("Report expression probe failed for column {}: {}", r.getTobeColumn(), e.getMessage());
+                String t = classifyDuckDbErrorCode(e.getMessage());
+                return errorResult(schema, tobeTable, headers, sql,
+                        "EXPRESSION_FAILED", r.getTobeColumn(), expr, t,
+                        "컬럼 \"" + r.getTobeColumn() + "\" 의 변환식에서 오류가 발생했습니다.\n"
+                                + "표현식: " + expr + "\n"
+                                + "오류 종류: " + classifyDuckDbErrorMessage(e.getMessage()));
+            }
+        }
+        // 식별 실패 — UNKNOWN
+        return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType,
+                "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
+    }
+
+    private static ReportResult errorResult(String schema, String tobeTable, List<String> headers,
+                                            String sql, String kind, String col, String expr,
+                                            String type, String legacy) {
+        return new ReportResult(schema, tobeTable, headers, List.of(), 0, false, sql, legacy,
+                kind, col, expr, type);
+    }
+
+    /** DuckDB 메시지 → 구조화 type 코드 (프론트 i18n 키 매칭용). */
+    private static String classifyDuckDbErrorCode(String msg) {
+        if (msg == null) return "UNKNOWN";
+        if (msg.contains("Parser Error"))     return "SYNTAX";
+        if (msg.contains("Binder Error"))     return "BINDER";
+        if (msg.contains("Catalog Error"))    return "CATALOG";
+        if (msg.contains("Conversion Error")) return "CONVERSION";
+        if (msg.contains("IO Error"))         return "IO";
+        return "UNKNOWN";
+    }
+
+    /** DuckDB 메시지 → 한국어 라벨 (legacy `error` 필드 fallback용). */
+    private static String classifyDuckDbErrorMessage(String msg) {
+        return switch (classifyDuckDbErrorCode(msg)) {
+            case "SYNTAX"     -> "SQL 문법 오류 (지원하지 않는 구문)";
+            case "BINDER"     -> "참조 오류 (컬럼/별칭/타입을 찾을 수 없음)";
+            case "CATALOG"    -> "함수 또는 타입을 찾을 수 없음";
+            case "CONVERSION" -> "타입 변환 실패";
+            case "IO"         -> "파일 읽기 실패";
+            default           -> "실행 오류";
+        };
     }
 
     /**
      * 한 TO-BE 테이블에 대한 SELECT SQL 생성.
      * 룰들의 transform_sql (없으면 transform_rule) 을 그대로 SELECT 식으로 인젝션 + AS tobeColumn.
-     * 바인딩이 있으면 read_csv FROM + JOIN/UNION + WHERE 까지 붙임.
+     * 바인딩이 있으면 read_csv FROM + JOIN + WHERE 까지 붙임 (FROM 구성은 buildFromClause 에 위임).
      */
     private String buildSql(MappingTableBinding binding, List<MappingRule> rules, Path baseDir, int limit) {
         StringBuilder select = new StringBuilder("SELECT ");
@@ -150,16 +244,24 @@ public class MappingReportService {
             return "SELECT NULL LIMIT 0";
         }
 
-        if (binding == null || binding.getSources().isEmpty()) {
+        String fromClause = buildFromClause(binding, rules, baseDir);
+        if (fromClause.isEmpty()) {
             // No source → defaults only. 한 row 짜리 SELECT.
-            select.append(" LIMIT 1");
-            return select.toString();
+            return select.append(" LIMIT 1").toString();
         }
+        return select.toString() + fromClause + " LIMIT " + limit;
+    }
 
+    /**
+     * FROM ... [JOIN ...] [WHERE ...] 부분만 생성. 앞에 공백 포함.
+     * binding 이 없거나 sources 가 비면 빈 문자열 반환.
+     * identifyFailingRule 의 probe 쿼리도 이걸 재사용.
+     */
+    private String buildFromClause(MappingTableBinding binding, List<MappingRule> rules, Path baseDir) {
+        if (binding == null || binding.getSources().isEmpty()) return "";
         var sources = binding.getSources().stream()
                 .sorted(Comparator.comparingInt(MappingTableBindingSource::getOrdinal))
                 .toList();
-
         StringBuilder from = new StringBuilder(" FROM ");
         for (int i = 0; i < sources.size(); i++) {
             var s = sources.get(i);
@@ -188,14 +290,10 @@ public class MappingReportService {
                 }
             }
         }
-
-        StringBuilder sql = new StringBuilder();
-        sql.append(select).append(from);
         if (binding.getWhereFilter() != null && !binding.getWhereFilter().isBlank()) {
-            sql.append(" WHERE ").append(binding.getWhereFilter());
+            from.append(" WHERE ").append(binding.getWhereFilter());
         }
-        sql.append(" LIMIT ").append(limit);
-        return sql.toString();
+        return from.toString();
     }
 
     private String exprForRule(MappingRule r) {
