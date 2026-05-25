@@ -61,7 +61,10 @@ export interface MappingRuleDto {
   tobeColumn: string;
   asisSchema: string | null;
   asisTable: string | null;
-  asisColumn: string | null;
+  /** PG TEXT[] — combine 시 여러 컬럼명. 단일 source 면 원소 1개. */
+  asisColumn: string[] | null;
+  /** asisColumn 각 원소에 대응하는 AS-IS 타입 (combine 시 다중). */
+  asisType: string[] | null;
   strategy: 'expression' | 'null' | 'default' | 'skip';
   transformRule: string | null;
   transformSql: string | null;
@@ -136,7 +139,8 @@ export const mappingImportApi = {
     tobeColumn: string;
     asisSchema: string | null;
     asisTable: string | null;
-    asisColumn: string | null;
+    /** PG TEXT[] — combine 시 여러 원소. 단일이면 [col] 형태로 전송. */
+    asisColumn: string[] | null;
     strategy: 'expression' | 'null' | 'default' | 'skip';
     transformRule: string | null;
     transformSql: string | null;

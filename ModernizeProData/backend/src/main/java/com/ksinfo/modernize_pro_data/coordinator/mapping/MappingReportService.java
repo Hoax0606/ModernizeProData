@@ -265,7 +265,7 @@ public class MappingReportService {
         StringBuilder from = new StringBuilder(" FROM ");
         for (int i = 0; i < sources.size(); i++) {
             var s = sources.get(i);
-            String csvPath = resolveCsvFile(baseDir, s.getAsisTable());
+            String csvPath = resolveCsvFile(baseDir, s.getAsisSchema(), s.getAsisTable());
             String escPath = csvPath.replace("'", "''");
             String aliasQ = quoteIdent(s.getAlias());
             String typesClause = buildTypesClause(s.getAsisTable(), rules);
@@ -318,16 +318,25 @@ public class MappingReportService {
 
     /**
      * 한 AS-IS 테이블의 컬럼별 타입을 모아서 read_csv 의 types= 구조체 만듦.
-     * 룰의 asis_type 이 채워진 컬럼만. asis_type 비어있으면 자동 추론에 맡김.
+     * asis_column / asis_type 은 PG TEXT[] 매핑 String[] — combine 시 여러 원소.
+     * 같은 index 끼리 짝지어 types 맵에 등록.
      */
     private static String buildTypesClause(String asisTable, List<MappingRule> rules) {
         if (asisTable == null) return "";
         Map<String, String> types = new LinkedHashMap<>();
         for (MappingRule r : rules) {
             if (!asisTable.equals(r.getAsisTable())) continue;
-            if (r.getAsisColumn() == null || r.getAsisType() == null) continue;
-            String duck = oracleToDuckDbType(r.getAsisType());
-            if (duck != null) types.putIfAbsent(r.getAsisColumn(), duck);
+            String[] cols = r.getAsisColumn();
+            if (cols == null || cols.length == 0) continue;
+            String[] typs = r.getAsisType() == null ? new String[0] : r.getAsisType();
+            for (int i = 0; i < cols.length; i++) {
+                String col = cols[i] == null ? "" : cols[i].trim();
+                if (col.isEmpty()) continue;
+                String typ = i < typs.length && typs[i] != null ? typs[i].trim() : "";
+                if (typ.isEmpty()) continue;  // 타입 미명시 — 자동 추론에 맡김
+                String duck = oracleToDuckDbType(typ);
+                if (duck != null) types.putIfAbsent(col, duck);
+            }
         }
         if (types.isEmpty()) return "";
         StringBuilder sb = new StringBuilder("types={");
@@ -376,19 +385,32 @@ public class MappingReportService {
         return "VARCHAR"; // safest fallback
     }
 
-    /** baseDir 에서 {asis_table}.csv 를 case-insensitive 검색. 못 찾으면 그래도 그 path 반환 (SQL 이 알아서 에러). */
-    private String resolveCsvFile(Path baseDir, String asisTable) {
+    /**
+     * baseDir 에서 CSV 파일을 case-insensitive 로 검색.
+     * 우선순위:
+     *   1) {schema}.{table}.csv  (예: RECRUIT.APPLICANTS.csv)
+     *   2) {table}.csv           (예: m_employee.csv)
+     * 못 찾으면 fallback path 반환 — SQL 이 알아서 IO Error 던지도록 둠.
+     */
+    private String resolveCsvFile(Path baseDir, String asisSchema, String asisTable) {
         if (asisTable == null) return baseDir.resolve("missing.csv").toString();
-        String want = (asisTable + ".csv").toLowerCase();
-        try (Stream<Path> stream = Files.list(baseDir)) {
-            return stream
-                    .filter(Files::isRegularFile)
-                    .filter(p -> p.getFileName().toString().toLowerCase().equals(want))
-                    .findFirst()
-                    .map(Path::toString)
-                    .orElseGet(() -> baseDir.resolve(asisTable + ".csv").toString());
-        } catch (IOException e) {
-            return baseDir.resolve(asisTable + ".csv").toString();
+        List<String> wants = new ArrayList<>();
+        if (asisSchema != null && !asisSchema.isBlank()) {
+            wants.add((asisSchema + "." + asisTable + ".csv").toLowerCase());
         }
+        wants.add((asisTable + ".csv").toLowerCase());
+        try (Stream<Path> stream = Files.list(baseDir)) {
+            List<Path> files = stream.filter(Files::isRegularFile).toList();
+            for (String want : wants) {
+                for (Path p : files) {
+                    if (p.getFileName().toString().toLowerCase().equals(want)) {
+                        return p.toString();
+                    }
+                }
+            }
+        } catch (IOException e) {
+            // fallthrough
+        }
+        return baseDir.resolve(asisTable + ".csv").toString();
     }
 }
