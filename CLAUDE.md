@@ -95,6 +95,7 @@ Rules:
 
 ### Phase 모델
 - 9 단계: `planning · analysis · test · sign-off · rehearsal · ready · cutover · hypercare · done`
+- run 起動 가능한 phase 는 `test` / `rehearsal` / `ready` (`ready` 에서 cutover 起動). `cutover` 는 **실행 중 phase** = 신규 run reject. 完了 시 `hypercare` 로 전이.
 - `cutover` 는 **production 환경에서만** 실행 가능.
 - 스냅샷은 mapping snapshot 과 cutover snapshot 두 갈래.
 - `runStatus` (`idle | running | completed`) 는 test/rehearsal/cutover 의 sub-status.

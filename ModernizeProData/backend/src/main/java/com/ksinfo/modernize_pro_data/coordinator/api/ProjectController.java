@@ -56,7 +56,6 @@ public class ProjectController {
             String owner,
             String assignee,
             String executionAssignee,
-            Map<String, Object> cutover,
             String runStatus
     ) {}
 
@@ -136,7 +135,6 @@ public class ProjectController {
             log.info("Project {} executionAssignee: {} -> {}", id, p.getExecutionAssignee(), newExec);
             p.setExecutionAssignee(newExec);
         }
-        if (req.cutover() != null)    p.setCutover(req.cutover());
         if (req.runStatus() != null)  p.setRunStatus(req.runStatus());
 
         // audit log — 의미 있는 변경만 기록

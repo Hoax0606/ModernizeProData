@@ -11,6 +11,7 @@ import lombok.Setter;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
@@ -55,12 +56,23 @@ public class Project {
     @Column(name = "execution_assignee", length = 64)
     private String executionAssignee;
 
-    @JdbcTypeCode(SqlTypes.JSON)
-    @Column(columnDefinition = "jsonb")
-    private Map<String, Object> cutover;
-
     @Column(name = "run_status", length = 16)
     private String runStatus;
+
+    /**
+     * Nightly rehearsal 시작 시각 (TZ 는 site 설정 기준).
+     * solution_settings.internal_mode="individual" 일 때만 의미가 있음 (mode="common"
+     * 이면 solution_settings.internal_common_time 가 사용됨).
+     * Individual mode 에서는 모든 project 에 값이 들어 있어야 Save 가능 (FE 강제).
+     */
+    @Column(name = "schedule_start_time")
+    private LocalTime scheduleStartTime;
+
+    @Column(name = "schedule_last_run_at")
+    private OffsetDateTime scheduleLastRunAt;
+
+    @Column(name = "schedule_next_run_at")
+    private OffsetDateTime scheduleNextRunAt;
 
     @Column(name = "created_at", nullable = false)
     private OffsetDateTime createdAt;

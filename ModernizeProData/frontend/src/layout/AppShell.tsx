@@ -16,6 +16,7 @@ import { ClusterAdminModal } from '../components/ClusterAdminModal';
 import { NotificationToast } from '../components/NotificationToast';
 import { LicenseBanner } from '../components/LicenseBanner';
 import { LockIcon } from '../components/LockIcon';
+import { HourglassHalfIcon } from '../components/HourglassHalfIcon';
 import { useLicenseStore } from '../store/license';
 import { useWorkspaceStore } from '../store/workspace';
 import { useUiStore } from '../store/ui';
@@ -100,6 +101,16 @@ export function AppShell() {
   isEditingRef.current = isEditing;
 
   const fetchSnapshots = useSnapshotsStore((s) => s.fetchBySite);
+
+  // 사이드바 project row 옆에 pending snapshot 모래시계 — Versions 에서 Request Review 한 직후 표시.
+  const allSnapshots = useSnapshotsStore((s) => s.snapshots);
+  const pendingProjectIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const s of allSnapshots) {
+      if (s.status === 'pending') ids.add(s.projectId);
+    }
+    return ids;
+  }, [allSnapshots]);
 
   // navigate 시 location.state.activateProjectId 로 전달된 값을 setActiveProject 에 반영.
   // 알림 클릭처럼 라우트 전환 + 프로젝트 변경을 한 번에 해야 하는 경우, 핸들러에서 setActiveProject 를
@@ -499,6 +510,15 @@ export function AppShell() {
                   >
                     <div style={styles.projectNameRow}>
                       <span style={styles.projectName}>{p.name}</span>
+                      {pendingProjectIds.has(p.id) && p.phase === 'test' && p.runStatus === 'completed' && (
+                        <span
+                          style={styles.projectPendingIcon}
+                          title={t('siteOverview.pendingSnapshotIcon.title')}
+                          aria-label={t('siteOverview.pendingSnapshotIcon.title')}
+                        >
+                          <HourglassHalfIcon size={11} color="var(--amber)" />
+                        </span>
+                      )}
                       {readOnly && (
                         <span style={styles.projectReadOnlyIcon} aria-label={t('shell.readOnly.projectTooltip')}>
                           <LockIcon open={false} color="var(--amber)" size={11} />
@@ -812,6 +832,9 @@ export function AppShell() {
             <Tab to="/site/approvals" label={t('tab.approvals')} />
             <Tab to="/site/export" label={t('tab.siteExport')} />
             <Tab to="/site/audit" label={t('tab.auditLog')} />
+            {user?.role === 'master' && (
+              <Tab to="/site/scheduler" label={t('tab.scheduler')} />
+            )}
           </div>
         )}
 
@@ -1232,6 +1255,13 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'inline-flex',
     alignItems: 'center',
     flexShrink: 0,
+  },
+  projectPendingIcon: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    flexShrink: 0,
+    // flex 기하 중심 → 텍스트 caps 옵티컬 중심 보정 (1px 위)
+    transform: 'translateY(-1px)',
   },
   readOnlyBanner: {
     display: 'flex',

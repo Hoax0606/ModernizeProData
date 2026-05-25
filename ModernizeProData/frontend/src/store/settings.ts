@@ -6,22 +6,15 @@ export type Language = 'ko' | 'ja' | 'en';
 export type ProjectSort = 'created-asc' | 'created-desc' | 'name-asc' | 'name-desc' | 'tables-desc';
 export type NotificationScope = 'mine-only' | 'all-project';
 
-export interface ExternalConfig {
-  scheduler: string;
-  cliPath: string;
-  apiEndpoint: string;
-  apiToken: string;
-  syslog: string;
-}
-
 interface SettingsState {
   theme: Theme;
   language: Language;
   notifications: boolean;
   notificationScope: NotificationScope;
   notificationRetention: string;
+  /** External integrations master toggle — BE solution_settings.external_enabled の mirror.
+   *  SchedulerPage が source of truth として BE から fetch する。store には optimistic な値が入る. */
   externalIntegrations: boolean;
-  externalConfig: ExternalConfig;
   projectSort: ProjectSort;
 
   setTheme: (theme: Theme) => void;
@@ -30,13 +23,16 @@ interface SettingsState {
   setNotificationScope: (scope: NotificationScope) => void;
   setNotificationRetention: (retention: string) => void;
   setExternalIntegrations: (on: boolean) => void;
-  setExternalConfig: (config: Partial<ExternalConfig>) => void;
   setProjectSort: (sort: ProjectSort) => void;
 }
 
 /**
  * Solution settings 의 모든 값 — localStorage 에 영속.
  * 첫 화면 진입 시 theme/language 가 자동 적용.
+ *
+ * 注: 旧 ExternalConfig (cliPath / apiEndpoint / syslog / apiToken) は本ブランチで削除。
+ *     token は BE 側で hash 管理されるので zustand には保持しない。
+ *     CLI path / API endpoint / Syslog はメタ情報専用フィールドだったが機能ゼロのため撤去。
  */
 export const useSettingsStore = create<SettingsState>()(
   persist(
@@ -47,13 +43,6 @@ export const useSettingsStore = create<SettingsState>()(
       notificationScope: 'all-project',
       notificationRetention: '90 days',
       externalIntegrations: false,
-      externalConfig: {
-        scheduler: 'Control-M',
-        cliPath: '/opt/modernize/bin/modernize',
-        apiEndpoint: 'https://modernize.kdb.internal/api/v1/runs',
-        apiToken: 'mig_****************_a9f3',
-        syslog: 'syslog.kdb.internal:514 · facility local4',
-      },
       projectSort: 'created-asc',
 
       setTheme: (theme) => set({ theme }),
@@ -62,8 +51,6 @@ export const useSettingsStore = create<SettingsState>()(
       setNotificationScope: (scope) => set({ notificationScope: scope }),
       setNotificationRetention: (retention) => set({ notificationRetention: retention }),
       setExternalIntegrations: (on) => set({ externalIntegrations: on }),
-      setExternalConfig: (config) =>
-        set((s) => ({ externalConfig: { ...s.externalConfig, ...config } })),
       setProjectSort: (projectSort) => set({ projectSort }),
     }),
     { name: 'modernize-settings' },

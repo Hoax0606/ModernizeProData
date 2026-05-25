@@ -14,6 +14,7 @@ import { ExecutionPage } from './pages/ExecutionPage';
 import { ExecutionOverviewPage } from './pages/ExecutionOverviewPage';
 import { MappingPage } from './pages/MappingPage';
 import { ArtifactsPage } from './pages/ArtifactsPage';
+import { SchedulerPage } from './pages/SchedulerPage';
 import { LogViewerPage } from './pages/LogViewerPage';
 import { SiteQuarantinePage } from './pages/SiteQuarantinePage';
 import { AppShell } from './layout/AppShell';
@@ -57,6 +58,7 @@ function App() {
               <Route path="/artifacts" element={<ArtifactsPage />} />
               <Route path="/logs" element={<LogViewerPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/site/scheduler" element={<SchedulerPage />} />
             </Route>
           </Route>
 
