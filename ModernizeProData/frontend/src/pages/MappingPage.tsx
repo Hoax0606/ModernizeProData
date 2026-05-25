@@ -2114,7 +2114,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     //   - source 0개 → 빈 자동값 (computeAutoCast 가 '' 반환)
     let initialAutoCast: string;
     if (filledSrcs.length > 1) {
-      initialAutoCast = '-- combine: 변환식을 직접 입력하세요 (예: MAKE_DATE / CONCAT)';
+      initialAutoCast = t('mapping.inspector.combineHint');
     } else {
       const firstSrcForCast = filledSrcs[0]
         || (active.src !== '—' ? (active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src) : undefined);
@@ -2161,7 +2161,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     const filledSrcs = nextEditSrc.filter((s) => s && s.trim() !== '');
     let newAutoCast: string;
     if (filledSrcs.length > 1) {
-      newAutoCast = '-- combine: 변환식을 직접 입력하세요 (예: MAKE_DATE / CONCAT)';
+      newAutoCast = t('mapping.inspector.combineHint');
     } else if (filledSrcs.length === 1) {
       newAutoCast = computeAutoCast(filledSrcs[0]);
     } else {
@@ -2389,7 +2389,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
                     value={editValue}
                     onChange={(v) => { setEditValue(upperSqlKeywords(v)); if (ruleError) setRuleError(null); }}
                     language="sql"
-                    placeholder={transformPlain(active)}
+                    placeholder={transformPlain(active, t('mapping.inspector.combineHint'))}
                     hasError={!!ruleError}
                     completions={localCompletions}
                     minHeight={72}
@@ -2474,7 +2474,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
             </div>
           ) : (
             <div style={styles.codeBlock}>
-              {transformPreview(active).map((line, i) => (
+              {transformPreview(active, t('mapping.inspector.combineHint')).map((line, i) => (
                 <div key={i} dangerouslySetInnerHTML={{ __html: line }} />
               ))}
             </div>
@@ -3274,7 +3274,7 @@ function MetaRow({ k, children }: { k: string; children: React.ReactNode }) {
   );
 }
 
-function transformPreview(r: MappingRow): string[] {
+function transformPreview(r: MappingRow, combineHint?: string): string[] {
   const kw  = (s: string) => `<span style="color:#e8b86f">${s}</span>`;
   const str = (s: string) => `<span style="color:#9fd9b3">${s}</span>`;
   const cmt = (s: string) => `<span style="color:#7a8aa6">${s}</span>`;
@@ -3284,7 +3284,8 @@ function transformPreview(r: MappingRow): string[] {
   if (r.rule === 'skip')     return [cmt('-- column is dropped from TO-BE'), `${kw('DROP')}(${r.src})`];
   if (r.rule === 'added')    return [cmt('-- no AS-IS source'), `${kw('DEFAULT')} ${str(r.ddlDefault || 'NULL')}`];
   // multi-source (combine) 케이스 — r.src 가 '—' 로 떨어져 단일 표현 불가. 직접 입력 안내.
-  if (!r.src || r.src === '—') return [cmt('-- combine: 변환식을 직접 입력하세요 (예: MAKE_DATE / CONCAT)')];
+  // combineHint 는 caller (Inspector 내 useT) 에서 i18n 처리한 문자열을 전달. 없으면 영문 fallback.
+  if (!r.src || r.src === '—') return [cmt(combineHint ?? '-- combine: enter your own expression (e.g. MAKE_DATE / CONCAT)')];
   if (r.srcType.includes('YYYYMMDD'))                                       return [cmt('-- date parse'), `${kw('TO_DATE')}(${r.src}, ${str("'YYYYMMDD'")})`];
   if (r.srcType.includes('CHAR(14)') && r.tgtType.includes('TIMESTAMP'))    return [cmt('-- timestamp parse'), `${kw('TO_TIMESTAMP')}(${r.src}, ${str("'YYYYMMDDHH24MISS'")})`];
   if (r.srcType.includes('COMP-3'))                                         return [cmt('-- COMP-3 → NUMERIC'), `${kw('unpack_comp3')}(${r.src})`];
@@ -3293,8 +3294,8 @@ function transformPreview(r: MappingRow): string[] {
   return [cmt('-- direct pass-through'), `${r.src} ${kw('AS')} ${r.tgt}`];
 }
 
-function transformPlain(r: MappingRow): string {
-  return transformPreview(r).map((line) => line.replace(/<[^>]+>/g, '')).join('\n');
+function transformPlain(r: MappingRow, combineHint?: string): string {
+  return transformPreview(r, combineHint).map((line) => line.replace(/<[^>]+>/g, '')).join('\n');
 }
 
 // ── AS-IS table detail ───────────────────────────────────────
