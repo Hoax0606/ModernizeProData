@@ -32,11 +32,6 @@ function siteInitials(name: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
-/**
- * `highlight` 는 Pre-flight 의 csv-arrived / conn-tobe Fix 클릭으로 모달이 열렸을 때
- * 어느 섹션을 1초 강조할지 지정. AppShell 이 URL `?siteSettings=csv|tobe-db` 를 감지해
- * modal open + 이 prop 을 한 번 set 한 다음 1초 후 null 로 reset 한다.
- */
 interface Props {
   open: boolean;
   /** 외부에서 특정 영역을 강조하며 모달을 열 때.
@@ -44,7 +39,6 @@ interface Props {
    *    'asis-csv' → AS-IS CSV path 필드 */
   focus?: 'tobe-db' | 'asis-csv' | 'general';
   onClose: () => void;
-  highlight?: 'csv' | 'tobe-db' | null;
 }
 
 const ENV_OPTIONS: Array<{ value: SiteEnv; key: TranslationKey }> = [
@@ -75,7 +69,7 @@ const ASIS_DB_TYPES = ['Oracle', 'DB2', 'Mainframe DB2', 'SQL Server', 'PostgreS
 /**
  * Site settings — name·envs·encoding·notes·운영 단계·TO-BE DB 편집 + 삭제.
  */
-export function SiteSettingsModal({ open, onClose, highlight }: Props) {
+export function SiteSettingsModal({ open, focus, onClose }: Props) {
   const t = useT();
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
@@ -87,15 +81,6 @@ export function SiteSettingsModal({ open, onClose, highlight }: Props) {
 
   const site: Site | undefined = sites.find((s) => s.id === activeSiteId);
   const projectCount = projects.filter((p) => p.siteId === activeSiteId).length;
-
-  // Pre-flight Fix → csv-arrived / conn-tobe 가 강조할 두 섹션의 ref.
-  const csvRef = useRef<HTMLDivElement>(null);
-  const tobeDbRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open || !highlight) return;
-    const el = highlight === 'csv' ? csvRef.current : tobeDbRef.current;
-    el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }, [open, highlight]);
 
   const [name, setName] = useState('');
   const [asisEnv, setAsisEnv] = useState<SiteEnv>('mainframe');
@@ -410,8 +395,10 @@ export function SiteSettingsModal({ open, onClose, highlight }: Props) {
       </div>
 
       <div
-        ref={csvRef}
-        className={highlight === 'csv' ? 'mpd-fix-highlight' : undefined}
+        ref={csvPathRef}
+        style={csvPathPulse
+          ? { boxShadow: '0 0 0 3px var(--green)', borderRadius: 4, transition: 'box-shadow 200ms' }
+          : undefined}
       >
         <Field label={t('siteSettings.csvPath')}>
           <CsvPathField value={csvPath} onChange={setCsvPath} />
@@ -425,8 +412,11 @@ export function SiteSettingsModal({ open, onClose, highlight }: Props) {
       {/* TO-BE DB */}
       <div
         ref={tobeDbRef}
-        className={highlight === 'tobe-db' ? 'mpd-fix-highlight' : undefined}
-        style={styles.dbCard}>
+        style={{
+          ...styles.dbCard,
+          ...(tobeDbPulse ? { boxShadow: '0 0 0 3px var(--green)', transition: 'box-shadow 200ms' } : {}),
+        }}
+      >
         <div style={styles.dbHeader}>
           <span>{t('siteSettings.tobeDb')}</span>
           {dbConfigured
