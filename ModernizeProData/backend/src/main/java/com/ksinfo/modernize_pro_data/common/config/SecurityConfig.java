@@ -19,7 +19,8 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
  *
  * - Stateless (JWT 토큰 기반, 세션 없음).
  * - JwtAuthFilter 가 UsernamePasswordAuthenticationFilter 전에 동작.
- * - 인증 없이 허용: /api/v1/health, /api/v1/auth/**, WebSocket handshake.
+ * - 인증 없이 허용: /api/v1/health, /api/v1/auth/**, WebSocket handshake,
+ *   SPA shell 정적 자산 (/, /index.html, /favicon, /mpd*, /assets/**).
  * - /api/v1/users/** 는 master 한정 (@PreAuthorize 가 메서드 레벨에서 강제).
  * - 그 외 인증 필요.
  */
@@ -41,6 +42,11 @@ public class SecurityConfig {
                         .requestMatchers("/api/v1/health/**").permitAll()
                         .requestMatchers("/api/v1/auth/**").permitAll()
                         .requestMatchers("/ws/**").permitAll() // WebSocket handshake
+                        // SPA shell — bundled Vite 산출물 (login 페이지 진입 전 anonymous 로딩).
+                        .requestMatchers("/", "/index.html",
+                                         "/favicon.svg", "/favicon.ico",
+                                         "/mpd.png", "/mpd_lic.png",
+                                         "/assets/**").permitAll()
                         .anyRequest().authenticated()
                 )
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)

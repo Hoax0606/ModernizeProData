@@ -35,11 +35,16 @@ public class HealthController {
 
     @GetMapping("/info")
     public ApiResponse<Map<String, Object>> info() {
+        // defaultLanguage is set by Launcher.java reading the installer's
+        // registry value HKCU\Software\ModernizeProData\Language; the React
+        // app reads this on first boot to pick its UI language.
+        String defaultLang = System.getProperty("mpd.default-lang", "");
         return ApiResponse.ok(Map.of(
                 "name", appName,
                 "mode", mode,
                 "javaVersion", System.getProperty("java.version"),
                 "osName", System.getProperty("os.name"),
+                "defaultLanguage", defaultLang,
                 "timestamp", OffsetDateTime.now()
         ));
     }
