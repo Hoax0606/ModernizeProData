@@ -48,6 +48,7 @@ ModernizeProData/
         ├── components/         # 재사용 컴포넌트·모달
         ├── i18n/               # ko/ja/en
         ├── layout/             # AppShell (사이드바·탑바·탭바)
+        ├── lib/                # 공유 유틸 (useDemoMode, pipelineStages, …)
         ├── pages/              # 페이지 컴포넌트
         ├── routes/             # ProtectedRoute
         └── store/              # zustand stores
