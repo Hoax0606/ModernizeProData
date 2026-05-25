@@ -28,6 +28,9 @@ export interface ActiveRunState {
      실제 백엔드 연결 시 fail 이벤트 페이로드가 그대로 매핑된다. */
   failedStageIndex: number | null;
   failureReason: string | null;
+  /* failed / aborted 로 멈춘 시각 (epoch ms). running / paused / completed 면 null.
+     computeElapsedMs 가 이 값을 ref 로 써서 정지 후 progress 가 계속 자라는 버그 방지. */
+  haltedAt: number | null;
 }
 
 interface PreflightEntry {
@@ -63,6 +66,7 @@ function newActiveRun(projectId: string, runIndex: number, selectedTables: strin
     runStatus: 'running',
     failedStageIndex: null,
     failureReason: null,
+    haltedAt: null,
   };
 }
 
@@ -250,6 +254,9 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
         set((s) => {
           const entry = s.byProject[projectId];
           if (!entry?.activeRun || entry.activeRun.runStatus !== 'running') return s;
+          /* paused 상태에서 fail 들어오면 pause 누적 정산 후 멈춘 시각으로 haltedAt 고정. */
+          const now = Date.now();
+          const pausedFor = entry.activeRun.pausedAt !== null ? now - entry.activeRun.pausedAt : 0;
           return {
             byProject: {
               ...s.byProject,
@@ -259,8 +266,10 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
                   ...entry.activeRun,
                   runStatus: 'failed',
                   pausedAt: null,
+                  pauseAccumMs: entry.activeRun.pauseAccumMs + pausedFor,
                   failedStageIndex: stageIndex,
                   failureReason: reason,
+                  haltedAt: now,
                 },
               },
             },
@@ -274,6 +283,8 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
           if (!entry?.activeRun) return s;
           /* running / paused 모두에서 호출 가능. completed / failed / aborted 면 무시. */
           if (entry.activeRun.runStatus !== 'running') return s;
+          const now = Date.now();
+          const pausedFor = entry.activeRun.pausedAt !== null ? now - entry.activeRun.pausedAt : 0;
           return {
             byProject: {
               ...s.byProject,
@@ -283,8 +294,10 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
                   ...entry.activeRun,
                   runStatus: 'aborted',
                   pausedAt: null,
+                  pauseAccumMs: entry.activeRun.pauseAccumMs + pausedFor,
                   failedStageIndex: stageIndex,
                   failureReason: reason,
+                  haltedAt: now,
                 },
               },
             },
@@ -314,6 +327,7 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
                   runStatus: 'running',
                   failedStageIndex: null,
                   failureReason: null,
+                  haltedAt: null,
                 },
               },
             },
@@ -340,24 +354,30 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
       // 와 신 schema (7개) 가 호환 안 돼서 그냥 invalidate — 사용자가 Pre-flight 다시 한 번 돌리면 회복.
       // v1 → v2 (2026-05-25): runId 형식 변경 (reh-{timestamp} → {projectId} - {runIndex}).
       // 옛 형식 activeRun 만 invalidate — selection / snapshot / pre-flight 결과는 보존.
-      version: 2,
+      // v2 → v3 (2026-05-25): ActiveRunState 에 haltedAt 추가. 정지(failed/aborted) 후 progress 가
+      // 계속 자라는 버그 수정. 옛 cache 의 activeRun 은 haltedAt: null 로 채워넣음.
+      version: 3,
       migrate: (persistedState: unknown, version: number) => {
-        if (version < 2 && persistedState && typeof persistedState === 'object') {
-          const state = persistedState as { byProject?: Record<string, PreflightEntry> };
-          if (state.byProject) {
-            const fixed: Record<string, PreflightEntry> = {};
-            for (const id in state.byProject) {
-              const entry = state.byProject[id];
-              if (entry.activeRun?.runId?.startsWith('reh-')) {
-                fixed[id] = { ...entry, activeRun: null, runCounter: 0 };
-              } else {
-                fixed[id] = entry;
-              }
-            }
-            return { ...state, byProject: fixed };
+        if (!persistedState || typeof persistedState !== 'object') return persistedState;
+        const state = persistedState as { byProject?: Record<string, PreflightEntry> };
+        if (!state.byProject) return persistedState;
+        const fixed: Record<string, PreflightEntry> = {};
+        for (const id in state.byProject) {
+          const entry = state.byProject[id];
+          let activeRun = entry.activeRun;
+          if (version < 2 && activeRun?.runId?.startsWith('reh-')) {
+            activeRun = null;
           }
+          if (version < 3 && activeRun && (activeRun as Partial<ActiveRunState>).haltedAt === undefined) {
+            activeRun = { ...activeRun, haltedAt: null };
+          }
+          fixed[id] = {
+            ...entry,
+            activeRun,
+            runCounter: version < 2 && entry.activeRun?.runId?.startsWith('reh-') ? 0 : entry.runCounter,
+          };
         }
-        return persistedState;
+        return { ...state, byProject: fixed };
       },
     },
   ),

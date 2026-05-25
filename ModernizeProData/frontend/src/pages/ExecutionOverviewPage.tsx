@@ -1,7 +1,15 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useWorkspaceStore, type Project } from '../store/workspace';
 import { useUsersStore } from '../store/users';
 import { useAuthStore } from '../store/auth';
+import { useSnapshotsStore, usePinnedSnapshotsStore, type MappingSnapshot } from '../store/snapshots';
+import { useExecutionPreflightStore } from '../store/executionPreflight';
+import {
+  TOTAL_RUN_MS,
+  buildStages,
+  buildStagesFromActiveRun,
+  type Stage,
+} from '../lib/pipelineStages';
 import { useT } from '../i18n';
 
 const PHASES: Project['phase'][] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
@@ -38,6 +46,32 @@ export function ExecutionOverviewPage() {
   );
 
   const users = useUsersStore((s) => s.users);
+  const snapshots = useSnapshotsStore((s) => s.snapshots);
+  const pinnedIds = usePinnedSnapshotsStore((s) => s.pinnedIds);
+  // projectId -> pinned snapshot (if any). 同サイト内全 project の snapshot は
+  // AppShell が site 切替時に fetchBySite で読み込み済みである前提。
+  const pinnedByProject = useMemo(() => {
+    const pinSet = new Set(pinnedIds);
+    const map: Record<string, MappingSnapshot> = {};
+    for (const s of snapshots) {
+      if (pinSet.has(s.id)) map[s.projectId] = s;
+    }
+    return map;
+  }, [snapshots, pinnedIds]);
+
+  // activeRun lookup: projectId -> ActiveRunState. 走行中があれば 500ms tick で再描画。
+  const preflightByProject = useExecutionPreflightStore((s) => s.byProject);
+  const hasRunning = useMemo(
+    () => Object.values(preflightByProject).some((e) => e.activeRun?.runStatus === 'running' && e.activeRun.pausedAt === null),
+    [preflightByProject],
+  );
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!hasRunning) return;
+    const id = window.setInterval(() => setTick((n) => n + 1), 500);
+    return () => window.clearInterval(id);
+  }, [hasRunning]);
+
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // 담당자 변경 draft — Save 누르기 전까지는 backend / store 에 반영 안 됨.
   // key = projectId, value = 새 executionAssignee ('' = unassigned).
@@ -283,18 +317,19 @@ export function ExecutionOverviewPage() {
                 <input type="checkbox" checked={allSelected} onChange={toggleAll} aria-label="Select all" />
               </th>
               <Th>{t('executionOverview.col.project')}</Th>
-              <Th>{t('executionOverview.col.phase')}</Th>
-              <Th>{t('executionOverview.col.username')}</Th>
-              <Th align="right">{t('executionOverview.col.tables')}</Th>
-              <Th align="right">{t('executionOverview.col.rows')}</Th>
-              <Th>{t('executionOverview.col.progress')}</Th>
-              <Th align="right">{t('executionOverview.col.errors')}</Th>
-              <Th align="right">{t('executionOverview.col.warnings')}</Th>
+              <Th align="center">{t('executionOverview.col.phase')}</Th>
+              <Th width={150}>{t('executionOverview.col.pinned')}</Th>
+              <Th align="center">{t('executionOverview.col.username')}</Th>
+              <Th align="center" width={70}>{t('executionOverview.col.tables')}</Th>
+              <Th align="right"  width={80}>{t('executionOverview.col.rows')}</Th>
+              <Th align="center" width={260}>{t('executionOverview.col.progress')}</Th>
+              <Th align="center" width={64}>{t('executionOverview.col.errors')}</Th>
+              <Th align="center" width={76}>{t('executionOverview.col.warnings')}</Th>
             </tr>
           </thead>
           <tbody>
             {filteredProjects.length === 0 ? (
-              <tr><td colSpan={9} style={styles.emptyRow}>{t('executionOverview.empty')}</td></tr>
+              <tr><td colSpan={10} style={styles.emptyRow}>{t('executionOverview.empty')}</td></tr>
             ) : (
               filteredProjects.map((p, i) => {
                 const checked = selected.has(p.id);
@@ -302,7 +337,10 @@ export function ExecutionOverviewPage() {
                 const dimmed = !selectable;
                 const rowBg = checked ? 'var(--navy-50)' : i % 2 ? 'var(--zebra)' : 'transparent';
                 const dimColor = dimmed ? 'var(--text-4)' : undefined;
-                const progress = 0; // placeholder
+                const activeRun = preflightByProject[p.id]?.activeRun ?? null;
+                const pipelineStages: Stage[] = activeRun
+                  ? buildStagesFromActiveRun(activeRun, TOTAL_RUN_MS)
+                  : buildStages(p.phase);
                 return (
                   <tr key={p.id} style={{ background: rowBg, borderBottom: '1px solid var(--border)' }}>
                     <td style={{ ...styles.td, paddingLeft: 12 }}>
@@ -320,6 +358,20 @@ export function ExecutionOverviewPage() {
                     </td>
                     <td style={styles.td}>
                       <span style={{ ...styles.phaseChip, ...phaseChipColor(p.phase, p.runStatus) }}>{p.phase}</span>
+                    </td>
+                    <td style={styles.td}>
+                      {(() => {
+                        const pinned = pinnedByProject[p.id];
+                        if (!pinned) {
+                          return <span style={styles.pinnedEmpty}>—</span>;
+                        }
+                        return (
+                          <span style={styles.pinnedCell}>
+                            <span style={styles.pinnedVersion}>{pinned.version}</span>
+                            <span style={styles.pinnedName} title={pinned.name}>{pinned.name}</span>
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td style={styles.td}>
                       {canEditRow(p) ? (
@@ -347,16 +399,33 @@ export function ExecutionOverviewPage() {
                         </span>
                       )}
                     </td>
-                    <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--mono)' }}>{p.tableCount}</td>
-                    <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text-4)' }}>0 / 0</td>
-                    <td style={styles.td}>
-                      <div style={styles.progressOuter}>
-                        <div style={{ ...styles.progressInner, width: `${progress}%` }} />
+                    <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)' }}>{p.tableCount}</td>
+                    <td style={{ ...styles.td, textAlign: 'right',  fontFamily: 'var(--mono)', color: 'var(--text-4)' }}>0 / 0</td>
+                    <td style={{ ...styles.td, textAlign: 'center' }}>
+                      <div style={styles.pipelineSlots}>
+                        {pipelineStages.map((st) => (
+                          <div
+                            key={st.id}
+                            title={`${st.name} · ${st.pct.toFixed(0)}%`}
+                            style={styles.pipelineSlotOuter}
+                          >
+                            <div
+                              style={{
+                                ...styles.pipelineSlotInner,
+                                width: `${st.pct}%`,
+                                background:
+                                  st.tone === 'ok'      ? 'var(--text-3)'
+                                  : st.tone === 'running' ? 'var(--green)'
+                                  : st.tone === 'err'   ? 'var(--red)'
+                                  : 'var(--amber)',
+                              }}
+                            />
+                          </div>
+                        ))}
                       </div>
-                      <span style={styles.progressLabel}>{progress.toFixed(0)}%</span>
                     </td>
-                    <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text-4)' }}>0</td>
-                    <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text-4)' }}>0</td>
+                    <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)', color: 'var(--text-4)' }}>0</td>
+                    <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)', color: 'var(--text-4)' }}>0</td>
                   </tr>
                 );
               })
@@ -385,12 +454,11 @@ function Kpi({ label, value, sub, tone }: { label: string; value: string | numbe
   );
 }
 
-function Th({ children, align, width }: { children?: React.ReactNode; align?: 'left' | 'right'; width?: number }) {
+function Th({ children, align, width }: { children?: React.ReactNode; align?: 'left' | 'right' | 'center'; width?: number }) {
   return (
     <th style={{ ...styles.th, textAlign: align ?? 'left', width }}>{children}</th>
   );
 }
-
 function phaseChipColor(phase: string, runStatus?: string): React.CSSProperties {
   const activePhase = phase === 'test' || phase === 'rehearsal' || phase === 'cutover';
   if (activePhase && runStatus !== 'running') {
@@ -524,10 +592,33 @@ const styles: Record<string, React.CSSProperties> = {
   },
   assigneeText: { fontFamily: 'var(--mono)', fontSize: 11.5 },
 
+  pinnedCell: {
+    display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start',
+    gap: 3, maxWidth: 140,
+  },
+  pinnedVersion: {
+    fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 700,
+    color: 'var(--navy)', background: 'var(--navy-50)',
+    border: '1px solid var(--navy)', borderRadius: 3, padding: '1px 6px', flexShrink: 0,
+  },
+  pinnedName: {
+    display: 'block', maxWidth: 140,
+    fontSize: 11.5, color: 'var(--text-2)',
+    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  },
+  pinnedEmpty: { color: 'var(--text-4)', fontFamily: 'var(--mono)', fontSize: 12 },
+
   progressOuter: {
     width: 140, height: 6, background: 'var(--panel-2)',
     border: '1px solid var(--border)', borderRadius: 3, overflow: 'hidden', display: 'inline-block', verticalAlign: 'middle',
   },
   progressInner: { height: '100%', background: 'var(--navy)' },
   progressLabel: { fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginLeft: 8 },
+
+  pipelineSlots: { display: 'flex', gap: 2, height: 8 },
+  pipelineSlotOuter: {
+    flex: 1, background: 'var(--border)', borderRadius: 2,
+    overflow: 'hidden', position: 'relative',
+  },
+  pipelineSlotInner: { height: '100%', transition: 'width .4s ease' },
 };
