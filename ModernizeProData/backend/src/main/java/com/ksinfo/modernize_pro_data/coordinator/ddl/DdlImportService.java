@@ -1,6 +1,7 @@
 package com.ksinfo.modernize_pro_data.coordinator.ddl;
 
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.common.util.HashUtil;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.OracleDdlParser;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.ParsedColumn;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.ParsedDdl;
@@ -16,9 +17,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -77,7 +75,8 @@ public class DdlImportService {
 
         DdlImport ddlImport = DdlImport.create(
                 projectId, side, filename, content.length,
-                sha256Hex(content), dialect, importedBy);
+                HashUtil.sha256Hex(content), "oracle", importedBy);
+                //sha256Hex(content), dialect, importedBy);
         ddlImport.setTableCount(parsed.getTables().size());
         ddlImport.setColumnCount(parsed.totalColumnCount());
         ddlImportRepo.save(ddlImport);

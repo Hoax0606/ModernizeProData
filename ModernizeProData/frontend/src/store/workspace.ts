@@ -68,19 +68,6 @@ export interface DdlFile {
   uploadedAt: string;
 }
 
-export interface CutoverMeta {
-  snapshotId?: string;
-  /** Coordinator 가 지정한 담당자 (username). cutover 책임자 라벨. */
-  assignee?: string;
-  startedAt?: string;
-  startedBy?: string;
-  abortedAt?: string;
-  abortedBy?: string;
-  abortReason?: string;
-  finishedAt?: string;
-  finishedBy?: string;
-}
-
 export interface Project {
   id: string;
   siteId: string;
@@ -97,10 +84,17 @@ export interface Project {
   assignee?: string;
   /** 프로젝트의 실행(run) 담당. Execution Overview 의 dropdown 으로 지정. assignee 와 별개. */
   executionAssignee?: string;
-  /** cutover 실행 메타 (시작·중단·완료 누가 언제). Coordinator 만 수정. */
-  cutover?: CutoverMeta;
   /** 실행 단계(test/rehearsal/cutover)의 sub-status. phase 전환 시 idle 로 초기화. */
   runStatus?: RunStatus;
+  /**
+   * 시작 시각 (HH:mm[:ss]). solution_settings.internal_mode="individual" 시만 의미.
+   * common mode 에서는 solution_settings.internal_common_time 이 사용됨.
+   */
+  scheduleStartTime?: string | null;
+  /** 마지막 run 실행 시각. Misfire 판정 용. */
+  scheduleLastRunAt?: string | null;
+  /** Quartz 가 계산한 다음 발화 시각. UI 표시 용 cache (서버가 갱신). */
+  scheduleNextRunAt?: string | null;
   createdAt: string;
 }
 

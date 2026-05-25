@@ -544,6 +544,130 @@ Chrome before declaring "it works."
 
 ---
 
+## 17. Scheduler & External Trigger Integration (added 2026-05-24)
+
+Coordinator-side scheduling: internal Quartz nightly trigger + external scheduler
+REST/CLI entry. Both gated by a solution-level mutex (only one can be active at
+a time).
+
+### 17.1 Architecture
+
+```
+                  ┌─ Quartz Nightly Job (internal) ─┐
+                  │                                  │
+ (Control-M / cron / etc.) ─ REST ──────────────────┼─→ RunService ─→ Spring Batch
+                                                     │   (lock + insert run_history
+              UI manual run ──────────────────────────┘    + WS dispatch to Worker)
+```
+
+Three trigger paths converge on `RunService.startRun()` (single entry point) →
+`SELECT FOR UPDATE` on `projects.run_status` for idempotency → insert
+`run_history` row → dispatch to Worker via STOMP (`/topic/worker/{workerId}/tasks`).
+
+### 17.2 Internal mode — common vs individual
+
+`solution_settings.internal_mode` is `'common' | 'individual' | NULL`.
+
+- `common` — all projects fire at `solution_settings.internal_common_time`.
+- `individual` — each project fires at its own `projects.schedule_start_time`.
+- `NULL` — only valid when `internal_enabled = false`. When the toggle goes ON
+  the user must explicitly pick a mode; otherwise save is rejected.
+
+Default time on mode selection is `22:00` (pre-filled, editable). FE forces a
+hard validation: in `individual` mode, every project must have a `start_time`
+or Save is blocked.
+
+`SchedulerInitializer.rescheduleAllNightly()` is called on app startup and on
+every Solution Settings change. It deletes all `NIGHTLY_GROUP` triggers and
+re-registers based on current `internal_mode`. Incremental diff-rebuild is a
+future optimization (see 17.7).
+
+### 17.3 API token auth — register, not generate
+
+Token issuance is **inverted from the original design**: customers generate
+tokens on the external scheduler side (Control-M / JP1 / etc.) and **register**
+them via UI paste. The tool never generates tokens.
+
+- `api_credentials.token_hash` — SHA-256 hex, used for auth lookup.
+- `api_credentials.token_plain` — **stored plaintext** (PoC requirement; see
+  17.6 for the security tradeoff).
+- `api_credentials.display_prefix` + `display_last4` — for masked display.
+- Min token length: 16 chars (4 prefix + 8 hidden + 4 last4).
+- Registration revokes the previous default credential automatically.
+
+`ApiTokenAuthFilter` accepts any Bearer token, with these exceptions:
+
+- `WK-…` prefix → defer to `WorkerTokenAuthFilter`
+- 3-segment dotted (`x.y.z`) → defer to `JwtAuthFilter` (heuristic)
+- Otherwise: SHA-256 the token, look up by hash. Hit → `ROLE_API_CLIENT`.
+
+### 17.4 Phase semantics for runs
+
+`RunService.resolveRunTypeFromPhase()` maps phase → runType:
+
+| Phase | runType | Notes |
+|---|---|---|
+| `test` | `test` | dry-run test |
+| `rehearsal` | `rehearsal` | dry-run rehearsal |
+| `ready` | `cutover` | **production cut-over fires here** |
+| `cutover` | _(empty)_ | already running — new runs rejected |
+| others | _(empty)_ | not eligible |
+
+The `cutover` phase represents an **in-progress** cut-over (not a
+"ready-to-cut" state). On completion, the project transitions to `hypercare`.
+
+### 17.5 Trigger source enum
+
+`run_history.trigger_source` is one of `internal` / `external` / `cli` /
+`manual`. Names follow UI labels (`Internal scheduler` / `External
+integrations`). Legacy `nightly` / `rest` / `manual_ui` rows from earlier
+migrations are accepted by the CHECK constraint but never written by current
+code.
+
+### 17.6 Security tradeoff — plaintext token storage
+
+`api_credentials.token_plain` stores the registered token in plaintext. This
+contradicts the original design principle of hash-only storage but was added
+because:
+
+- Users want to view the registered token on different sessions / by different
+  master accounts.
+- Trigger examples docs in the UI embed the live token for copy-paste.
+
+**Implications for production**:
+
+- A DB leak (backup theft, direct SQL access) immediately compromises the
+  scheduler credentials.
+- This will likely be flagged in customer security review (FISC / J-SOX /
+  PCI-DSS contexts).
+- Pre-production deploy: confirm with customer security team, or switch to
+  encrypted storage (AES + master key) before going live.
+
+The columns / methods involved carry `⚠ PoC requirement, security tradeoff`
+comments for traceability.
+
+### 17.7 Intentionally out of scope (PoC 2nd or later)
+
+- **Quartz incremental rebuild** — current `rescheduleAllNightly()` is full
+  rebuild (delete-all + re-register). For high project counts this slows
+  startup; switch to diff-based add/remove/modify later.
+- **`/runs/all` bulk transaction** — currently a `for` loop calls
+  `RunService.startRun()` per project, each in its own `@Transactional`. With
+  100+ projects this becomes 100 sequential transactions. Future: bulk insert
+  + parallel `ExecutorService`.
+- **Token / SolutionSettings cache** — `CredentialService.authenticate()` and
+  `SolutionSettingsRepository.get()` hit DB on every request. Adding Spring
+  Cache (`@Cacheable` + `@CacheEvict` on update) cuts hot-path DB load.
+- **Encrypted token storage** — see 18.6.
+- **OSS scheduler vendor verification** — Control-M Workbench / Rundeck /
+  Hinemos integration tests not run. Manual verification via Windows Task
+  Scheduler + LAN-cross curl was sufficient for PoC.
+- **SIEM (syslog) forwarding** — UI field was removed since BE has no syslog
+  emitter. Re-add when SIEM integration is a real requirement.
+
+---
+
+## 18. Further Reading
 ## 17. Site Export — Client-side zip Delivery (added 2026-05-21)
 
 The bulk-export feature that lets a Coordinator user package all artifacts of

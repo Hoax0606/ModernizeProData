@@ -832,6 +832,9 @@ export function AppShell() {
             <Tab to="/site/approvals" label={t('tab.approvals')} />
             <Tab to="/site/export" label={t('tab.siteExport')} />
             <Tab to="/site/audit" label={t('tab.auditLog')} />
+            {user?.role === 'master' && (
+              <Tab to="/site/scheduler" label={t('tab.scheduler')} />
+            )}
           </div>
         )}
 
