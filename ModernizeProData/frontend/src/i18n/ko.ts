@@ -1184,6 +1184,7 @@ export const ko = {
   'logs.view.label':            'View',
   'logs.view.stream':           'Stream',
   'logs.view.quarantine':       'Quarantine',
+  'logs.view.history':          'Run history',
   'logs.quarantine.empty':      '위 드롭다운에서 항목을 선택하면 상세가 표시됩니다.',
   'logs.quarantine.count':      '{n}건 격리됨',
   'logs.quarantine.group':      '{stage} ({n})',

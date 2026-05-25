@@ -1186,6 +1186,7 @@ export const ja: Record<TranslationKey, string> = {
   'logs.view.label':            'View',
   'logs.view.stream':           'Stream',
   'logs.view.quarantine':       'Quarantine',
+  'logs.view.history':          'Run history',
   'logs.quarantine.empty':      '上のドロップダウンから項目を選ぶと詳細が表示されます。',
   'logs.quarantine.count':      '{n} 件隔離中',
   'logs.quarantine.group':      '{stage} ({n})',
