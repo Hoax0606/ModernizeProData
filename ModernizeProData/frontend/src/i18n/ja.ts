@@ -299,6 +299,21 @@ export const ja: Record<TranslationKey, string> = {
   'versions.cutoverConfirm.desc':    'このスナップショットはプロジェクトを production cutover 準備状態にします。Coordinator 承認後、phase が Ready に変更されます。',
   'versions.cutoverConfirm.proceed': 'Proceed',
 
+  'versions.statusDesc.draftReady':  'このスナップショットは承認リクエストの準備ができています。',
+  'versions.statusDesc.pending':     'Coordinator の承認を待っています。',
+  'versions.statusDesc.approved':    '{date} に {who} さんが承認しました。',
+  'versions.statusDesc.rejected':    '{date} に {who} さんが却下しました。',
+  'versions.descError.repeat':       '同じ文字を10回以上連続して入力することはできません。',
+
+  'versions.pin.section':            'Pin',
+  'versions.pin.descPinned':         'このスナップショットはリストの先頭にピン留めされています。',
+  'versions.pin.descEligible':       'このスナップショットをリストの先頭にピン留めします。',
+  'versions.pin.descIneligible':     '現在の phase ではこのスナップショットをピン留めできません。',
+  'versions.pin.toggleTitlePin':     'Click to pin to top',
+  'versions.pin.toggleTitleUnpin':   'Click to unpin',
+  'versions.pin.toggleTitleIneligible': '現在の phase ではピン留め不可',
+  'versions.pin.iconAria':           'Pinned to top',
+
   'approvals.title':           'Approvals',
   'approvals.subtitle':        'サイト全体のスナップショット承認 / 却下と履歴',
   'approvals.empty':           'No snapshots yet',
