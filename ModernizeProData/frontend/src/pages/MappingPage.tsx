@@ -741,6 +741,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [importMappingOpen, setImportMappingOpen] = useState(false);
   const [importYamlOpen, setImportYamlOpen] = useState(false);
+  const [yamlImported, setYamlImported] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   // 슬롯별 현재 활성 파일명 — rules/code_maps 가 실제 비어있으면 null (삭제 후 반영)
   const [mappingStatus, setMappingStatus] = useState<MappingStatusDto>({
@@ -1193,13 +1194,21 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         </div>
         <div style={{ flex: 1 }} />
         <button
-          style={styles.btnGhost}
+          style={yamlImported
+            ? { ...styles.btnSecondary, color: 'var(--text-3)' }
+            : styles.btnSecondary}
           onClick={() => setImportYamlOpen(true)}
-        ><Ic.download /> Import YAML</button>
+        >{yamlImported
+            ? <><Ic.check /> YAML Imported</>
+            : <><i className="fa-solid fa-download" style={{ fontSize: 11 }} /> Import YAML</>}</button>
         <button
-          style={styles.btnSecondary}
+          style={mappingImported
+            ? { ...styles.btnSecondary, color: 'var(--text-3)' }
+            : styles.btnSecondary}
           onClick={() => setImportMappingOpen(true)}
-        >{mappingImported ? 'Auto-mapping' : 'Auto-map unmapped'}</button>
+        >{mappingImported
+            ? <><Ic.check /> Mapping Imported</>
+            : <><i className="fa-solid fa-download" style={{ fontSize: 11 }} /> Import Mapping</>}</button>
       </div>
       {importMappingOpen && (
         <MappingDefinitionImportModal
@@ -1216,6 +1225,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
           acceptLabel=".yml · .yaml"
           hint="YAML 정의서로 매핑을 일괄 임포트합니다. 매칭된 unmapped 행만 채워지고, 이미 매핑된 행은 덮어쓰지 않습니다."
           onClose={() => setImportYamlOpen(false)}
+          onImported={() => setYamlImported(true)}
         />
       )}
 
@@ -2282,7 +2292,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
       </div>
 
       <div style={styles.section}>
-        <div style={styles.sectionLabel}>Transform</div>
+        <div style={styles.sectionLabel}>Rule</div>
         {editingRule ? (
           <>
             {(() => {
@@ -2461,7 +2471,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
 }
 
 function ImportFileModal({
-  title, accept, acceptLabel, templateHref, templateFilename, hint, onClose,
+  title, accept, acceptLabel, templateHref, templateFilename, hint, onClose, onImported,
 }: {
   title: string;
   accept: string;
@@ -2470,6 +2480,7 @@ function ImportFileModal({
   templateFilename?: string;
   hint: string;
   onClose: () => void;
+  onImported?: () => void;
 }) {
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -2545,6 +2556,7 @@ function ImportFileModal({
             onClick={() => {
               // TODO: 백엔드 import API 가 생기면 여기서 호출.
               console.log(`[${title}] would import`, file?.name);
+              onImported?.();
               onClose();
             }}
           >Import</button>
@@ -3508,13 +3520,14 @@ function GuidePanel() {
 
 type TobeRuleFilter = 'all' | 'unmapped' | 'auto' | 'rule' | 'null' | 'default';
 
-// Unmapped 만 빨강; 나머지는 같은 초록 계열, Default 를 기준으로 점점 옅어진다.
+// Unmapped 만 빨강; 나머지는 #059669 → #8aedc3 사이를 RGB 직선 보간으로 균등 4 분할.
+// 순서 (진함 → 옅음): Pass · Rule · Default · Null
 const TOBE_RULE_COLORS: Record<Exclude<TobeRuleFilter, 'all'>, string> = {
   unmapped: 'var(--red)',
-  auto:     '#059669',  // green 600 (darkest)
-  rule:     '#34d399',  // green 400
-  null:     '#6ee7b7',  // green 200
-  default:  '#a7f3d0',  // green 100 (lightest)
+  auto:     '#059669',  // step 0/3 — darkest
+  rule:     '#31B387',  // step 1/3
+  default:  '#5ED0A5',  // step 2/3
+  null:     '#8AEDC3',  // step 3/3 — lightest
 };
 
 function TobeCoverageBar({ total, ruleCounts, filter, onFilter }: {
@@ -3551,18 +3564,18 @@ function TobeCoverageBar({ total, ruleCounts, filter, onFilter }: {
         <div style={styles.coverageFilters}>
           {btn('all',      'All',         total)}
           {btn('unmapped', 'Unmapped',    ruleCounts.unmapped, TOBE_RULE_COLORS.unmapped)}
-          {btn('auto',     'Passthrough', ruleCounts.auto,     TOBE_RULE_COLORS.auto)}
-          {btn('rule',     'Transform',   ruleCounts.rule,     TOBE_RULE_COLORS.rule)}
-          {btn('null',     'Null',        ruleCounts.null,     TOBE_RULE_COLORS.null)}
+          {btn('auto',     'Pass',        ruleCounts.auto,     TOBE_RULE_COLORS.auto)}
+          {btn('rule',     'Rule',        ruleCounts.rule,     TOBE_RULE_COLORS.rule)}
           {btn('default',  'Default',     ruleCounts.default,  TOBE_RULE_COLORS.default)}
+          {btn('null',     'Null',        ruleCounts.null,     TOBE_RULE_COLORS.null)}
         </div>
       </div>
       <div style={styles.coverageTrack}>
         <div style={{ width: `${pct(ruleCounts.unmapped)}%`, background: TOBE_RULE_COLORS.unmapped }} />
         <div style={{ width: `${pct(ruleCounts.auto)}%`,     background: TOBE_RULE_COLORS.auto }} />
         <div style={{ width: `${pct(ruleCounts.rule)}%`,     background: TOBE_RULE_COLORS.rule }} />
-        <div style={{ width: `${pct(ruleCounts.null)}%`,     background: TOBE_RULE_COLORS.null }} />
         <div style={{ width: `${pct(ruleCounts.default)}%`,  background: TOBE_RULE_COLORS.default }} />
+        <div style={{ width: `${pct(ruleCounts.null)}%`,     background: TOBE_RULE_COLORS.null }} />
       </div>
     </div>
   );
@@ -3611,17 +3624,35 @@ function StatusBadge({ tone, children }: { tone: 'ok' | 'warn' | 'err' | 'info' 
 
 function RuleTag({ rule, status }: { rule: MappingRow['rule']; status?: MappingRow['status'] }) {
   const labels: Record<MappingRow['rule'], string> = {
-    auto: 'pass', rule: 'rule', null: 'null', default: 'def',
-    unmapped: 'unmapped', added: 'new', skip: 'skip',
+    auto: 'Pass', rule: 'Rule', null: 'Null', default: 'Default',
+    unmapped: 'Unmapped', added: 'New', skip: 'Skip',
   };
-  let tone: Parameters<typeof StatusBadge>[0]['tone'];
-  if (rule === 'skip') tone = 'skip';
-  else if (rule === 'unmapped') tone = 'err';
-  else if (status === 'err') tone = 'err';
-  else if (status === 'warn') tone = 'warn';
-  else if (rule === 'auto') tone = 'blue';
-  else tone = 'ok';
-  return <StatusBadge tone={tone}>{labels[rule]}</StatusBadge>;
+  // status err/warn 은 색을 덮어쓴다 (룰과 무관하게 위험 신호 우선).
+  if (status === 'err') return <StatusBadge tone="err">{labels[rule]}</StatusBadge>;
+  if (status === 'warn') return <StatusBadge tone="warn">{labels[rule]}</StatusBadge>;
+  if (rule === 'skip') return <StatusBadge tone="skip">{labels[rule]}</StatusBadge>;
+  if (rule === 'added') return <StatusBadge tone="info">{labels[rule]}</StatusBadge>;
+  // Pass / Rule / Null / Default / Unmapped — 필터바 dot 색을 좌측 dot 으로 가져오고
+  // 칩 자체는 같은 hue 의 옅은 배경 + 진한 텍스트로 통일. unmapped 만 red 팔레트.
+  const dot = TOBE_RULE_COLORS[rule];
+  const isUnmapped = rule === 'unmapped';
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5,
+      padding: '1px 7px 1px 6px', borderRadius: 10,
+      fontFamily: 'var(--mono)', fontSize: 10, fontWeight: 700,
+      color: isUnmapped ? '#b91c1c' : '#065f46',
+      background: isUnmapped ? '#fef2f2' : '#ecfdf5',
+      border: `1px solid ${dot}`,
+      letterSpacing: 0.2, whiteSpace: 'nowrap',
+    }}>
+      <span style={{
+        display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+        background: dot, flexShrink: 0,
+      }} />
+      {labels[rule]}
+    </span>
+  );
 }
 
 function TypeBadge({ children }: { children: React.ReactNode }) {
