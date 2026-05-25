@@ -9,11 +9,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 루트 (/) 안내.
+ * API 안내 endpoint.
  *
- * 이 백엔드는 API 서버다. UI 는 별도 (개발 시 Vite dev server, 운영 시
- * jpackage 네이티브 앱이 같은 프로세스에서 호스팅). 사용자가 브라우저로
- * 직접 8080 에 접속한 경우 친절한 안내 응답.
+ * 인스톨러 빌드부터는 `/` 가 jpackage 가 번들한 React 의 index.html 을
+ * 서빙해야 하므로 안내 응답은 `/api/v1/info` 로 옮김. dev 모드 (Vite 가
+ * 별도 5173 으로 떠 있을 때) 에서도 동일하게 `/api/v1/info` 로 접근.
+ *
+ * <p>인스톨러가 박은 default language 는 {@link HealthController#info()} 의
+ * defaultLanguage 필드로 노출됨. 이 컨트롤러는 단순 안내 응답만.
  */
 @RestController
 public class RootController {
@@ -24,13 +27,12 @@ public class RootController {
     @Value("${modernize.mode}")
     private String mode;
 
-    @GetMapping("/")
-    public ApiResponse<Map<String, Object>> root() {
+    @GetMapping("/api/v1/info")
+    public ApiResponse<Map<String, Object>> info() {
         return ApiResponse.ok(Map.of(
                 "name", appName,
                 "mode", mode,
                 "type", "REST API server",
-                "note", "이 endpoint 는 백엔드 API 서버입니다. UI 는 개발 시 http://localhost:5173 으로 접속.",
                 "endpoints", List.of(
                         "GET  /api/v1/health",
                         "GET  /api/v1/health/info",

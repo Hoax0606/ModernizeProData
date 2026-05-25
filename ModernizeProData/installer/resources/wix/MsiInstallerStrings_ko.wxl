@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="ko-kr" xmlns="http://schemas.microsoft.com/wix/2006/localization" Codepage="949">
+  <String Id="message.install.dir.exist">폴더 [INSTALLDIR] 이(가) 이미 있습니다. 그 폴더에 설치하시겠습니까?</String>
+  <String Id="MainFeatureTitle">기본 기능</String>
+  <String Id="DowngradeErrorMessage">[ProductName] 의 상위 버전이 이미 설치되어 있습니다. 다운그레이드는 허용되지 않습니다. 설치를 종료합니다.</String>
+  <String Id="DisallowUpgradeErrorMessage">[ProductName] 의 하위 버전이 이미 설치되어 있습니다. 업그레이드가 비활성화되어 있습니다. 설치를 종료합니다.</String>
+
+  <String Id="ShortcutPromptDlg_Title">[ProductName] 설치</String>
+  <String Id="ShortcutPromptDlgTitle">{\WixUI_Font_Title}바로 가기</String>
+  <String Id="ShortcutPromptDlgBannerBitmap">WixUI_Bmp_Banner</String>
+  <String Id="ShortcutPromptDlgDescription">만들 바로 가기를 선택하세요.</String>
+  <String Id="ShortcutPromptDlgDesktopShortcutControlLabel">바탕 화면 바로 가기 만들기</String>
+  <String Id="ShortcutPromptDlgStartMenuShortcutControlLabel">시작 메뉴 바로 가기 만들기</String>
+  <String Id="InstallDirNotEmptyDlg_Title">[ProductName] 설치</String>
+  <String Id="ContextMenuCommandLabel">[ProductName] (으)로 열기</String>
+</WixLocalization>

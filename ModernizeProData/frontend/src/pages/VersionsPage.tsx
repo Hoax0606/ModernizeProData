@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useWorkspaceStore, type ProjectPhase } from '../store/workspace';
-import { useSnapshotsStore, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
+import { useSnapshotsStore, usePinnedSnapshotsStore, isPinEligible, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
 import { useAuthStore } from '../store/auth';
 import { useActiveProjectReadOnly } from '../store/readOnly';
 import { useAuditLogStore } from '../store/auditLog';
@@ -27,13 +27,20 @@ export function VersionsPage() {
 
   const allSnapshots = useSnapshotsStore((s) => s.snapshots);
   const fetchByProject = useSnapshotsStore((s) => s.fetchByProject);
-  const snapshots = useMemo(
-    () => allSnapshots
+  const pinnedIds = usePinnedSnapshotsStore((s) => s.pinnedIds);
+  const togglePin = usePinnedSnapshotsStore((s) => s.togglePin);
+  const snapshots = useMemo(() => {
+    const list = allSnapshots
       .filter((s) => s.projectId === activeProjectId)
       .slice()
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-    [allSnapshots, activeProjectId],
-  );
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    // pinned 가 상단에. 둘 다 같은 그룹 안에서는 최신순 유지
+    return list.sort((a, b) => {
+      const ap = pinnedIds.includes(a.id) ? 1 : 0;
+      const bp = pinnedIds.includes(b.id) ? 1 : 0;
+      return bp - ap;
+    });
+  }, [allSnapshots, activeProjectId, pinnedIds]);
   const createSnapshot = useSnapshotsStore((s) => s.createSnapshot);
   const requestSnapshot = useSnapshotsStore((s) => s.requestSnapshot);
   const deleteSnapshot = useSnapshotsStore((s) => s.deleteSnapshot);
@@ -72,7 +79,7 @@ export function VersionsPage() {
   // Description 입력 규칙: 같은 글자 10번 이상 연속 금지 + 첫째 줄만 20자 초과 시 자동 개행
   const handleDescChange = (raw: string) => {
     if (/(.)\1{9,}/.test(raw)) {
-      setDescError('같은 글자를 10번 이상 연속으로 입력할 수 없습니다.');
+      setDescError(t('versions.descError.repeat'));
       return;
     }
     setDescError('');
@@ -387,18 +394,25 @@ export function VersionsPage() {
             <div style={styles.snapshotsContainer}>
               {snapshots.map((s) => {
                 const isSelected = selectedSnapshotId === s.id;
+                const isPinned = pinnedIds.includes(s.id);
 
                 return (
-                  <div 
-                    key={s.id} 
+                  <div
+                    key={s.id}
                     style={{
                       ...styles.snapshotItem,
-                      ...(isSelected ? styles.snapshotItemSelected : {})
+                      ...(isSelected ? styles.snapshotItemSelected : {}),
+                      position: 'relative',
                     }}
                     onClick={() => {
                       setSelectedSnapshotId(s.id);
                     }}
                   >
+                    {isPinned && (
+                      <span style={styles.pinIcon} title={t('versions.pin.iconAria')} aria-label={t('versions.pin.iconAria')}>
+                        <PinIconSvg />
+                      </span>
+                    )}
                     <div style={styles.snapshotItemHeader}>
                       <div style={styles.snapshotVersion}>
                         {s.version || `v1.${snapshots.length - snapshots.indexOf(s) - 1}`}
@@ -434,7 +448,14 @@ export function VersionsPage() {
         {/* 오른쪽: 선택된 스냅샷 상세 정보 */}
         <div style={styles.detailPanel}>
           {selectedSnapshot ? (
-            <SnapshotDetailView snapshot={selectedSnapshot} onRequest={() => handleRequest(selectedSnapshot.id)} readOnly={readOnly} />
+            <SnapshotDetailView
+              snapshot={selectedSnapshot}
+              onRequest={() => handleRequest(selectedSnapshot.id)}
+              readOnly={readOnly}
+              isPinned={pinnedIds.includes(selectedSnapshot.id)}
+              pinEligible={isPinEligible(selectedSnapshot, project.phase)}
+              onTogglePin={() => togglePin(selectedSnapshot.id)}
+            />
           ) : (
             <div style={styles.noSelectionMessage}>
               <div style={styles.noSelectionTitle}>Select a snapshot</div>
@@ -483,6 +504,14 @@ function Th({ children }: { children: React.ReactNode }) {
   return <th style={styles.th}>{children}</th>;
 }
 
+function PinIconSvg({ size = 11 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1 0 .707c-.48.48-1.072.588-1.503.588-.177 0-.335-.018-.46-.039l-3.134 3.134a5.927 5.927 0 0 1 .16 1.013c.046.702-.032 1.687-.72 2.375a.5.5 0 0 1-.707 0l-2.829-2.828-3.182 3.182c-.195.195-1.219.902-1.414.707-.195-.195.512-1.22.707-1.414l3.182-3.182-2.828-2.829a.5.5 0 0 1 0-.707c.688-.688 1.673-.767 2.375-.72a5.922 5.922 0 0 1 1.013.16l3.134-3.133a2.772 2.772 0 0 1-.04-.461c0-.43.108-1.022.589-1.503a.5.5 0 0 1 .353-.146z"/>
+    </svg>
+  );
+}
+
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div style={styles.field}>
@@ -516,7 +545,7 @@ function ChangeRow({ kind, table, detail }: { kind: 'added' | 'modified'; table:
   );
 }
 
-function SnapshotDetailView({ snapshot, onRequest, readOnly }: {
+function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligible, onTogglePin }: {
   snapshot: {
     id: string;
     name: string;
@@ -536,6 +565,9 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly }: {
   };
   onRequest: () => void;
   readOnly?: boolean;
+  isPinned: boolean;
+  pinEligible: boolean;
+  onTogglePin: () => void;
 }) {
   const t = useT();
   const user = useAuthStore((s) => s.user);
@@ -592,10 +624,12 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly }: {
         </div>
       )}
 
-      {/* 승인 상태 */}
+      {/* 승인 상태 (왼쪽 절반) + Pin 컨트롤 (오른쪽 절반) */}
       <div style={styles.detailSection}>
-        <h3 style={styles.detailSectionTitle}>Approval Status</h3>
-        <div style={styles.approvalSection}>
+        <div style={styles.approvalRow}>
+          <div style={styles.approvalCol}>
+            <h3 style={styles.detailSectionTitle}>Approval Status</h3>
+            <div style={styles.approvalSection}>
           {snapshot.status === 'draft' && (
             <div style={{
               ...styles.statusCard,
@@ -607,8 +641,8 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly }: {
               <div style={styles.statusContent}>
                 <div style={styles.statusDesc}>
                   {confirmingRequest
-                    ? <><b>{snapshot.name}</b> 스냅샷에 대해 승인을 요청하시겠습니까?</>
-                    : '이 스냅샷은 승인 요청 준비가 되었습니다.'}
+                    ? <>{t('versions.confirmRequestPre')}<b>{snapshot.name}</b>{t('versions.confirmRequestPost')}</>
+                    : t('versions.statusDesc.draftReady')}
                 </div>
               </div>
               {confirmingRequest ? (
@@ -636,21 +670,24 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly }: {
           )}
           
           {snapshot.status === 'pending' && (
-            <div style={styles.statusCard}>
+            <div style={{ ...styles.statusCard, background: 'var(--amber-50)', borderColor: 'var(--amber)' }}>
               <div style={styles.statusContent}>
-                <div style={styles.statusTitle}>승인 대기 중</div>
-                <div style={styles.statusDesc}>코디네이터의 승인을 기다리고 있습니다.</div>
+                <div style={{ ...styles.statusTitle, color: 'var(--amber)' }}>{t('versions.status.pending')}</div>
+                <div style={styles.statusDesc}>{t('versions.statusDesc.pending')}</div>
               </div>
             </div>
           )}
 
           {snapshot.status === 'approved' && (
-            <div style={styles.statusCard}>
+            <div style={{ ...styles.statusCard, background: 'var(--green-50)', borderColor: 'var(--green)' }}>
               <div style={styles.statusContent}>
-                <div style={styles.statusTitle}>승인됨</div>
+                <div style={{ ...styles.statusTitle, color: 'var(--green)' }}>{t('versions.status.approved')}</div>
                 <div style={styles.statusDesc}>
                   {snapshot.approvedBy && snapshot.approvedAt && (
-                    <>{new Date(snapshot.approvedAt).toLocaleDateString()}에 {snapshot.approvedBy}님이 승인했습니다.</>
+                    t('versions.statusDesc.approved', {
+                      date: new Date(snapshot.approvedAt).toLocaleDateString(),
+                      who: snapshot.approvedBy,
+                    })
                   )}
                 </div>
               </div>
@@ -658,22 +695,79 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly }: {
           )}
 
           {snapshot.status === 'rejected' && (
-            <div style={styles.statusCard}>
+            <div style={{ ...styles.statusCard, background: 'var(--red-50)', borderColor: 'var(--red)' }}>
               <div style={styles.statusContent}>
-                <div style={styles.statusTitle}>반려됨</div>
+                <div style={{ ...styles.statusTitle, color: 'var(--red)' }}>{t('versions.status.rejected')}</div>
                 <div style={styles.statusDesc}>
                   {snapshot.rejectedBy && snapshot.rejectedAt && (
-                    <>{new Date(snapshot.rejectedAt).toLocaleDateString()}에 {snapshot.rejectedBy}님이 반려했습니다.</>
+                    t('versions.statusDesc.rejected', {
+                      date: new Date(snapshot.rejectedAt).toLocaleDateString(),
+                      who: snapshot.rejectedBy,
+                    })
                   )}
                   {snapshot.rejectionReason && (
                     <div style={styles.rejectionReason}>
-                      사유: {snapshot.rejectionReason}
+                      {t('versions.reasonPrefix')}{snapshot.rejectionReason}
                     </div>
                   )}
                 </div>
               </div>
             </div>
           )}
+            </div>
+          </div>
+
+          {/* Pin to top */}
+          <div style={styles.approvalCol}>
+            <h3 style={styles.detailSectionTitle}>{t('versions.pin.section')}</h3>
+            <div style={styles.pinCard}>
+              <div style={styles.statusContent}>
+                <div style={styles.statusDesc}>
+                  {isPinned
+                    ? t('versions.pin.descPinned')
+                    : pinEligible
+                      ? t('versions.pin.descEligible')
+                      : t('versions.pin.descIneligible')}
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                onClick={onTogglePin}
+                disabled={!isPinned && !pinEligible}
+                style={{
+                  ...styles.pinToggle,
+                  ...(isPinned ? styles.pinToggleOn : {}),
+                  ...(!isPinned && !pinEligible ? styles.pinToggleDisabled : {}),
+                }}
+                aria-checked={isPinned}
+                aria-label={isPinned ? t('versions.pin.toggleTitleUnpin') : t('versions.pin.toggleTitlePin')}
+                title={
+                  !isPinned && !pinEligible
+                    ? t('versions.pin.toggleTitleIneligible')
+                    : isPinned
+                      ? t('versions.pin.toggleTitleUnpin')
+                      : t('versions.pin.toggleTitlePin')
+                }
+              >
+                <span
+                  style={{
+                    ...styles.pinToggleKnob,
+                    ...(isPinned ? styles.pinToggleKnobOn : {}),
+                  }}
+                >
+                  <span
+                    style={{
+                      ...styles.pinToggleKnobIcon,
+                      color: isPinned ? 'var(--navy)' : 'var(--text-4)',
+                    }}
+                  >
+                    <PinIconSvg size={9} />
+                  </span>
+                </span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -857,16 +951,16 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 6,
   },
   cutoverTag: {
-    fontSize: 8.5,
-    fontWeight: 600,
+    fontSize: 9,
+    fontWeight: 700,
     color: 'var(--red)',
     fontFamily: 'var(--mono)',
     textTransform: 'uppercase',
     letterSpacing: 0.3,
     background: 'var(--red-50)',
     border: '1px solid var(--red)',
-    borderRadius: 3,
-    padding: '0 4px',
+    borderRadius: 2,
+    padding: '1px 6px',
     lineHeight: 1.3,
     whiteSpace: 'nowrap',
     flexShrink: 0,
@@ -978,10 +1072,10 @@ const styles: Record<string, React.CSSProperties> = {
   detailStatus: {},
 
   detailSection: {
-    marginBottom: 22
+    marginBottom: 56
   },
   detailSectionTitle: {
-    margin: '0 0 9px',
+    margin: '0 0 12px',
     fontSize: 11,
     fontWeight: 600,
     color: 'var(--text-2)',
@@ -1023,7 +1117,85 @@ const styles: Record<string, React.CSSProperties> = {
     wordBreak: 'break-word',
   },
 
-  approvalSection: {},
+  approvalSection: {
+    display: 'flex',
+    flexDirection: 'column',
+    flex: 1,
+  },
+  approvalRow: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: 14,
+    alignItems: 'stretch',
+  },
+  approvalCol: {
+    display: 'flex',
+    flexDirection: 'column',
+    minWidth: 0,
+  },
+  pinCard: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    padding: '11px 12px',
+    background: 'var(--panel-2)',
+    borderRadius: 6,
+    border: '1px solid var(--border)',
+    flex: 1,
+  },
+  pinToggle: {
+    position: 'relative',
+    width: 40,
+    height: 22,
+    padding: 0,
+    border: '1px solid var(--border-strong)',
+    borderRadius: 999,
+    background: 'var(--panel-2)',
+    cursor: 'pointer',
+    transition: 'background-color 0.15s ease, border-color 0.15s ease',
+    flexShrink: 0,
+  },
+  pinToggleOn: {
+    background: 'var(--navy)',
+    borderColor: 'var(--navy)',
+  },
+  pinToggleDisabled: {
+    opacity: 0.4,
+    cursor: 'not-allowed',
+  },
+  pinToggleKnob: {
+    position: 'absolute',
+    top: 1,
+    left: 1,
+    width: 18,
+    height: 18,
+    borderRadius: '50%',
+    background: '#fff',
+    boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+    transition: 'transform 0.15s ease',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pinToggleKnobOn: {
+    transform: 'translateX(18px)',
+  },
+  pinToggleKnobIcon: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pinIcon: {
+    position: 'absolute',
+    top: 8,
+    right: 10,
+    color: 'var(--navy)',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    pointerEvents: 'none',
+  },
   statusCard: {
     display: 'flex',
     alignItems: 'flex-start',
@@ -1032,6 +1204,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--panel-2)',
     borderRadius: 6,
     border: '1px solid var(--border)',
+    flex: 1,
   },
   statusIcon: { fontSize: 16 },
   statusContent: { flex: 1, minWidth: 0 },
@@ -1432,7 +1605,7 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 4, fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
   },
   btnCutover: {
-    padding: '6px 12px', background: 'var(--panel)', color: 'var(--red)', border: '1px solid var(--red)',
+    padding: '6px 12px', background: 'var(--red)', color: '#fff', border: '1px solid var(--red)',
     borderRadius: 4, fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
   },
   btnGhost: {

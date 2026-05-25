@@ -14,6 +14,9 @@ import { ExecutionPage } from './pages/ExecutionPage';
 import { ExecutionOverviewPage } from './pages/ExecutionOverviewPage';
 import { MappingPage } from './pages/MappingPage';
 import { ArtifactsPage } from './pages/ArtifactsPage';
+import { SchedulerPage } from './pages/SchedulerPage';
+import { LogViewerPage } from './pages/LogViewerPage';
+import { SiteQuarantinePage } from './pages/SiteQuarantinePage';
 import { AppShell } from './layout/AppShell';
 import { ProtectedRoute } from './routes/ProtectedRoute';
 import { useSettingsStore } from './store/settings';
@@ -34,6 +37,25 @@ function App() {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
 
+  // 인스톨러가 박은 default language 를 첫 부팅 시 한 번 적용. zustand persist
+  // 의 localStorage 가 비어있을 때 (= 진짜 첫 부팅) 만 적용해서 사용자가 한 번
+  // 변경한 적 있는 경우는 덮어쓰지 않음.
+  useEffect(() => {
+    const persisted = localStorage.getItem('modernize-settings');
+    if (persisted) return;
+    fetch('/api/v1/health/info')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        const lang = d?.data?.defaultLanguage;
+        if (lang === 'ko' || lang === 'ja' || lang === 'en') {
+          useSettingsStore.getState().setLanguage(lang);
+        }
+      })
+      .catch(() => {
+        /* endpoint 없음 / dev 환경 - navigator.language fallback 그대로. */
+      });
+  }, []);
+
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
@@ -45,6 +67,7 @@ function App() {
             <Route element={<AppShell />}>
               <Route path="/" element={<DashboardPage />} />
               <Route path="/site/execution" element={<ExecutionOverviewPage />} />
+              <Route path="/site/quarantine" element={<SiteQuarantinePage />} />
               <Route path="/site/export" element={<SiteExportPage />} />
               <Route path="/site/approvals" element={<ApprovalsPage />} />
               <Route path="/site/audit" element={<AuditLogPage />} />
@@ -52,8 +75,9 @@ function App() {
               <Route path="/versions" element={<VersionsPage />} />
               <Route path="/execution" element={<ExecutionPage />} />
               <Route path="/artifacts" element={<ArtifactsPage />} />
-              <Route path="/logs" element={<PlaceholderPage title="Log viewer" description="Audit log 조회·필터·검색·export" />} />
+              <Route path="/logs" element={<LogViewerPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/site/scheduler" element={<SchedulerPage />} />
             </Route>
           </Route>
 

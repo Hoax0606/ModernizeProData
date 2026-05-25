@@ -39,6 +39,10 @@ function siteInitials(name: string): string {
  */
 interface Props {
   open: boolean;
+  /** 외부에서 특정 영역을 강조하며 모달을 열 때.
+   *    'tobe-db'  → TO-BE Target DB 카드
+   *    'asis-csv' → AS-IS CSV path 필드 */
+  focus?: 'tobe-db' | 'asis-csv' | 'general';
   onClose: () => void;
   highlight?: 'csv' | 'tobe-db' | null;
 }
@@ -109,6 +113,29 @@ export function SiteSettingsModal({ open, onClose, highlight }: Props) {
   const [testStatus, setTestStatus] = useState<TestStatus>('idle');
   const [testMessage, setTestMessage] = useState<string | null>(null);
   const [siteUnlocked, setSiteUnlocked] = useState(false);
+  const [tobeDbPulse, setTobeDbPulse] = useState(false);
+  const tobeDbRef = useRef<HTMLDivElement | null>(null);
+  const [csvPathPulse, setCsvPathPulse] = useState(false);
+  const csvPathRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    if (focus === 'tobe-db') {
+      setTobeDbPulse(true);
+      const scrollT = window.setTimeout(() => {
+        tobeDbRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 50);
+      const pulseT = window.setTimeout(() => setTobeDbPulse(false), 1500);
+      return () => { window.clearTimeout(scrollT); window.clearTimeout(pulseT); };
+    }
+    if (focus === 'asis-csv') {
+      setCsvPathPulse(true);
+      const scrollT = window.setTimeout(() => {
+        csvPathRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 50);
+      const pulseT = window.setTimeout(() => setCsvPathPulse(false), 1500);
+      return () => { window.clearTimeout(scrollT); window.clearTimeout(pulseT); };
+    }
+  }, [open, focus]);
 
   useEffect(() => {
     if (!open || !site) return;

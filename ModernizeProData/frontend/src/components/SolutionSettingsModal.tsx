@@ -1,11 +1,14 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { Modal } from './Modal';
 import { BrandName } from './BrandName';
 import { Toggle } from './Toggle';
 import { Toast } from './Toast';
-import { useSettingsStore, type Theme, type Language, type ExternalConfig, type NotificationScope } from '../store/settings';
+import { useSettingsStore, type Theme, type Language, type NotificationScope } from '../store/settings';
 import { useAuthStore } from '../store/auth';
 import { LANGUAGE_LABELS, useT } from '../i18n';
+import { licenseApi, type LicenseDto, type LicenseStatus as LicenseStatusEnum } from '../api/license';
+import { ApiError } from '../api/client';
+import { useLicenseStore } from '../store/license';
 
 interface Props {
   open: boolean;
@@ -22,14 +25,12 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
 
-  // 로컬 드래프트 — Save 전에는 store 에 반영 안 됨
+  // 로컬 드래프트 — Save 전에는 store 에 반영 안 됨.
   const [theme, setTheme] = useState<Theme>(store.theme);
   const [language, setLanguage] = useState<Language>(store.language);
   const [notifications, setNotifications] = useState(store.notifications);
   const [notifScope, setNotifScope] = useState<NotificationScope>(store.notificationScope);
   const [notifRetention, setNotifRetention] = useState(store.notificationRetention);
-  const [externalOn, setExternalOn] = useState(store.externalIntegrations);
-  const [extCfg, setExtCfg] = useState<ExternalConfig>(store.externalConfig);
   const [saved, setSaved] = useState(false);
 
   // 모달 열릴 때마다 store 의 현재 값으로 리셋
@@ -40,10 +41,8 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
     setNotifications(store.notifications);
     setNotifScope(store.notificationScope);
     setNotifRetention(store.notificationRetention);
-    setExternalOn(store.externalIntegrations);
-    setExtCfg(store.externalConfig);
     setSaved(false);
-  }, [open, store.theme, store.language, store.notifications, store.notificationScope, store.notificationRetention, store.externalIntegrations, store.externalConfig]);
+  }, [open, store.theme, store.language, store.notifications, store.notificationScope, store.notificationRetention]);
 
   // 변경 여부 — Save 버튼 활성 조건
   const isDirty = useMemo(() => {
@@ -52,26 +51,17 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
     if (notifications !== store.notifications) return true;
     if (notifScope !== store.notificationScope) return true;
     if (notifRetention !== store.notificationRetention) return true;
-    if (externalOn !== store.externalIntegrations) return true;
-    if (extCfg.scheduler !== store.externalConfig.scheduler) return true;
-    if (extCfg.cliPath !== store.externalConfig.cliPath) return true;
-    if (extCfg.apiEndpoint !== store.externalConfig.apiEndpoint) return true;
-    if (extCfg.apiToken !== store.externalConfig.apiToken) return true;
-    if (extCfg.syslog !== store.externalConfig.syslog) return true;
     return false;
-  }, [theme, language, notifications, notifScope, notifRetention, externalOn, extCfg, store]);
+  }, [theme, language, notifications, notifScope, notifRetention, store]);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!isDirty) return;
     store.setTheme(theme);
     store.setLanguage(language);
     store.setNotifications(notifications);
     store.setNotificationScope(notifScope);
     if (isMaster) store.setNotificationRetention(notifRetention);
-    store.setExternalIntegrations(externalOn);
-    store.setExternalConfig(extCfg);
     setSaved(true);
-    // Toast 가 durationMs 후 자동으로 onHide 호출
   };
 
   return (
@@ -193,46 +183,7 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
         </div>
       </Card>
 
-      {/* External integrations — master 전용 (admin 은 read-only) */}
-      <Card
-        title={<>{t('solution.external')} {!isMaster && <span style={styles.masterOnlyTag}>{t('solution.external.masterOnly')}</span>}</>}
-        desc={t('solution.external.desc')}
-        right={
-          <Toggle
-            on={externalOn}
-            onChange={() => isMaster && setExternalOn((v) => !v)}
-            ariaLabel={t('solution.external')}
-          />
-        }
-      >
-        <div style={{ opacity: externalOn ? 1 : 0.5, pointerEvents: externalOn && isMaster ? 'auto' : 'none' }}>
-          <Row label={<RowLabel title={t('solution.external.scheduler')} sub={t('solution.external.schedulerSub')} />}>
-            <select
-              value={extCfg.scheduler}
-              onChange={(e) => setExtCfg({ ...extCfg, scheduler: e.target.value })}
-              style={styles.select}
-              disabled={!isMaster}
-            >
-              <option>Control-M</option>
-              <option>Airflow</option>
-              <option>Jenkins</option>
-              <option>cron</option>
-            </select>
-          </Row>
-          <Row label={<RowLabel title={t('solution.external.cliPath')} sub={t('solution.external.cliPathSub')} />}>
-            <input value={extCfg.cliPath} onChange={(e) => setExtCfg({ ...extCfg, cliPath: e.target.value })} style={styles.input} disabled={!isMaster} />
-          </Row>
-          <Row label={<RowLabel title={t('solution.external.apiEndpoint')} sub={t('solution.external.apiEndpointSub')} />}>
-            <input value={extCfg.apiEndpoint} onChange={(e) => setExtCfg({ ...extCfg, apiEndpoint: e.target.value })} style={styles.input} disabled={!isMaster} />
-          </Row>
-          <Row label={<RowLabel title={t('solution.external.apiToken')} sub={t('solution.external.apiTokenSub')} />}>
-            <input value={extCfg.apiToken} onChange={(e) => setExtCfg({ ...extCfg, apiToken: e.target.value })} style={styles.input} disabled={!isMaster} />
-          </Row>
-          <Row label={<RowLabel title={t('solution.external.syslog')} sub={t('solution.external.syslogSub')} />}>
-            <input value={extCfg.syslog} onChange={(e) => setExtCfg({ ...extCfg, syslog: e.target.value })} style={styles.input} disabled={!isMaster} />
-          </Row>
-        </div>
-      </Card>
+      {/* Internal scheduler / External integrations 카드 는 SchedulerPage 로 이동했음 (Phase 3). */}
 
       <div style={styles.footer}>
         © 2024–2026 KS Info System · All rights reserved
@@ -278,76 +229,157 @@ function RowLabel({ title, sub }: { title: React.ReactNode; sub?: string }) {
 
 /* ─── License ───────────────────────────────────────────── */
 
-// 백엔드 license 모듈 완성 전까지 placeholder 값. 실제 도구에서는 Coordinator 가 검증한 `.lic` 정보로 교체.
-const LICENSE = {
-  licensedTo: 'KS Info System Co., Ltd.',
-  edition: 'Standard',
-  issuedAt: '2026-01-01',
-  expiresAt: '2027-01-01',
+const STATUS_TONE: Record<LicenseStatusEnum, { bg: string; color: string; border: string }> = {
+  ACTIVE:    { bg: 'var(--green-50)', color: 'var(--green)', border: 'var(--green)' },
+  EXPIRING:  { bg: 'var(--amber-50)', color: 'var(--amber)', border: 'var(--amber)' },
+  IN_GRACE:  { bg: 'var(--amber-50)', color: 'var(--amber)', border: 'var(--amber)' },
+  READ_ONLY: { bg: 'var(--red-50)',   color: 'var(--red)',   border: 'var(--red)'   },
+  EXPIRED:   { bg: 'var(--red-50)',   color: 'var(--red)',   border: 'var(--red)'   },
+  MISSING:   { bg: 'var(--red-50)',   color: 'var(--red)',   border: 'var(--red)'   },
+  INVALID:   { bg: 'var(--red-50)',   color: 'var(--red)',   border: 'var(--red)'   },
 };
 
 function LicenseCard({ isMaster }: { isMaster: boolean }) {
   const t = useT();
-  const now = new Date();
-  const expDate = new Date(LICENSE.expiresAt);
-  const daysLeft = Math.ceil((expDate.getTime() - now.getTime()) / 86_400_000);
+  const [lic, setLic] = useState<LicenseDto | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadOk, setUploadOk] = useState(false);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const refreshGlobalLicense = useLicenseStore((s) => s.refresh);
 
-  type LicenseStatus = 'active' | 'expSoon' | 'expired';
-  const status: LicenseStatus =
-    daysLeft < 0      ? 'expired'
-    : daysLeft < 30   ? 'expSoon'
-    : 'active';
+  useEffect(() => {
+    let cancelled = false;
+    licenseApi.get()
+      .then((d) => { if (!cancelled) setLic(d); })
+      .catch(() => { /* MISSING 상태일 수 있음 — 그냥 null */ })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
 
-  const statusTone = {
-    active:  { bg: 'var(--green-50)', color: 'var(--green)', border: 'var(--green)' },
-    expSoon: { bg: 'var(--amber-50)', color: 'var(--amber)', border: 'var(--amber)' },
-    expired: { bg: 'var(--red-50)',   color: 'var(--red)',   border: 'var(--red)'   },
-  }[status];
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadError(null);
+    setUploadOk(false);
+    try {
+      const next = await licenseApi.upload(file);
+      setLic(next);
+      setUploadOk(true);
+      // banner 가 즉시 갱신되도록 전역 store 도 refresh
+      void refreshGlobalLicense();
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setUploadError(err.code === 'LICENSE_INVALID_SIG'
+          ? t('solution.license.upload.invalidSig')
+          : err.message);
+      } else {
+        setUploadError(t('solution.license.upload.failed'));
+      }
+    } finally {
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  };
+
+  const status = lic?.status ?? 'MISSING';
+  const tone = STATUS_TONE[status];
+  const days = lic?.daysRemaining ?? 0;
 
   return (
     <Card
       title={t('solution.license')}
       desc={t('solution.license.desc')}
       right={isMaster ? (
-        <button style={styles.licenseUpdateBtn} disabled title={t('solution.license.update')}>
-          {t('solution.license.update')}
-        </button>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".lic,application/json"
+            style={{ display: 'none' }}
+            onChange={onFile}
+          />
+          {import.meta.env.DEV && lic?.status && lic.status !== 'MISSING' && (
+            <button
+              style={styles.licenseClearBtn}
+              onClick={async () => {
+                if (!confirm(t('solution.license.clearDev.confirm'))) return;
+                try {
+                  const next = await licenseApi.clear();
+                  setLic(next);
+                  setUploadOk(false);
+                  setUploadError(null);
+                  void refreshGlobalLicense();
+                } catch (err) {
+                  setUploadError(err instanceof ApiError
+                    ? err.message
+                    : t('solution.license.clearDev.failed'));
+                }
+              }}
+              title={t('solution.license.clearDev')}
+            >
+              {t('solution.license.clearDev')}
+            </button>
+          )}
+          <button
+            style={styles.licenseUpdateBtn}
+            onClick={() => fileRef.current?.click()}
+            title={t('solution.license.update')}
+          >
+            {t('solution.license.update')}
+          </button>
+        </div>
       ) : (
         <span style={styles.masterOnlyTag}>{t('solution.license.coordOnly')}</span>
       )}
     >
-      <Row label={t('solution.license.licensedTo')}>
-        <span style={styles.licenseValue}>{LICENSE.licensedTo}</span>
-      </Row>
-      <Row label={t('solution.license.edition')}>
-        <span style={styles.licenseMono}>{LICENSE.edition}</span>
-      </Row>
-      <Row label={t('solution.license.issued')}>
-        <span style={styles.licenseMono}>{LICENSE.issuedAt}</span>
-      </Row>
-      <Row label={t('solution.license.expires')}>
-        <span style={styles.licenseMono}>{LICENSE.expiresAt}</span>
-      </Row>
-      <Row label={t('solution.license.daysLeft')}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{
-            ...styles.licenseDaysBadge,
-            background: statusTone.bg,
-            color: statusTone.color,
-            borderColor: statusTone.border,
-          }}>
-            {daysLeft < 0 ? 0 : daysLeft} {t('solution.license.daysUnit')}
-          </span>
-          <span style={{
-            ...styles.licenseStatusBadge,
-            background: statusTone.bg,
-            color: statusTone.color,
-            borderColor: statusTone.border,
-          }}>
-            {t(`solution.license.${status}` as const)}
-          </span>
-        </div>
-      </Row>
+      {loading ? (
+        <Row label={t('solution.license.licensedTo')}>
+          <span style={styles.licenseValue}>…</span>
+        </Row>
+      ) : (
+        <>
+          <Row label={t('solution.license.licensedTo')}>
+            <span style={styles.licenseValue}>{lic?.customer ?? '—'}</span>
+          </Row>
+          <Row label={t('solution.license.edition')}>
+            <span style={styles.licenseMono}>{lic?.edition ?? '—'}</span>
+          </Row>
+          <Row label={t('solution.license.issued')}>
+            <span style={styles.licenseMono}>{lic?.issuedAt ?? '—'}</span>
+          </Row>
+          <Row label={t('solution.license.expires')}>
+            <span style={styles.licenseMono}>{lic?.expiresAt ?? '—'}</span>
+          </Row>
+          <Row label={t('solution.license.daysLeft')}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{
+                ...styles.licenseDaysBadge,
+                background: tone.bg, color: tone.color, borderColor: tone.border,
+              }}>
+                {days < 0 ? 0 : days} {t('solution.license.daysUnit')}
+              </span>
+              <span style={{
+                ...styles.licenseStatusBadge,
+                background: tone.bg, color: tone.color, borderColor: tone.border,
+              }}>
+                {t(`solution.license.status.${status}` as const)}
+              </span>
+            </div>
+          </Row>
+          {uploadOk && (
+            <Row label="">
+              <span style={{ fontSize: 12, color: 'var(--green)' }}>
+                {t('solution.license.upload.ok')}
+              </span>
+            </Row>
+          )}
+          {uploadError && (
+            <Row label="">
+              <span style={{ fontSize: 12, color: 'var(--red)' }}>{uploadError}</span>
+            </Row>
+          )}
+        </>
+      )}
     </Card>
   );
 }
@@ -513,16 +545,26 @@ const styles: Record<string, React.CSSProperties> = {
     textTransform: 'uppercase',
     letterSpacing: 0.4,
   },
+  licenseClearBtn: {
+    padding: '4px 10px',
+    background: 'var(--red-50)',
+    border: '1px solid var(--red)',
+    color: 'var(--red)',
+    borderRadius: 4,
+    fontSize: 11,
+    fontWeight: 600,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  },
   licenseUpdateBtn: {
     padding: '5px 12px',
-    background: 'var(--panel)',
-    border: '1px solid var(--border-strong)',
-    color: 'var(--text-2)',
+    background: 'var(--navy)',
+    border: '1px solid var(--navy)',
+    color: '#fff',
     borderRadius: 4,
     fontSize: 12,
-    fontWeight: 500,
-    cursor: 'not-allowed',
-    opacity: 0.6,
+    fontWeight: 600,
+    cursor: 'pointer',
     whiteSpace: 'nowrap',
   },
 };

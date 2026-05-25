@@ -73,6 +73,7 @@ ModernizeProData/**/data/
 # ── 환경설정·자격증명 ──────────────────────────────────────────────
 .env
 .env.*
+!infra/.env.example
 *.local
 *.pem
 *.key
@@ -82,6 +83,10 @@ ModernizeProData/**/data/
 *.p8
 secrets/
 credentials/
+
+# license public key 는 빌드 시 jar 에 임베드되어야 하므로 예외로 track.
+# private.pem 은 그대로 ignore (이름이 다르므로 위 *.pem 규칙에 걸림).
+!ModernizeProData/backend/src/main/resources/license/public.pem
 
 # ── 로그 ────────────────────────────────────────────────────────────
 *.log
@@ -106,6 +111,14 @@ __pycache__/
 # ── Git / Merge 잔재 ────────────────────────────────────────────────
 *.orig
 *.rej
+
+# ── jpackage installer 빌드 산출물 ─────────────────────────────────
+ModernizeProData/installer/staging/
+ModernizeProData/installer/dist/
+ModernizeProData/installer/cache/
+ModernizeProData/installer/assets/mpd.ico
+# Vite prod build → backend resources/static/ 으로 stage 됨 (빌드 산출물).
+ModernizeProData/backend/src/main/resources/static/
 
 # ── Docker 로컬 override ────────────────────────────────────────────
 compose.override.yaml

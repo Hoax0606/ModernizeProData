@@ -3,9 +3,12 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useWorkspaceStore } from '../store/workspace';
 import { useAsisDdlStore } from '../store/asisDdl';
 import { useTobeDdlStore } from '../store/tobeDdl';
-import { useMappingEditsStore } from '../store/mappingEdits';
+import { useT, type TranslationKey } from '../i18n';
+import { useMappingEditsStore, type TableBindingEdit } from '../store/mappingEdits';
+import { useUiStore } from '../store/ui';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
-import { projectApi } from '../api/workspace';
+import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
+import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult } from '../api/mappingImport';
 import { MappingOnboarding } from './DashboardPage';
 import { isDemoProjectId } from '../lib/demoFixtures';
 
@@ -73,6 +76,10 @@ type AsisColumn = { name: string; type: string; pk?: boolean; nullPct?: number; 
 
 let ASIS_COLUMNS: Record<string, AsisColumn[]> = {};
 
+/** Site DB type 으로 결정된 DDL dialect — 백엔드 DdlImport.dialect 가 source of truth. */
+let ASIS_DIALECT: string = 'oracle';
+let TOBE_DIALECT: string = 'oracle';
+
 /** Convert DDL schema response → AsisTable[]. */
 function ddlToAsisTables(schema: DdlSchema | undefined | null): AsisTable[] {
   if (!schema) return [];
@@ -85,7 +92,7 @@ function ddlToAsisTables(schema: DdlSchema | undefined | null): AsisTable[] {
       rows: 0,
       routing: [],
       unrouted: true,
-      imported: true,  // TODO: 백엔드 CSV import 상태 API 가 생기면 실제 값으로 교체. 현재는 테스트용으로 모두 imported 처리.
+      imported: false,
     };
   });
 }
@@ -144,6 +151,64 @@ function ddlToMappingByTobe(tobe: DdlSchema | undefined | null): Record<string, 
 
 function qualifiedName(t: DdlTableWithColumns): string {
   return t.table.schemaName ? `${t.table.schemaName}.${t.table.physicalName}` : t.table.physicalName;
+}
+
+/** Site 의 raw DB type 문자열을 dialect 코드로 정규화. 빈 값/모름 → 'oracle' 폴백. */
+function normalizeDialect(raw: string | null | undefined): string {
+  if (!raw) return 'oracle';
+  const s = raw.trim().toLowerCase();
+  if (!s) return 'oracle';
+  if (s.includes('postgres')) return 'postgresql';
+  if (s.includes('sql server') || s === 'mssql' || s.includes('microsoft')) return 'mssql';
+  if (s.includes('mysql') || s.includes('mariadb')) return 'mysql';
+  if (s.includes('db2')) return 'db2';
+  if (s.includes('oracle')) return 'oracle';
+  return 'oracle';
+}
+
+/** dialect 코드 → UI 표시명. */
+function dialectLabel(d: string): string {
+  switch (d) {
+    case 'oracle':     return 'Oracle';
+    case 'postgresql': return 'PostgreSQL';
+    case 'mssql':      return 'SQL Server';
+    case 'mysql':      return 'MySQL';
+    case 'db2':        return 'DB2';
+    default:           return d || 'Oracle';
+  }
+}
+
+/**
+ * AS-IS type 문자열을 TO-BE dialect 의 동등 type 으로 변환.
+ *   예) VARCHAR2(60) + tobe=postgresql → VARCHAR(60)
+ *       NUMBER(11,2) + tobe=postgresql → NUMERIC(11,2)
+ *       CLOB         + tobe=postgresql → TEXT
+ * 동일/미지원 dialect 에는 입력값 그대로.
+ */
+function translateTypeToTobe(asisType: string, tobeDialect: string): string {
+  if (!asisType || asisType === '—') return asisType;
+  const t = asisType.trim();
+  const u = t.toUpperCase();
+  // Oracle → PostgreSQL
+  if (tobeDialect === 'postgresql') {
+    if (u.startsWith('VARCHAR2')) return t.replace(/^VARCHAR2/i, 'VARCHAR');
+    if (u.startsWith('NVARCHAR2')) return t.replace(/^NVARCHAR2/i, 'VARCHAR');
+    if (u.startsWith('NUMBER'))   return t.replace(/^NUMBER/i,   'NUMERIC');
+    if (u === 'CLOB' || u === 'NCLOB') return 'TEXT';
+    if (u === 'BLOB') return 'BYTEA';
+    if (u.startsWith('DATE')) return 'TIMESTAMP';  // Oracle DATE 는 시각 포함
+    if (u.startsWith('RAW')) return 'BYTEA';
+    if (u.startsWith('LONG RAW')) return 'BYTEA';
+  }
+  // Oracle → MSSQL / PostgreSQL → MSSQL
+  if (tobeDialect === 'mssql') {
+    if (u.startsWith('VARCHAR2')) return t.replace(/^VARCHAR2/i, 'VARCHAR');
+    if (u.startsWith('NUMBER'))   return t.replace(/^NUMBER/i,   'NUMERIC');
+    if (u === 'CLOB' || u === 'TEXT') return 'NVARCHAR(MAX)';
+    if (u === 'BOOLEAN') return 'BIT';
+  }
+  // 미지원 / 동일 dialect → 그대로
+  return t;
 }
 
 /**
@@ -207,13 +272,28 @@ export function MappingPage() {
   // Hydrate module-level fixtures whenever schemas change, then bump a state value
   // to force a re-render so children see the new ASIS_TABLES / TOBE_TABLES / etc.
   const [hydrationTick, setHydrationTick] = useState(0);
+  // dialect 는 site 의 DB type 을 1차 source 로 사용 (DDL 재임포트 없이 즉시 반영).
+  // site 정보가 없거나 type 이 비어있으면 ddl_imports.dialect 폴백.
+  const siteForDialect = useWorkspaceStore((s) => {
+    const p = s.projects.find((p) => p.id === s.activeProjectId);
+    return p ? s.sites.find((st) => st.id === p.siteId) ?? null : null;
+  });
   useEffect(() => {
     ASIS_TABLES = ddlToAsisTables(asisSchema);
+    // PoC: Site 의 csvPath 가 채워져 있으면 모든 AS-IS 테이블을 imported 로 간주.
+    // (실제 파일 존재 / 행 수 검증은 백엔드 CSV import API 가 생기면 그 응답으로 교체.)
+    if (siteForDialect?.csvPath && siteForDialect.csvPath.trim() !== '') {
+      ASIS_TABLES = ASIS_TABLES.map((t) => ({ ...t, imported: true }));
+    }
     TOBE_TABLES = ddlToTobeTables(tobeSchema);
     ASIS_COLUMNS = ddlToAsisColumns(asisSchema);
     MAPPING_BY_TOBE = ddlToMappingByTobe(tobeSchema);
+    const asisRaw = siteForDialect?.asisDbType;
+    const tobeRaw = siteForDialect?.tobeDbByEnv?.[siteForDialect.environment]?.type;
+    ASIS_DIALECT = asisRaw ? normalizeDialect(asisRaw) : (asisSchema?.latestImport?.dialect ?? 'oracle');
+    TOBE_DIALECT = tobeRaw ? normalizeDialect(tobeRaw) : (tobeSchema?.latestImport?.dialect ?? 'oracle');
     setHydrationTick((t) => t + 1);
-  }, [asisSchema, tobeSchema]);
+  }, [asisSchema, tobeSchema, siteForDialect]);
 
   // Pre-flight Fix → 첫 unmapped row 찾아 scrollIntoView + 1초 teal pulse.
   // ExecutionPage 가 navigate('/mapping', { state: { fixTarget: { kind } } }) 로 진입.
@@ -268,12 +348,27 @@ export function MappingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrationTick]);
 
-  const [selected, setSelected] = useState<Selection>(initialSelection);
+  const [selected, setSelected] = useState<Selection>(null);
+  // 매핑 메뉴 초기 화면은 무조건 TO-BE 첫 테이블. 프로젝트가 바뀌면 다시 reset.
+  const didInitialSelectRef = useRef(false);
+  // 프로젝트 변경 시 selection lock 해제.
+  useEffect(() => {
+    didInitialSelectRef.current = false;
+    setSelected(null);
+  }, [activeProjectId]);
+  // hydrate 후 첫 TOBE 자동 선택 (프로젝트당 한 번).
+  useEffect(() => {
+    if (didInitialSelectRef.current) return;
+    if (TOBE_TABLES.length === 0) return;  // TO-BE 아직 안 옴 — 다음 tick 대기
+    const first = TOBE_TABLES[0];
+    setSelected({ side: 'tobe', name: first.name, internalName: first.internalName });
+    didInitialSelectRef.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrationTick]);
   // hydrate 된 데이터에 selected 가 존재하지 않으면 자동으로 첫 TOBE 로 reset.
-  // (selected 없음, 새 프로젝트, 또는 영속된 selection 이 이번 프로젝트 데이터에 없는 경우 모두 처리.)
   useEffect(() => {
     if (!initialSelection) return;
-    if (!selected) { setSelected(initialSelection); return; }
+    if (!selected) return;  // 위 effect 에서 처리
     const existsInTobe = selected.side === 'tobe' && TOBE_TABLES.some((t) => t.internalName === selected.internalName);
     const existsInAsis = selected.side === 'asis' && ASIS_TABLES.some((t) => t.name === selected.name);
     if (!existsInTobe && !existsInAsis) {
@@ -295,6 +390,39 @@ export function MappingPage() {
   const handleBindingChange = useCallback((internalName: string, edit: TableBindingEdit) => {
     if (!activeProjectId) return;
     useMappingEditsStore.getState().setBindingEdit(activeProjectId, internalName, edit);
+
+    // DB 영속화 — TO-BE table name 으로 schema/table 분리, AS-IS source 도 동일하게.
+    const tobe = TOBE_TABLES.find((t) => t.internalName === internalName);
+    if (!tobe) return;
+    const splitQualified = (qn: string): { schema: string; table: string } => {
+      const i = qn.indexOf('.');
+      return i > 0 ? { schema: qn.slice(0, i), table: qn.slice(i + 1) } : { schema: '', table: qn };
+    };
+    const tobeSplit = splitQualified(tobe.name);
+    const sources = edit.sources.map((s, i) => {
+      const sp = splitQualified(s.table);
+      return {
+        ordinal: i,
+        asisSchema: sp.schema || null,
+        asisTable: sp.table,
+        alias: s.alias,
+        role: s.role,
+        joinType: s.joinType ?? null,
+        joinOn: s.joinOn ?? null,
+      };
+    });
+    const compositionKind: 'single' | 'join' | 'union' | 'none' =
+      sources.length === 0 ? 'none'
+      : sources.length === 1 ? 'single'
+      : edit.mode;
+
+    mappingImportApi.upsertBinding(activeProjectId, {
+      tobeSchema: tobeSplit.schema,
+      tobeTable: tobeSplit.table,
+      compositionKind,
+      whereFilter: edit.whereFilter ?? null,
+      sources,
+    }).catch((e) => console.warn('[mapping] upsertBinding failed', e));
   }, [activeProjectId]);
 
   const handleToggleAsisSkip = useCallback((tableName: string, colName: string, nextSkip: boolean) => {
@@ -312,6 +440,7 @@ export function MappingPage() {
         sources: srcs,
         unrouted: srcs.length === 0,
         compositionKind: (srcs.length === 0 ? 'none' : srcs.length === 1 ? 'single' : edit.mode) as TobeTable['compositionKind'],
+        whereFilter: edit.whereFilter ?? t.whereFilter,
       };
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -646,30 +775,197 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
 }) {
   const navigate = useNavigate();
   const [bindingOpen, setBindingOpen] = useState((bindingEdit?.sources ?? table.sources).length === 0);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [bindingPulse, setBindingPulse] = useState(false);
+  const triggerBindingHighlight = () => {
+    setBindingOpen(true);
+    setBindingPulse(true);
+    window.setTimeout(() => setBindingPulse(false), 1500);
+  };
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [importMappingOpen, setImportMappingOpen] = useState(false);
+  const [importYamlOpen, setImportYamlOpen] = useState(false);
+  const [yamlImported, setYamlImported] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
+  // 슬롯별 현재 활성 파일명 — rules/code_maps 가 실제 비어있으면 null (삭제 후 반영)
+  const [mappingStatus, setMappingStatus] = useState<MappingStatusDto>({
+    columnFilename: null, codeFilename: null, ruleCount: 0, codeMapCount: 0,
+  });
+  const mappingImported = mappingStatus.columnFilename !== null || mappingStatus.codeFilename !== null;
   const [q, setQ] = useState('');
   type RuleFilter = 'all' | 'unmapped' | 'auto' | 'rule' | 'null' | 'default';
   const [coverageFilter, setCoverageFilter] = useState<RuleFilter>('all');
   const [activeIdx, setActiveIdx] = useState(0);
   const activeProjectIdForRow = useWorkspaceStore((s) => s.activeProjectId);
+
+  /**
+   * DB 의 mapping_table_bindings → zustand 의 tableBindingEdits 로 hydrate.
+   * 임포트 직후 / 페이지 마운트 시 호출. 해당 project 의 binding edits 전부 교체.
+   * AS-IS 테이블명은 `{schema}.{table}` 형태로 변환 (frontend AsisTable.name 컨벤션).
+   */
+  /**
+   * Hydrate bindings from DB into zustand. (검증은 별도 — findUncoveredDdlColumns)
+   */
+  const hydrateBindingsFromDb = useCallback(async (projectId: string): Promise<void> => {
+    if (TOBE_TABLES.length === 0) return;
+    try {
+      const list = await mappingImportApi.listBindings(projectId);
+      const edits: Record<string, TableBindingEdit> = {};
+      for (const b of list) {
+        const tobeQualified = (b.tobeSchema ? b.tobeSchema + '.' : '') + b.tobeTable;
+        const tobe = TOBE_TABLES.find(
+          (t) => t.name.toLowerCase() === tobeQualified.toLowerCase()
+              || t.short.toLowerCase() === b.tobeTable.toLowerCase(),
+        );
+        if (!tobe) continue; // 매핑정의서 > DDL — 정상 (다른 프로젝트용 룰)
+        const mode: 'join' | 'union' = b.compositionKind === 'union' ? 'union' : 'join';
+        edits[tobe.internalName] = {
+          mode,
+          whereFilter: b.whereFilter ?? undefined,
+          sources: b.sources.map((s) => ({
+            alias: s.alias,
+            table: (s.asisSchema ? s.asisSchema + '.' : '') + s.asisTable,
+            role: s.role,
+            joinType: s.joinType ?? undefined,
+            joinOn: s.joinOn ?? undefined,
+            rows: 0,
+          })),
+        };
+      }
+      useMappingEditsStore.getState().replaceBindingEdits(projectId, edits);
+    } catch (e) {
+      console.warn('[mapping] failed to hydrate bindings', e);
+    }
+  }, []);
+
+  /**
+   * 검증: DDL 의 (TO-BE table.column) 중 매핑정의서 (mapping_rules) 에 없는 것 목록.
+   * 사이트의 맵핑정의서는 슈퍼셋이어야 하고, 프로젝트 DDL 은 부분집합. DDL 컬럼이
+   * 매핑정의서에 없으면 그 컬럼을 채울 명세가 없는 것 → 사용자에게 경고.
+   */
+  const findUncoveredDdlColumns = useCallback(async (projectId: string): Promise<string[]> => {
+    if (TOBE_TABLES.length === 0) return [];
+    try {
+      const rules = await mappingImportApi.listRules(projectId);
+      const ruleCols = new Map<string, Set<string>>();  // `${schema}|${table}` → Set<column>
+      for (const r of rules) {
+        const key = (r.tobeSchema || '') + '|' + r.tobeTable;
+        if (!ruleCols.has(key)) ruleCols.set(key, new Set());
+        ruleCols.get(key)!.add(r.tobeColumn);
+      }
+      const uncovered: string[] = [];
+      for (const tobe of TOBE_TABLES) {
+        const i = tobe.name.indexOf('.');
+        const schema = i > 0 ? tobe.name.slice(0, i) : '';
+        const table = i > 0 ? tobe.name.slice(i + 1) : tobe.name;
+        const haveCols = ruleCols.get(schema + '|' + table) || new Set();
+        const ddlCols = MAPPING_BY_TOBE[tobe.internalName] || [];
+        for (const c of ddlCols) {
+          if (!haveCols.has(c.tgt)) uncovered.push(`${tobe.name}.${c.tgt}`);
+        }
+      }
+      return uncovered;
+    } catch (e) {
+      console.warn('[mapping] failed to compute uncovered DDL columns', e);
+      return [];
+    }
+  }, []);
+
+  /**
+   * DB 의 mapping_rules → zustand 의 rowEdits 로 hydrate.
+   * Bindings 를 alias 매핑 소스로 사용 (asis_table → alias).
+   */
+  const hydrateRowEditsFromDb = useCallback(async (projectId: string) => {
+    if (TOBE_TABLES.length === 0) return;
+    try {
+      const [rules, bindings] = await Promise.all([
+        mappingImportApi.listRules(projectId),
+        mappingImportApi.listBindings(projectId),
+      ]);
+      // alias 룩업 — key: `{tobeSchema}|{tobeTable}|{asisTable}` → alias
+      const aliasMap = new Map<string, string>();
+      for (const b of bindings) {
+        for (const s of b.sources) {
+          aliasMap.set(`${b.tobeSchema}|${b.tobeTable}|${s.asisTable}`, s.alias);
+        }
+      }
+      // rules 를 internalName / tgtColumn 으로 그룹화
+      const edits: Record<string, Record<string, RowEdit>> = {};
+      for (const r of rules) {
+        const tobeQualified = (r.tobeSchema ? r.tobeSchema + '.' : '') + r.tobeTable;
+        const tobe = TOBE_TABLES.find(
+          (t) => t.name.toLowerCase() === tobeQualified.toLowerCase()
+              || t.short.toLowerCase() === r.tobeTable.toLowerCase(),
+        );
+        if (!tobe) continue;
+        const internalName = tobe.internalName;
+        if (!edits[internalName]) edits[internalName] = {};
+
+        // savedSrc: 가능하면 `{alias}.{column}`, alias 못 찾으면 column 만
+        let savedSrc: string[] | undefined;
+        if (r.asisColumn) {
+          const alias = r.asisTable
+            ? aliasMap.get(`${r.tobeSchema}|${r.tobeTable}|${r.asisTable}`)
+            : undefined;
+          savedSrc = [alias ? `${alias}.${r.asisColumn}` : r.asisColumn];
+        }
+
+        const strat = r.strategy === 'skip' ? undefined
+          : (r.strategy as 'expression' | 'null' | 'default');
+        edits[internalName][r.tobeColumn] = {
+          savedSrc,
+          savedRule: r.transformRule ?? undefined,
+          savedDefault: r.defaultValue ?? undefined,
+          savedNotNull: r.notNullOverride || undefined,
+          savedStrategy: strat,
+          ruleOrigin: r.ruleOrigin,
+          savedNotes: r.notes ?? undefined,
+        };
+      }
+      useMappingEditsStore.getState().replaceRowEdits(projectId, edits);
+    } catch (e) {
+      console.warn('[mapping] failed to hydrate rowEdits', e);
+    }
+  }, []);
+
+  const refreshMappingStatus = useCallback(async (): Promise<string[]> => {
+    if (!activeProjectIdForRow) return [];
+    try {
+      const st = await mappingImportApi.status(activeProjectIdForRow);
+      setMappingStatus(st);
+    } catch {
+      setMappingStatus({ columnFilename: null, codeFilename: null, ruleCount: 0, codeMapCount: 0 });
+    }
+    await hydrateBindingsFromDb(activeProjectIdForRow);
+    await hydrateRowEditsFromDb(activeProjectIdForRow);
+    return await findUncoveredDdlColumns(activeProjectIdForRow);
+  }, [activeProjectIdForRow, hydrateBindingsFromDb, hydrateRowEditsFromDb, findUncoveredDdlColumns]);
+
+  useEffect(() => {
+    if (!activeProjectIdForRow) {
+      setMappingStatus({ columnFilename: null, codeFilename: null, ruleCount: 0, codeMapCount: 0 });
+      return;
+    }
+    let cancelled = false;
+    mappingImportApi.status(activeProjectIdForRow)
+      .then((st) => { if (!cancelled) setMappingStatus(st); })
+      .catch(() => {
+        if (!cancelled) setMappingStatus({ columnFilename: null, codeFilename: null, ruleCount: 0, codeMapCount: 0 });
+      });
+    // TobeMappingDetail 은 MappingPage 가 DDL 로드 완료 후에야 렌더되므로
+    // TOBE_TABLES 는 마운트 시점에 이미 채워져 있음. 추가 trigger 불필요.
+    hydrateBindingsFromDb(activeProjectIdForRow);
+    hydrateRowEditsFromDb(activeProjectIdForRow);
+    return () => { cancelled = true; };
+  }, [activeProjectIdForRow, hydrateBindingsFromDb, hydrateRowEditsFromDb]);
   const rowEdits = useMappingEditsStore(
     (s) => (activeProjectIdForRow ? s.rowEdits[activeProjectIdForRow]?.[table.internalName] : undefined) || EMPTY_ROW_EDITS,
   );
   const [testStatus, setTestStatus] = useState<'idle' | 'running' | 'completed'>('idle');
   const [testProgress, setTestProgress] = useState(0);
-  const startTest = useCallback(async () => {
+  // Trial 은 DuckDB 위 in-memory 미리보기 — TO-BE DB 적재도, project phase 변경도 하지 않는다.
+  const startTest = useCallback(() => {
     setTestStatus('running');
     setTestProgress(0);
-    const active = useWorkspaceStore.getState().getActiveProject();
-    if (active) {
-      try {
-        await projectApi.update(active.id, { phase: 'test', runStatus: 'running' });
-        const siteId = useWorkspaceStore.getState().activeSiteId;
-        if (siteId) await useWorkspaceStore.getState().fetchProjects(siteId);
-      } catch (e) {
-        console.error('[mapping] phase update (start) failed', e);
-      }
-    }
   }, []);
   useEffect(() => {
     if (testStatus !== 'running') return;
@@ -678,15 +974,6 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         if (p >= 100) {
           window.clearInterval(id);
           setTestStatus('completed');
-          const active = useWorkspaceStore.getState().getActiveProject();
-          if (active) {
-            projectApi.update(active.id, { phase: 'test', runStatus: 'completed' })
-              .then(() => {
-                const siteId = useWorkspaceStore.getState().activeSiteId;
-                if (siteId) return useWorkspaceStore.getState().fetchProjects(siteId);
-              })
-              .catch((e) => console.error('[mapping] phase update (complete) failed', e));
-          }
           return 100;
         }
         return Math.min(100, p + 4);
@@ -696,12 +983,58 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   }, [testStatus]);
   const handleSaveEdit = useCallback((r: MappingRow, edit: RowEdit) => {
     if (!activeProjectIdForRow) return;
-    useMappingEditsStore.getState().setRowEdit(activeProjectIdForRow, table.internalName, r.tgt, edit);
-  }, [activeProjectIdForRow, table.internalName]);
+    // 사용자가 row 편집기에서 저장한 것 = manual
+    const editWithOrigin: RowEdit = { ...edit, ruleOrigin: 'manual' };
+    useMappingEditsStore.getState().setRowEdit(activeProjectIdForRow, table.internalName, r.tgt, editWithOrigin);
+
+    // DB 영속화 — savedSrc 의 {alias}.{column} 에서 alias 룩업으로 asis_table 복원
+    const splitQ = (qn: string) => {
+      const i = qn.indexOf('.');
+      return i > 0 ? { schema: qn.slice(0, i), table: qn.slice(i + 1) } : { schema: '', table: qn };
+    };
+    const tobeSplit = splitQ(table.name);
+    let asisSchema: string | null = null;
+    let asisTable: string | null = null;
+    let asisColumn: string | null = null;
+    const firstSrc = edit.savedSrc?.find((s) => s && s.trim());
+    if (firstSrc) {
+      const parts = firstSrc.split('.');
+      asisColumn = parts[parts.length - 1];
+      if (parts.length >= 2 && bindingEdit) {
+        const alias = parts[0];
+        const source = bindingEdit.sources.find((s) => s.alias === alias);
+        if (source) {
+          const ssp = splitQ(source.table);
+          asisSchema = ssp.schema || null;
+          asisTable = ssp.table;
+        }
+      }
+    }
+    const strategy = edit.savedStrategy ?? 'expression';
+    mappingImportApi.upsertRule(activeProjectIdForRow, {
+      tobeSchema: tobeSplit.schema,
+      tobeTable: tobeSplit.table,
+      tobeColumn: r.tgt,
+      asisSchema, asisTable, asisColumn,
+      strategy,
+      transformRule: edit.savedRule ?? null,
+      transformSql: edit.savedRule ?? null,
+      defaultValue: edit.savedDefault ?? null,
+      notNullOverride: edit.savedNotNull ?? false,
+    }).catch((e) => console.warn('[mapping] upsertRule failed', e));
+  }, [activeProjectIdForRow, table.internalName, table.name, bindingEdit]);
   const [bindingSources, setBindingSources] = useState(bindingEdit?.sources ?? table.sources);
   const [bindingMode, setBindingMode] = useState<'join' | 'union'>(
     bindingEdit?.mode ?? (table.compositionKind === 'union' ? 'union' : 'join'),
   );
+  const [bindingWhere, setBindingWhere] = useState(bindingEdit?.whereFilter ?? table.whereFilter ?? '');
+  // Apply/hydrate 등으로 외부에서 bindingEdit 가 갱신되면 로컬 state 도 따라가게.
+  // (useState 는 첫 렌더의 prop 으로만 초기화되어 이후 prop 변경을 못 받음)
+  useEffect(() => {
+    setBindingSources(bindingEdit?.sources ?? table.sources);
+    setBindingMode(bindingEdit?.mode ?? (table.compositionKind === 'union' ? 'union' : 'join'));
+    setBindingWhere(bindingEdit?.whereFilter ?? table.whereFilter ?? '');
+  }, [bindingEdit, table.internalName, table.sources, table.compositionKind, table.whereFilter]);
   const allRows = useMemo(() => rows.map((r) => {
     const re = rowEdits[r.tgt];
     if (!re) return r;
@@ -711,7 +1044,12 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
     if (re.savedStrategy === 'null') eff = 'null';
     else if (re.savedStrategy === 'default') eff = 'default';
     else if (re.savedStrategy === 'expression') {
-      if (hasRule || filledSrc) eff = filledSrc && !hasRule ? 'auto' : 'rule';
+      if (hasRule || filledSrc) {
+        // 임포트된 룰 = passthrough(auto), 사용자가 수정한 룰 = transform(rule)
+        if (filledSrc && !hasRule) eff = 'auto';
+        else if (re.ruleOrigin === 'imported') eff = 'auto';
+        else eff = 'rule';
+      }
     } else if (filledSrc && r.rule === 'unmapped') {
       eff = 'auto';
     }
@@ -720,10 +1058,20 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         && re.savedStrategy !== 'null' && re.savedStrategy !== 'default') {
       eff = 'unmapped';
     }
-    return eff === r.rule ? r : { ...r, rule: eff };
+    const noteFromEdit = re.savedNotes && re.savedNotes.trim() ? re.savedNotes : undefined;
+    if (eff === r.rule && noteFromEdit === r.note) return r;
+    return { ...r, rule: eff, note: noteFromEdit ?? r.note };
   }), [rows, rowEdits]);
 
   const visibleRows = useMemo(() => allRows.filter((r) => r.rule !== 'skip'), [allRows]);
+
+  // For Test/Report: overlay user-picked source column into r.src so the CSV
+  // lookup (and transformation pipeline) sees the AS-IS column the user mapped.
+  const reportRows = useMemo(() => visibleRows.map((r) => {
+    const re = rowEdits[r.tgt];
+    const picked = re?.savedSrc?.find((s) => s && s.trim() !== '');
+    return picked ? { ...r, src: picked.trim() } : r;
+  }), [visibleRows, rowEdits]);
 
   const filtered = visibleRows.filter((r) =>
     (!q || (r.src + ' ' + r.tgt).toLowerCase().includes(q.toLowerCase())) &&
@@ -743,76 +1091,162 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   const missingImports = bindingSources
     .map((s) => ASIS_TABLES.find((a) => a.name === s.table))
     .filter((a): a is AsisTable => !!a && !a.imported);
-  const testDisabled = counts.unmapped > 0 || bindingSources.length === 0 || missingImports.length > 0;
+  // TO-BE Target DB 가 Site Settings 에서 "configured" 상태인지 검사 — Site Settings 의
+  // Trial 은 in-memory 미리보기라 TO-BE DB 연결 여부와 무관 — 매핑 정합성만 검사.
+  const testDisabled =
+    counts.unmapped > 0
+    || bindingSources.length === 0
+    || missingImports.length > 0;
   const testDisabledReason =
     bindingSources.length === 0 ? 'AS-IS source 가 연결되어 있지 않습니다.'
     : missingImports.length > 0 ? `AS-IS extracted data 가 임포트되지 않았습니다: ${missingImports.map((a) => a.short).join(', ')}`
     : counts.unmapped > 0 ? `Unmapped 컬럼이 ${counts.unmapped}개 남아 있습니다.`
-    : 'Run test migration for this table';
+    : 'Run trial transformation for this table';
 
   return (
     <div style={styles.workspace}>
       {/* Context bar */}
       <div style={styles.contextBar}>
         <span style={{ ...styles.sidePill, color: 'var(--navy)', background: 'var(--navy-50)', borderColor: 'var(--navy)' }}>TO-BE</span>
-        <div style={styles.tableChip}>{table.name}</div>
+        <div style={styles.tableChip}>{table.short}</div>
         <div style={{ flex: 1 }} />
         <div style={styles.statusCounts}>
-          {counts.unmapped > 0 && <StatusBadge tone="queued">{counts.unmapped} unmapped</StatusBadge>}
-          {missingImports.length > 0 && (
-            <button
-              type="button"
-              onClick={() => navigate('/settings', { state: { highlightSide: 'asis-csv' } })}
-              title="Project Settings → AS-IS 의 CSV 카드로 이동합니다."
-              style={styles.csvMissingBtn}
-            >
-              <StatusBadge tone="warn">
-                {missingImports.length} CSV not imported →
-              </StatusBadge>
-            </button>
-          )}
+          {(() => {
+            // 우선순위 — 매핑 작업 순. 한 번에 하나씩만 표시.
+            if (bindingSources.length === 0) {
+              return (
+                <button
+                  type="button"
+                  onClick={triggerBindingHighlight}
+                  title="Table binding 패널을 엽니다."
+                  style={styles.csvMissingBtn}
+                >
+                  <StatusBadge tone="warn">AS-IS source not bound →</StatusBadge>
+                </button>
+              );
+            }
+            if (missingImports.length > 0) {
+              return (
+                <button
+                  type="button"
+                  onClick={() => useUiStore.getState().requestOpenSiteSettings({ focus: 'asis-csv' })}
+                  title="Site Settings → AS-IS CSV path 필드를 엽니다."
+                  style={styles.csvMissingBtn}
+                >
+                  <StatusBadge tone="warn">{missingImports.length} CSV not imported →</StatusBadge>
+                </button>
+              );
+            }
+            if (counts.unmapped > 0) {
+              return <StatusBadge tone="err">{counts.unmapped} unmapped</StatusBadge>;
+            }
+            return null;
+          })()}
         </div>
         <button
-          style={(testDisabled || testStatus === 'running') ? styles.btnPrimaryDisabled : styles.btnPrimary}
-          disabled={testDisabled || testStatus === 'running'}
+          style={(testDisabled || testStatus === 'running' || reportOpen) ? styles.btnPrimaryDisabled : styles.btnPrimary}
+          disabled={testDisabled || testStatus === 'running' || reportOpen}
           onClick={startTest}
           title={
-            testStatus === 'running' ? `Testing… ${testProgress}%`
-            : testStatus === 'completed' ? 'Test completed. Click to re-run.'
+            reportOpen ? 'Close the Report to run Trial again'
+            : testStatus === 'running' ? `Running… ${testProgress}%`
+            : testStatus === 'completed' ? 'Trial completed. Click to re-run.'
             : testDisabledReason
           }
         >
-          <Ic.play /> {testStatus === 'running' ? `Testing ${testProgress}%` : testStatus === 'completed' ? 'Re-test' : 'Test'}
+          <Ic.play /> {testStatus === 'running' ? `Running ${testProgress}%` : 'Trial'}
         </button>
+        {testStatus === 'completed' && (
+          <button
+            type="button"
+            onClick={() => setReportOpen(true)}
+            title="변환 룰을 적용한 TO-BE 데이터 미리보기를 봅니다."
+            style={styles.reportChip}
+          >
+            <Ic.arrow /> Report
+          </button>
+        )}
       </div>
 
-      {bindingSources.length === 0 && (
+      {!reportOpen && bindingSources.length === 0 && (
         <div style={styles.noSourceBanner}>
           <Ic.warn />
           <span>AS-IS 테이블이 매핑되지 않았습니다. <b>Table binding</b> 패널에서 <b>+ Add source</b>로 테이블을 추가하세요.</span>
         </div>
       )}
-      <CollapsibleBinding
-        table={table} open={bindingOpen} onToggle={() => setBindingOpen((o) => !o)}
-        sources={bindingSources}
-        onSourcesChange={(s) => { setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode }); }}
-        compositionMode={bindingMode}
-        onCompositionModeChange={(m) => { setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m }); }}
-      />
+      {!reportOpen && (
+        <CollapsibleBinding
+          table={table} open={bindingOpen} pulse={bindingPulse} onToggle={() => setBindingOpen((o) => !o)}
+          sources={bindingSources}
+          onSourcesChange={(s) => { setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode, whereFilter: bindingWhere }); }}
+          compositionMode={bindingMode}
+          onCompositionModeChange={(m) => { setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m, whereFilter: bindingWhere }); }}
+          whereFilter={bindingWhere}
+          onWhereChange={(v) => { setBindingWhere(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: v }); }}
+        />
+      )}
 
       {/* Toolbar */}
-      <div style={styles.toolbar}>
+      <div style={{ ...styles.toolbar, display: reportOpen ? 'none' : 'flex' }}>
         <div style={styles.toolbarSearch}>
           <Ic.search />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by field name…" style={styles.searchInput} />
         </div>
         <div style={{ flex: 1 }} />
-        <button style={styles.btnGhost}><Ic.download /> Import YAML</button>
-        <button style={styles.btnSecondary}>Auto-map unmapped</button>
+        <button
+          style={yamlImported
+            ? { ...styles.btnSecondary, color: 'var(--text-3)' }
+            : styles.btnSecondary}
+          onClick={() => setImportYamlOpen(true)}
+        >{yamlImported
+            ? <><Ic.check /> YAML Imported</>
+            : <><i className="fa-solid fa-download" style={{ fontSize: 11 }} /> Import YAML</>}</button>
+        <button
+          style={mappingImported
+            ? { ...styles.btnSecondary, color: 'var(--text-3)' }
+            : styles.btnSecondary}
+          onClick={() => setImportMappingOpen(true)}
+        >{mappingImported
+            ? <><Ic.check /> Mapping Imported</>
+            : <><i className="fa-solid fa-download" style={{ fontSize: 11 }} /> Import Mapping</>}</button>
       </div>
+      {importMappingOpen && (
+        <MappingDefinitionImportModal
+          projectId={activeProjectIdForRow ?? ''}
+          activeFiles={{ column: mappingStatus.columnFilename, code: mappingStatus.codeFilename }}
+          onClose={() => setImportMappingOpen(false)}
+          onChanged={refreshMappingStatus}
+        />
+      )}
+      {importYamlOpen && (
+        <ImportFileModal
+          title="Import YAML"
+          accept=".yml,.yaml"
+          acceptLabel=".yml · .yaml"
+          hint="YAML 정의서로 매핑을 일괄 임포트합니다. 매칭된 unmapped 행만 채워지고, 이미 매핑된 행은 덮어쓰지 않습니다."
+          onClose={() => setImportYamlOpen(false)}
+          onImported={() => setYamlImported(true)}
+        />
+      )}
+
+      {reportOpen && (
+        <ReportView
+          table={table}
+          rows={reportRows}
+          onClose={() => setReportOpen(false)}
+          onPickColumn={(tgt) => {
+            const idx = visibleRows.findIndex((r) => r.tgt === tgt);
+            if (idx >= 0) {
+              setActiveIdx(idx);
+              setInspectorOpen(true);
+              setReportOpen(false);
+            }
+          }}
+        />
+      )}
 
       {/* Grid + inspector */}
-      <div style={styles.gridSplit}>
+      <div style={{ ...styles.gridSplit, display: reportOpen ? 'none' : 'flex' }}>
         <div style={styles.gridScroll}>
           <TobeCoverageBar
             total={counts.all}
@@ -931,10 +1365,6 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
           </table>
         </div>
 
-        <InspectorRail
-          open={inspectorOpen}
-          onToggle={() => setInspectorOpen((o) => !o)}
-        />
         {inspectorOpen && (
           <Inspector
             active={active}
@@ -979,11 +1409,110 @@ function StatusFor({ row }: { row: MappingRow }) {
 
 // ── Collapsible binding ──────────────────────────────────────
 
-function CollapsibleBinding({ table, open, onToggle, sources, onSourcesChange, compositionMode, onCompositionModeChange }: {
-  table: TobeTable; open: boolean; onToggle: () => void;
+/**
+ * 단일 행 input 에 cursor-aware autocomplete 를 붙임.
+ * 사용자가 타이핑하는 현재 단어 ([\w.] 연속체) 가 completions 와 prefix 매칭되면 dropdown.
+ * Tab/Enter 로 선택, Esc 로 닫음, ↑↓ 로 이동.
+ */
+function AutocompleteInput({
+  value, onChange, completions, placeholder, style,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  completions: string[];
+  placeholder?: string;
+  style?: React.CSSProperties;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [focused, setFocused] = useState(false);
+  const [acItems, setAcItems] = useState<string[]>([]);
+  const [acIdx, setAcIdx] = useState(0);
+  const savedCursor = useRef<number | null>(null);
+
+  useLayoutEffect(() => {
+    if (savedCursor.current !== null && inputRef.current) {
+      inputRef.current.setSelectionRange(savedCursor.current, savedCursor.current);
+      savedCursor.current = null;
+    }
+  }, [value]);
+
+  useEffect(() => {
+    if (!focused || !completions.length || !inputRef.current) { setAcItems([]); return; }
+    const pos = inputRef.current.selectionStart ?? 0;
+    let s = pos;
+    while (s > 0 && /[\w.]/.test(value[s - 1])) s--;
+    const word = value.slice(s, pos);
+    if (word.length < 1) { setAcItems([]); return; }
+    const lo = word.toLowerCase();
+    const hits = completions.filter((c) => c.toLowerCase().startsWith(lo) && c.toLowerCase() !== lo).slice(0, 10);
+    setAcItems(hits);
+    setAcIdx(0);
+  }, [value, focused, completions]);
+
+  const applyAc = (item: string) => {
+    if (!inputRef.current) return;
+    const pos = inputRef.current.selectionStart ?? 0;
+    let s = pos;
+    while (s > 0 && /[\w.]/.test(value[s - 1])) s--;
+    const before = value.slice(0, s);
+    const after = value.slice(pos);
+    savedCursor.current = before.length + item.length;
+    onChange(before + item + after);
+    setAcItems([]);
+    inputRef.current.focus();
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!acItems.length) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); setAcIdx((i) => Math.min(i + 1, acItems.length - 1)); return; }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); setAcIdx((i) => Math.max(i - 1, 0)); return; }
+    if (e.key === 'Escape')    { setAcItems([]); return; }
+    if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); applyAc(acItems[acIdx]); return; }
+  };
+
+  return (
+    <div style={{ position: 'relative', flex: 1, minWidth: 0, width: '100%' }}>
+      <input
+        ref={inputRef}
+        value={value}
+        onChange={(e) => {
+          savedCursor.current = e.target.selectionStart;
+          onChange(e.target.value);
+        }}
+        onKeyDown={handleKeyDown}
+        onFocus={() => setFocused(true)}
+        onBlur={() => { setFocused(false); setAcItems([]); }}
+        placeholder={placeholder}
+        spellCheck={false}
+        style={{ width: '100%', boxSizing: 'border-box', ...style }}
+      />
+      {acItems.length > 0 && (
+        <div style={styles.acDropdown}>
+          {acItems.map((item, i) => (
+            <div
+              key={item}
+              onMouseDown={(e) => { e.preventDefault(); applyAc(item); }}
+              onMouseEnter={() => setAcIdx(i)}
+              style={{
+                ...styles.acItem,
+                background: i === acIdx ? 'var(--navy-50)' : 'transparent',
+                color: i === acIdx ? 'var(--navy)' : 'var(--text-2)',
+              }}
+            >{item}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesChange, compositionMode, onCompositionModeChange, whereFilter, onWhereChange }: {
+  table: TobeTable; open: boolean; pulse?: boolean; onToggle: () => void;
   sources: TobeTable['sources']; onSourcesChange: (s: TobeTable['sources']) => void;
   compositionMode: 'join' | 'union'; onCompositionModeChange: (m: 'join' | 'union') => void;
+  whereFilter: string; onWhereChange: (v: string) => void;
 }) {
+  const t = useT();
   const [addingSource, setAddingSource] = useState(false);
   const [pickTable, setPickTable] = useState('');
   const [pickAlias, setPickAlias] = useState('');
@@ -991,6 +1520,17 @@ function CollapsibleBinding({ table, open, onToggle, sources, onSourcesChange, c
   const op = compositionMode === 'union' ? '∪' : '⋈';
   const usedTables = new Set(sources.map((s) => s.table));
   const availableTables = ASIS_TABLES.filter((t) => !usedTables.has(t.name));
+
+  // {alias}.{column} 자동완성 후보 — 현재 binding 의 모든 source 의 컬럼들.
+  const datalistId = `mpd-cols-${table.internalName}`;
+  const aliasColumnOptions = useMemo(() => {
+    const opts: string[] = [];
+    for (const s of sources) {
+      const cols = ASIS_COLUMNS[s.table] || [];
+      for (const c of cols) opts.push(`${s.alias}.${c.name}`);
+    }
+    return opts;
+  }, [sources, table.internalName]);
 
   const startAdd = () => {
     const first = availableTables[0];
@@ -1090,7 +1630,7 @@ function CollapsibleBinding({ table, open, onToggle, sources, onSourcesChange, c
 
           {sources.length === 0 && !addingSource && (
             <div style={styles.bindingHint}>
-              이 TO-BE 테이블에 연결된 AS-IS 소스가 없습니다. [Add source] 로 추가하세요.
+              {t('mapping.binding.noSourceHint')}
             </div>
           )}
 
@@ -1132,9 +1672,10 @@ function CollapsibleBinding({ table, open, onToggle, sources, onSourcesChange, c
                   {s.role === 'join' && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                       <span style={styles.joinOnLabel}>ON</span>
-                      <input
+                      <AutocompleteInput
+                        completions={aliasColumnOptions}
                         value={s.joinOn ?? ''}
-                        onChange={(e) => updateSource(s.alias, { joinOn: e.target.value })}
+                        onChange={(v) => updateSource(s.alias, { joinOn: v })}
                         placeholder={`${s.alias}.id = primary.id`}
                         style={styles.joinOnInput}
                       />
@@ -1157,7 +1698,7 @@ function CollapsibleBinding({ table, open, onToggle, sources, onSourcesChange, c
                 style={styles.addSourceSelect}
               >
                 {availableTables.map((t) => (
-                  <option key={t.name} value={t.name}>{t.name}</option>
+                  <option key={t.name} value={t.name}>{t.short}</option>
                 ))}
               </select>
               <span style={{ color: 'var(--text-4)', fontSize: 10.5, whiteSpace: 'nowrap' }}>alias</span>
@@ -1176,28 +1717,31 @@ function CollapsibleBinding({ table, open, onToggle, sources, onSourcesChange, c
             <div style={{ marginTop: 12 }}>
               <div style={styles.whereLabel}>
                 <span>WHERE filter</span>
-                <span style={styles.whereHint}>이 TO-BE 에 포함할 행 조건. 비우면 전체 rows.</span>
+                <span style={styles.whereHint}>{t('mapping.binding.whereHint')}</span>
               </div>
-              <input
-                defaultValue={table.whereFilter ?? ''}
+              <AutocompleteInput
+                completions={aliasColumnOptions}
+                value={whereFilter}
+                onChange={onWhereChange}
                 placeholder={`예: ${sources[0].alias}.party_type = 'P'`}
-                style={{
-                  ...styles.whereInput,
-                  borderColor: table.whereFilter ? 'var(--navy)' : 'var(--border)',
-                  background: table.whereFilter ? '#0e1a2b' : 'var(--panel)',
-                  color: table.whereFilter ? '#cad7e8' : 'var(--text)',
-                }}
+                style={styles.whereInput}
               />
             </div>
           )}
         </div>
       )}
+      {/* alias.column 자동완성 — joinOn / whereFilter input 의 list= 가 참조 */}
+      <datalist id={datalistId}>
+        {aliasColumnOptions.map((opt) => (
+          <option key={opt} value={opt} />
+        ))}
+      </datalist>
     </div>
   );
 }
 
 // Per-row saved edits (lifted to TobeMappingDetail so they survive row switches)
-type RowEdit = { savedSrc?: string[]; savedRule?: string; savedDefault?: string; savedNotNull?: boolean; savedStrategy?: 'expression' | 'null' | 'default' };
+type RowEdit = { savedSrc?: string[]; savedRule?: string; savedDefault?: string; savedNotNull?: boolean; savedStrategy?: 'expression' | 'null' | 'default'; ruleOrigin?: 'imported' | 'manual'; savedNotes?: string };
 
 // Module-level helper so it can be called from useEffect closures
 function resolveSrcType(s: string, sources: TobeTable['sources']): string {
@@ -1264,7 +1808,19 @@ const _cmt = (s: string) => `<span style="color:#7a8aa6">${_e(s)}</span>`;
 const _num = (s: string) => `<span style="color:#79c0ff">${_e(s)}</span>`;
 const _def = (s: string) => `<span style="color:#cad7e8">${_e(s)}</span>`;
 
-const SQL_KW = new Set(['SELECT','FROM','WHERE','AND','OR','NOT','IN','IS','NULL','AS','CAST','JOIN','LEFT','RIGHT','INNER','OUTER','FULL','ON','TO_DATE','TO_TIMESTAMP','ICONV','UNPACK_COMP3','DROP','DEFAULT','UNION','ALL','DISTINCT','CASE','WHEN','THEN','ELSE','END','TRUE','FALSE','WITH','INSERT','UPDATE','DELETE','LIKE','BETWEEN','EXISTS','COALESCE','NULLIF','TRIM','UPPER','LOWER','SUBSTR','SUBSTRING','LENGTH','CONCAT','EXTRACT','NOW','CURRENT_DATE','CURRENT_TIMESTAMP','NUMERIC','INTEGER','VARCHAR','CHAR','DATE','TIMESTAMP','BOOLEAN','UUID','TEXT','JSONB','INT','BIGINT','FLOAT','DOUBLE','USING','INTO','RETURNS','ORDER','GROUP','BY','HAVING','LIMIT','OFFSET']);
+const SQL_KW = new Set(['SELECT','FROM','WHERE','AND','OR','NOT','IN','IS','NULL','AS','CAST','TRY_CAST','JOIN','LEFT','RIGHT','INNER','OUTER','FULL','ON','TO_DATE','TO_TIMESTAMP','STRPTIME','ICONV','UNPACK_COMP3','DROP','DEFAULT','UNION','ALL','DISTINCT','CASE','WHEN','THEN','ELSE','END','TRUE','FALSE','WITH','INSERT','UPDATE','DELETE','LIKE','BETWEEN','EXISTS','COALESCE','NULLIF','TRIM','UPPER','LOWER','SUBSTR','SUBSTRING','LENGTH','CONCAT','EXTRACT','NOW','CURRENT_DATE','CURRENT_TIMESTAMP','NUMERIC','INTEGER','VARCHAR','CHAR','DATE','TIMESTAMP','BOOLEAN','UUID','TEXT','JSONB','INT','BIGINT','FLOAT','DOUBLE','USING','INTO','RETURNS','ORDER','GROUP','BY','HAVING','LIMIT','OFFSET']);
+
+/**
+ * SQL 키워드/함수만 대문자화. 문자열 리터럴('...') 과 식별자(컬럼/별칭) 는 원본 그대로.
+ * Transform 입력에서 사용자가 친 컬럼명/리터럴이 자동으로 대문자화되면 DB 데이터까지 망가지기 때문.
+ */
+function upperSqlKeywords(s: string): string {
+  return s.replace(/'(?:[^']|'')*'|[A-Za-z_][A-Za-z_0-9]*/g, (m) => {
+    if (m.startsWith("'")) return m;
+    const u = m.toUpperCase();
+    return SQL_KW.has(u) ? u : m;
+  });
+}
 
 function highlightSql(raw: string): string {
   const out: string[] = [];
@@ -1472,7 +2028,11 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   const [savedStrategy, setSavedStrategy] = useState<'expression' | 'null' | 'default' | null>(null);
   const [userFnOpen, setUserFnOpen] = useState(false);
   const [javaCode, setJavaCode] = useState('');
+  const [notesOpen, setNotesOpen] = useState(false);
+  useEffect(() => { setNotesOpen(false); }, [active?.tgt]);
   useEffect(() => {
+    // 같은 컬럼이면 effective rule 갱신으로 active 객체 reference 가 새로 만들어져도
+    // 편집 모드를 종료하지 않는다 — active.tgt 만 dep 로 사용.
     setEditingRule(false); setRuleError(null);
     const re = rowEdit;
     setSavedRule(re?.savedRule ?? null);
@@ -1480,7 +2040,8 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     const src = re?.savedSrc ?? null;
     setSavedSrc(src);
     setSavedSrcType(src ? src.map((s) => resolveSrcType(s, sources)) : null);
-  }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active?.tgt]);
   if (!active) return null;
   const initSrc: string[] = active.src === '—' ? [] : [active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src];
   const resolveType = (s: string) => resolveSrcType(s, sources);
@@ -1494,20 +2055,22 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     const srcCol = firstSrc.includes('.') ? firstSrc.slice(firstSrc.indexOf('.') + 1) : firstSrc;
     const srcT = resolveSrcType(firstSrc, sources);
     if (!srcT || srcT === '—' || active.tgtType === '—') return '';
-    return (srcT === active.tgtType ? srcCol : `CAST(${srcCol} AS ${active.tgtType})`).toUpperCase();
+    // AS-IS type 을 TO-BE dialect 로 정규화한 결과가 TO-BE 컬럼 type 과 같으면 단순 컬럼.
+    const translatedSrcT = translateTypeToTobe(srcT, TOBE_DIALECT);
+    const same = translatedSrcT.toUpperCase() === active.tgtType.toUpperCase();
+    return same ? srcCol : `CAST(${srcCol} AS ${active.tgtType})`;
   };
 
   const handleEdit = () => {
     const inferredStrategy = savedStrategy ?? (active.rule === 'null' ? 'null' : active.rule === 'default' ? 'default' : 'expression');
     setEditStrategy(inferredStrategy);
-    const initialAutoCast =
-      active.src !== '—' && active.tgt !== '—'
-      && active.srcType !== '—' && active.tgtType !== '—'
-      && active.srcType !== active.tgtType
-        ? `CAST(${active.src} AS ${active.tgtType})`
-        : '';
-    prevAutoCastRef.current = initialAutoCast.toUpperCase();
-    setEditValue((savedRule ?? initialAutoCast).toUpperCase());
+    // 자동 CAST 생성 — savedSrc 우선, 없으면 active.sourceAlias.src.
+    // computeAutoCast 헬퍼를 그대로 써서 TO-BE dialect 변환표가 동일하게 적용됨.
+    const firstSrcForCast = (savedSrc && savedSrc.find((s) => s && s.trim() !== ''))
+      || (active.src !== '—' ? (active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src) : undefined);
+    const initialAutoCast = computeAutoCast(firstSrcForCast);
+    prevAutoCastRef.current = initialAutoCast;
+    setEditValue(savedRule ?? initialAutoCast);
     // Filter out stale alias references no longer present in current binding
     const rawSrc = savedSrc ?? initSrc;
     const cleanedSrc = rawSrc.filter((s) => {
@@ -1563,7 +2126,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   const displaySrcArr = (savedSrc ?? initSrc).filter((s) => s && s.trim() !== '');
   const displaySrcName = displaySrcArr.length === 0
     ? '(unassigned)'
-    : displaySrcArr.map((s) => s.slice(s.lastIndexOf('.') + 1)).join(' + ');
+    : displaySrcArr.join(' + ');  // alias.col 형태 그대로 (예: tr.TX_ID + em.EMP_NM)
   const handleClear = () => {
     setSavedSrc(null);
     setSavedSrcType(null);
@@ -1671,10 +2234,56 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
             ? <span style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-2)' }}>{active.ddlDefault}</span>
             : <span style={{ color: 'var(--text-4)' }}>—</span>}
         </MetaRow>
+        <MetaRow k="Notes">
+          {active.note ? (
+            <button
+              type="button"
+              onClick={() => setNotesOpen((v) => !v)}
+              title={notesOpen ? 'Collapse' : 'Expand'}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                padding: 0,
+                cursor: 'pointer',
+                color: 'var(--navy)',
+                lineHeight: 1,
+                fontFamily: 'inherit',
+              }}
+            >
+              <i
+                className="fa-regular"
+                style={{
+                  fontSize: 13,
+                  color: 'var(--navy)',
+                  transform: notesOpen ? 'rotate(180deg)' : 'none',
+                  transition: 'transform 0.15s',
+                  display: 'inline-block',
+                }}
+              >&#xf150;</i>
+            </button>
+          ) : (
+            <span style={{ color: 'var(--text-4)' }}>—</span>
+          )}
+        </MetaRow>
+        {active.note && notesOpen && (
+          <div style={{
+            margin: '4px 0 8px',
+            padding: '6px 8px',
+            background: 'var(--panel-2)',
+            border: '1px solid var(--border-strong)',
+            borderRadius: 4,
+            fontSize: 11.5,
+            color: 'var(--text-2)',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}>
+            {active.note}
+          </div>
+        )}
       </div>
 
       <div style={styles.section}>
-        <div style={styles.sectionLabel}>Transform</div>
+        <div style={styles.sectionLabel}>Rule</div>
         {editingRule ? (
           <>
             {(() => {
@@ -1724,7 +2333,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
                 <>
                   <HighlightEditor
                     value={editValue}
-                    onChange={(v) => { setEditValue(v.toUpperCase()); if (ruleError) setRuleError(null); }}
+                    onChange={(v) => { setEditValue(upperSqlKeywords(v)); if (ruleError) setRuleError(null); }}
                     language="sql"
                     placeholder={transformPlain(active)}
                     hasError={!!ruleError}
@@ -1852,18 +2461,754 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   );
 }
 
-function InspectorRail({ open, onToggle }: { open: boolean; onToggle: () => void }) {
+function ImportFileModal({
+  title, accept, acceptLabel, templateHref, templateFilename, hint, onClose, onImported,
+}: {
+  title: string;
+  accept: string;
+  acceptLabel: string;
+  templateHref?: string;
+  templateFilename?: string;
+  hint: string;
+  onClose: () => void;
+  onImported?: () => void;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const handlePick = (f: File | null) => {
+    if (!f) return;
+    setFile(f);
+  };
   return (
-    <div
-      onClick={onToggle}
-      title={open ? 'Hide mapping detail' : 'Show mapping detail'}
-      style={styles.inspectorRail}
-    >
-      <div style={styles.inspectorRailLabel}>
-        {open ? '›' : '‹'} Mapping detail
+    <div style={styles.modalBackdrop} onClick={onClose}>
+      <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <div style={styles.modalTitle}>{title}</div>
+          <div style={{ flex: 1 }} />
+          {templateHref && (
+            <a
+              href={templateHref}
+              download={templateFilename}
+              style={styles.modalTemplateBtn}
+            >
+              <Ic.download /> Download template
+            </a>
+          )}
+        </div>
+        <div style={styles.modalBody}>
+          <div
+            onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging(false);
+              const f = e.dataTransfer.files?.[0];
+              if (f) handlePick(f);
+            }}
+            onClick={() => inputRef.current?.click()}
+            style={{
+              ...styles.modalDropZone,
+              borderColor: dragging ? 'var(--navy)' : 'var(--border-strong)',
+              background: dragging ? 'var(--navy-50)' : 'var(--panel-2)',
+            }}
+          >
+            <input
+              ref={inputRef}
+              type="file"
+              accept={accept}
+              onChange={(e) => handlePick(e.target.files?.[0] ?? null)}
+              style={{ display: 'none' }}
+            />
+            {file ? (
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontFamily: 'var(--mono)', fontWeight: 600, fontSize: 13 }}>{file.name}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 4 }}>
+                  {(file.size / 1024).toFixed(1)} KB · 다른 파일을 선택하려면 다시 클릭
+                </div>
+              </div>
+            ) : (
+              <div style={{ textAlign: 'center', color: 'var(--text-3)' }}>
+                <div style={{ fontSize: 13, marginBottom: 4 }}>파일을 끌어다 놓거나 클릭해서 선택</div>
+                <div style={{ fontSize: 11 }}>{acceptLabel}</div>
+              </div>
+            )}
+          </div>
+          <div style={styles.modalHint}>
+            <Ic.warn />
+            <span>{hint}</span>
+          </div>
+        </div>
+        <div style={styles.modalFooter}>
+          <button style={styles.btnSecondary} onClick={onClose}>Cancel</button>
+          <button
+            style={file ? styles.btnPrimary : styles.btnPrimaryDisabled}
+            disabled={!file}
+            onClick={() => {
+              // TODO: 백엔드 import API 가 생기면 여기서 호출.
+              console.log(`[${title}] would import`, file?.name);
+              onImported?.();
+              onClose();
+            }}
+          >Import</button>
+        </div>
       </div>
     </div>
   );
+}
+
+// ── Mapping definition import modal (stage → save 모델) ──
+//
+// 폴더 아이콘으로 파일 픽 / 휴지통으로 슬롯 삭제 — 둘 다 일단 모달 안 state 에만
+// stage 됨. Save 누를 때 한꺼번에 DB 에 commit (POST /mapping/import + DELETE).
+// Close 누르면 staged 변경 전부 폐기.
+
+type SlotPending =
+  | { kind: 'none' }
+  | { kind: 'upload'; file: File }
+  | { kind: 'delete' };
+
+function MappingDefinitionImportModal({
+  projectId, activeFiles, onClose, onChanged,
+}: {
+  projectId: string;
+  activeFiles: { column: string | null; code: string | null };
+  onClose: () => void;
+  /** Returns the list of TO-BE qualified names from DB bindings that didn't match TOBE_TABLES. */
+  onChanged: () => Promise<string[]>;
+}) {
+  const t = useT();
+  const [columnPending, setColumnPending] = useState<SlotPending>({ kind: 'none' });
+  const [codePending, setCodePending]     = useState<SlotPending>({ kind: 'none' });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
+
+  /**
+   * Apply — pending 변경이 있으면 처리 + 매번 bindings 재구성 (멱등).
+   * pending 변경 없어도 활성. 파일 안 바꿔도 재맵핑 가능.
+   */
+  const handleApply = async () => {
+    if (!projectId) return;
+    setSaving(true);
+    setError(null);
+    setWarning(null);
+    try {
+      if (columnPending.kind === 'delete') await mappingImportApi.deleteRules(projectId);
+      if (codePending.kind === 'delete')   await mappingImportApi.deleteCodeMaps(projectId);
+      const colFile = columnPending.kind === 'upload' ? columnPending.file : null;
+      const codFile = codePending.kind   === 'upload' ? codePending.file   : null;
+      const anyPending = columnPending.kind !== 'none' || codePending.kind !== 'none';
+      if (colFile || codFile) {
+        await mappingImportApi.importCsv(projectId, colFile, codFile);
+      } else if (!anyPending && (activeFiles.column || activeFiles.code)) {
+        // 사용자가 파일 다시 안 고르고 Apply 만 누름 → 마지막 임포트 CSV 로 재적용
+        // (수동 수정된 룰 reset)
+        await mappingImportApi.reapplyLatest(projectId);
+      }
+      await mappingImportApi.rebuildBindings(projectId);
+      const unmatched = await onChanged();
+      if (unmatched.length > 0) {
+        const shown = unmatched.slice(0, 5).join(', ');
+        const more = unmatched.length > 5 ? ` 외 ${unmatched.length - 5}개` : '';
+        setWarning(t('mapping.import.warning.uncoveredCols', { cols: shown + more }));
+        // 경고만 표시하고 모달은 그대로 유지 — 사용자가 직접 Close
+        return;
+      }
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const displayName = (slot: 'column' | 'code'): { name: string | null; mode: 'normal' | 'pending' } => {
+    const pending = slot === 'column' ? columnPending : codePending;
+    const active = slot === 'column' ? activeFiles.column : activeFiles.code;
+    if (pending.kind === 'upload') return { name: pending.file.name, mode: 'pending' };
+    if (pending.kind === 'delete') return { name: null, mode: 'normal' };
+    return { name: active, mode: 'normal' };
+  };
+
+  const colDisp = displayName('column');
+  const codDisp = displayName('code');
+
+  return (
+    <div style={styles.modalBackdrop} onClick={saving ? undefined : onClose}>
+      <div style={{ ...styles.modalCard, width: 520 }} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <div style={styles.modalTitle}>Mapping Definition</div>
+          <div style={{ flex: 1 }} />
+          <a
+            href="/templates/mapping_definition_template.csv"
+            download="column_mapping_template.csv"
+            style={styles.modalTemplateBtn}
+          >
+            <Ic.download /> column template
+          </a>
+          <a
+            href="/templates/code_mapping_template.csv"
+            download="code_mapping_template.csv"
+            style={{ ...styles.modalTemplateBtn, marginLeft: 6 }}
+          >
+            <Ic.download /> code template
+          </a>
+        </div>
+        <div style={styles.modalBody}>
+          <MappingFileRow
+            label="Column mapping"
+            displayName={colDisp.name}
+            displayMode={colDisp.mode}
+            onPick={(f) => setColumnPending({ kind: 'upload', file: f })}
+            onDelete={() => setColumnPending({ kind: 'delete' })}
+            canDelete={activeFiles.column !== null && columnPending.kind !== 'delete'}
+          />
+          <MappingFileRow
+            label="Code mapping"
+            displayName={codDisp.name}
+            displayMode={codDisp.mode}
+            onPick={(f) => setCodePending({ kind: 'upload', file: f })}
+            onDelete={() => setCodePending({ kind: 'delete' })}
+            canDelete={activeFiles.code !== null && codePending.kind !== 'delete'}
+          />
+          {warning && (
+            <div style={{ ...styles.modalHint, background: 'var(--amber-50)', borderColor: 'var(--amber)', color: 'var(--amber)' }}>
+              <Ic.warn />
+              <span>{warning}</span>
+            </div>
+          )}
+          {error && (
+            <div style={{ ...styles.modalHint, background: 'var(--red-50)', borderColor: 'var(--red)', color: 'var(--red)' }}>
+              <Ic.warn />
+              <span>{error}</span>
+            </div>
+          )}
+        </div>
+        <div style={styles.modalFooter}>
+          <button
+            style={!saving ? styles.btnPrimary : styles.btnPrimaryDisabled}
+            disabled={saving}
+            onClick={handleApply}
+          >{saving ? 'Applying…' : 'Apply'}</button>
+          <button style={styles.btnSecondary} disabled={saving} onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 한 슬롯의 행 — [라벨] [흰 박스: 파일명 ... 📁 🗑]
+ * 폴더 아이콘 / 휴지통은 흰 박스 내부의 단일 컨테이너에 묶여 있음.
+ */
+function MappingFileRow({
+  label, displayName, displayMode, onPick, onDelete, canDelete,
+}: {
+  label: string;
+  displayName: string | null;
+  displayMode: 'normal' | 'pending';
+  onPick: (f: File) => void;
+  onDelete: () => void;
+  canDelete: boolean;
+}) {
+  const t = useT();
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const nameStyle: React.CSSProperties = {
+    flex: 1,
+    fontFamily: 'var(--mono)',
+    fontSize: 12,
+    color: displayName == null ? 'var(--text-4)' : 'var(--text)',
+    fontStyle: displayMode === 'pending' ? 'italic' : 'normal',
+    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  };
+
+  const iconBtnStyle: React.CSSProperties = {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    width: 22, height: 22,
+    background: 'transparent', border: 'none', borderRadius: 3,
+    cursor: 'pointer', color: 'var(--text-3)', fontSize: 12,
+  };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ minWidth: 110, fontSize: 11.5, color: 'var(--text-2)' }}>{label}</div>
+        {/* 흰 박스 — 파일명과 아이콘 모두 감싼다 */}
+        <div style={{
+          flex: 1,
+          display: 'flex', alignItems: 'center', gap: 4,
+          padding: '6px 10px',
+          background: 'var(--panel)',
+          border: '1px solid var(--border-strong)',
+          borderRadius: 4,
+          minHeight: 30,
+        }}>
+          <div style={nameStyle}>{displayName ?? '—'}</div>
+          {canDelete && (
+            <button
+              type="button"
+              onClick={onDelete}
+              title={t('mapping.import.deleteSlotTooltip')}
+              style={iconBtnStyle}
+            >
+              <i className="fa-solid fa-trash" />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            title={t('mapping.import.pickFileTooltip')}
+            style={iconBtnStyle}
+          >
+            <i className="fa-solid fa-folder-open" />
+          </button>
+        </div>
+        <input
+          ref={inputRef}
+          type="file"
+          accept=".csv"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) onPick(f);
+            e.target.value = '';
+          }}
+          style={{ display: 'none' }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ── Report view (Test 결과 미리보기) ─────────────────────────
+
+/**
+ * Fetch the CSV preview for `{site.csvPath}/{tableName}.csv` via the backend
+ * (browsers can't read arbitrary local paths). Cached per (siteId, tableName).
+ * Returns null while loading, or when the file is missing / unreadable.
+ */
+const CSV_CACHE = new Map<string, CsvPreview | null>();
+
+function useTableCsv(siteId: string | null, tableShortName: string | undefined): CsvPreview | null {
+  const cacheKey = siteId && tableShortName ? `${siteId}::${tableShortName.toLowerCase()}` : null;
+  const [data, setData] = useState<CsvPreview | null>(() =>
+    cacheKey ? CSV_CACHE.get(cacheKey) ?? null : null,
+  );
+  useEffect(() => {
+    if (!siteId || !tableShortName) { setData(null); return; }
+    const key = `${siteId}::${tableShortName.toLowerCase()}`;
+    if (CSV_CACHE.has(key)) { setData(CSV_CACHE.get(key) ?? null); return; }
+    let cancelled = false;
+    csvPreviewApi.forTable(siteId, tableShortName.toLowerCase(), 50)
+      .then((preview) => {
+        CSV_CACHE.set(key, preview);
+        if (!cancelled) setData(preview);
+      })
+      .catch(() => {
+        CSV_CACHE.set(key, null);
+        if (!cancelled) setData(null);
+      });
+    return () => { cancelled = true; };
+  }, [siteId, tableShortName]);
+  return data;
+}
+
+/**
+ * Run the mapping Report — call backend which executes the generated SELECT
+ * (transform_sql per rule + read_csv per binding source) via DuckDB.
+ * Returns transformed rows where columns are named by TO-BE column name.
+ */
+function useReportRows(
+  projectId: string | null,
+  tobeSchema: string,
+  tobeTable: string | undefined,
+): { result: MappingReportResult | null; loading: boolean } {
+  const [result, setResult] = useState<MappingReportResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    if (!projectId || !tobeTable) { setResult(null); return; }
+    let cancelled = false;
+    setLoading(true);
+    mappingImportApi.runReport(projectId, tobeSchema, tobeTable, 20)
+      .then((r) => { if (!cancelled) setResult(r); })
+      .catch((e) => {
+        if (!cancelled) setResult({
+          tobeSchema, tobeTable, headers: [], rows: [], rowCount: 0, truncated: false,
+          sql: null, error: e instanceof Error ? e.message : String(e),
+        });
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [projectId, tobeSchema, tobeTable]);
+  return { result, loading };
+}
+
+/**
+ * Pipe one AS-IS CSV row through the mapping rule for `r` and produce the TO-BE cell value.
+ * No DB write — purely in-memory preview of what the test run will emit.
+ *
+ *   rule = unmapped / null / default / added → rule-driven literal
+ *   rule = auto / rule with CSV loaded       → CSV[r.src] with applyTransform
+ *   anything else (no CSV, source missing)   → empty cell ([NULL])
+ *
+ * Dummies are intentionally never shown here — the Report is a Test-result view,
+ * and a blank means "no source row" which is a more honest signal than fake data.
+ */
+function computeReportCell(
+  r: MappingRow,
+  rowIdx: number,
+  csv: CsvPreview | null,
+  csvColIdx: Map<string, number> | null,
+): string {
+  if (r.rule === 'unmapped') return '';
+  if (r.rule === 'null')     return 'NULL';
+  if (r.rule === 'default')  return r.ddlDefault ?? 'DEFAULT';
+  if (r.rule === 'added')    return r.ddlDefault ?? 'NULL';
+  // 'auto' / 'rule'
+  if (!csv || !csvColIdx) return '';
+  if (!r.src || r.src === '—') return '';
+  // savedSrc 는 row editor 가 `{alias}.{column}` (예: "c.CUST_ID") 로 저장하므로
+  // CSV 헤더 (alias 없음) 와 맞추려면 마지막 세그먼트만 사용.
+  const colName = r.src.includes('.') ? r.src.split('.').pop()! : r.src;
+  const idx = csvColIdx.get(colName.trim().toLowerCase());
+  if (idx === undefined) return '';
+  const raw = csv.rows[rowIdx]?.[idx];
+  return raw === undefined ? '' : applyTransform(raw, r);
+}
+
+/**
+ * Minimal AS-IS → TO-BE value transformation. Covers the common Oracle → PG
+ * cases the rule editor lets users express implicitly via type changes.
+ * Anything richer (code maps, unit conversion, regex split) should live in
+ * `RowEdit.savedRule` and ultimately be executed in DuckDB SQL — out of scope
+ * for this preview path.
+ */
+function applyTransform(raw: string, r: MappingRow): string {
+  if (raw === '') return r.tgtNullable === false ? '' : 'NULL'; // Oracle empty == NULL
+  const t = r.tgtType.toUpperCase();
+  if (t.startsWith('BOOL') || t === 'BIT') {
+    const u = raw.trim().toUpperCase();
+    if (u === 'Y' || u === 'TRUE' || u === '1' || u === 'T') return 'true';
+    if (u === 'N' || u === 'FALSE' || u === '0' || u === 'F') return 'false';
+  }
+  return raw;
+}
+
+function excelColLabel(i: number): string {
+  // 0 → A, 25 → Z, 26 → AA, ...
+  let s = '';
+  let n = i;
+  while (true) {
+    s = String.fromCharCode(65 + (n % 26)) + s;
+    n = Math.floor(n / 26) - 1;
+    if (n < 0) break;
+  }
+  return s;
+}
+
+function typeIconLabel(t: string): string {
+  const u = t.toLowerCase();
+  if (u === 'uuid') return 'UUID';
+  if (u.startsWith('varchar') || u.startsWith('char') || u === 'text' || u.includes('nvarchar')) return 'ABC';
+  if (u === 'int' || u === 'integer' || u === 'bigint' || u === 'smallint' || u === 'serial' || u === 'bigserial') return '123';
+  if (u.startsWith('numeric') || u.startsWith('decimal') || u.startsWith('number')) return '1.2';
+  if (u.startsWith('timestamp')) return 'TS';
+  if (u === 'date') return 'DT';
+  if (u === 'time') return 'TM';
+  if (u === 'bool' || u === 'boolean' || u === 'bit') return 'T/F';
+  if (u === 'bytea' || u.includes('blob') || u.includes('binary') || u === 'raw') return 'BIN';
+  if (u === 'json' || u === 'jsonb') return '{}';
+  return u.slice(0, 3).toUpperCase();
+}
+
+function isNumericType(t: string): boolean {
+  const u = t.toLowerCase();
+  return u === 'int' || u === 'integer' || u === 'bigint' || u === 'smallint'
+    || u.startsWith('numeric') || u.startsWith('number') || u.startsWith('decimal');
+}
+
+function ReportView({ table, rows, onClose, onPickColumn }: {
+  table: TobeTable;
+  rows: MappingRow[];
+  onClose: () => void;
+  onPickColumn: (tgt: string) => void;
+}) {
+  const t = useT();
+  const PREVIEW_ROWS = 20;
+  const shortName = table.short || (table.name.includes('.') ? table.name.split('.').pop()! : table.name);
+  const tobeDbLabel = dialectLabel(TOBE_DIALECT);
+
+  const ws = useWorkspaceStore.getState();
+  const activeSite = ws.getActiveSite();
+  const activeSiteName = activeSite?.name || 'modernize';
+  const activeProject = ws.getActiveProject();
+  const activeProjectName = activeProject?.name || 'project';
+
+  // Mapping report — 백엔드가 transform_sql 들을 묶어 read_csv 위에서 한 방에 실행.
+  // header 는 TO-BE 컬럼명, row 값은 변환식 적용 결과.
+  const tobeSplit = useMemo(() => {
+    const i = table.name.indexOf('.');
+    return i > 0
+      ? { schema: table.name.slice(0, i), table: table.name.slice(i + 1) }
+      : { schema: '', table: table.name };
+  }, [table.name]);
+  const { result: report, loading: reportLoading } = useReportRows(activeProject?.id ?? null, tobeSplit.schema, tobeSplit.table);
+  const reportColIdx = useMemo(() => {
+    if (!report) return null;
+    const m = new Map<string, number>();
+    report.headers.forEach((h, i) => m.set(h.trim().toLowerCase(), i));
+    return m;
+  }, [report]);
+  const dataRowCount = report ? Math.min(report.rows.length, PREVIEW_ROWS) : 0;
+  // 디버그 — 결과가 도착했을 때 한 번만 찍음
+  useEffect(() => {
+    if (!report) return;
+    console.log('[Report]', {
+      tobeSplit,
+      headers: report.headers,
+      rowCount: report.rowCount,
+      error: report.error,
+      sql: report.sql,
+      firstRow: report.rows[0],
+    });
+  }, [report, tobeSplit]);
+
+  return (
+    <div style={styles.dbvWindow}>
+      {/* ① 타이틀바 */}
+      <div style={styles.dbvTitlebar}>
+        <div style={styles.dbvTitlebarLeft}>
+          <img src="/mpd.png" alt="" style={styles.dbvLogo} />
+          <span style={styles.dbvTitleText}>{shortName} - Report</span>
+        </div>
+        <div style={styles.dbvTitlebarRight}>
+          <span style={styles.dbvTitleBtn}>─</span>
+          <span style={styles.dbvTitleBtn}>▢</span>
+          <button
+            type="button"
+            onClick={onClose}
+            title="Mapping 화면으로 돌아가기"
+            style={{ ...styles.dbvTitleBtn, ...styles.dbvTitleBtnClose }}
+            aria-label="Close report"
+          >✕</button>
+        </div>
+      </div>
+
+      {/* ② 메뉴바 */}
+      <div style={styles.dbvMenubar}>
+        {['File', 'Edit', 'Navigate', 'Search', 'SQL Editor', 'Database', 'Window', 'Help'].map((m) => (
+          <span key={m} style={styles.dbvMenuItem}>{m}</span>
+        ))}
+      </div>
+
+      {/* ③ 툴바 */}
+      <div style={styles.dbvToolbar}>
+        {['📄','📂','💾'].map((s, i) => <span key={`g1-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
+        <span style={styles.dbvToolSep} />
+        {['↶','↷'].map((s, i) => <span key={`g2-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
+        <span style={styles.dbvToolSep} />
+        {['▶','⏹'].map((s, i) => <span key={`g3-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
+        <span style={styles.dbvToolSep} />
+        <span style={styles.dbvToolDropdown}>Auto<span style={styles.dbvToolDropArrow}>▾</span></span>
+        <span style={styles.dbvToolDropdown}>{tobeDbLabel}<span style={styles.dbvToolDropArrow}>▾</span></span>
+        <span style={styles.dbvToolDropdown}>{activeProjectName}@{shortName}<span style={styles.dbvToolDropArrow}>▾</span></span>
+        <span style={styles.dbvToolSep} />
+        {['⚙','🔍','⤓','⤴'].map((s, i) => <span key={`g4-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
+      </div>
+
+      {/* ④ 탭바 — 프로젝트의 모든 TO-BE 테이블 */}
+      <div style={styles.dbvTabbar}>
+        {TOBE_TABLES.map((t) => {
+          const active = t.internalName === table.internalName;
+          const name = t.short || t.name.split('.').pop() || t.name;
+          return (
+            <div
+              key={t.internalName}
+              style={active
+                ? { ...styles.dbvTab, ...styles.dbvTabActive }
+                : styles.dbvTab}
+            >
+              <i className="fa-solid fa-table" style={{ color: '#2DBD96', fontSize: 12 }} />
+              <span>{name}</span>
+              {active && <span style={styles.dbvTabClose}>✕</span>}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ⑤ 서브탭 */}
+      <div style={styles.dbvSubtabs}>
+        <span style={styles.dbvSubtab}>Properties</span>
+        <span style={{ ...styles.dbvSubtab, ...styles.dbvSubtabActive }}>Data</span>
+        <span style={styles.dbvSubtab}>Diagram</span>
+      </div>
+
+      {/* ⑥ 필터바 */}
+      <div style={styles.dbvFilterbar}>
+        <span style={styles.dbvFilterShowSql}>Show SQL</span>
+        <span style={styles.dbvFilterInput}>이 데이터는 DB에 저장되지 않습니다.</span>
+        <span style={styles.dbvFilterIcons}>
+          {['▾','▶','✕','⟳','⊞','⚙'].map((s, i) => <span key={i} style={styles.dbvFilterIcon}>{s}</span>)}
+        </span>
+      </div>
+
+      {/* 상태 배너 — loading / error / 빈 결과 */}
+      {reportLoading && (
+        <div style={{ padding: '8px 14px', background: '#fff8e1', color: '#856404', borderBottom: '1px solid #e8e8e8', fontSize: 11.5 }}>
+          ⏳ {t('mapping.report.loading')}
+        </div>
+      )}
+
+      {/* 데이터 그리드 */}
+      <div style={styles.dbvGridArea}>
+        <table style={styles.dbvGrid}>
+          <thead>
+            <tr>
+              <th style={styles.dbvGridCorner}> </th>
+              {rows.map((r) => (
+                <th
+                  key={r.tgt}
+                  onClick={() => onPickColumn(r.tgt)}
+                  title={`${r.tgt} (${r.tgtType}) · 클릭해서 매핑 상세 보기`}
+                  style={styles.dbvGridCol}
+                >
+                  <div style={styles.dbvColHeaderInner}>
+                    <span style={styles.dbvColTypeIcon}>{typeIconLabel(r.tgtType)}</span>
+                    <span>{r.tgt}</span>
+                    <span style={styles.dbvColCaret}>▾</span>
+                  </div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {report?.error ? (
+              <tr>
+                <td
+                  colSpan={rows.length + 1}
+                  style={{
+                    padding: '14px 16px',
+                    background: '#fde2e2',
+                    color: '#a02020',
+                    fontFamily: 'var(--mono)',
+                    fontSize: 11.5,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    verticalAlign: 'top',
+                    borderBottom: '1px solid #f5b5b5',
+                  }}
+                >
+                  ⚠ {buildReportErrorMessage(report, t)}
+                </td>
+              </tr>
+            ) : Array.from({ length: dataRowCount }, (_, i) => {
+              const zebra = i % 2 === 1;
+              return (
+                <tr key={i}>
+                  <td style={styles.dbvRowNum}>{i + 1}</td>
+                  {rows.map((r) => {
+                    // TO-BE 컬럼명으로 report 결과에서 lookup
+                    let v = '';
+                    if (report && reportColIdx) {
+                      const idx = reportColIdx.get(r.tgt.toLowerCase());
+                      if (idx !== undefined) v = report.rows[i]?.[idx] ?? '';
+                    }
+                    const isNull = v === 'NULL' || v === '';
+                    const numeric = isNumericType(r.tgtType);
+                    return (
+                      <td
+                        key={r.tgt}
+                        style={{
+                          ...styles.dbvCell,
+                          ...(zebra ? styles.dbvCellZebra : {}),
+                          ...(numeric ? styles.dbvCellNum : {}),
+                        }}
+                      >
+                        {isNull
+                          ? <span style={styles.dbvCellNull}>[NULL]</span>
+                          : v}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* 하단 상태바 */}
+      <div style={styles.dbvStatusbar}>
+        <span style={{ ...styles.dbvStatusBtn, ...styles.dbvStatusBtnDropdown }}>Refresh</span>
+        <span style={styles.dbvStatusSep} />
+        <span style={styles.dbvStatusBtn}>💾 Save</span>
+        <span style={styles.dbvStatusBtn}>✕ Cancel</span>
+        <span style={styles.dbvStatusSep} />
+        <span style={styles.dbvStatusBtn}>⏮</span>
+        <span style={styles.dbvStatusBtn}>◀</span>
+        <span style={styles.dbvStatusBtn}>▶</span>
+        <span style={styles.dbvStatusBtn}>⏭</span>
+        <span style={styles.dbvStatusSep} />
+        <span style={{ ...styles.dbvStatusBtn, ...styles.dbvStatusBtnDropdown }}>Export data</span>
+        <span style={styles.dbvStatusSep} />
+        <span style={styles.dbvStatusCenter}>
+          {rows.length} column(s), {dataRowCount} row(s) fetched - 0.0s, on {fmtDate(new Date())} at {fmtTime(new Date())}
+        </span>
+      </div>
+
+      {/* 브레드크럼 */}
+      <div style={styles.dbvBreadcrumb}>
+        <span style={styles.dbvCrumb}>
+          <i className="fa-solid fa-database" style={{ color: '#2DBD96', fontSize: 12 }} />
+          <span>{tobeDbLabel} - {activeSiteName}</span>
+        </span>
+        <span style={styles.dbvCrumbSep}>▸</span>
+        <span style={styles.dbvCrumb}>
+          <i className="fa-solid" style={{ color: '#2DBD96', fontSize: 12 }}>&#xf46d;</i>
+          <span>{activeProjectName}</span>
+        </span>
+        <span style={styles.dbvCrumbSep}>▸</span>
+        <span style={styles.dbvCrumb}>
+          <i className="fa-solid fa-table" style={{ color: '#2DBD96', fontSize: 12 }} />
+          <span>{shortName}</span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function fmtDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function fmtTime(d: Date): string {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+}
+
+/**
+ * 백엔드의 구조화된 ReportResult error 필드를 현재 언어 메시지로 합성.
+ * 키 정의: i18n/{ko,ja,en}.ts 의 `mapping.report.error.*`.
+ */
+function buildReportErrorMessage(
+  report: MappingReportResult,
+  t: ReturnType<typeof useT>,
+): string {
+  const typeKey = report.errorType ?? 'UNKNOWN';
+  const typeLabel = t(`mapping.report.error.type.${typeKey}` as TranslationKey);
+  const typeLine = `${t('mapping.report.error.typeLabel')}: ${typeLabel}`;
+  if (report.errorKind === 'EXPRESSION_FAILED' && report.errorColumn) {
+    const head = t('mapping.report.error.expressionFailed', { column: report.errorColumn });
+    const expr = `${t('mapping.report.error.expressionLabel')}: ${report.errorExpression ?? ''}`;
+    return `${head}\n${expr}\n${typeLine}`;
+  }
+  if (report.errorKind === 'FROM_FAILED') {
+    return `${t('mapping.report.error.fromFailed')}\n${typeLine}`;
+  }
+  if (report.errorKind === 'NO_RULES') {
+    return t('mapping.report.error.noRules');
+  }
+  // UNKNOWN 또는 누락 — 일반 메시지 + 분류 라벨
+  return `${t('mapping.report.error.unknown')}\n${typeLine}`;
 }
 
 function MetaRow({ k, children }: { k: string; children: React.ReactNode }) {
@@ -2015,7 +3360,7 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
     <div style={styles.workspace}>
       <div style={styles.contextBar}>
         <span style={{ ...styles.sidePill, color: 'var(--amber)', background: 'var(--amber-50)', borderColor: 'var(--amber)' }}>AS-IS</span>
-        <div style={styles.tableChip}>{table.name}</div>
+        <div style={styles.tableChip}>{table.short}</div>
         <div style={{ flex: 1 }} />
       </div>
 
@@ -2031,7 +3376,7 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
               <div key={to.internalName} style={styles.routeRow} onClick={() => onJumpTobe(to.internalName, to.name)}>
                 <span style={{ color: 'var(--text-2)' }}>{table.short}</span>
                 <span style={{ color: 'var(--text-4)' }}><Ic.arrow /></span>
-                <span style={{ color: 'var(--navy)', fontWeight: 500 }}>{to.name}</span>
+                <span style={{ color: 'var(--navy)', fontWeight: 500 }}>{to.short}</span>
                 {to.whereFilter && (
                   <span style={styles.whereTag} title={`WHERE: ${to.whereFilter}`}>
                     WHERE {to.whereFilter.length > 40 ? to.whereFilter.slice(0, 40) + '…' : to.whereFilter}
@@ -2207,13 +3552,14 @@ function GuidePanel() {
 
 type TobeRuleFilter = 'all' | 'unmapped' | 'auto' | 'rule' | 'null' | 'default';
 
-// Unmapped 만 빨강; 나머지는 같은 초록 계열, Default 를 기준으로 점점 옅어진다.
+// Unmapped 만 빨강; 나머지는 #059669 → #8aedc3 사이를 RGB 직선 보간으로 균등 4 분할.
+// 순서 (진함 → 옅음): Pass · Rule · Default · Null
 const TOBE_RULE_COLORS: Record<Exclude<TobeRuleFilter, 'all'>, string> = {
   unmapped: 'var(--red)',
-  auto:     '#059669',  // green 600 (darkest)
-  rule:     '#34d399',  // green 400
-  null:     '#6ee7b7',  // green 200
-  default:  '#a7f3d0',  // green 100 (lightest)
+  auto:     '#059669',  // step 0/3 — darkest
+  rule:     '#31B387',  // step 1/3
+  default:  '#5ED0A5',  // step 2/3
+  null:     '#8AEDC3',  // step 3/3 — lightest
 };
 
 function TobeCoverageBar({ total, ruleCounts, filter, onFilter }: {
@@ -2250,18 +3596,18 @@ function TobeCoverageBar({ total, ruleCounts, filter, onFilter }: {
         <div style={styles.coverageFilters}>
           {btn('all',      'All',         total)}
           {btn('unmapped', 'Unmapped',    ruleCounts.unmapped, TOBE_RULE_COLORS.unmapped)}
-          {btn('auto',     'Passthrough', ruleCounts.auto,     TOBE_RULE_COLORS.auto)}
-          {btn('rule',     'Transform',   ruleCounts.rule,     TOBE_RULE_COLORS.rule)}
-          {btn('null',     'Null',        ruleCounts.null,     TOBE_RULE_COLORS.null)}
+          {btn('auto',     'Pass',        ruleCounts.auto,     TOBE_RULE_COLORS.auto)}
+          {btn('rule',     'Rule',        ruleCounts.rule,     TOBE_RULE_COLORS.rule)}
           {btn('default',  'Default',     ruleCounts.default,  TOBE_RULE_COLORS.default)}
+          {btn('null',     'Null',        ruleCounts.null,     TOBE_RULE_COLORS.null)}
         </div>
       </div>
       <div style={styles.coverageTrack}>
         <div style={{ width: `${pct(ruleCounts.unmapped)}%`, background: TOBE_RULE_COLORS.unmapped }} />
         <div style={{ width: `${pct(ruleCounts.auto)}%`,     background: TOBE_RULE_COLORS.auto }} />
         <div style={{ width: `${pct(ruleCounts.rule)}%`,     background: TOBE_RULE_COLORS.rule }} />
-        <div style={{ width: `${pct(ruleCounts.null)}%`,     background: TOBE_RULE_COLORS.null }} />
         <div style={{ width: `${pct(ruleCounts.default)}%`,  background: TOBE_RULE_COLORS.default }} />
+        <div style={{ width: `${pct(ruleCounts.null)}%`,     background: TOBE_RULE_COLORS.null }} />
       </div>
     </div>
   );
@@ -2310,17 +3656,35 @@ function StatusBadge({ tone, children }: { tone: 'ok' | 'warn' | 'err' | 'info' 
 
 function RuleTag({ rule, status }: { rule: MappingRow['rule']; status?: MappingRow['status'] }) {
   const labels: Record<MappingRow['rule'], string> = {
-    auto: 'pass', rule: 'rule', null: 'null', default: 'def',
-    unmapped: 'unmapped', added: 'new', skip: 'skip',
+    auto: 'Pass', rule: 'Rule', null: 'Null', default: 'Default',
+    unmapped: 'Unmapped', added: 'New', skip: 'Skip',
   };
-  let tone: Parameters<typeof StatusBadge>[0]['tone'];
-  if (rule === 'skip') tone = 'skip';
-  else if (rule === 'unmapped') tone = 'err';
-  else if (status === 'err') tone = 'err';
-  else if (status === 'warn') tone = 'warn';
-  else if (rule === 'auto') tone = 'blue';
-  else tone = 'ok';
-  return <StatusBadge tone={tone}>{labels[rule]}</StatusBadge>;
+  // status err/warn 은 색을 덮어쓴다 (룰과 무관하게 위험 신호 우선).
+  if (status === 'err') return <StatusBadge tone="err">{labels[rule]}</StatusBadge>;
+  if (status === 'warn') return <StatusBadge tone="warn">{labels[rule]}</StatusBadge>;
+  if (rule === 'skip') return <StatusBadge tone="skip">{labels[rule]}</StatusBadge>;
+  if (rule === 'added') return <StatusBadge tone="info">{labels[rule]}</StatusBadge>;
+  // Pass / Rule / Null / Default / Unmapped — 필터바 dot 색을 좌측 dot 으로 가져오고
+  // 칩 자체는 같은 hue 의 옅은 배경 + 진한 텍스트로 통일. unmapped 만 red 팔레트.
+  const dot = TOBE_RULE_COLORS[rule];
+  const isUnmapped = rule === 'unmapped';
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5,
+      padding: '1px 7px 1px 6px', borderRadius: 10,
+      fontFamily: 'var(--mono)', fontSize: 10, fontWeight: 700,
+      color: isUnmapped ? '#b91c1c' : '#065f46',
+      background: isUnmapped ? '#fef2f2' : '#ecfdf5',
+      border: `1px solid ${dot}`,
+      letterSpacing: 0.2, whiteSpace: 'nowrap',
+    }}>
+      <span style={{
+        display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+        background: dot, flexShrink: 0,
+      }} />
+      {labels[rule]}
+    </span>
+  );
 }
 
 function TypeBadge({ children }: { children: React.ReactNode }) {
@@ -2936,9 +4300,655 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
     whiteSpace: 'nowrap',
   },
+  // Test 옆 Report chip
+  reportChip: {
+    display: 'inline-flex', alignItems: 'center', gap: 5,
+    height: 26, padding: '0 10px', marginLeft: -6,
+    background: 'var(--panel)', color: 'var(--navy)',
+    border: '1px solid var(--navy)', borderRadius: 4,
+    fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+    fontFamily: 'inherit',
+  },
+
+  // ── Report view (Excel UI prototype 그대로) ───────────────
+  // ── Report view (DBeaver UI prototype) ───────────────
+  dbvWindow: {
+    flex: 1, minHeight: 0, minWidth: 0,
+    margin: 10,
+    display: 'flex', flexDirection: 'column',
+    background: '#ffffff',
+    fontFamily: '"Segoe UI", "맑은 고딕", "Malgun Gothic", system-ui, sans-serif',
+    fontSize: 12, color: '#1f1f1f',
+    userSelect: 'none',
+    border: '1px solid #c8c6c4', borderRadius: 8, overflow: 'hidden',
+    boxShadow: '0 2px 10px rgba(0,0,0,0.06)',
+  },
+  dbvTitlebar: {
+    height: 28, background: '#FFFFFF', color: '#000',
+    display: 'flex', alignItems: 'center', padding: '0 8px',
+    fontSize: 12, flexShrink: 0,
+  },
+  dbvTitlebarLeft: { display: 'flex', alignItems: 'center', gap: 8 },
+  dbvLogo: { width: 18, height: 18, objectFit: 'contain', display: 'inline-block' },
+  dbvTitleText: { color: '#000', fontSize: 12, fontWeight: 500 },
+  dbvTitlebarRight: { marginLeft: 'auto', display: 'flex', alignItems: 'stretch', height: '100%' },
+  dbvTitleBtn: {
+    width: 40, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    color: '#555', fontSize: 13, cursor: 'default',
+    background: 'transparent', border: 'none', fontFamily: 'inherit',
+  },
+  dbvTitleBtnClose: { cursor: 'pointer' },
+
+  dbvMenubar: {
+    height: 24, background: '#FFFFFF', color: '#000',
+    display: 'flex', alignItems: 'center', padding: '0 8px',
+    fontSize: 12, flexShrink: 0,
+  },
+  dbvMenuItem: {
+    padding: '0 10px', height: 24, lineHeight: '24px',
+    cursor: 'default', color: '#000',
+  },
+
+  dbvToolbar: {
+    height: 32, background: '#ECECEC',
+    borderBottom: '1px solid #c8c8c8',
+    display: 'flex', alignItems: 'center', padding: '0 4px', gap: 4,
+    flexShrink: 0,
+  },
+  dbvToolBtn: {
+    width: 24, height: 24,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    color: '#555', fontSize: 12, borderRadius: 2, cursor: 'default',
+  },
+  dbvToolSep: { width: 1, height: 18, background: '#c0c0c0', margin: '0 2px' },
+  dbvToolDropdown: {
+    display: 'inline-flex', alignItems: 'center',
+    height: 22, padding: '0 6px',
+    background: '#ffffff', border: '1px solid #c0c0c0', borderRadius: 2,
+    fontSize: 11, color: '#1f1f1f', margin: '0 2px', gap: 4, cursor: 'default',
+  },
+  dbvToolDropArrow: { color: '#888', fontSize: 9 },
+
+  dbvTabbar: {
+    height: 28, background: '#ECECEC',
+    display: 'flex', alignItems: 'flex-end',
+    padding: '0 4px', flexShrink: 0,
+    overflowX: 'auto', overflowY: 'hidden',
+  },
+  dbvTab: {
+    height: 24, padding: '0 10px', marginTop: 4,
+    background: '#ECECEC', color: '#555', fontSize: 12,
+    display: 'inline-flex', alignItems: 'center', gap: 6,
+    cursor: 'default',
+    borderTopLeftRadius: 2, borderTopRightRadius: 2,
+    whiteSpace: 'nowrap', flexShrink: 0,
+  },
+  dbvTabActive: {
+    background: '#FFFFFF', color: '#000',
+    borderBottom: '2px solid #2DBD96',
+    height: 26, marginTop: 2,
+    fontWeight: 600,
+  },
+  dbvTabClose: { color: '#555', fontSize: 11, marginLeft: 2 },
+
+  dbvSubtabs: {
+    height: 28, background: '#ECECEC',
+    display: 'flex', alignItems: 'stretch', padding: 0,
+    flexShrink: 0,
+  },
+  dbvSubtab: {
+    padding: '0 14px', height: 28,
+    display: 'inline-flex', alignItems: 'center',
+    color: '#555', fontSize: 12, cursor: 'default',
+    background: '#ECECEC',
+  },
+  dbvSubtabActive: {
+    background: '#FFFFFF', color: '#000', fontWeight: 600,
+    boxShadow: 'inset 0 -2px 0 #2DBD96',
+  },
+
+  dbvFilterbar: {
+    height: 30, background: '#F5F5F5',
+    borderBottom: '1px solid #d0d0d0',
+    display: 'flex', alignItems: 'center', padding: '0 6px', gap: 6,
+    flexShrink: 0,
+  },
+  dbvFilterShowSql: {
+    height: 22, padding: '0 10px',
+    background: '#ffffff', border: '1px solid #c0c0c0', borderRadius: 2,
+    fontSize: 11, color: '#1f1f1f',
+    display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'default',
+  },
+  dbvFilterInput: {
+    flex: 1, height: 22,
+    background: '#ffffff', border: '1px solid #c0c0c0', borderRadius: 2,
+    padding: '0 8px',
+    fontSize: 11, color: '#a0a0a0', fontStyle: 'italic',
+    display: 'flex', alignItems: 'center',
+  },
+  dbvFilterIcons: { display: 'flex', alignItems: 'center', gap: 2 },
+  dbvFilterIcon: {
+    width: 22, height: 22,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    color: '#555', fontSize: 11, borderRadius: 2, cursor: 'default',
+  },
+
+  dbvGridArea: {
+    flex: 1, overflow: 'auto', background: '#ffffff', minHeight: 0, minWidth: 0,
+  },
+  dbvGrid: {
+    borderCollapse: 'collapse',
+    fontFamily: '"Segoe UI", "맑은 고딕", system-ui, sans-serif',
+    fontSize: 12, background: '#ffffff',
+    width: 'max-content', minWidth: '100%',
+  },
+  dbvGridCorner: {
+    position: 'sticky', top: 0, left: 0, zIndex: 3,
+    width: 44, height: 32,
+    background: '#F0F0F0',
+    borderRight: '1px solid #CCCCCC', borderBottom: '1px solid #CCCCCC',
+    padding: 0,
+  },
+  dbvGridCol: {
+    position: 'sticky', top: 0, zIndex: 1,
+    minWidth: 120, height: 32,
+    background: '#F0F0F0',
+    borderRight: '1px solid #CCCCCC', borderBottom: '1px solid #CCCCCC',
+    color: '#000', fontSize: 11.5, fontWeight: 600,
+    textAlign: 'left', padding: '0 6px',
+    whiteSpace: 'nowrap', cursor: 'pointer',
+  },
+  dbvColHeaderInner: { display: 'flex', alignItems: 'center', width: '100%' },
+  dbvColTypeIcon: {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    minWidth: 22, height: 16, padding: '0 2px',
+    color: '#2DBD96', fontSize: 10, fontWeight: 700,
+    fontFamily: '"Segoe UI", sans-serif',
+    marginRight: 5,
+    background: 'transparent',
+    letterSpacing: 0.2, textTransform: 'uppercase',
+  },
+  dbvColCaret: { color: '#2DBD96', fontSize: 9, marginLeft: 'auto', paddingLeft: 8 },
+
+  dbvRowNum: {
+    position: 'sticky', left: 0, zIndex: 1,
+    width: 44, height: 22,
+    background: '#F0F0F0',
+    borderRight: '1px solid #CCCCCC', borderBottom: '1px solid #ebebeb',
+    color: '#555', fontSize: 11, textAlign: 'center', padding: '0 4px',
+    fontFamily: '"Consolas", "Courier New", monospace',
+  },
+  dbvCell: {
+    minWidth: 120, height: 22, padding: '0 6px',
+    background: '#FFFFFF', color: '#000',
+    borderRight: '1px solid #ebebeb', borderBottom: '1px solid #ebebeb',
+    fontSize: 12, verticalAlign: 'middle',
+    whiteSpace: 'nowrap',
+    fontFamily: '"Consolas", "Segoe UI", monospace',
+  },
+  dbvCellZebra: { background: '#F0FBF7' },
+  dbvCellNum: { textAlign: 'right' },
+  dbvCellNull: { color: '#BBBBBB', fontStyle: 'italic' },
+
+  dbvStatusbar: {
+    height: 28, background: '#ECECEC',
+    borderTop: '1px solid #d0d0d0',
+    display: 'flex', alignItems: 'center', padding: '0 6px', gap: 4,
+    fontSize: 11, color: '#555555', flexShrink: 0,
+  },
+  dbvStatusBtn: {
+    display: 'inline-flex', alignItems: 'center', gap: 4,
+    height: 22, padding: '0 6px', borderRadius: 2,
+    background: 'transparent', color: '#555555', cursor: 'default',
+  },
+  dbvStatusBtnDropdown: {},  // 화살표는 텍스트로 직접 (CSS ::after 안 쓰는 인라인 한계)
+  dbvStatusSep: { width: 1, height: 16, background: '#c8c8c8', margin: '0 2px' },
+  dbvStatusCenter: { flex: 1, textAlign: 'center', color: '#555555', fontSize: 11 },
+  dbvStatusRight: { color: '#555555', fontSize: 11, padding: '0 8px' },
+
+  dbvBreadcrumb: {
+    height: 24, background: '#ECECEC',
+    borderTop: '1px solid #d0d0d0',
+    display: 'flex', alignItems: 'center', padding: '0 8px', gap: 4,
+    fontSize: 11, color: '#1A9E7A', flexShrink: 0,
+  },
+  dbvCrumb: { display: 'inline-flex', alignItems: 'center', gap: 4 },
+  dbvCrumbSep: { color: '#999', margin: '0 2px' },
+
+  xlWindow: {
+    flex: 1, minHeight: 0, minWidth: 0,
+    margin: 10,
+    display: 'flex', flexDirection: 'column',
+    background: '#ffffff',
+    fontFamily: '"Calibri", "Segoe UI", "맑은 고딕", "Malgun Gothic", system-ui, sans-serif',
+    fontSize: 11,
+    color: '#201f1e',
+    userSelect: 'none',
+    border: '1px solid #c8c6c4',
+    borderRadius: 8,
+    overflow: 'hidden',
+    boxShadow: '0 2px 10px rgba(0, 0, 0, 0.06)',
+  },
+  xlTitlebar: {
+    height: 28, background: '#217346', color: '#ffffff',
+    display: 'flex', alignItems: 'center', padding: 0,
+    fontSize: 11.5, flexShrink: 0, position: 'relative',
+  },
+  xlTitleCenter: {
+    position: 'absolute', left: '50%', transform: 'translateX(-50%)',
+    color: '#ffffff', fontSize: 11.5, letterSpacing: 0.2,
+  },
+  xlTitleRight: {
+    marginLeft: 'auto', display: 'flex', alignItems: 'stretch', height: '100%',
+  },
+  xlTitleBtn: {
+    width: 46, height: 28, padding: 0,
+    background: 'transparent', color: '#ffffff',
+    border: 'none', fontSize: 13,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    cursor: 'default',
+    fontFamily: 'inherit',
+  },
+  xlTitleBtnClose: { cursor: 'pointer' },
+
+  xlRibbon: {
+    height: 28, background: '#217346', color: '#ffffff',
+    display: 'flex', alignItems: 'flex-end',
+    padding: '0 8px', fontSize: 12, flexShrink: 0,
+  },
+  xlRibbonTab: {
+    padding: '4px 12px', height: 24, lineHeight: '16px',
+    color: 'rgba(255,255,255,0.92)', cursor: 'default',
+  },
+  xlRibbonTabFile: { background: '#185c37', fontWeight: 600 },
+  xlRibbonTabActive: {
+    background: '#f3f2f1', color: '#201f1e', fontWeight: 600,
+    borderTopLeftRadius: 2, borderTopRightRadius: 2,
+  },
+  xlRibbonBody: {
+    height: 4, background: '#f3f2f1',
+    borderBottom: '1px solid #d0d0d0', flexShrink: 0,
+  },
+
+  xlFormulaBar: {
+    height: 24, background: '#F3F3F3',
+    display: 'flex', alignItems: 'stretch',
+    borderBottom: '1px solid #D0D0D0',
+    flexShrink: 0, padding: '2px 4px', gap: 4,
+  },
+  xlNameBox: {
+    width: 110, background: '#FFFFFF',
+    border: '1px solid #D0D0D0',
+    display: 'flex', alignItems: 'center', padding: '0 8px',
+    fontSize: 11, color: '#201f1e',
+  },
+  xlNameBoxCaret: { marginLeft: 'auto', fontSize: 9, color: '#605e5c' },
+  xlFormulaButtons: {
+    display: 'flex', alignItems: 'center', gap: 2, padding: '0 4px',
+  },
+  xlFormulaBtn: {
+    width: 20, height: 18,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    background: 'transparent', color: '#888', fontSize: 11,
+    cursor: 'default',
+  },
+  xlFormulaBtnCancel: { color: '#b40000' },
+  xlFormulaBtnConfirm: { color: '#006400' },
+  xlFormulaBtnFx: {
+    color: '#605e5c',
+    fontFamily: '"Cambria Math", "Times New Roman", serif',
+    fontStyle: 'italic', fontSize: 12,
+  },
+  xlFormulaInput: {
+    flex: 1, background: '#FFFFFF', border: '1px solid #D0D0D0',
+    padding: '0 8px', display: 'flex', alignItems: 'center',
+    fontSize: 11, color: '#201f1e',
+    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+  },
+
+  xlSheetArea: {
+    flex: 1, overflow: 'auto', background: '#ffffff', minHeight: 0, minWidth: 0,
+  },
+  xlSheet: {
+    borderCollapse: 'collapse',
+    fontFamily: '"Calibri", "Segoe UI", system-ui, sans-serif',
+    fontSize: 11, background: '#ffffff',
+    width: 'max-content', minWidth: '100%',
+  },
+  xlCorner: {
+    position: 'sticky', top: 0, left: 0, zIndex: 3,
+    width: 32, height: 20, background: '#e1e1e1',
+    borderRight: '1px solid #b8b8b8', borderBottom: '1px solid #b8b8b8',
+    padding: 0,
+  },
+  xlColHeader: {
+    position: 'sticky', top: 0, zIndex: 1,
+    minWidth: 100, height: 20, background: '#e1e1e1', color: '#555',
+    borderRight: '1px solid #c8c8c8', borderBottom: '1px solid #b8b8b8',
+    fontSize: 11, fontWeight: 400, textAlign: 'center',
+  },
+  xlRowHeader: {
+    position: 'sticky', left: 0, zIndex: 1,
+    width: 32, height: 20, background: '#e1e1e1', color: '#555',
+    borderRight: '1px solid #b8b8b8', borderBottom: '1px solid #d8d8d8',
+    fontSize: 11, fontWeight: 400, textAlign: 'center', padding: 0,
+  },
+  xlRowHeaderName: { top: 20, left: 0, zIndex: 2, borderBottom: 'none' },
+  xlRowHeaderType: { top: 42, left: 0, zIndex: 2, borderBottom: '1px solid #b8b8b8' },
+  xlColName: {
+    position: 'sticky', top: 20, zIndex: 1,
+    minWidth: 100, height: 22,
+    padding: '3px 6px 0 6px',
+    background: '#f3f2f1', color: '#217346',
+    fontSize: 12, fontWeight: 700, textAlign: 'left',
+    borderRight: '1px solid #c8c8c8', borderBottom: 'none',
+    verticalAlign: 'bottom', whiteSpace: 'nowrap',
+    cursor: 'pointer',
+  },
+  xlColType: {
+    position: 'sticky', top: 42, zIndex: 1,
+    minWidth: 100, height: 20,
+    padding: '0 6px 3px 6px',
+    background: '#f3f2f1', color: '#605e5c',
+    fontSize: 10.5, fontWeight: 400, textAlign: 'left',
+    borderRight: '1px solid #c8c8c8', borderBottom: '1px solid #b8b8b8',
+    verticalAlign: 'top', whiteSpace: 'nowrap',
+    cursor: 'pointer',
+  },
+  xlCell: {
+    minWidth: 100, height: 20, padding: '0 6px',
+    background: '#ffffff', color: '#201f1e',
+    borderRight: '1px solid #e1e1e1', borderBottom: '1px solid #e1e1e1',
+    fontSize: 11, verticalAlign: 'middle',
+  },
+
+  xlSheetTabs: {
+    height: 22, background: '#f3f2f1',
+    borderTop: '1px solid #d0d0d0',
+    display: 'flex', alignItems: 'center', padding: '0 8px', gap: 4,
+    flexShrink: 0,
+  },
+  xlSheetTab: {
+    padding: '2px 14px', fontSize: 11, color: '#444',
+    background: '#ffffff', border: '1px solid #c8c8c8',
+    borderBottom: 'none', marginTop: 2, cursor: 'default',
+  },
+  xlSheetTabActive: {
+    color: '#217346', fontWeight: 700,
+    borderBottom: '2px solid #217346',
+  },
+  xlStatusBar: {
+    height: 22, background: '#217346', color: '#ffffff',
+    display: 'flex', alignItems: 'center', padding: '0 12px',
+    fontSize: 11, flexShrink: 0,
+  },
+
+  // ── 옛 report* (사용 안 함, 유지하면 컴파일 OK) ────────
+  reportWrap: {
+    flex: 1, minHeight: 0,
+    display: 'flex', flexDirection: 'column',
+    background: '#ffffff',
+    fontFamily: '"Segoe UI", "Calibri", system-ui, sans-serif',
+  },
+  // 짙은 녹색 Excel title bar (Artifacts 와 같은 #217346)
+  reportTitleBar: {
+    display: 'flex', alignItems: 'center', gap: 10,
+    height: 30,
+    padding: '0 0 0 0',
+    background: '#217346',
+    color: '#ffffff',
+    fontSize: 11.5, fontWeight: 400,
+    flexShrink: 0,
+  },
+  reportTitleText: {
+    fontSize: 11.5, color: '#ffffff', fontWeight: 400,
+    letterSpacing: 0.1,
+    textAlign: 'center',
+  },
+  // Formula bar — 진한 회색 (Artifacts formulaSpacer 와 같은 회색 tone 통일).
+  // Name box / fx 도 같은 회색.
+  reportFormulaBar: {
+    display: 'flex', alignItems: 'stretch', gap: 0,
+    height: 22,
+    background: '#e1e1e1',
+    borderBottom: '1px solid #d0cfce',
+    flexShrink: 0,
+  },
+  reportNameBox: {
+    display: 'inline-flex', alignItems: 'center',
+    width: 80, padding: '0 8px',
+    background: '#e1e1e1',
+    color: '#201f1e',
+    fontFamily: '"Calibri", "Segoe UI", system-ui, sans-serif',
+    fontSize: 11,
+    borderRight: '1px solid #d0cfce',
+  },
+  reportFxBtn: {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    width: 28,
+    background: '#e1e1e1',
+    color: '#605e5c',
+    fontFamily: '"Cambria Math", "Times New Roman", serif',
+    fontSize: 12, fontStyle: 'italic',
+    borderRight: '1px solid #d0cfce',
+  },
+  reportFormulaInput: {
+    flex: 1, padding: '0 10px',
+    background: '#ffffff',
+    display: 'flex', alignItems: 'center',
+    fontFamily: '"Calibri", "Segoe UI", system-ui, sans-serif',
+    fontSize: 11, color: '#201f1e',
+    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+  },
+  reportTitleClose: {
+    width: 46, height: 32, padding: 0,
+    background: 'transparent',
+    color: '#ffffff',
+    border: 'none',
+    fontSize: 16, fontWeight: 400,
+    cursor: 'pointer',
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    fontFamily: 'inherit',
+  },
+  // 시트 영역
+  reportBody: {
+    flex: 1, minHeight: 0, overflow: 'auto',
+    background: '#ffffff',
+  },
+  reportTable: {
+    borderCollapse: 'collapse',
+    fontFamily: '"Calibri", "Segoe UI", system-ui, sans-serif',
+    fontSize: 11,
+    width: 'max-content',
+    minWidth: '100%',
+    background: '#ffffff',
+  },
+  // 좌상단 corner cell (A 위, 1 왼쪽) — 진한 회색 (formula bar / 헤더 톤과 통일)
+  reportCornerCell: {
+    position: 'sticky', top: 0, left: 0, zIndex: 3,
+    width: 36, height: 20,
+    background: '#e1e1e1',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: '1px solid #d0cfce',
+    padding: 0,
+  },
+  // A B C ... 알파벳 컬럼 헤더 — 진한 회색
+  reportAlphaCell: {
+    position: 'sticky', top: 0, zIndex: 1,
+    minWidth: 110,
+    height: 20,
+    padding: '0 4px',
+    background: '#e1e1e1',
+    color: '#444',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: '1px solid #d0cfce',
+    fontSize: 11, fontWeight: 400,
+    textAlign: 'center',
+    userSelect: 'none',
+  },
+  // 데이터 row 번호 (3, 4, 5...) — 진한 회색 (헤더 톤)
+  reportRowNumCell: {
+    position: 'sticky', left: 0, zIndex: 1,
+    width: 36, height: 20,
+    background: '#e1e1e1',
+    color: '#444',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: '1px solid #e8e8e8',
+    fontSize: 11, fontWeight: 400,
+    textAlign: 'center',
+    padding: 0,
+  },
+  // Row 1: 컬럼명 — 옅은 회색 (Artifacts ribbon 톤), 셀 병합 효과로 아래 가로 border 제거
+  reportHeaderRowNumName: {
+    position: 'sticky', top: 20, left: 0, zIndex: 3,
+    width: 36, height: 22,
+    background: '#e1e1e1',
+    color: '#444',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: 'none',  // ← Row 2 와 셀 병합 효과
+    fontSize: 11, fontWeight: 400,
+    textAlign: 'center',
+    padding: 0,
+  },
+  reportHeaderNameOnly: {
+    position: 'sticky', top: 20, zIndex: 1,
+    minWidth: 110, height: 22,
+    padding: '4px 6px 0 6px',
+    background: '#f3f2f1',
+    color: '#217346',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: 'none',  // ← Row 2 와 셀 병합 효과
+    textAlign: 'left',
+    fontSize: 11.5, fontWeight: 700,
+    cursor: 'pointer',
+    userSelect: 'none',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden', textOverflow: 'ellipsis',
+    verticalAlign: 'bottom',
+  },
+  // Row 2: 타입 — 옅은 회색, sticky top 42
+  reportHeaderRowNumType: {
+    position: 'sticky', top: 42, left: 0, zIndex: 3,
+    width: 36, height: 20,
+    background: '#e1e1e1',
+    color: '#444',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: '1px solid #d0cfce',
+    fontSize: 11, fontWeight: 400,
+    textAlign: 'center',
+    padding: 0,
+  },
+  reportHeaderTypeOnly: {
+    position: 'sticky', top: 42, zIndex: 1,
+    minWidth: 110, height: 20,
+    padding: '0 6px 4px 6px',
+    background: '#f3f2f1',
+    color: '#605e5c',
+    borderRight: '1px solid #d0cfce',
+    borderBottom: '1px solid #d0cfce',
+    textAlign: 'left',
+    fontSize: 10.5, fontWeight: 400,
+    cursor: 'pointer',
+    userSelect: 'none',
+    whiteSpace: 'nowrap',
+    verticalAlign: 'top',
+  },
+  reportCell: {
+    minWidth: 110, height: 20,
+    padding: '0 6px',
+    background: '#ffffff',
+    color: '#201f1e',
+    borderRight: '1px solid #e8e8e8',
+    borderBottom: '1px solid #e8e8e8',
+    fontSize: 11,
+    verticalAlign: 'middle',
+  },
+  reportStatusBar: {
+    height: 22,
+    padding: '0 12px',
+    borderTop: '1px solid #d0cfce',
+    background: '#217346',
+    fontSize: 11, color: '#ffffff',
+    display: 'flex', alignItems: 'center',
+    flexShrink: 0,
+    fontFamily: '"Segoe UI", "Calibri", system-ui, sans-serif',
+  },
+
+  dialectChip: {
+    display: 'inline-flex', alignItems: 'center',
+    padding: '2px 8px', borderRadius: 3,
+    fontFamily: 'var(--mono)', fontSize: 10.5, fontWeight: 600,
+    color: 'var(--text-3)', background: 'var(--panel-2)',
+    border: '1px solid var(--border-strong)',
+    whiteSpace: 'nowrap', letterSpacing: 0.3,
+  },
   csvMissingBtn: {
     background: 'transparent', border: 'none', padding: 0,
     cursor: 'pointer', display: 'inline-flex', alignItems: 'center',
+  },
+
+  // Import mapping spec modal
+  modalBackdrop: {
+    position: 'fixed', inset: 0, zIndex: 1000,
+    background: 'rgba(0, 0, 0, 0.45)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    padding: 20,
+  },
+  modalCard: {
+    background: 'var(--panel)',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 6,
+    width: 520, maxWidth: '100%',
+    display: 'flex', flexDirection: 'column',
+    boxShadow: '0 10px 32px rgba(0, 0, 0, 0.2)',
+  },
+  modalHeader: {
+    padding: '14px 16px',
+    borderBottom: '1px solid var(--border)',
+    display: 'flex', alignItems: 'center', gap: 8,
+  },
+  modalTemplateBtn: {
+    display: 'inline-flex', alignItems: 'center', gap: 5,
+    height: 26, padding: '0 10px',
+    border: '1px solid var(--border-strong)', borderRadius: 4,
+    background: 'var(--panel)', color: '#1A9E7A',
+    fontSize: 11.5, fontFamily: 'var(--mono)', fontWeight: 600,
+    cursor: 'pointer', textDecoration: 'none',
+    whiteSpace: 'nowrap',
+  },
+  modalTitle: {
+    fontSize: 14, fontWeight: 700, color: 'var(--text)',
+    marginBottom: 4,
+  },
+  modalSubtitle: {
+    fontSize: 11.5, color: 'var(--text-3)',
+  },
+  modalBody: {
+    padding: 16,
+    display: 'flex', flexDirection: 'column', gap: 12,
+  },
+  modalDropZone: {
+    border: '2px dashed var(--border-strong)',
+    borderRadius: 6,
+    padding: '28px 16px',
+    cursor: 'pointer',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    minHeight: 100,
+    transition: 'background 120ms, border-color 120ms',
+  },
+  modalHint: {
+    display: 'flex', alignItems: 'flex-start', gap: 6,
+    padding: 10,
+    background: 'var(--amber-50)',
+    border: '1px solid var(--amber)',
+    borderRadius: 4,
+    color: 'var(--amber)',
+    fontSize: 11, lineHeight: 1.5,
+  },
+  modalFooter: {
+    padding: '12px 16px',
+    borderTop: '1px solid var(--border)',
+    display: 'flex', justifyContent: 'flex-end', gap: 6,
   },
   btnPrimaryDisabled: {
     display: 'inline-flex', alignItems: 'center', gap: 5,

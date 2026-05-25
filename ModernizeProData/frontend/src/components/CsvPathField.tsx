@@ -1,50 +1,57 @@
-import { useRef } from 'react';
+import { useState } from 'react';
 import { useT } from '../i18n';
+import { fileDialogApi } from '../api/fileDialog';
+import { ApiError } from '../api/client';
 
 interface Props {
   value: string;
   onChange: (v: string) => void;
 }
 
-// File System Access API (Chromium / secure context).
-type DirectoryPickerOptions = { id?: string; mode?: 'read' | 'readwrite' };
-interface FileSystemDirectoryHandleLike { name: string }
-interface WindowWithDirPicker extends Window {
-  showDirectoryPicker?: (opts?: DirectoryPickerOptions) => Promise<FileSystemDirectoryHandleLike>;
-}
-
 /**
- * CSV 디렉터리 입력 + 폴더 선택 버튼.
- * - Chromium + secure context: showDirectoryPicker 사용 (네이티브 폴더 다이얼로그)
- * - 그 외: <input type="file" webkitdirectory> 로 폴더 선택. (브라우저 보안상 절대경로는
- *   받을 수 없고 폴더명 + 첫 파일의 webkitRelativePath 만 추출 — 사용자가 직접 절대경로를
- *   완성해 줘야 함. desktop 앱(jpackage) 으로 배포되면 네이티브 dialog 로 교체 예정.)
+ * CSV 디렉터리 입력 필드.
+ *
+ * Browse 버튼은 백엔드 (사용자 PC 에 같이 깔린 Coordinator) 에 요청해서
+ * OS 네이티브 폴더 다이얼로그 (macOS Cocoa / Windows Explorer / Linux GTK)
+ * 를 띄우고, 사용자가 고른 절대경로를 그대로 받아 input 에 채운다.
+ *
+ * 백엔드가 headless 모드이거나 (서버 배포 등) 다이얼로그가 안 뜨는 환경에서는
+ * 자동으로 window.prompt 로 폴백.
  */
 export function CsvPathField({ value, onChange }: Props) {
   const t = useT();
-  const fallbackRef = useRef<HTMLInputElement | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  const handleBrowse = async () => {
-    const w = window as WindowWithDirPicker;
-    if (typeof w.showDirectoryPicker === 'function') {
-      try {
-        const handle = await w.showDirectoryPicker({ mode: 'read' });
-        onChange(handle.name);
-      } catch {
-        /* 사용자 취소 — 무시 */
-      }
-      return;
+  const fallbackPrompt = () => {
+    const isMac = navigator.platform.toLowerCase().includes('mac');
+    const hint = isMac
+      ? '예: /Users/me/migration/csv'
+      : '예: D:\\migration\\csv 또는 \\\\server\\share\\csv';
+    const seed = value && value.trim() ? value : (isMac ? '/Users/' : 'D:\\');
+    const result = window.prompt(`AS-IS CSV 디렉터리의 절대경로를 입력하세요.\n${hint}`, seed);
+    if (result !== null) {
+      const trimmed = result.trim();
+      if (trimmed) onChange(trimmed);
     }
-    fallbackRef.current?.click();
   };
 
-  const handleFallbackChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    const first = files[0] as File & { webkitRelativePath?: string };
-    const segments = first.webkitRelativePath?.split('/') ?? [];
-    if (segments.length > 1) onChange(segments[0]);
-    e.target.value = '';
+  const handleBrowse = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const res = await fileDialogApi.pickDirectory(value || undefined, 'AS-IS CSV 디렉터리 선택');
+      if (!res.cancelled && res.path) onChange(res.path);
+    } catch (e) {
+      // Backend가 headless 거나 다이얼로그를 못 띄우면 prompt 로 폴백.
+      if (e instanceof ApiError && (e.code === 'HEADLESS_BACKEND' || e.code === 'DIALOG_FAILED')) {
+        fallbackPrompt();
+      } else {
+        console.warn('[CsvPathField] pickDirectory failed, falling back to prompt', e);
+        fallbackPrompt();
+      }
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -56,19 +63,14 @@ export function CsvPathField({ value, onChange }: Props) {
         style={styles.input}
         spellCheck={false}
       />
-      <button type="button" onClick={handleBrowse} style={styles.btnGhost}>
-        {t('siteSettings.csvPathBrowse')}
+      <button
+        type="button"
+        onClick={handleBrowse}
+        disabled={busy}
+        style={busy ? { ...styles.btnGhost, opacity: 0.5, cursor: 'wait' } : styles.btnGhost}
+      >
+        {busy ? '…' : t('siteSettings.csvPathBrowse')}
       </button>
-      <input
-        ref={fallbackRef}
-        type="file"
-        // @ts-expect-error — webkitdirectory 는 비표준 attribute
-        webkitdirectory=""
-        directory=""
-        multiple
-        style={{ display: 'none' }}
-        onChange={handleFallbackChange}
-      />
     </div>
   );
 }

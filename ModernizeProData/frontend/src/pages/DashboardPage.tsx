@@ -9,6 +9,7 @@ import { CreateSiteModal } from '../components/CreateSiteModal';
 import { CreateProjectModal } from '../components/CreateProjectModal';
 import { DdlImportButton } from '../components/DdlImportButton';
 import { Toast } from '../components/Toast';
+import { HourglassHalfIcon } from '../components/HourglassHalfIcon';
 import { useT } from '../i18n';
 
 /**
@@ -479,11 +480,27 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
   const navigate = useNavigate();
   const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
   const setProjectAssignee = useWorkspaceStore((s) => s.setProjectAssignee);
+  const activeSiteId = useWorkspaceStore((s) => s.activeSiteId);
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
   const users = useUsersStore((s) => s.users);
   // Coordinator(master) 만 dropdown 으로 변경 가능. 그 외 사용자는 본인 row 도 text 로 표시.
   const canEditRow = (_p: Project) => isMaster;
+
+  // Snapshot pending 표시 — 프로젝트별로 pending snapshot 이 1개 이상이면 이름 옆에 아이콘.
+  // 사이트 단위 fetch (Approvals 이전에 들렀어도 store 가 비어있을 수 있어서).
+  const allSnapshots = useSnapshotsStore((s) => s.snapshots);
+  const fetchSnapshotsBySite = useSnapshotsStore((s) => s.fetchBySite);
+  useEffect(() => {
+    if (activeSiteId) void fetchSnapshotsBySite(activeSiteId);
+  }, [activeSiteId, fetchSnapshotsBySite]);
+  const pendingProjectIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const s of allSnapshots) {
+      if (s.status === 'pending') ids.add(s.projectId);
+    }
+    return ids;
+  }, [allSnapshots]);
 
   // 담당자 변경 draft — Save 누르기 전까지는 backend / store 에 반영 안 됨.
   const [assigneeDraft, setAssigneeDraft] = useState<Record<string, string>>({});
@@ -680,7 +697,18 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
                         }}
                       >
                         <td style={styles.td}>
-                          <span style={{ fontWeight: 500 }}>{p.name}</span>
+                          <span style={styles.projectNameCell}>
+                            <span style={{ fontWeight: 500 }}>{p.name}</span>
+                            {pendingProjectIds.has(p.id) && p.phase === 'test' && p.runStatus === 'completed' && (
+                              <span
+                                style={styles.pendingSnapshotIcon}
+                                title={t('siteOverview.pendingSnapshotIcon.title')}
+                                aria-label={t('siteOverview.pendingSnapshotIcon.title')}
+                              >
+                                <HourglassHalfIcon size={12} />
+                              </span>
+                            )}
+                          </span>
                         </td>
                         <td style={styles.td}>
                           <span style={{ ...styles.phaseChip, ...phaseChipColor(p.phase, p.runStatus) }}>{p.phase}</span>
@@ -1290,6 +1318,19 @@ const styles: Record<string, React.CSSProperties> = {
     flexShrink: 0,
   },
   phaseChipCount: { fontWeight: 700, opacity: 0.85 },
+  projectNameCell: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+  },
+  pendingSnapshotIcon: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: 'var(--amber)',
+    // flex 기하 중심 → 텍스트 caps 옵티컬 중심 보정 (1px 위)
+    transform: 'translateY(-1px)',
+  },
   miniBtn: {
     padding: '3px 9px',
     fontSize: 11,

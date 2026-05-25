@@ -45,8 +45,8 @@
   --phase-done:         #678b86; /* 회색 */
   --phase-done-50:      #f2f4f3;
 
-  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-  --sans: 'Inter', -apple-system, system-ui, sans-serif;
+  --mono: 'Hoax Mono JP', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sans: 'Hoax Mono JP', 'Inter', -apple-system, system-ui, sans-serif;
 }
 
 [data-theme="dark"] {

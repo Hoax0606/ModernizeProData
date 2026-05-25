@@ -544,6 +544,130 @@ Chrome before declaring "it works."
 
 ---
 
+## 17. Scheduler & External Trigger Integration (added 2026-05-24)
+
+Coordinator-side scheduling: internal Quartz nightly trigger + external scheduler
+REST/CLI entry. Both gated by a solution-level mutex (only one can be active at
+a time).
+
+### 17.1 Architecture
+
+```
+                  ┌─ Quartz Nightly Job (internal) ─┐
+                  │                                  │
+ (Control-M / cron / etc.) ─ REST ──────────────────┼─→ RunService ─→ Spring Batch
+                                                     │   (lock + insert run_history
+              UI manual run ──────────────────────────┘    + WS dispatch to Worker)
+```
+
+Three trigger paths converge on `RunService.startRun()` (single entry point) →
+`SELECT FOR UPDATE` on `projects.run_status` for idempotency → insert
+`run_history` row → dispatch to Worker via STOMP (`/topic/worker/{workerId}/tasks`).
+
+### 17.2 Internal mode — common vs individual
+
+`solution_settings.internal_mode` is `'common' | 'individual' | NULL`.
+
+- `common` — all projects fire at `solution_settings.internal_common_time`.
+- `individual` — each project fires at its own `projects.schedule_start_time`.
+- `NULL` — only valid when `internal_enabled = false`. When the toggle goes ON
+  the user must explicitly pick a mode; otherwise save is rejected.
+
+Default time on mode selection is `22:00` (pre-filled, editable). FE forces a
+hard validation: in `individual` mode, every project must have a `start_time`
+or Save is blocked.
+
+`SchedulerInitializer.rescheduleAllNightly()` is called on app startup and on
+every Solution Settings change. It deletes all `NIGHTLY_GROUP` triggers and
+re-registers based on current `internal_mode`. Incremental diff-rebuild is a
+future optimization (see 17.7).
+
+### 17.3 API token auth — register, not generate
+
+Token issuance is **inverted from the original design**: customers generate
+tokens on the external scheduler side (Control-M / JP1 / etc.) and **register**
+them via UI paste. The tool never generates tokens.
+
+- `api_credentials.token_hash` — SHA-256 hex, used for auth lookup.
+- `api_credentials.token_plain` — **stored plaintext** (PoC requirement; see
+  17.6 for the security tradeoff).
+- `api_credentials.display_prefix` + `display_last4` — for masked display.
+- Min token length: 16 chars (4 prefix + 8 hidden + 4 last4).
+- Registration revokes the previous default credential automatically.
+
+`ApiTokenAuthFilter` accepts any Bearer token, with these exceptions:
+
+- `WK-…` prefix → defer to `WorkerTokenAuthFilter`
+- 3-segment dotted (`x.y.z`) → defer to `JwtAuthFilter` (heuristic)
+- Otherwise: SHA-256 the token, look up by hash. Hit → `ROLE_API_CLIENT`.
+
+### 17.4 Phase semantics for runs
+
+`RunService.resolveRunTypeFromPhase()` maps phase → runType:
+
+| Phase | runType | Notes |
+|---|---|---|
+| `test` | `test` | dry-run test |
+| `rehearsal` | `rehearsal` | dry-run rehearsal |
+| `ready` | `cutover` | **production cut-over fires here** |
+| `cutover` | _(empty)_ | already running — new runs rejected |
+| others | _(empty)_ | not eligible |
+
+The `cutover` phase represents an **in-progress** cut-over (not a
+"ready-to-cut" state). On completion, the project transitions to `hypercare`.
+
+### 17.5 Trigger source enum
+
+`run_history.trigger_source` is one of `internal` / `external` / `cli` /
+`manual`. Names follow UI labels (`Internal scheduler` / `External
+integrations`). Legacy `nightly` / `rest` / `manual_ui` rows from earlier
+migrations are accepted by the CHECK constraint but never written by current
+code.
+
+### 17.6 Security tradeoff — plaintext token storage
+
+`api_credentials.token_plain` stores the registered token in plaintext. This
+contradicts the original design principle of hash-only storage but was added
+because:
+
+- Users want to view the registered token on different sessions / by different
+  master accounts.
+- Trigger examples docs in the UI embed the live token for copy-paste.
+
+**Implications for production**:
+
+- A DB leak (backup theft, direct SQL access) immediately compromises the
+  scheduler credentials.
+- This will likely be flagged in customer security review (FISC / J-SOX /
+  PCI-DSS contexts).
+- Pre-production deploy: confirm with customer security team, or switch to
+  encrypted storage (AES + master key) before going live.
+
+The columns / methods involved carry `⚠ PoC requirement, security tradeoff`
+comments for traceability.
+
+### 17.7 Intentionally out of scope (PoC 2nd or later)
+
+- **Quartz incremental rebuild** — current `rescheduleAllNightly()` is full
+  rebuild (delete-all + re-register). For high project counts this slows
+  startup; switch to diff-based add/remove/modify later.
+- **`/runs/all` bulk transaction** — currently a `for` loop calls
+  `RunService.startRun()` per project, each in its own `@Transactional`. With
+  100+ projects this becomes 100 sequential transactions. Future: bulk insert
+  + parallel `ExecutorService`.
+- **Token / SolutionSettings cache** — `CredentialService.authenticate()` and
+  `SolutionSettingsRepository.get()` hit DB on every request. Adding Spring
+  Cache (`@Cacheable` + `@CacheEvict` on update) cuts hot-path DB load.
+- **Encrypted token storage** — see 18.6.
+- **OSS scheduler vendor verification** — Control-M Workbench / Rundeck /
+  Hinemos integration tests not run. Manual verification via Windows Task
+  Scheduler + LAN-cross curl was sufficient for PoC.
+- **SIEM (syslog) forwarding** — UI field was removed since BE has no syslog
+  emitter. Re-add when SIEM integration is a real requirement.
+
+---
+
+## 18. Further Reading
 ## 17. Site Export — Client-side zip Delivery (added 2026-05-21)
 
 The bulk-export feature that lets a Coordinator user package all artifacts of
@@ -761,6 +885,323 @@ zustand store will carry `{ tableId, columnId }` across navigation.
 ---
 
 ## 19. Further Reading
+## 18. License (Ed25519 .lic verification — finalized 2026-05-22)
+
+### 18.1 Goals
+
+Stop unauthorized use of the tool after the agreed term, without depending on
+network reachability (target sites are fully air-gapped). The license is a
+signed JSON file (`.lic`) delivered to the site by USB and uploaded through
+the in-app UI.
+
+### 18.2 Cryptographic shape
+
+- **Signature**: Ed25519 (java.security built-in, no extra libs).
+- **One global keypair**: HQ holds the single `private.pem`; every shipped
+  backend binary embeds the matching `public.pem` at build time. New
+  customers ≠ new keypair; new keypair = full backend rebuild + redeploy.
+- **Public key embed path**: `backend/src/main/resources/license/public.pem` (same filename the issuer produces — drop the file as-is, no rename).
+- **Fingerprint** = first 16 bytes of SHA-256 over the public key DER, hex
+  encoded. Stored in each `.lic` as `publicKeyFp` so corruption / wrong-key
+  uploads can be diagnosed quickly.
+
+### 18.3 .lic file format
+
+```json
+{
+  "alg": "Ed25519",
+  "payload": {
+    "v": 1,
+    "licenseId": "MPD-2026-05-22-kdb-bank",
+    "customer": "KDB Bank",
+    "siteId": "kdb-prod-2026",
+    "edition": "standard",
+    "features": [],
+    "issuedAt": "2026-05-22",
+    "expiresAt": "2027-05-22",
+    "graceDays": 14,
+    "publicKeyFp": "a3f1...c920"
+  },
+  "signature": "base64(ed25519-sig-over-jackson-bytes(payload))"
+}
+```
+
+- `edition` is currently always `"standard"` (no tiering yet).
+- `features` is currently always `[]` — feature gating was implemented and
+  then removed because there is no second tier. The field is preserved to
+  keep the JSON shape stable in case tiers are introduced later.
+
+### 18.4 Lifecycle stages (`LicenseStatus`)
+
+```
+issued                expires           expires+grace      expires+grace+15d
+   │                     │                     │                  │
+   │ ACTIVE      ──►    │   IN_GRACE   ──►    │   READ_ONLY  ──►  │  EXPIRED
+   │ (60d before expiry: EXPIRING — banner, no functional change)
+```
+
+| Status      | Behavior                                                  |
+|-------------|-----------------------------------------------------------|
+| `ACTIVE`    | Normal.                                                   |
+| `EXPIRING`  | Amber banner; ≤60 days remaining.                         |
+| `IN_GRACE`  | Amber banner; past expiry, still within `graceDays`.      |
+| `READ_ONLY` | Write APIs return 403 `LICENSE_READ_ONLY`. 15-day window. |
+| `EXPIRED`   | All non-whitelisted APIs return 403.                      |
+| `MISSING`   | No `.lic` ever uploaded — same blocking as EXPIRED.       |
+| `INVALID`   | Signature failed or clock-rollback detected.              |
+
+`statusOf()` uses `ChronoUnit.DAYS.between(today, expires)` — not
+`Period.getDays()` (which returns only the day component of a Period).
+
+### 18.5 Enforcement filter (`LicenseEnforcementFilter`)
+
+Runs after `JwtAuthFilter`. Always-allowed path prefixes regardless of
+status (so the user can recover from MISSING/EXPIRED):
+
+```
+/api/v1/health/**
+/api/v1/auth/**
+/api/v1/license       (GET + master POST + master DELETE)
+/ws/**
+```
+
+For other paths it gates on `LicenseStatus.isFullyBlocked()` /
+`isWriteBlocked()`. Throttled `last_seen_at` touch (5-min) updates both the
+DB column and the sealed-clock file on each request.
+
+### 18.6 Clock-rollback detection (`LicenseSealedClock`)
+
+A tiny AES-GCM-sealed file written next to the live license tracks the
+last-seen wall-clock time. If the OS clock is later observed earlier than
+the sealed value by more than 5 minutes, the verifier flips the status to
+`INVALID` and emits a `LICENSE_CLOCK_TAMPER` audit row.
+
+- Sealed file lives at `${user.home}/.ksinfo-modernize/license-seen.bin`
+  (configurable via `modernize.license.sealed-file`).
+- AES-GCM key is derived from `SHA-256(public-key-fingerprint + fixed salt)`.
+  Defeating it requires source code or the keypair — sufficient for the
+  honest-operator threat model.
+
+### 18.7 Backend artefacts
+
+- `coordinator/license/` package — `License` entity, `LicenseRepository`,
+  `LicenseService`, `LicenseDocument` record, `LicenseStatus` enum,
+  `LicenseVerifier`, `LicenseSealedClock`, `LicenseEnforcementFilter`,
+  `LicenseStartupLoader`.
+- `coordinator/api/LicenseController` — `GET` returns status DTO,
+  `POST` uploads a `.lic` (master only, multipart), `DELETE` wipes
+  (master only, dev-mode shortcut).
+- Migration: `V20260522114140__license.sql` adds the `license` table with
+  `last_seen_at` and `imported_at` columns. Audit log gets two new actions:
+  `LICENSE_LOADED`, `LICENSE_INVALID_SIG`, plus `LICENSE_CLEARED` and
+  `LICENSE_CLOCK_TAMPER`.
+
+### 18.8 Frontend artefacts
+
+- `api/license.ts` — `get()`, `upload(File)`, `clear()` (dev).
+- `store/license.ts` — singleton zustand store with 30-min polling. Banner
+  reads from this; LicenseCard refreshes it after upload/clear so the
+  banner reacts immediately.
+- `components/LicenseBanner.tsx` — amber/red header band shown for any
+  non-`ACTIVE` status. Mounted by `AppShell` above the main flex column.
+- `components/SolutionSettingsModal.tsx` → `LicenseCard` — shows
+  customer / edition / dates / days-remaining badge / status chip. Master-
+  only `Update license` button triggers a hidden file picker. In Vite dev
+  builds, an extra red `Clear (dev)` button wipes the license server-side.
+
+### 18.9 Issuer module (`ModernizeProData/issuer/`)
+
+A standalone Maven module (Spring-free, Jackson only) that produces both a
+CLI and a Swing GUI for issuing `.lic` files. Build script `build-exe.ps1`
+packages it via jpackage `--type app-image` into a self-contained Windows
+bundle (LicenseIssuer\) with bundled JRE — no separate installer, no Inno
+Setup / WiX dependency.
+
+- Default key location: `LicenseIssuer\license\` (portable — copies with
+  the install folder, survives PC handover via USB).
+- jpackage's bundled JRE uses **System Look-and-Feel** so OS-level font
+  composite handles Korean/Japanese/Latin glyphs in the GUI without manual
+  fontconfig surgery.
+- `--icon mpd.ico` (generated from `mpd_lic.png` by `make-ico.ps1`) — sets
+  the Windows Explorer / taskbar / title-bar icon for both launchers.
+- `build-exe.ps1` preserves the `license\` folder across rebuilds by
+  moving it to `%TEMP%` before `jpackage` and restoring it after. Without
+  this, rebuilds would silently destroy the keypair.
+- Issuer keypair must never be regenerated except for security-incident
+  rotation. Rotation = full backend rebuild + redeployment to every
+  customer site. PC handover should be `license\` folder copy, not regen.
+
+### 18.10 Open items (intentionally deferred)
+
+- Per-customer keypair (currently one global key for all customers — same
+  fingerprint everywhere). Per-customer would isolate blast radius but
+  needs a per-customer backend build pipeline.
+- Hardware-bound license (e.g. tied to machine UUID). Not required by the
+  current threat model.
+- License rotation tooling — currently manual (delete `license\` folder,
+  regenerate, rebuild backend). A CLI/UI flow could automate the warning
+  about cascading rebuilds.
+
+---
+
+## 19. Windows Installer — Coordinator MVP (Phase 1, 2026-05-24)
+
+### 19.1 Goals
+
+Ship the main tool (Coordinator backend + React frontend) as a single Windows
+.msi. Double-click install → native window opens → user logs in. PoC 1st-round
+demo deliverable. Three downstream modes (Client / Standalone / Coordinator)
+remain Phase 2 — a first-boot wizard branches there from the same installer.
+
+### 19.2 Architecture (single fat jar inside JavaFX shell)
+
+```
+%LOCALAPPDATA%\ModernizeProData\                   (per-user install)
+├── ModernizeProData.exe          ← jpackage launcher
+├── app\modernize-pro-data-*.jar  ← Spring Boot fat jar (BOOT-INF/classes/static/
+│                                   = Vite dist)
+└── runtime\                       ← bundled JRE + JavaFX modules (jlink)
+```
+
+```
+double-click ModernizeProData.exe
+  -> Launcher.main (jpackage sets -Dmpd.gui.enabled=true)
+  -> GuiApp.launch (JavaFX Application)
+       -> Stage opens with "Starting..." HTML
+       -> Spring Boot started on background thread
+       -> ApplicationReadyEvent fires
+       -> Platform.runLater -> WebView.load("http://localhost:8080/")
+  -> User logs in; window close = SpringApplication.exit + Platform.exit
+```
+
+### 19.3 Decision log
+
+- **PowerShell, not Maven jpackage plugin** — orchestration mirrors
+  `issuer/build-exe.ps1`. Single source of pattern for both modules.
+- **Single fat jar with static under classpath:/static/** — spring-boot-maven-
+  plugin already produces this layout; SPA fallback controller forwards non-
+  `/api`/`/ws`/`/assets` paths to `/index.html`.
+- **.msi via WiX 3.14** — chosen for Japan finance market acceptance. WiX 4 is
+  not compatible with jpackage; build.ps1 explicitly checks 3.x.
+- **Per-user install** — `--win-per-user-install` puts everything under
+  `%LOCALAPPDATA%`, no UAC, no admin rights. Standalone deployment matches the
+  isolated-customer-PC story.
+- **JavaFX WebView (not browser-auto-open)** — UX requirement is "native
+  desktop app, not a browser tab". JavaFX is the lightest path in our Java
+  stack to embed React. Native dependency on JavaFX SDK 21.0.4 from Gluon, not
+  in JDK 21 by default.
+- **JavaFX as `provided` Maven scope** — keeps the fat jar lean (no JavaFX in
+  BOOT-INF/lib). jpackage gets the runtime modules from JavaFX SDK via
+  `--module-path` and `--add-modules javafx.controls,javafx.web`.
+- **PG pre-installed assumption (Phase 1)** — host native PostgreSQL on
+  localhost:5433, DB `mpd_meta`, user/pw `mpd`/`mpd` (matches CLAUDE.md
+  default). Bundling PG portable is deferred. If the DB is missing, Spring
+  startup fails and the WebView shows an error page (Phase 1 simple; Phase 2
+  wizard improves it).
+- **`mpd.gui.enabled` system property** — Launcher branches dev vs installed
+  on this flag. `mvn spring-boot:run` does not set it, so JavaFX never
+  initializes during dev. jpackage launcher sets it, so the installed mode
+  always runs the JavaFX shell.
+
+### 19.4 Frontend build divergence (tsc gate)
+
+`npm run build` is `tsc -b && vite build`. Other team members' work-in-
+progress branches on `dev` may leave the `tsc -b` gate failing for code
+unrelated to the installer. The installer pipeline therefore calls `npx
+vite build` directly — Vite's own bundler still validates the build, and
+unblocking the installer is more valuable than enforcing the strict TS gate at
+this stage. The dev workflow (`npm run build` from a feature branch) keeps the
+gate.
+
+### 19.5 Static frontend wiring on the backend
+
+- `frontend/.env.production`: `VITE_API_BASE_URL=` (empty) → axios prefix is
+  empty → requests go to `/api/v1/...` relative → same-origin Spring Boot.
+- `SpaFallbackController`: regex-routes any non-`/api`/`/ws`/`/assets`/`/favicon`/`/mpd*`
+  path to `forward:/index.html`. React Router takes over from there.
+- `SecurityConfig`: anonymous permitAll for `/`, `/index.html`, `/favicon.svg`,
+  `/favicon.ico`, `/mpd.png`, `/mpd_lic.png`, `/assets/**`. Login still happens
+  through `/api/v1/auth/**` (also anonymous, pre-existing).
+
+### 19.6 application-prod.yml
+
+Bundled in fat jar. Activated by `-Dspring.profiles.active=prod`. Overrides
+nothing the user has to care about — only:
+
+- `spring.datasource.url` default points to `localhost:5433/mpd_meta`
+  (matches CLAUDE.md, not the Spring Boot Maven Plugin's docker-compose
+  default of 5432).
+- Logging tightened to INFO root, WARN for `org.hibernate.SQL` and
+  `org.springframework.security`.
+- Vite dev-server origin removed from CORS (only `http://localhost:8080`).
+- `modernize.license.public-key` falls back to `classpath:license/public.pem`
+  and accepts `MPD_LICENSE_PUBKEY` env override.
+
+### 19.7 Build pipeline (installer/build.ps1)
+
+7 phases, in order:
+
+0. **Verify environment** — `jpackage`, WiX 3.x (auto-detects `Program Files
+   (x86)\WiX Toolset v3.14\bin` or v3.11 paths), `npm`.
+1. **JavaFX SDK cache** — first run downloads
+   `openjfx-21.0.4_windows-x64_bin-sdk.zip` (~30MB) from Gluon to
+   `installer/cache/`. Subsequent runs skip.
+2. **Frontend** — `npx vite build` in `frontend/`.
+3. **Stage frontend** — `frontend/dist/*` → `backend/src/main/resources/static/`.
+4. **Backend** — `./mvnw -DskipTests package` in `backend/` produces fat jar.
+5. **Stage jar** — fat jar copied into `installer/staging/app/`.
+6. **Icon** — `make-ico.ps1` wraps `frontend/public/mpd.png` as PNG-embedded
+   `.ico` (same pattern as issuer). Cached at `installer/assets/mpd.ico`.
+7. **jpackage** — `--type msi --win-per-user-install --module-path
+   <javafx-sdk-lib> --add-modules javafx.controls,javafx.web,...`. Adds
+   shortcut + Start Menu group + dir chooser.
+
+Output: `installer/dist/ModernizeProData-1.0.0.msi`, ~130–160MB (JRE + JavaFX
+modules + fat jar).
+
+### 19.8 Critical rules carried over from issuer
+
+- All `.ps1` files **must keep UTF-8 BOM** — PowerShell 5.1 on Korean Windows
+  reads BOM-less UTF-8 as CP949 and corrupts non-ASCII content. Keep build
+  output ASCII to be safe across encoding regressions.
+- **Do not "simplify" `installer/staging/`'s `Remove-Item -Recurse`** — same
+  cautionary tale as issuer's `license/` preservation. If we ever stage
+  generated state (license, signing materials, captured certs) here, it MUST
+  be preserved across rebuilds.
+- **System Look-and-Feel only** (Swing-style components stay native) —
+  Cross-Platform L&F on Korean Windows breaks Hangul rendering in jpackage'd
+  JRE. JavaFX WebView is unaffected, but if we ever add Swing dialogs in the
+  installer they must respect this.
+
+### 19.9 Verification flow
+
+Build: `cd ModernizeProData\installer; .\build.ps1`. Output is the .msi under
+`installer\dist\`.
+
+Smoke test (clean Windows account or VM):
+
+1. PG 18 running on `localhost:5433/mpd_meta` (user/pw `mpd`/`mpd`).
+2. Double-click .msi → next/next/install. No UAC prompt expected.
+3. Start Menu → ModernizeProData → window opens "Starting...", then loads the
+   login page within ~10s.
+4. master/password (UserBootstrap default) → Dashboard.
+5. Close window → no orphan processes.
+
+PG-missing path: open the window, see the WebView error page. Phase 2 wizard
+will turn this into an interactive setup.
+
+### 19.10 Phase 2 / 3 forward references
+
+- **Phase 2** — same .msi gets a first-boot mode selector (Coordinator /
+  Client / Standalone). Client mode drops Spring Boot + DB entirely, leaving
+  the JavaFX shell pointed at a remote Coordinator's URL.
+- **Phase 3** — License hardening (per-customer keypair, fingerprint binding,
+  password-encrypted private.pem). The Phase 1 installer assumes the existing
+  single global keypair from `feature/license`.
+
+---
+
+## 20. Further Reading
 
 - `CLAUDE.md` — stack, conventions, domain glossary, local run.
 - `docs/handoff/` — time-stamped handoff notes (read the most recent first).

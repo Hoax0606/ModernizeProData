@@ -14,8 +14,12 @@ import { CreateProjectModal } from '../components/CreateProjectModal';
 import { SignOutModal } from '../components/SignOutModal';
 import { ClusterAdminModal } from '../components/ClusterAdminModal';
 import { NotificationToast } from '../components/NotificationToast';
+import { LicenseBanner } from '../components/LicenseBanner';
 import { LockIcon } from '../components/LockIcon';
+import { HourglassHalfIcon } from '../components/HourglassHalfIcon';
+import { useLicenseStore } from '../store/license';
 import { useWorkspaceStore } from '../store/workspace';
+import { useUiStore } from '../store/ui';
 import { isProjectReadOnly } from '../store/readOnly';
 import { useSnapshotsStore } from '../store/snapshots';
 import { useAsisDdlStore } from '../store/asisDdl';
@@ -130,6 +134,7 @@ export function AppShell() {
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [clusterAdminOpen, setClusterAdminOpen] = useState(false);
   const [siteSettingsOpen, setSiteSettingsOpen] = useState(false);
+  const [siteSettingsFocus, setSiteSettingsFocus] = useState<import('../store/ui').SiteSettingsFocus>(undefined);
   const [siteMenuOpen, setSiteMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifTab, setNotifTab] = useState<'all' | 'unread'>('all');
@@ -148,12 +153,31 @@ export function AppShell() {
   const fetchSites = useWorkspaceStore((s) => s.fetchSites);
   const fetchProjects = useWorkspaceStore((s) => s.fetchProjects);
 
+  // 외부 페이지(MappingPage 등)에서 site settings 모달 open 요청 감지
+  const siteSettingsRequest = useUiStore((s) => s.siteSettingsRequest);
+  useEffect(() => {
+    if (!siteSettingsRequest) return;
+    setSiteSettingsFocus(siteSettingsRequest.focus);
+    setSiteSettingsOpen(true);
+    useUiStore.getState().consumeSiteSettingsRequest();
+  }, [siteSettingsRequest]);
+
   // 모달이 열려있으면 polling 일시 중지 (편집 중 서버 데이터로 덮어쓰기 방지)
   const isEditing = siteSettingsOpen || createSiteOpen || createProjectOpen;
   const isEditingRef = useRef(isEditing);
   isEditingRef.current = isEditing;
 
   const fetchSnapshots = useSnapshotsStore((s) => s.fetchBySite);
+
+  // 사이드바 project row 옆에 pending snapshot 모래시계 — Versions 에서 Request Review 한 직후 표시.
+  const allSnapshots = useSnapshotsStore((s) => s.snapshots);
+  const pendingProjectIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const s of allSnapshots) {
+      if (s.status === 'pending') ids.add(s.projectId);
+    }
+    return ids;
+  }, [allSnapshots]);
 
   // navigate 시 location.state.activateProjectId 로 전달된 값을 setActiveProject 에 반영.
   // 알림 클릭처럼 라우트 전환 + 프로젝트 변경을 한 번에 해야 하는 경우, 핸들러에서 setActiveProject 를
@@ -211,6 +235,23 @@ export function AppShell() {
     production: 'PROD',
   };
   const stageShort = (env: string) => STAGE_SHORT[env] ?? env.slice(0, 4).toUpperCase();
+
+  // site 의 raw DB type 을 짧은 라벨로. 알 수 없으면 빈 문자열.
+  const dialectLabel = (raw: string | null | undefined): string => {
+    if (!raw) return '';
+    const s = raw.trim().toLowerCase();
+    if (!s) return '';
+    if (s.includes('postgres')) return 'PostgreSQL';
+    if (s.includes('sql server') || s === 'mssql' || s.includes('microsoft')) return 'SQL Server';
+    if (s.includes('mysql') || s.includes('mariadb')) return 'MySQL';
+    if (s.includes('db2')) return 'DB2';
+    if (s.includes('oracle')) return 'Oracle';
+    return raw.trim();
+  };
+  const siteDialects = (s: typeof sites[number]) => {
+    const tobeRaw = (s.tobeDbByEnv?.[s.environment] as { type?: string } | undefined)?.type;
+    return { asis: dialectLabel(s.asisDbType), tobe: dialectLabel(tobeRaw) };
+  };
 
   const projectSort = useSettingsStore((s) => s.projectSort);
   const setProjectSort = useSettingsStore((s) => s.setProjectSort);
@@ -338,8 +379,18 @@ export function AppShell() {
     }
   }, [user?.role, user?.username, loadUsers]);
 
+  // 라이선스 상태 — 마운트 시 + 30분마다 polling. banner / write 차단 hint 용.
+  const refreshLicense = useLicenseStore((s) => s.refresh);
+  useEffect(() => {
+    void refreshLicense();
+    const id = setInterval(() => void refreshLicense(), 30 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [refreshLicense]);
+
   return (
-    <div style={styles.wrap}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+      <LicenseBanner />
+      <div style={styles.wrap}>
       {sidebarOpen && (
         <aside style={styles.sidebar}>
           {/* 브랜드 */}
@@ -530,6 +581,15 @@ export function AppShell() {
                   >
                     <div style={styles.projectNameRow}>
                       <span style={styles.projectName}>{p.name}</span>
+                      {pendingProjectIds.has(p.id) && p.phase === 'test' && p.runStatus === 'completed' && (
+                        <span
+                          style={styles.projectPendingIcon}
+                          title={t('siteOverview.pendingSnapshotIcon.title')}
+                          aria-label={t('siteOverview.pendingSnapshotIcon.title')}
+                        >
+                          <HourglassHalfIcon size={11} color="var(--amber)" />
+                        </span>
+                      )}
                       {readOnly && (
                         <span style={styles.projectReadOnlyIcon} aria-label={t('shell.readOnly.projectTooltip')}>
                           <LockIcon open={false} color="var(--amber)" size={11} />
@@ -643,7 +703,19 @@ export function AppShell() {
                   })()}
                 </div>
                 <div style={styles.topTitleSub}>
-                  {activeProject.tableCount} tables
+                  {activeSite && (() => {
+                    const d = siteDialects(activeSite);
+                    if (!d.asis && !d.tobe) return null;
+                    return (
+                      <span style={styles.topDialectChip} title={`AS-IS: ${d.asis || '?'}  →  TO-BE: ${d.tobe || '?'}`}>
+                        <span style={styles.topDialectName}>{d.asis || '?'}</span>
+                        <span style={styles.topDialectArrow}>→</span>
+                        <span style={styles.topDialectName}>{d.tobe || '?'}</span>
+                      </span>
+                    );
+                  })()}
+                  <span style={styles.topDialectSep}>·</span>
+                  <span>{activeProject.tableCount} tables</span>
                 </div>
               </>
             ) : activeSite ? (
@@ -827,9 +899,13 @@ export function AppShell() {
           <div style={styles.tabbar}>
             <Tab to="/" end label={t('tab.siteOverview')} />
             <Tab to="/site/execution" label={t('tab.executionOverview')} />
+            <Tab to="/site/quarantine" label={t('tab.siteQuarantine')} />
             <Tab to="/site/approvals" label={t('tab.approvals')} />
             <Tab to="/site/export" label={t('tab.siteExport')} />
             <Tab to="/site/audit" label={t('tab.auditLog')} />
+            {user?.role === 'master' && (
+              <Tab to="/site/scheduler" label={t('tab.scheduler')} />
+            )}
           </div>
         )}
 
@@ -863,6 +939,7 @@ export function AppShell() {
         onConfirm={() => { setSignOutOpen(false); handleLogout(); }}
       />
       <NotificationToast />
+      </div>
     </div>
   );
 }
@@ -1247,6 +1324,13 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     flexShrink: 0,
   },
+  projectPendingIcon: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    flexShrink: 0,
+    // flex 기하 중심 → 텍스트 caps 옵티컬 중심 보정 (1px 위)
+    transform: 'translateY(-1px)',
+  },
   readOnlyBanner: {
     display: 'flex',
     alignItems: 'center',
@@ -1381,6 +1465,18 @@ const styles: Record<string, React.CSSProperties> = {
   },
   allProjectsLabel: { fontSize: 11.5, fontWeight: 500, color: 'var(--text)' },
   countMono: { fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-3)' },
+
+  topDialectChip: {
+    display: 'inline-flex', alignItems: 'center', gap: 4,
+    whiteSpace: 'nowrap',
+  },
+  topDialectName: {
+    fontFamily: 'var(--mono)', fontSize: 9.5, fontWeight: 500,
+    color: 'var(--text-4)', letterSpacing: 0.2,
+  },
+  topDialectArrow: {
+    fontSize: 9, color: 'var(--text-4)', fontFamily: 'var(--mono)',
+  },
 
   sectionHeader: {
     padding: '8px 14px 4px',
@@ -1597,7 +1693,11 @@ const styles: Record<string, React.CSSProperties> = {
   },
   topTitle: { display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 },
   topTitleMain: { fontSize: 13, fontWeight: 600, letterSpacing: -0.1 },
-  topTitleSub: { fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
+  topTitleSub: {
+    fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)',
+    display: 'flex', alignItems: 'center', gap: 6,
+  },
+  topDialectSep: { color: 'var(--text-4)' },
 
   bellBtn: {
     position: 'relative',
