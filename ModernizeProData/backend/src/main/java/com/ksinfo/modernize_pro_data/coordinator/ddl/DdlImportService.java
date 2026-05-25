@@ -220,15 +220,6 @@ public class DdlImportService {
         return "oracle";  // 모르면 폴백
     }
 
-    private String sha256Hex(byte[] bytes) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(md.digest(bytes));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 unavailable", e);
-        }
-    }
-
     public record DdlSchema(DdlImport latestImport, List<DdlTableWithColumns> tables) {}
 
     public record DdlTableWithColumns(DdlTable table, List<DdlColumn> columns) {}

@@ -54,8 +54,7 @@ public class SecurityConfig {
                 // 後에 추가된 것이 chain 上 앞쪽에 위치하므로, 의도 順序대로 register.
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
                 .addFilterBefore(workerTokenAuthFilter, UsernamePasswordAuthenticationFilter.class)
-                .addFilterBefore(apiTokenAuthFilter, UsernamePasswordAuthenticationFilter.class);
-                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(apiTokenAuthFilter, UsernamePasswordAuthenticationFilter.class)
                 .addFilterAfter(licenseEnforcementFilter, JwtAuthFilter.class);
 
         return http.build();
