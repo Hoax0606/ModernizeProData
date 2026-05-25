@@ -1264,4 +1264,6 @@ export const ja: Record<TranslationKey, string> = {
   'mapping.report.error.type.CONVERSION':  '型変換に失敗しました',
   'mapping.report.error.type.IO':          'ファイル読み込み失敗',
   'mapping.report.error.type.UNKNOWN':     '実行エラー',
+  'mapping.report.error.hintLabel':        'ヒント',
+  'mapping.inspector.combineHint':         '-- combine: 変換式を直接入力してください (例: MAKE_DATE / CONCAT)',
 };

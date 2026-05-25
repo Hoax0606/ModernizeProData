@@ -900,13 +900,15 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         const internalName = tobe.internalName;
         if (!edits[internalName]) edits[internalName] = {};
 
-        // savedSrc: 가능하면 `{alias}.{column}`, alias 못 찾으면 column 만
+        // savedSrc: 가능하면 `{alias}.{column}`, alias 못 찾으면 column 만.
+        // r.asisColumn 은 PG TEXT[] 매핑 string[] — combine 시 여러 원소.
         let savedSrc: string[] | undefined;
-        if (r.asisColumn) {
+        if (r.asisColumn && r.asisColumn.length > 0) {
           const alias = r.asisTable
             ? aliasMap.get(`${r.tobeSchema}|${r.tobeTable}|${r.asisTable}`)
             : undefined;
-          savedSrc = [alias ? `${alias}.${r.asisColumn}` : r.asisColumn];
+          const cols = r.asisColumn.map((c) => c.trim()).filter((c) => c);
+          savedSrc = cols.map((c) => alias ? `${alias}.${c}` : c);
         }
 
         const strat = r.strategy === 'skip' ? undefined
@@ -987,7 +989,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
     const editWithOrigin: RowEdit = { ...edit, ruleOrigin: 'manual' };
     useMappingEditsStore.getState().setRowEdit(activeProjectIdForRow, table.internalName, r.tgt, editWithOrigin);
 
-    // DB 영속화 — savedSrc 의 {alias}.{column} 에서 alias 룩업으로 asis_table 복원
+    // DB 영속화 — savedSrc 의 {alias}.{column} 들에서 컬럼 부분만 추출해 string[] 로 보냄.
+    // asisTable / asisSchema 는 첫 source 의 alias 기준 (combine 은 보통 같은 source table).
     const splitQ = (qn: string) => {
       const i = qn.indexOf('.');
       return i > 0 ? { schema: qn.slice(0, i), table: qn.slice(i + 1) } : { schema: '', table: qn };
@@ -995,13 +998,16 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
     const tobeSplit = splitQ(table.name);
     let asisSchema: string | null = null;
     let asisTable: string | null = null;
-    let asisColumn: string | null = null;
-    const firstSrc = edit.savedSrc?.find((s) => s && s.trim());
-    if (firstSrc) {
-      const parts = firstSrc.split('.');
-      asisColumn = parts[parts.length - 1];
-      if (parts.length >= 2 && bindingEdit) {
-        const alias = parts[0];
+    let asisColumn: string[] | null = null;
+    const filledSrcs = (edit.savedSrc ?? []).filter((s) => s && s.trim());
+    if (filledSrcs.length > 0) {
+      asisColumn = filledSrcs.map((src) => {
+        const parts = src.split('.');
+        return parts[parts.length - 1];
+      });
+      const firstParts = filledSrcs[0].split('.');
+      if (firstParts.length >= 2 && bindingEdit) {
+        const alias = firstParts[0];
         const source = bindingEdit.sources.find((s) => s.alias === alias);
         if (source) {
           const ssp = splitQ(source.table);
@@ -1106,7 +1112,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   return (
     <div style={styles.workspace}>
       {/* Context bar */}
-      <div style={styles.contextBar}>
+      <div style={{ ...styles.contextBar, display: reportOpen ? 'none' : 'flex' }}>
         <span style={{ ...styles.sidePill, color: 'var(--navy)', background: 'var(--navy-50)', borderColor: 'var(--navy)' }}>TO-BE</span>
         <div style={styles.tableChip}>{table.short}</div>
         <div style={{ flex: 1 }} />
@@ -1444,7 +1450,7 @@ function AutocompleteInput({
     const word = value.slice(s, pos);
     if (word.length < 1) { setAcItems([]); return; }
     const lo = word.toLowerCase();
-    const hits = completions.filter((c) => c.toLowerCase().startsWith(lo) && c.toLowerCase() !== lo).slice(0, 10);
+    const hits = completions.filter((c) => c.toLowerCase().includes(lo) && c.toLowerCase() !== lo).slice(0, 10);
     setAcItems(hits);
     setAcIdx(0);
   }, [value, focused, completions]);
@@ -1801,14 +1807,48 @@ function validateRule(code: string): string | null {
 
 // ── Syntax highlighters + editor ────────────────────────────
 
-const _e   = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-const _kw  = (s: string) => `<span style="color:#e8b86f">${_e(s)}</span>`;
-const _str = (s: string) => `<span style="color:#9fd9b3">${_e(s)}</span>`;
-const _cmt = (s: string) => `<span style="color:#7a8aa6">${_e(s)}</span>`;
-const _num = (s: string) => `<span style="color:#79c0ff">${_e(s)}</span>`;
-const _def = (s: string) => `<span style="color:#cad7e8">${_e(s)}</span>`;
+const _e    = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const _kw   = (s: string) => `<span style="color:#e8b86f">${_e(s)}</span>`;
+const _func = (s: string) => `<span style="color:#dcdcaa">${_e(s)}</span>`;
+const _str  = (s: string) => `<span style="color:#9fd9b3">${_e(s)}</span>`;
+const _cmt  = (s: string) => `<span style="color:#7a8aa6">${_e(s)}</span>`;
+const _num  = (s: string) => `<span style="color:#79c0ff">${_e(s)}</span>`;
+const _def  = (s: string) => `<span style="color:#cad7e8">${_e(s)}</span>`;
 
-const SQL_KW = new Set(['SELECT','FROM','WHERE','AND','OR','NOT','IN','IS','NULL','AS','CAST','TRY_CAST','JOIN','LEFT','RIGHT','INNER','OUTER','FULL','ON','TO_DATE','TO_TIMESTAMP','STRPTIME','ICONV','UNPACK_COMP3','DROP','DEFAULT','UNION','ALL','DISTINCT','CASE','WHEN','THEN','ELSE','END','TRUE','FALSE','WITH','INSERT','UPDATE','DELETE','LIKE','BETWEEN','EXISTS','COALESCE','NULLIF','TRIM','UPPER','LOWER','SUBSTR','SUBSTRING','LENGTH','CONCAT','EXTRACT','NOW','CURRENT_DATE','CURRENT_TIMESTAMP','NUMERIC','INTEGER','VARCHAR','CHAR','DATE','TIMESTAMP','BOOLEAN','UUID','TEXT','JSONB','INT','BIGINT','FLOAT','DOUBLE','USING','INTO','RETURNS','ORDER','GROUP','BY','HAVING','LIMIT','OFFSET']);
+// 예약어 / 절 / 타입 — 주황 (#e8b86f) 으로 강조.
+const SQL_KW = new Set(['SELECT','FROM','WHERE','AND','OR','NOT','IN','IS','NULL','AS','JOIN','LEFT','RIGHT','INNER','OUTER','FULL','ON','DROP','DEFAULT','UNION','ALL','DISTINCT','CASE','WHEN','THEN','ELSE','END','TRUE','FALSE','WITH','INSERT','UPDATE','DELETE','LIKE','BETWEEN','EXISTS','USING','INTO','RETURNS','ORDER','GROUP','BY','HAVING','LIMIT','OFFSET','NUMERIC','INTEGER','VARCHAR','CHAR','DATE','TIMESTAMP','BOOLEAN','UUID','TEXT','JSONB','INT','BIGINT','FLOAT','DOUBLE']);
+
+// 함수 — VS Code 함수 색 (#dcdcaa, 옅은 yellow) 으로 키워드와 구분.
+// 시그니처 맵: 함수명 → 시그니처 문자열. 자동완성 hint 와 삽입 동작에 사용.
+//   '': 괄호 없는 함수 (CURRENT_DATE 등) — 그대로 삽입
+//   '()': 인자 없는 함수 (NOW 등) — '()' 까지 삽입, 커서는 ')' 뒤
+//   '(...)': 인자 있는 함수 — '(' 까지 삽입, 커서는 괄호 안쪽
+const SQL_FUNC_SIGS: Record<string, string> = {
+  CAST: '(expr AS type)', TRY_CAST: '(expr AS type)',
+  TO_DATE: '(text, format)', TO_TIMESTAMP: '(text, format)',
+  STRPTIME: '(text, format)', STRFTIME: '(date, format)',
+  MAKE_DATE: '(year, month, day)',
+  MAKE_TIMESTAMP: '(year, month, day, hour, min, sec)',
+  DATE_TRUNC: '(unit, date)', DATE_PART: '(unit, date)',
+  AGE: '(timestamp1, timestamp2)', EXTRACT: '(field FROM source)',
+  NOW: '()', CURRENT_DATE: '', CURRENT_TIMESTAMP: '',
+  COALESCE: '(expr1, expr2, ...)', NULLIF: '(expr1, expr2)',
+  GREATEST: '(expr1, expr2, ...)', LEAST: '(expr1, expr2, ...)',
+  TRIM: '(text)', LTRIM: '(text)', RTRIM: '(text)',
+  UPPER: '(text)', LOWER: '(text)', INITCAP: '(text)',
+  SUBSTR: '(text, start, length)', SUBSTRING: '(text, start, length)',
+  REPLACE: '(text, from, to)', LENGTH: '(text)',
+  CHAR_LENGTH: '(text)', OCTET_LENGTH: '(text)',
+  POSITION: '(substring IN text)',
+  CONCAT: '(expr1, expr2, ...)', CONCAT_WS: '(sep, expr1, expr2, ...)',
+  SPLIT_PART: '(text, sep, n)', LPAD: '(text, length, pad)', RPAD: '(text, length, pad)',
+  REGEXP_REPLACE: '(text, pattern, replacement)', REGEXP_MATCHES: '(text, pattern)',
+  ROUND: '(number, digits)', FLOOR: '(number)', CEIL: '(number)', CEILING: '(number)',
+  ABS: '(number)', MOD: '(number, divisor)', POWER: '(base, exponent)', SQRT: '(number)',
+  SUM: '(expr)', AVG: '(expr)', MIN: '(expr)', MAX: '(expr)', COUNT: '(expr)',
+  ICONV: '(text, from_encoding, to_encoding)', UNPACK_COMP3: '(text)',
+};
+const SQL_FUNCS = new Set(Object.keys(SQL_FUNC_SIGS));
 
 /**
  * SQL 키워드/함수만 대문자화. 문자열 리터럴('...') 과 식별자(컬럼/별칭) 는 원본 그대로.
@@ -1818,7 +1858,7 @@ function upperSqlKeywords(s: string): string {
   return s.replace(/'(?:[^']|'')*'|[A-Za-z_][A-Za-z_0-9]*/g, (m) => {
     if (m.startsWith("'")) return m;
     const u = m.toUpperCase();
-    return SQL_KW.has(u) ? u : m;
+    return (SQL_KW.has(u) || SQL_FUNCS.has(u)) ? u : m;
   });
 }
 
@@ -1838,7 +1878,11 @@ function highlightSql(raw: string): string {
       let j = i;
       while (j < raw.length && /\w/.test(raw[j])) j++;
       const w = raw.slice(i, j);
-      out.push(SQL_KW.has(w.toUpperCase()) ? _kw(w) : _def(w)); i = j;
+      const u = w.toUpperCase();
+      if (SQL_KW.has(u)) out.push(_kw(w));
+      else if (SQL_FUNCS.has(u)) out.push(_func(w));
+      else out.push(_def(w));
+      i = j;
     } else if (/[0-9]/.test(raw[i])) {
       let j = i;
       while (j < raw.length && /[0-9.]/.test(raw[j])) j++;
@@ -1918,7 +1962,7 @@ function HighlightEditor({
     const word = value.slice(s, pos);
     if (word.length < 1) { setAcItems([]); return; }
     const lo = word.toLowerCase();
-    const hits = completions.filter((c) => c.toLowerCase().startsWith(lo) && c.toLowerCase() !== lo).slice(0, 10);
+    const hits = completions.filter((c) => c.toLowerCase().includes(lo) && c.toLowerCase() !== lo).slice(0, 10);
     setAcItems(hits);
     setAcIdx(0);
   }, [value, isFocused]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1930,8 +1974,26 @@ function HighlightEditor({
     while (s > 0 && /[\w.]/.test(value[s - 1])) s--;
     const before = value.slice(0, s);
     const after = value.slice(pos);
-    savedCursor.current = { start: before.length + item.length, end: before.length + item.length };
-    onChange(before + item + after);
+
+    // 함수면 시그니처에 맞춰 괄호 자동 삽입 + 커서 위치 조정.
+    //   '' (괄호 없음)      → 그대로
+    //   '()' (인자 없음)    → '()' 삽입, 커서는 ')' 뒤
+    //   '(...)' (인자 있음) → '(' 삽입, 커서는 괄호 안쪽
+    let inserted = item;
+    let cursorOffset = item.length;
+    const sig = SQL_FUNC_SIGS[item];
+    if (sig !== undefined) {
+      if (sig === '()') {
+        inserted = item + '()';
+        cursorOffset = item.length + 2;
+      } else if (sig !== '') {
+        inserted = item + '(';
+        cursorOffset = item.length + 1;
+      }
+    }
+
+    savedCursor.current = { start: before.length + cursorOffset, end: before.length + cursorOffset };
+    onChange(before + inserted + after);
     setAcItems([]);
     taRef.current.focus();
   };
@@ -1987,19 +2049,26 @@ function HighlightEditor({
       />
       {acItems.length > 0 && (
         <div style={styles.acDropdown}>
-          {acItems.map((item, i) => (
-            <div
-              key={item}
-              onMouseDown={(e) => { e.preventDefault(); applyAc(item); }}
-              style={{
-                ...styles.acItem,
-                background: i === acIdx ? 'var(--navy-50)' : 'transparent',
-                color: i === acIdx ? 'var(--navy)' : 'var(--text-2)',
-              }}
-            >
-              {item}
-            </div>
-          ))}
+          {acItems.map((item, i) => {
+            const sig = SQL_FUNC_SIGS[item];
+            return (
+              <div
+                key={item}
+                onMouseDown={(e) => { e.preventDefault(); applyAc(item); }}
+                style={{
+                  ...styles.acItem,
+                  background: i === acIdx ? 'var(--navy-50)' : 'transparent',
+                  color: i === acIdx ? 'var(--navy)' : 'var(--text-2)',
+                  display: 'flex', alignItems: 'baseline', gap: 6,
+                }}
+              >
+                <span>{item}</span>
+                {sig !== undefined && sig !== '' && (
+                  <span style={{ fontSize: 10, color: 'var(--text-4)' }}>{sig}</span>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -2016,6 +2085,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   onSave: (edit: RowEdit) => void;
   onClose: () => void;
 }) {
+  const t = useT();
   const [editingRule, setEditingRule] = useState(false);
   const [editValue, setEditValue] = useState('');
   const [savedRule, setSavedRule] = useState<string | null>(null);
@@ -2064,13 +2134,6 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   const handleEdit = () => {
     const inferredStrategy = savedStrategy ?? (active.rule === 'null' ? 'null' : active.rule === 'default' ? 'default' : 'expression');
     setEditStrategy(inferredStrategy);
-    // 자동 CAST 생성 — savedSrc 우선, 없으면 active.sourceAlias.src.
-    // computeAutoCast 헬퍼를 그대로 써서 TO-BE dialect 변환표가 동일하게 적용됨.
-    const firstSrcForCast = (savedSrc && savedSrc.find((s) => s && s.trim() !== ''))
-      || (active.src !== '—' ? (active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src) : undefined);
-    const initialAutoCast = computeAutoCast(firstSrcForCast);
-    prevAutoCastRef.current = initialAutoCast;
-    setEditValue(savedRule ?? initialAutoCast);
     // Filter out stale alias references no longer present in current binding
     const rawSrc = savedSrc ?? initSrc;
     const cleanedSrc = rawSrc.filter((s) => {
@@ -2079,6 +2142,24 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
       const alias = di >= 0 ? s.slice(0, di) : '';
       return !alias || validAliases.has(alias);
     });
+    const filledSrcs = cleanedSrc.filter((s) => s && s.trim() !== '');
+
+    // 자동 CAST 생성:
+    //   - source 가 2개 이상 (combine) → editValue 는 빈 칸. placeholder 가 '-- combine' 안내 표시.
+    //     클릭 시 placeholder 사라지고 사용자가 바로 입력 가능.
+    //   - source 1개 → computeAutoCast 로 dialect 변환표 적용한 CAST 를 editValue 에 채움 (편집 시작점)
+    //   - source 0개 → 빈 자동값 (computeAutoCast 가 '' 반환)
+    let initialAutoCast: string;
+    if (filledSrcs.length > 1) {
+      initialAutoCast = '';
+    } else {
+      const firstSrcForCast = filledSrcs[0]
+        || (active.src !== '—' ? (active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src) : undefined);
+      initialAutoCast = computeAutoCast(firstSrcForCast);
+    }
+    prevAutoCastRef.current = initialAutoCast;
+    setEditValue(savedRule ?? initialAutoCast);
+
     const slots = cleanedSrc.length > 0 ? cleanedSrc : [''];
     setEditSrc(slots);
     setEditSrcType(slots.map(resolveType));
@@ -2111,14 +2192,22 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     setEditSrc(nextEditSrc);
     setEditSrcType((prev) => prev.map((x, j) => (j === i ? resolveType(val) : x)));
 
-    // 1번째 슬롯이 변경되면 expression 자동 채움.
     if (editStrategy !== 'expression') return;
-    if (i !== 0) return;
-    const firstSrc = nextEditSrc.find((s) => s && s.trim() !== '');
-    const newAutoCast = firstSrc
-      ? computeAutoCast(firstSrc)
-      : '-- NOT MAPPED YET — PICK A STRATEGY';
-    setEditValue(newAutoCast);
+    // 어느 슬롯 변경이든 자동 식을 다시 평가 (combine 추가/제거 시점 캐치).
+    // 단, editValue 가 이전 자동값과 다르면 = 사용자가 손댄 식이므로 보존.
+    const filledSrcs = nextEditSrc.filter((s) => s && s.trim() !== '');
+    let newAutoCast: string;
+    if (filledSrcs.length > 1) {
+      // combine — 빈 칸으로 두고 placeholder 가 '-- combine' 안내 표시.
+      newAutoCast = '';
+    } else if (filledSrcs.length === 1) {
+      newAutoCast = computeAutoCast(filledSrcs[0]);
+    } else {
+      newAutoCast = '';
+    }
+    if (editValue === prevAutoCastRef.current) {
+      setEditValue(newAutoCast);
+    }
     prevAutoCastRef.current = newAutoCast;
     if (ruleError) setRuleError(null);
   };
@@ -2319,6 +2408,8 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
               );
             })()}
             {editStrategy === 'expression' && (() => {
+              // 자동완성 후보: 현재 매핑된 source 컬럼 + SQL 함수 라이브러리.
+              // 키워드(SELECT/CASE 등)는 사용자가 거의 안 치니까 제외, 함수는 적극 추천.
               const localCompletions = (() => {
                 const set = new Set<string>();
                 editSrc.forEach((s) => {
@@ -2327,6 +2418,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
                   const di = s.indexOf('.');
                   if (di > 0) set.add(s.slice(di + 1));
                 });
+                SQL_FUNCS.forEach((fn) => set.add(fn));
                 return Array.from(set);
               })();
               return (
@@ -2335,7 +2427,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
                     value={editValue}
                     onChange={(v) => { setEditValue(upperSqlKeywords(v)); if (ruleError) setRuleError(null); }}
                     language="sql"
-                    placeholder={transformPlain(active)}
+                    placeholder={transformPlain(active, t('mapping.inspector.combineHint'))}
                     hasError={!!ruleError}
                     completions={localCompletions}
                     minHeight={72}
@@ -2420,7 +2512,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
             </div>
           ) : (
             <div style={styles.codeBlock}>
-              {transformPreview(active).map((line, i) => (
+              {transformPreview(active, t('mapping.inspector.combineHint')).map((line, i) => (
                 <div key={i} dangerouslySetInnerHTML={{ __html: line }} />
               ))}
             </div>
@@ -3037,13 +3129,6 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
         })}
       </div>
 
-      {/* ⑤ 서브탭 */}
-      <div style={styles.dbvSubtabs}>
-        <span style={styles.dbvSubtab}>Properties</span>
-        <span style={{ ...styles.dbvSubtab, ...styles.dbvSubtabActive }}>Data</span>
-        <span style={styles.dbvSubtab}>Diagram</span>
-      </div>
-
       {/* ⑥ 필터바 */}
       <div style={styles.dbvFilterbar}>
         <span style={styles.dbvFilterShowSql}>Show SQL</span>
@@ -3097,9 +3182,25 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
                     wordBreak: 'break-word',
                     verticalAlign: 'top',
                     borderBottom: '1px solid #f5b5b5',
+                    userSelect: 'text',
+                    cursor: 'text',
+                    position: 'relative',
                   }}
                 >
-                  ⚠ {buildReportErrorMessage(report, t)}
+                  <button
+                    type="button"
+                    onClick={() => { void navigator.clipboard.writeText(buildReportErrorMessage(report, t)); }}
+                    title="에러 메시지를 클립보드에 복사"
+                    style={{
+                      position: 'absolute', top: 8, right: 10,
+                      padding: '2px 8px', fontSize: 10.5,
+                      fontFamily: 'var(--mono)',
+                      color: '#a02020', background: '#fff5f5',
+                      border: '1px solid #f5b5b5', borderRadius: 3,
+                      cursor: 'pointer', userSelect: 'none',
+                    }}
+                  >Copy</button>
+                  <div style={{ userSelect: 'text' }}>⚠ {buildReportErrorMessage(report, t)}</div>
                 </td>
               </tr>
             ) : Array.from({ length: dataRowCount }, (_, i) => {
@@ -3196,19 +3297,22 @@ function buildReportErrorMessage(
   const typeKey = report.errorType ?? 'UNKNOWN';
   const typeLabel = t(`mapping.report.error.type.${typeKey}` as TranslationKey);
   const typeLine = `${t('mapping.report.error.typeLabel')}: ${typeLabel}`;
+  const hintLine = report.errorHint
+    ? `\n${t('mapping.report.error.hintLabel')}: ${report.errorHint}`
+    : '';
   if (report.errorKind === 'EXPRESSION_FAILED' && report.errorColumn) {
     const head = t('mapping.report.error.expressionFailed', { column: report.errorColumn });
     const expr = `${t('mapping.report.error.expressionLabel')}: ${report.errorExpression ?? ''}`;
-    return `${head}\n${expr}\n${typeLine}`;
+    return `${head}\n${expr}\n${typeLine}${hintLine}`;
   }
   if (report.errorKind === 'FROM_FAILED') {
-    return `${t('mapping.report.error.fromFailed')}\n${typeLine}`;
+    return `${t('mapping.report.error.fromFailed')}\n${typeLine}${hintLine}`;
   }
   if (report.errorKind === 'NO_RULES') {
     return t('mapping.report.error.noRules');
   }
-  // UNKNOWN 또는 누락 — 일반 메시지 + 분류 라벨
-  return `${t('mapping.report.error.unknown')}\n${typeLine}`;
+  // UNKNOWN 또는 누락 — 일반 메시지 + 분류 라벨 + 힌트
+  return `${t('mapping.report.error.unknown')}\n${typeLine}${hintLine}`;
 }
 
 function MetaRow({ k, children }: { k: string; children: React.ReactNode }) {
@@ -3220,7 +3324,7 @@ function MetaRow({ k, children }: { k: string; children: React.ReactNode }) {
   );
 }
 
-function transformPreview(r: MappingRow): string[] {
+function transformPreview(r: MappingRow, combineHint?: string): string[] {
   const kw  = (s: string) => `<span style="color:#e8b86f">${s}</span>`;
   const str = (s: string) => `<span style="color:#9fd9b3">${s}</span>`;
   const cmt = (s: string) => `<span style="color:#7a8aa6">${s}</span>`;
@@ -3229,6 +3333,9 @@ function transformPreview(r: MappingRow): string[] {
   if (r.rule === 'default')  return [cmt('-- explicitly mapped to DDL DEFAULT'), `${kw('DEFAULT')}`];
   if (r.rule === 'skip')     return [cmt('-- column is dropped from TO-BE'), `${kw('DROP')}(${r.src})`];
   if (r.rule === 'added')    return [cmt('-- no AS-IS source'), `${kw('DEFAULT')} ${str(r.ddlDefault || 'NULL')}`];
+  // multi-source (combine) 케이스 — r.src 가 '—' 로 떨어져 단일 표현 불가. 직접 입력 안내.
+  // combineHint 는 caller (Inspector 내 useT) 에서 i18n 처리한 문자열을 전달. 없으면 영문 fallback.
+  if (!r.src || r.src === '—') return [cmt(combineHint ?? '-- combine: enter your own expression (e.g. MAKE_DATE / CONCAT)')];
   if (r.srcType.includes('YYYYMMDD'))                                       return [cmt('-- date parse'), `${kw('TO_DATE')}(${r.src}, ${str("'YYYYMMDD'")})`];
   if (r.srcType.includes('CHAR(14)') && r.tgtType.includes('TIMESTAMP'))    return [cmt('-- timestamp parse'), `${kw('TO_TIMESTAMP')}(${r.src}, ${str("'YYYYMMDDHH24MISS'")})`];
   if (r.srcType.includes('COMP-3'))                                         return [cmt('-- COMP-3 → NUMERIC'), `${kw('unpack_comp3')}(${r.src})`];
@@ -3237,8 +3344,8 @@ function transformPreview(r: MappingRow): string[] {
   return [cmt('-- direct pass-through'), `${r.src} ${kw('AS')} ${r.tgt}`];
 }
 
-function transformPlain(r: MappingRow): string {
-  return transformPreview(r).map((line) => line.replace(/<[^>]+>/g, '')).join('\n');
+function transformPlain(r: MappingRow, combineHint?: string): string {
+  return transformPreview(r, combineHint).map((line) => line.replace(/<[^>]+>/g, '')).join('\n');
 }
 
 // ── AS-IS table detail ───────────────────────────────────────

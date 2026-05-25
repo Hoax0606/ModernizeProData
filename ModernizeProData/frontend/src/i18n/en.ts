@@ -1258,4 +1258,6 @@ export const en: Record<TranslationKey, string> = {
   'mapping.report.error.type.CONVERSION':  'Type conversion failed',
   'mapping.report.error.type.IO':          'File read failed',
   'mapping.report.error.type.UNKNOWN':     'Runtime error',
+  'mapping.report.error.hintLabel':        'Hint',
+  'mapping.inspector.combineHint':         '-- combine: enter your own expression (e.g. MAKE_DATE / CONCAT)',
 };
