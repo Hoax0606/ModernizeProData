@@ -112,6 +112,14 @@ __pycache__/
 *.orig
 *.rej
 
+# ── jpackage installer 빌드 산출물 ─────────────────────────────────
+ModernizeProData/installer/staging/
+ModernizeProData/installer/dist/
+ModernizeProData/installer/cache/
+ModernizeProData/installer/assets/mpd.ico
+# Vite prod build → backend resources/static/ 으로 stage 됨 (빌드 산출물).
+ModernizeProData/backend/src/main/resources/static/
+
 # ── Docker 로컬 override ────────────────────────────────────────────
 compose.override.yaml
 compose.override.yml

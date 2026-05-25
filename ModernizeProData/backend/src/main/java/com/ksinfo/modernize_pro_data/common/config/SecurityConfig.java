@@ -24,8 +24,10 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
  *     1. ApiTokenAuthFilter    — "Bearer mig_..."  → ROLE_API_CLIENT
  *     2. WorkerTokenAuthFilter — "Bearer WK-..."   → ROLE_WORKER
  *     3. JwtAuthFilter         — "Bearer eyJ..."   → ROLE_MASTER / ADMIN / VIEWER
- *   각 filter 는 자신의 prefix 가 아니면 통과. 첫 매칭으로 SecurityContext 設정.
- * - 인증 없이 허용: /api/v1/health, /api/v1/auth/**, WebSocket handshake.
+ *   각 filter 는 자신의 prefix 가 아니면 통과. 첫 매칭으로 SecurityContext 설정.
+ * - 인증 없이 허용: /api/v1/health, /api/v1/auth/**, WebSocket handshake,
+ *   SPA shell 정적 자산 (/, /index.html, /favicon, /mpd*, /assets/**).
+ * - /api/v1/users/** 는 master 한정 (@PreAuthorize 가 메서드 레벨에서 강제).
  * - 세부 권한 (ROLE 체크) 는 controller 메서드 @PreAuthorize 가 강제.
  */
 @Configuration
@@ -48,6 +50,11 @@ public class SecurityConfig {
                         .requestMatchers("/api/v1/health/**").permitAll()
                         .requestMatchers("/api/v1/auth/**").permitAll()
                         .requestMatchers("/ws/**").permitAll() // WebSocket handshake
+                        // SPA shell — bundled Vite 산출물 (login 페이지 진입 전 anonymous 로딩).
+                        .requestMatchers("/", "/index.html",
+                                         "/favicon.svg", "/favicon.ico",
+                                         "/mpd.png", "/mpd_lic.png",
+                                         "/assets/**").permitAll()
                         .anyRequest().authenticated()
                 )
                 // Filter 順序: api_token → worker_token → jwt. addFilterBefore 는

@@ -3,6 +3,19 @@ import { persist } from 'zustand/middleware';
 
 export type Theme = 'light' | 'dark';
 export type Language = 'ko' | 'ja' | 'en';
+
+/**
+ * 첫 부팅 시 OS locale 로 기본 언어 결정. localStorage 에 명시적으로
+ * 저장된 값이 있으면 그게 우선 (persist middleware 처리).
+ *   ko-* → 'ko' / ja-* → 'ja' / 그 외 → 'en'
+ */
+function detectInitialLanguage(): Language {
+  if (typeof navigator === 'undefined') return 'en';
+  const lang = (navigator.language || '').toLowerCase();
+  if (lang.startsWith('ko')) return 'ko';
+  if (lang.startsWith('ja')) return 'ja';
+  return 'en';
+}
 export type ProjectSort = 'created-asc' | 'created-desc' | 'name-asc' | 'name-desc' | 'tables-desc';
 export type NotificationScope = 'mine-only' | 'all-project';
 
@@ -38,7 +51,7 @@ export const useSettingsStore = create<SettingsState>()(
   persist(
     (set) => ({
       theme: 'light',
-      language: 'ko',
+      language: detectInitialLanguage(),
       notifications: true,
       notificationScope: 'all-project',
       notificationRetention: '90 days',
