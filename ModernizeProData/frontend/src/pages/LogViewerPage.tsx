@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useWorkspaceStore } from '../store/workspace';
@@ -8,6 +8,8 @@ import {
   type RunLogLevel,
   type RunLogLine,
 } from '../api/runLogs';
+import { runsApi, type RunHistoryDto } from '../api/runs';
+import { formatTimestamp, formatDuration } from '../lib/formatters';
 import { buildMockLines, stageColor } from './logViewerMock';
 import {
   buildQuarantineGroups,
@@ -49,8 +51,8 @@ export function LogViewerPage() {
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
   /** STEP(=stage) 필터. null = 전체, 문자열 = 그 stage 만. */
   const [stepFilter, setStepFilter] = useState<string | null>(null);
-  /** 화면 모드. stream = 전체 로그 tail, quarantine = 규칙 위반 group 카드 뷰. */
-  const [view, setView] = useState<'stream' | 'quarantine'>('stream');
+  /** 화면 모드. stream = 전체 로그 tail, quarantine = 규칙 위반 group 카드 뷰, history = run 履歴. */
+  const [view, setView] = useState<'stream' | 'quarantine' | 'history'>('stream');
   /** Quarantine 화면의 severity 필터. */
   const [severityFilter, setSeverityFilter] = useState<'all' | QuarantineSeverity>('all');
   /** 펼쳐진 (= 액션바 표시) group 의 id. 한 번에 하나만. 같은 카드 다시 클릭 → 접힘. */
@@ -123,6 +125,72 @@ export function LogViewerPage() {
       setPickedGroupId(null);
     }
   }, [pickableGroups, pickedGroupId]);
+
+  /* ── Run history (history 탭 専用 — listByProject) ────────────────
+     project 当たりの最近 run 一覧. SettingsPage の Schedule 탭에서 이쪽으로 이동.
+     view==='history' 진입 시 fetch, project 변경 시 자동 refetch. */
+  const [historyRows, setHistoryRows] = useState<RunHistoryDto[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  /** Status / Type / Trigger フィルタ. 空文字 = All. */
+  const [historyStatusFilter, setHistoryStatusFilter] = useState<string>('');
+  const [historyTypeFilter, setHistoryTypeFilter] = useState<string>('');
+  const [historyTriggerFilter, setHistoryTriggerFilter] = useState<string>('');
+  const refreshHistory = useCallback(async (projectId: string) => {
+    setHistoryLoading(true);
+    try {
+      const h = await runsApi.listByProject(projectId);
+      setHistoryRows(h);
+    } catch (e) {
+      console.error('Failed to load run history', e);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+  useEffect(() => {
+    if (view !== 'history') return;
+    if (!activeProjectId) return;
+    refreshHistory(activeProjectId);
+  }, [view, activeProjectId, refreshHistory]);
+
+  /** フィルタ dropdown の選択肢 — 現データに存在する値だけ derive (Step フィルタと同じパターン). */
+  const historyStatusOptions = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of historyRows) m.set(r.status, (m.get(r.status) ?? 0) + 1);
+    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [historyRows]);
+  const historyTypeOptions = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of historyRows) m.set(r.runType, (m.get(r.runType) ?? 0) + 1);
+    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [historyRows]);
+  const historyTriggerOptions = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of historyRows) m.set(r.triggerSource, (m.get(r.triggerSource) ?? 0) + 1);
+    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [historyRows]);
+  const filteredHistoryRows = useMemo(() => historyRows.filter((r) => {
+    if (historyStatusFilter && r.status !== historyStatusFilter) return false;
+    if (historyTypeFilter && r.runType !== historyTypeFilter) return false;
+    if (historyTriggerFilter && r.triggerSource !== historyTriggerFilter) return false;
+    return true;
+  }), [historyRows, historyStatusFilter, historyTypeFilter, historyTriggerFilter]);
+
+  /* データから消えた値を選んでた場合は filter をリセット (refresh で項目が変わった時など). */
+  useEffect(() => {
+    if (historyStatusFilter && !historyStatusOptions.some(([v]) => v === historyStatusFilter)) {
+      setHistoryStatusFilter('');
+    }
+  }, [historyStatusOptions, historyStatusFilter]);
+  useEffect(() => {
+    if (historyTypeFilter && !historyTypeOptions.some(([v]) => v === historyTypeFilter)) {
+      setHistoryTypeFilter('');
+    }
+  }, [historyTypeOptions, historyTypeFilter]);
+  useEffect(() => {
+    if (historyTriggerFilter && !historyTriggerOptions.some(([v]) => v === historyTriggerFilter)) {
+      setHistoryTriggerFilter('');
+    }
+  }, [historyTriggerOptions, historyTriggerFilter]);
 
   /* dropdown 으로 group 선택하면 그 카드는 자동으로 펼친 상태. */
   useEffect(() => {
@@ -246,6 +314,14 @@ export function LogViewerPage() {
               <span style={styles.viewToggleCount}>{groupStats.totalRows}</span>
             )}
           </button>
+          <button
+            role="tab"
+            aria-selected={view === 'history'}
+            onClick={() => setView('history')}
+            style={{ ...styles.viewToggleBtn, ...(view === 'history' ? styles.viewToggleBtnActive : {}) }}
+          >
+            {t('logs.view.history')}
+          </button>
         </div>
 
         {view === 'stream' && (
@@ -286,7 +362,119 @@ export function LogViewerPage() {
       </div>
 
       <div style={styles.main}>
-        {view === 'quarantine' ? (
+        {view === 'history' ? (
+          /* Run history 모드 — project 별 최근 run 一覧. SettingsPage / Schedule 탭에서 이쪽으로 이동. */
+          <div style={styles.quarPanel}>
+            <div style={styles.quarHeader}>
+              <div style={styles.quarStats}>
+                <div style={styles.quarStatsEyebrow}>
+                  {t('logs.view.history').toUpperCase()}
+                  {project && (
+                    <span style={styles.quarStatsProjectChip}>{project.name}</span>
+                  )}
+                </div>
+                <div style={styles.quarStatsLine}>
+                  {historyLoading
+                    ? '…'
+                    : filteredHistoryRows.length === historyRows.length
+                      ? `${historyRows.length} runs`
+                      : `${filteredHistoryRows.length} / ${historyRows.length} runs`}
+                </div>
+              </div>
+              <div style={styles.quarFilterRow}>
+                <label style={styles.historyFilterLabel}>
+                  <span style={styles.historyFilterLabelText}>Status</span>
+                  <select
+                    value={historyStatusFilter}
+                    onChange={(e) => setHistoryStatusFilter(e.target.value)}
+                    style={styles.historyFilterSelect}
+                    disabled={historyStatusOptions.length === 0}
+                  >
+                    <option value="">All ({historyRows.length})</option>
+                    {historyStatusOptions.map(([v, n]) => (
+                      <option key={v} value={v}>{v} ({n})</option>
+                    ))}
+                  </select>
+                </label>
+                <label style={styles.historyFilterLabel}>
+                  <span style={styles.historyFilterLabelText}>Type</span>
+                  <select
+                    value={historyTypeFilter}
+                    onChange={(e) => setHistoryTypeFilter(e.target.value)}
+                    style={styles.historyFilterSelect}
+                    disabled={historyTypeOptions.length === 0}
+                  >
+                    <option value="">All ({historyRows.length})</option>
+                    {historyTypeOptions.map(([v, n]) => (
+                      <option key={v} value={v}>{v} ({n})</option>
+                    ))}
+                  </select>
+                </label>
+                <label style={styles.historyFilterLabel}>
+                  <span style={styles.historyFilterLabelText}>Trigger</span>
+                  <select
+                    value={historyTriggerFilter}
+                    onChange={(e) => setHistoryTriggerFilter(e.target.value)}
+                    style={styles.historyFilterSelect}
+                    disabled={historyTriggerOptions.length === 0}
+                  >
+                    <option value="">All ({historyRows.length})</option>
+                    {historyTriggerOptions.map(([v, n]) => (
+                      <option key={v} value={v}>{v} ({n})</option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  onClick={() => activeProjectId && refreshHistory(activeProjectId)}
+                  disabled={historyLoading || !activeProjectId}
+                  style={styles.historyRefreshBtn}
+                >
+                  {historyLoading ? '…' : t('projectSettings.action.refresh')}
+                </button>
+                <div style={{ flex: 1 }} />
+              </div>
+            </div>
+
+            <div style={styles.historyScroll}>
+              {filteredHistoryRows.length === 0 ? (
+                <div style={styles.quarEmpty}>{t('projectSettings.schedule.history.empty')}</div>
+              ) : (
+                <table style={styles.historyTable}>
+                  <thead>
+                    <tr>
+                      <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.started')}</th>
+                      <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.finished')}</th>
+                      <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.type')}</th>
+                      <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.trigger')}</th>
+                      <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.worker')}</th>
+                      <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.status')}</th>
+                      <th style={{ ...styles.historyTh, textAlign: 'right' }}>
+                        {t('projectSettings.schedule.history.col.duration')}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredHistoryRows.map((h) => (
+                      <tr key={h.id}>
+                        <td style={styles.historyTd}>{formatTimestamp(h.startedAt)}</td>
+                        <td style={styles.historyTd}>{h.finishedAt ? formatTimestamp(h.finishedAt) : '-'}</td>
+                        <td style={styles.historyTd}>{h.runType}</td>
+                        <td style={styles.historyTd}>{h.triggerSource}</td>
+                        <td style={styles.historyTd}>{h.workerId ?? '-'}</td>
+                        <td style={styles.historyTd}>
+                          <span style={historyStatusStyle(h.status)}>{h.status}</span>
+                        </td>
+                        <td style={{ ...styles.historyTd, textAlign: 'right', fontFamily: 'var(--mono)' }}>
+                          {formatDuration(h.durationMs)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        ) : view === 'quarantine' ? (
           /* Quarantine 모드 — 라이트 톤 panel + group card 리스트. */
           <div style={styles.quarPanel}>
             <div style={styles.quarHeader}>
@@ -661,6 +849,19 @@ function Hl({ text, q }: { text: string; q: string }) {
 }
 
 /* ─────────────────── helpers ────────────────────────── */
+/** Run history 行 status 배지 색 — SettingsPage / PSSchedule 의 historyStatusStyle 그대로 移植. */
+function historyStatusStyle(status: string): React.CSSProperties {
+  const base: React.CSSProperties = { padding: '2px 6px', borderRadius: 2, fontSize: 10 };
+  switch (status) {
+    case 'running': return { ...base, background: '#fef3c7', color: '#92400e' };
+    case 'success': return { ...base, background: '#dcfce7', color: '#166534' };
+    case 'failed':
+    case 'aborted':
+    case 'timed_out': return { ...base, background: '#fee2e2', color: '#991b1b' };
+    default:        return { ...base, background: 'var(--panel-2)', color: 'var(--text-2)' };
+  }
+}
+
 function formatTime(iso: string): string {
   try { const d = new Date(iso); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; }
   catch { return ''; }
@@ -1138,5 +1339,46 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'transparent', color: 'var(--text-3)',
     fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
     textDecoration: 'none',
+  },
+
+  /* ── Run history 탭 (라이트 톤) — Quarantine panel 과 동일한 외곽 + 그 안에 평범한 table. ── */
+  /* 注: padding を入れると sticky thead と scroll container の間に隙間ができ、
+     その隙間にデータ行が見えてしまうので 0. 水平 margin は td/th の padding で取る. */
+  historyScroll: {
+    flex: 1, overflow: 'auto', padding: 0,
+    background: 'var(--panel-2)',
+  },
+  historyTable: {
+    width: '100%', borderCollapse: 'separate', borderSpacing: 0, fontSize: 11,
+    background: 'var(--panel)',
+  },
+  /* borderCollapse: separate + box-shadow で下線を描く. borderCollapse: collapse +
+     border-bottom は sticky 中に下線がセルから離れる既知の挙動. */
+  historyTh: {
+    textAlign: 'left', padding: '8px 12px',
+    color: 'var(--text-3)', fontSize: 10, fontWeight: 600,
+    background: 'var(--panel)',
+    position: 'sticky', top: 0, zIndex: 2,
+    boxShadow: 'inset 0 -1px 0 var(--border)',
+  },
+  historyTd: {
+    padding: '6px 12px', borderBottom: '1px solid var(--border)',
+    fontSize: 11, color: 'var(--text-2)', whiteSpace: 'nowrap',
+  },
+  historyRefreshBtn: {
+    padding: '5px 12px', border: '1px solid var(--border-strong)', borderRadius: 4,
+    background: 'var(--panel)', color: 'var(--text-2)',
+    fontSize: 11, fontWeight: 600, cursor: 'pointer',
+  },
+  historyFilterLabel: { display: 'inline-flex', alignItems: 'center', gap: 5 },
+  historyFilterLabelText: {
+    fontSize: 10, fontWeight: 700, color: 'var(--text-3)', fontFamily: 'var(--mono)',
+    letterSpacing: 0.8, textTransform: 'uppercase',
+  },
+  historyFilterSelect: {
+    padding: '4px 8px', border: '1px solid var(--border-strong)', borderRadius: 4,
+    background: 'var(--panel)', color: 'var(--text)',
+    fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer',
+    minWidth: 130,
   },
 };

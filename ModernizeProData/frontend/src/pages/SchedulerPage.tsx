@@ -39,6 +39,10 @@ export function SchedulerPage() {
 
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<RunHistoryDto[]>([]);
+  /** Run history 行絞り込み. 空文字 = All. */
+  const [historyStatusFilter, setHistoryStatusFilter] = useState<string>('');
+  const [historyTypeFilter, setHistoryTypeFilter] = useState<string>('');
+  const [historyTriggerFilter, setHistoryTriggerFilter] = useState<string>('');
 
   const [credential, setCredential] = useState<CurrentCredentialDto | null>(null);
   const [settings, setSettings] = useState<SolutionSettingsDto | null>(null);
@@ -315,6 +319,46 @@ export function SchedulerPage() {
     try { await runsApi.devAbort(runId, 'aborted from dev test page (manual reset)'); await refreshHistory(); }
     catch (e) { setError(formatError(e)); }
   };
+
+  /** Run history dropdown 選択肢 — 現データに存在する値だけ derive. */
+  const historyStatusOptions = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of history) m.set(r.status, (m.get(r.status) ?? 0) + 1);
+    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [history]);
+  const historyTypeOptions = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of history) m.set(r.runType, (m.get(r.runType) ?? 0) + 1);
+    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [history]);
+  const historyTriggerOptions = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of history) m.set(r.triggerSource, (m.get(r.triggerSource) ?? 0) + 1);
+    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [history]);
+  const filteredHistory = useMemo(() => history.filter((r) => {
+    if (historyStatusFilter && r.status !== historyStatusFilter) return false;
+    if (historyTypeFilter && r.runType !== historyTypeFilter) return false;
+    if (historyTriggerFilter && r.triggerSource !== historyTriggerFilter) return false;
+    return true;
+  }), [history, historyStatusFilter, historyTypeFilter, historyTriggerFilter]);
+
+  /* データから消えた値を選んでた場合は filter をリセット. */
+  useEffect(() => {
+    if (historyStatusFilter && !historyStatusOptions.some(([v]) => v === historyStatusFilter)) {
+      setHistoryStatusFilter('');
+    }
+  }, [historyStatusOptions, historyStatusFilter]);
+  useEffect(() => {
+    if (historyTypeFilter && !historyTypeOptions.some(([v]) => v === historyTypeFilter)) {
+      setHistoryTypeFilter('');
+    }
+  }, [historyTypeOptions, historyTypeFilter]);
+  useEffect(() => {
+    if (historyTriggerFilter && !historyTriggerOptions.some(([v]) => v === historyTriggerFilter)) {
+      setHistoryTriggerFilter('');
+    }
+  }, [historyTriggerOptions, historyTriggerFilter]);
 
   if (!isMaster) {
     return (
@@ -636,21 +680,72 @@ ${singleProjectCommands}`}
 
       {/* Run history */}
       <section style={styles.section}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-          <h3 style={{ ...styles.h3, margin: 0 }}>{t('scheduler.section.history')}</h3>
-          <button
-            onClick={refreshHistory}
-            style={{
-              padding: '4px 10px', fontSize: 11,
-              border: '1px solid var(--border)', borderRadius: 3,
-              background: 'var(--panel)', color: 'var(--text-2)',
-              cursor: 'pointer',
-            }}
-          >
-            {t('scheduler.button.refresh')}
-          </button>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8, flexWrap: 'wrap' }}>
+          <h3 style={{ ...styles.h3, margin: 0 }}>
+            {t('scheduler.section.history')}
+            {(historyStatusFilter || historyTypeFilter || historyTriggerFilter) && (
+              <span style={styles.historyFilterCount}>
+                {filteredHistory.length} / {history.length}
+              </span>
+            )}
+          </h3>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <label style={styles.historyFilterLabel}>
+              <span style={styles.historyFilterLabelText}>Status</span>
+              <select
+                value={historyStatusFilter}
+                onChange={(e) => setHistoryStatusFilter(e.target.value)}
+                style={styles.historyFilterSelect}
+                disabled={historyStatusOptions.length === 0}
+              >
+                <option value="">All ({history.length})</option>
+                {historyStatusOptions.map(([v, n]) => (
+                  <option key={v} value={v}>{v} ({n})</option>
+                ))}
+              </select>
+            </label>
+            <label style={styles.historyFilterLabel}>
+              <span style={styles.historyFilterLabelText}>Type</span>
+              <select
+                value={historyTypeFilter}
+                onChange={(e) => setHistoryTypeFilter(e.target.value)}
+                style={styles.historyFilterSelect}
+                disabled={historyTypeOptions.length === 0}
+              >
+                <option value="">All ({history.length})</option>
+                {historyTypeOptions.map(([v, n]) => (
+                  <option key={v} value={v}>{v} ({n})</option>
+                ))}
+              </select>
+            </label>
+            <label style={styles.historyFilterLabel}>
+              <span style={styles.historyFilterLabelText}>Trigger</span>
+              <select
+                value={historyTriggerFilter}
+                onChange={(e) => setHistoryTriggerFilter(e.target.value)}
+                style={styles.historyFilterSelect}
+                disabled={historyTriggerOptions.length === 0}
+              >
+                <option value="">All ({history.length})</option>
+                {historyTriggerOptions.map(([v, n]) => (
+                  <option key={v} value={v}>{v} ({n})</option>
+                ))}
+              </select>
+            </label>
+            <button
+              onClick={refreshHistory}
+              style={{
+                padding: '4px 10px', fontSize: 11,
+                border: '1px solid var(--border)', borderRadius: 3,
+                background: 'var(--panel)', color: 'var(--text-2)',
+                cursor: 'pointer',
+              }}
+            >
+              {t('scheduler.button.refresh')}
+            </button>
+          </div>
         </div>
-        {history.length === 0 ? (
+        {filteredHistory.length === 0 ? (
           <div style={{ color: 'var(--text-3)' }}>{t('scheduler.history.empty')}</div>
         ) : (
           <table style={styles.table}>
@@ -669,7 +764,7 @@ ${singleProjectCommands}`}
               </tr>
             </thead>
             <tbody>
-              {history.map((h) => (
+              {filteredHistory.map((h) => (
                 <tr key={h.id}>
                   <td style={styles.td}><code>{h.id}</code></td>
                   <td style={styles.td}>
@@ -800,4 +895,19 @@ const styles: Record<string, React.CSSProperties> = {
   table: { width: '100%', borderCollapse: 'collapse', fontSize: 11 },
   th: { textAlign: 'left', padding: '6px 8px', borderBottom: '1px solid var(--border)', color: 'var(--text-2)' },
   td: { padding: '6px 8px', borderBottom: '1px solid var(--border)' },
+  historyFilterLabel: { display: 'inline-flex', alignItems: 'center', gap: 5 },
+  historyFilterLabelText: {
+    fontSize: 10, fontWeight: 700, color: 'var(--text-3)', fontFamily: 'var(--mono)',
+    letterSpacing: 0.8, textTransform: 'uppercase',
+  },
+  historyFilterSelect: {
+    padding: '4px 8px', border: '1px solid var(--border-strong)', borderRadius: 3,
+    background: 'var(--panel)', color: 'var(--text)',
+    fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer',
+    minWidth: 130,
+  },
+  historyFilterCount: {
+    marginLeft: 8, fontSize: 11, fontWeight: 500,
+    color: 'var(--text-3)', fontFamily: 'var(--mono)',
+  },
 };

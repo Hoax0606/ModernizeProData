@@ -557,3 +557,26 @@ While empty, the summary slot shows the format itself (italic gray), so reviewer
 - `docs/handoff/` — point-in-time work handoff notes (read the most recent first)
 - `docs/DESIGN.md` — initial design (some parts outdated; this document takes precedence)
 - `docs/USER_MANUAL.md` / `DEVELOPER_MANUAL.md` — UI/operations manuals
+
+---
+
+## 19. Log Viewer page structure (added 2026-05-25)
+
+`/logs` is the single read-side surface for everything a run produces. Three tabs
+in the toolbar:
+
+1. **Stream** — virtualized log-line table with INFO/WARN/ERROR + Step filter.
+   Mock-driven until BE log ingest lands; flip `USE_MOCK` in `LogViewerPage.tsx`
+   when swapping in real data.
+2. **Quarantine** — rule-violation row groups with sample-row preview and a
+   "jump to Mapping" action.
+3. **Run history** — per-project run list via `runsApi.listByProject`. Has
+   client-side `Status` / `Type` / `Trigger` filters; option lists are derived
+   from the current dataset (so empty options don't appear in the dropdowns).
+
+Run history used to live in Project Settings → Schedule tab. That tab is removed
+entirely; Log Viewer's Run history tab is now the only per-project entry point.
+
+The same 3-axis filter UI is mirrored on the All Projects → Schedule page
+(`/site/scheduler`) Run history section, which still uses `runsApi.listAll`
+(cross-project, with the dev `Abort` action).

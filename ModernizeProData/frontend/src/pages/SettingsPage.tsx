@@ -4,7 +4,6 @@ import { useWorkspaceStore, type Project, type ProjectPhase, type Site } from '.
 import { useNotificationPrefsStore } from '../store/notificationPreferences';
 import { useSettingsStore } from '../store/settings';
 import { projectApi } from '../api/workspace';
-import { runsApi, type RunHistoryDto } from '../api/runs';
 import { ApiError } from '../api/client';
 import { useAuthStore } from '../store/auth';
 import { useActiveProjectReadOnly } from '../store/readOnly';
@@ -12,7 +11,6 @@ import { DdlSchemaPanel } from '../components/DdlSchemaPanel';
 import { LockIcon } from '../components/LockIcon';
 import { Toast } from '../components/Toast';
 import { useT } from '../i18n';
-import { formatTimestamp, formatDuration } from '../lib/formatters';
 
 /** AppShell 의 AS-IS/TO-BE 램프 클릭 → navigate(..., { state: { highlightSide } }) 로 전달.
  *  'asis-csv' 는 MappingPage 의 "CSV not imported" 배지에서 들어오는 경우에 쓰이며
@@ -29,7 +27,7 @@ function isSiteDbConfigured(s: Site | null): boolean {
   return !!db.type?.trim() && !!db.host?.trim() && !!db.database?.trim() && !!db.username?.trim();
 }
 
-type SectionKey = 'general' | 'ddl' | 'schedule' | 'notify' | 'danger';
+type SectionKey = 'general' | 'ddl' | 'notify' | 'danger';
 
 /**
  * Project Settings — 프로토타입의 6-section 구조.
@@ -84,7 +82,6 @@ export function SettingsPage() {
   const sections: { k: SectionKey; l: string; d: string; danger?: boolean }[] = [
     { k: 'general',   l: t('projectSettings.section.general.label'),   d: t('projectSettings.sidebar.general.desc') },
     { k: 'ddl',       l: t('projectSettings.section.ddl.label'),       d: t('projectSettings.sidebar.ddl.desc') },
-    { k: 'schedule',  l: t('projectSettings.section.schedule.label'),  d: t('projectSettings.sidebar.schedule.desc') },
     { k: 'notify',    l: t('projectSettings.section.notify.label'),    d: t('projectSettings.sidebar.notify.desc') },
     { k: 'danger',    l: t('projectSettings.section.danger.label'),    d: t('projectSettings.sidebar.danger.desc'), danger: true },
   ];
@@ -128,7 +125,6 @@ export function SettingsPage() {
       <div style={styles.content}>
         {section === 'general'   && <PSGeneral   project={project} site={site} />}
         {section === 'ddl'       && <PSDdl       project={project} highlightSide={highlightSide} />}
-        {section === 'schedule'  && <PSSchedule  project={project} />}
         {section === 'notify'    && <PSNotify    project={project} />}
         {section === 'danger'    && <PSDanger    project={project} />}
       </div>
@@ -257,108 +253,8 @@ function PSDdl({ project, highlightSide }: { project: Project; highlightSide: Hi
   );
 }
 
-/* ─── Schedule ───────────────────────────────────────────── */
+/* Schedule 탭의 Run history 는 LogViewer 의 'Run history' 탭으로 이동했음. */
 
-function PSSchedule({ project }: { project: Project }) {
-  const t = useT();
-
-  // Phase 4 で per-project schedule 編集 UI (start_time / max_duration / external 例) は
-  // SchedulerPage に集約された. 本 tab は Run history 表示専用.
-  const [history, setHistory] = useState<RunHistoryDto[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-
-  const refreshHistory = async () => {
-    setHistoryLoading(true);
-    try {
-      const h = await runsApi.listByProject(project.id);
-      setHistory(h);
-    } catch (e) {
-      console.error('Failed to load run history', e);
-    } finally {
-      setHistoryLoading(false);
-    }
-  };
-  useEffect(() => { refreshHistory(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [project.id]);
-
-  return (
-    <>
-      <PSHead
-        title="Run history"
-        desc={t('projectSettings.head.schedule.desc')}
-      />
-
-      {/* Phase 4: per-project schedule config (Nightly + External trigger) は SchedulerPage 에 이동.
-          이 tab 은 본 project 의 run 履歴 表示専用. */}
-      <PSCard
-        title={t('projectSettings.schedule.history.title')}
-        desc={t('projectSettings.schedule.history.desc')}
-      >
-        <div style={{ marginBottom: 8 }}>
-          <button onClick={refreshHistory} disabled={historyLoading} style={{ fontSize: 11, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 3, background: 'var(--panel-2)', color: 'var(--text-2)', cursor: 'pointer' }}>
-            {historyLoading ? '...' : t('projectSettings.action.refresh')}
-          </button>
-        </div>
-        {history.length === 0 ? (
-          <div style={{ fontSize: 11, color: 'var(--text-3)', padding: '8px 0' }}>
-            {t('projectSettings.schedule.history.empty')}
-          </div>
-        ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
-            <thead>
-              <tr>
-                <th style={historyTh}>{t('projectSettings.schedule.history.col.started')}</th>
-                <th style={historyTh}>{t('projectSettings.schedule.history.col.finished')}</th>
-                <th style={historyTh}>{t('projectSettings.schedule.history.col.type')}</th>
-                <th style={historyTh}>{t('projectSettings.schedule.history.col.trigger')}</th>
-                <th style={historyTh}>{t('projectSettings.schedule.history.col.worker')}</th>
-                <th style={historyTh}>{t('projectSettings.schedule.history.col.status')}</th>
-                <th style={{ ...historyTh, textAlign: 'right' }}>{t('projectSettings.schedule.history.col.duration')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {history.slice(0, 15).map((h) => (
-                <tr key={h.id}>
-                  <td style={historyTd}>{formatTimestamp(h.startedAt)}</td>
-                  <td style={historyTd}>{h.finishedAt ? formatTimestamp(h.finishedAt) : '-'}</td>
-                  <td style={historyTd}>{h.runType}</td>
-                  <td style={historyTd}>{h.triggerSource}</td>
-                  <td style={historyTd}>{h.workerId ?? '-'}</td>
-                  <td style={historyTd}>
-                    <span style={historyStatusStyle(h.status)}>{h.status}</span>
-                  </td>
-                  <td style={{ ...historyTd, textAlign: 'right', fontFamily: 'var(--mono)' }}>
-                    {formatDuration(h.durationMs)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </PSCard>
-
-    </>
-  );
-}
-
-const historyTh: React.CSSProperties = {
-  textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--border)',
-  color: 'var(--text-3)', fontSize: 10, fontWeight: 500,
-};
-const historyTd: React.CSSProperties = {
-  padding: '4px 8px', borderBottom: '1px solid var(--border)',
-  fontSize: 11, color: 'var(--text-2)',
-};
-function historyStatusStyle(status: string): React.CSSProperties {
-  const base: React.CSSProperties = { padding: '2px 6px', borderRadius: 2, fontSize: 10 };
-  switch (status) {
-    case 'running': return { ...base, background: '#fef3c7', color: '#92400e' };
-    case 'success': return { ...base, background: '#dcfce7', color: '#166534' };
-    case 'failed':
-    case 'aborted':
-    case 'timed_out': return { ...base, background: '#fee2e2', color: '#991b1b' };
-    default: return { ...base, background: 'var(--panel-2)', color: 'var(--text-2)' };
-  }
-}
 /* ─── Notifications ──────────────────────────────────────── */
 
 function PSNotify({ project }: { project: Project }) {
