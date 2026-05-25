@@ -1,6 +1,7 @@
 package com.ksinfo.modernize_pro_data.coordinator.ddl;
 
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.common.util.HashUtil;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.OracleDdlParser;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.ParsedColumn;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.ParsedDdl;
@@ -14,9 +15,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -70,7 +68,7 @@ public class DdlImportService {
 
         DdlImport ddlImport = DdlImport.create(
                 projectId, side, filename, content.length,
-                sha256Hex(content), "oracle", importedBy);
+                HashUtil.sha256Hex(content), "oracle", importedBy);
         ddlImport.setTableCount(parsed.getTables().size());
         ddlImport.setColumnCount(parsed.totalColumnCount());
         ddlImportRepo.save(ddlImport);
@@ -172,15 +170,6 @@ public class DdlImportService {
             throw new ApiException("INVALID_SIDE",
                     "side 는 'asis' 또는 'tobe' 여야 합니다 (입력: " + side + ")",
                     HttpStatus.BAD_REQUEST);
-        }
-    }
-
-    private String sha256Hex(byte[] bytes) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(md.digest(bytes));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 unavailable", e);
         }
     }
 

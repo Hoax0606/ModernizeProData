@@ -4,6 +4,7 @@ import { useWorkspaceStore, type Project, type ProjectPhase, type Site } from '.
 import { useNotificationPrefsStore } from '../store/notificationPreferences';
 import { useSettingsStore } from '../store/settings';
 import { projectApi } from '../api/workspace';
+import { runsApi, type RunHistoryDto } from '../api/runs';
 import { ApiError } from '../api/client';
 import { useAuthStore } from '../store/auth';
 import { useActiveProjectReadOnly } from '../store/readOnly';
@@ -11,6 +12,7 @@ import { DdlSchemaPanel } from '../components/DdlSchemaPanel';
 import { LockIcon } from '../components/LockIcon';
 import { Toast } from '../components/Toast';
 import { useT } from '../i18n';
+import { formatTimestamp, formatDuration } from '../lib/formatters';
 
 /** AppShell 의 AS-IS/TO-BE 램프 클릭 → navigate(..., { state: { highlightSide } }) 로 전달. */
 type HighlightSide = 'asis' | 'tobe';
@@ -257,92 +259,104 @@ function PSDdl({ project, highlightSide }: { project: Project; highlightSide: Hi
 
 function PSSchedule({ project }: { project: Project }) {
   const t = useT();
-  /* mock — 실제론 Project 엔티티에 schedule jsonb 추가 필요 */
-  const [rehearsalOn, setRehearsalOn] = useState(true);
-  const [startTime, setStartTime] = useState('22:00 KST');
-  const [maxDuration, setMaxDuration] = useState('240');
-  const [extOpen, setExtOpen] = useState(false);
 
-  const cutover = (project.cutover ?? {}) as { dday?: string; freezeHours?: number; rollbackSla?: number };
+  // Phase 4 で per-project schedule 編集 UI (start_time / max_duration / external 例) は
+  // SchedulerPage に集約された. 本 tab は Run history 表示専用.
+  const [history, setHistory] = useState<RunHistoryDto[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  const refreshHistory = async () => {
+    setHistoryLoading(true);
+    try {
+      const h = await runsApi.listByProject(project.id);
+      setHistory(h);
+    } catch (e) {
+      console.error('Failed to load run history', e);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+  useEffect(() => { refreshHistory(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [project.id]);
 
   return (
     <>
       <PSHead
-        title="Schedule"
+        title="Run history"
         desc={t('projectSettings.head.schedule.desc')}
-        actions={<button style={styles.btnPrimary} disabled>{t('projectSettings.action.saveChanges')}</button>}
-        mock
       />
 
+      {/* Phase 4: per-project schedule config (Nightly + External trigger) は SchedulerPage 에 이동.
+          이 tab 은 본 project 의 run 履歴 表示専用. */}
       <PSCard
-        title={t('projectSettings.schedule.nightly.title')}
-        desc={t('projectSettings.schedule.nightly.desc')}
+        title={t('projectSettings.schedule.history.title')}
+        desc={t('projectSettings.schedule.history.desc')}
       >
-        <PSRow label={t('projectSettings.schedule.row.enabled')} hint={rehearsalOn ? t('projectSettings.schedule.row.enabledOn') : t('projectSettings.schedule.row.enabledOff')}>
-          <Toggle on={rehearsalOn} onChange={setRehearsalOn} label={rehearsalOn ? t('projectSettings.schedule.toggle.on') : t('projectSettings.schedule.toggle.off')} />
-        </PSRow>
-        <PSRow label={t('projectSettings.schedule.row.startTime')} hint={t('projectSettings.schedule.row.startTimeHint')}>
-          <PSInput value={startTime} onChange={setStartTime} mono width={140} />
-        </PSRow>
-        <PSRow label={t('projectSettings.schedule.row.maxDuration')} hint={t('projectSettings.schedule.row.maxDurationHint')}>
-          <PSInput value={maxDuration} onChange={setMaxDuration} mono suffix={t('projectSettings.schedule.minutes')} width={120} />
-        </PSRow>
-        <PSRow label={t('projectSettings.schedule.row.next')}>
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: rehearsalOn ? 'var(--text-2)' : 'var(--text-4)' }}>
-            {rehearsalOn ? t('projectSettings.schedule.row.nextRun', { time: startTime }) : t('projectSettings.schedule.row.nextDisabled')}
-          </span>
-        </PSRow>
-      </PSCard>
-
-      <PSCard title={t('projectSettings.schedule.cutover.title')} desc={t('projectSettings.schedule.cutover.desc')}>
-        <PSRow label={t('projectSettings.schedule.cutover.dday')} hint={t('projectSettings.schedule.cutover.ddayHint')}>
-          <PSInput value={cutover.dday ?? 'TBD'} mono />
-        </PSRow>
-        <PSRow label={t('projectSettings.schedule.cutover.freeze')} hint={t('projectSettings.schedule.cutover.freezeHint')}>
-          <PSInput value={String(cutover.freezeHours ?? 24)} mono suffix={t('projectSettings.schedule.hours')} width={120} />
-        </PSRow>
-        <PSRow label={t('projectSettings.schedule.cutover.rollback')} hint={t('projectSettings.schedule.cutover.rollbackHint')}>
-          <PSInput value={String(cutover.rollbackSla ?? 15)} mono suffix={t('projectSettings.schedule.minutes')} width={120} />
-        </PSRow>
-      </PSCard>
-
-      <div style={styles.collapseCard}>
-        <div onClick={() => setExtOpen((o) => !o)} style={{ ...styles.collapseHeader, background: extOpen ? 'var(--panel-2)' : 'var(--panel)' }}>
-          <span style={{ color: 'var(--text-4)', fontSize: 10, width: 10 }}>{extOpen ? '▾' : '▸'}</span>
-          <div style={{ flex: 1 }}>
-            <div style={styles.cardTitle}>{t('projectSettings.schedule.external.title')}</div>
-            <div style={styles.cardDesc}>
-              {t('projectSettings.schedule.external.desc')}
-            </div>
-          </div>
-          <span style={styles.statusBadgeQueued}>{t('projectSettings.schedule.external.optional')}</span>
+        <div style={{ marginBottom: 8 }}>
+          <button onClick={refreshHistory} disabled={historyLoading} style={{ fontSize: 11, padding: '4px 10px', border: '1px solid var(--border)', borderRadius: 3, background: 'var(--panel-2)', color: 'var(--text-2)', cursor: 'pointer' }}>
+            {historyLoading ? '...' : t('projectSettings.action.refresh')}
+          </button>
         </div>
-        {extOpen && (
-          <div style={{ padding: '14px 16px' }}>
-            <div style={styles.warnBox}>
-              <div style={styles.warnTitle}>{t('projectSettings.schedule.external.warnTitle')}</div>
-              {t('projectSettings.schedule.external.warnBodyBefore')}<b>Solution Settings › External integrations</b>{t('projectSettings.schedule.external.warnBodyAfter')}
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--text-2)', lineHeight: 1.6, marginBottom: 8, marginTop: 10 }}>
-              {t('projectSettings.schedule.external.cliHint')}
-            </div>
-            <pre style={styles.cliBlock}>
-{`# Nightly rehearsal (dry-run · TEST target)
-migrate run --project ${project.id} --mode rehearsal --dry-run
-
-# Cutover (production target · approved snapshot required)
-migrate run --project ${project.id} --mode cutover
-
-# Rollback
-migrate rollback --project ${project.id} --to pre-cutover`}
-            </pre>
+        {history.length === 0 ? (
+          <div style={{ fontSize: 11, color: 'var(--text-3)', padding: '8px 0' }}>
+            {t('projectSettings.schedule.history.empty')}
           </div>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+            <thead>
+              <tr>
+                <th style={historyTh}>{t('projectSettings.schedule.history.col.started')}</th>
+                <th style={historyTh}>{t('projectSettings.schedule.history.col.finished')}</th>
+                <th style={historyTh}>{t('projectSettings.schedule.history.col.type')}</th>
+                <th style={historyTh}>{t('projectSettings.schedule.history.col.trigger')}</th>
+                <th style={historyTh}>{t('projectSettings.schedule.history.col.worker')}</th>
+                <th style={historyTh}>{t('projectSettings.schedule.history.col.status')}</th>
+                <th style={{ ...historyTh, textAlign: 'right' }}>{t('projectSettings.schedule.history.col.duration')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.slice(0, 15).map((h) => (
+                <tr key={h.id}>
+                  <td style={historyTd}>{formatTimestamp(h.startedAt)}</td>
+                  <td style={historyTd}>{h.finishedAt ? formatTimestamp(h.finishedAt) : '-'}</td>
+                  <td style={historyTd}>{h.runType}</td>
+                  <td style={historyTd}>{h.triggerSource}</td>
+                  <td style={historyTd}>{h.workerId ?? '-'}</td>
+                  <td style={historyTd}>
+                    <span style={historyStatusStyle(h.status)}>{h.status}</span>
+                  </td>
+                  <td style={{ ...historyTd, textAlign: 'right', fontFamily: 'var(--mono)' }}>
+                    {formatDuration(h.durationMs)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
-      </div>
+      </PSCard>
+
     </>
   );
 }
 
+const historyTh: React.CSSProperties = {
+  textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--border)',
+  color: 'var(--text-3)', fontSize: 10, fontWeight: 500,
+};
+const historyTd: React.CSSProperties = {
+  padding: '4px 8px', borderBottom: '1px solid var(--border)',
+  fontSize: 11, color: 'var(--text-2)',
+};
+function historyStatusStyle(status: string): React.CSSProperties {
+  const base: React.CSSProperties = { padding: '2px 6px', borderRadius: 2, fontSize: 10 };
+  switch (status) {
+    case 'running': return { ...base, background: '#fef3c7', color: '#92400e' };
+    case 'success': return { ...base, background: '#dcfce7', color: '#166534' };
+    case 'failed':
+    case 'aborted':
+    case 'timed_out': return { ...base, background: '#fee2e2', color: '#991b1b' };
+    default: return { ...base, background: 'var(--panel-2)', color: 'var(--text-2)' };
+  }
+}
 /* ─── Notifications ──────────────────────────────────────── */
 
 function PSNotify({ project }: { project: Project }) {

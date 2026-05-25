@@ -13,6 +13,7 @@ import { ApprovalsPage } from './pages/ApprovalsPage';
 import { ExecutionPage } from './pages/ExecutionPage';
 import { ExecutionOverviewPage } from './pages/ExecutionOverviewPage';
 import { ArtifactsPage } from './pages/ArtifactsPage';
+import { SchedulerPage } from './pages/SchedulerPage';
 import { AppShell } from './layout/AppShell';
 import { ProtectedRoute } from './routes/ProtectedRoute';
 import { useSettingsStore } from './store/settings';
@@ -53,6 +54,7 @@ function App() {
               <Route path="/artifacts" element={<ArtifactsPage />} />
               <Route path="/logs" element={<PlaceholderPage title="Log viewer" description="Audit log 조회·필터·검색·export" />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/site/scheduler" element={<SchedulerPage />} />
             </Route>
           </Route>
 

@@ -1,6 +1,8 @@
 package com.ksinfo.modernize_pro_data.common.config;
 
+import com.ksinfo.modernize_pro_data.coordinator.auth.ApiTokenAuthFilter;
 import com.ksinfo.modernize_pro_data.coordinator.auth.JwtAuthFilter;
+import com.ksinfo.modernize_pro_data.coordinator.auth.WorkerTokenAuthFilter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -16,11 +18,14 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 /**
  * Spring Security 설정.
  *
- * - Stateless (JWT 토큰 기반, 세션 없음).
- * - JwtAuthFilter 가 UsernamePasswordAuthenticationFilter 전에 동작.
+ * - Stateless (JWT / api_token / worker_token 모두 Bearer 헤더 기반, 세션 없음).
+ * - 3 개의 token filter 가 chain 으로 동작:
+ *     1. ApiTokenAuthFilter    — "Bearer mig_..."  → ROLE_API_CLIENT
+ *     2. WorkerTokenAuthFilter — "Bearer WK-..."   → ROLE_WORKER
+ *     3. JwtAuthFilter         — "Bearer eyJ..."   → ROLE_MASTER / ADMIN / VIEWER
+ *   각 filter 는 자신의 prefix 가 아니면 통과. 첫 매칭으로 SecurityContext 設정.
  * - 인증 없이 허용: /api/v1/health, /api/v1/auth/**, WebSocket handshake.
- * - /api/v1/users/** 는 master 한정 (@PreAuthorize 가 메서드 레벨에서 강제).
- * - 그 외 인증 필요.
+ * - 세부 권한 (ROLE 체크) 는 controller 메서드 @PreAuthorize 가 강제.
  */
 @Configuration
 @EnableMethodSecurity
@@ -28,6 +33,8 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 public class SecurityConfig {
 
     private final JwtAuthFilter jwtAuthFilter;
+    private final ApiTokenAuthFilter apiTokenAuthFilter;
+    private final WorkerTokenAuthFilter workerTokenAuthFilter;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
@@ -41,7 +48,11 @@ public class SecurityConfig {
                         .requestMatchers("/ws/**").permitAll() // WebSocket handshake
                         .anyRequest().authenticated()
                 )
-                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+                // Filter 順序: api_token → worker_token → jwt. addFilterBefore 는
+                // 後에 추가된 것이 chain 上 앞쪽에 위치하므로, 의도 順序대로 register.
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(workerTokenAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(apiTokenAuthFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
     }

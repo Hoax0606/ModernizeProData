@@ -3,7 +3,7 @@ import { Modal } from './Modal';
 import { BrandName } from './BrandName';
 import { Toggle } from './Toggle';
 import { Toast } from './Toast';
-import { useSettingsStore, type Theme, type Language, type ExternalConfig, type NotificationScope } from '../store/settings';
+import { useSettingsStore, type Theme, type Language, type NotificationScope } from '../store/settings';
 import { useAuthStore } from '../store/auth';
 import { LANGUAGE_LABELS, useT } from '../i18n';
 
@@ -22,14 +22,12 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
 
-  // 로컬 드래프트 — Save 전에는 store 에 반영 안 됨
+  // 로컬 드래프트 — Save 전에는 store 에 반영 안 됨.
   const [theme, setTheme] = useState<Theme>(store.theme);
   const [language, setLanguage] = useState<Language>(store.language);
   const [notifications, setNotifications] = useState(store.notifications);
   const [notifScope, setNotifScope] = useState<NotificationScope>(store.notificationScope);
   const [notifRetention, setNotifRetention] = useState(store.notificationRetention);
-  const [externalOn, setExternalOn] = useState(store.externalIntegrations);
-  const [extCfg, setExtCfg] = useState<ExternalConfig>(store.externalConfig);
   const [saved, setSaved] = useState(false);
 
   // 모달 열릴 때마다 store 의 현재 값으로 리셋
@@ -40,10 +38,8 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
     setNotifications(store.notifications);
     setNotifScope(store.notificationScope);
     setNotifRetention(store.notificationRetention);
-    setExternalOn(store.externalIntegrations);
-    setExtCfg(store.externalConfig);
     setSaved(false);
-  }, [open, store.theme, store.language, store.notifications, store.notificationScope, store.notificationRetention, store.externalIntegrations, store.externalConfig]);
+  }, [open, store.theme, store.language, store.notifications, store.notificationScope, store.notificationRetention]);
 
   // 변경 여부 — Save 버튼 활성 조건
   const isDirty = useMemo(() => {
@@ -52,26 +48,17 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
     if (notifications !== store.notifications) return true;
     if (notifScope !== store.notificationScope) return true;
     if (notifRetention !== store.notificationRetention) return true;
-    if (externalOn !== store.externalIntegrations) return true;
-    if (extCfg.scheduler !== store.externalConfig.scheduler) return true;
-    if (extCfg.cliPath !== store.externalConfig.cliPath) return true;
-    if (extCfg.apiEndpoint !== store.externalConfig.apiEndpoint) return true;
-    if (extCfg.apiToken !== store.externalConfig.apiToken) return true;
-    if (extCfg.syslog !== store.externalConfig.syslog) return true;
     return false;
-  }, [theme, language, notifications, notifScope, notifRetention, externalOn, extCfg, store]);
+  }, [theme, language, notifications, notifScope, notifRetention, store]);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!isDirty) return;
     store.setTheme(theme);
     store.setLanguage(language);
     store.setNotifications(notifications);
     store.setNotificationScope(notifScope);
     if (isMaster) store.setNotificationRetention(notifRetention);
-    store.setExternalIntegrations(externalOn);
-    store.setExternalConfig(extCfg);
     setSaved(true);
-    // Toast 가 durationMs 후 자동으로 onHide 호출
   };
 
   return (
@@ -193,46 +180,7 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
         </div>
       </Card>
 
-      {/* External integrations — master 전용 (admin 은 read-only) */}
-      <Card
-        title={<>{t('solution.external')} {!isMaster && <span style={styles.masterOnlyTag}>{t('solution.external.masterOnly')}</span>}</>}
-        desc={t('solution.external.desc')}
-        right={
-          <Toggle
-            on={externalOn}
-            onChange={() => isMaster && setExternalOn((v) => !v)}
-            ariaLabel={t('solution.external')}
-          />
-        }
-      >
-        <div style={{ opacity: externalOn ? 1 : 0.5, pointerEvents: externalOn && isMaster ? 'auto' : 'none' }}>
-          <Row label={<RowLabel title={t('solution.external.scheduler')} sub={t('solution.external.schedulerSub')} />}>
-            <select
-              value={extCfg.scheduler}
-              onChange={(e) => setExtCfg({ ...extCfg, scheduler: e.target.value })}
-              style={styles.select}
-              disabled={!isMaster}
-            >
-              <option>Control-M</option>
-              <option>Airflow</option>
-              <option>Jenkins</option>
-              <option>cron</option>
-            </select>
-          </Row>
-          <Row label={<RowLabel title={t('solution.external.cliPath')} sub={t('solution.external.cliPathSub')} />}>
-            <input value={extCfg.cliPath} onChange={(e) => setExtCfg({ ...extCfg, cliPath: e.target.value })} style={styles.input} disabled={!isMaster} />
-          </Row>
-          <Row label={<RowLabel title={t('solution.external.apiEndpoint')} sub={t('solution.external.apiEndpointSub')} />}>
-            <input value={extCfg.apiEndpoint} onChange={(e) => setExtCfg({ ...extCfg, apiEndpoint: e.target.value })} style={styles.input} disabled={!isMaster} />
-          </Row>
-          <Row label={<RowLabel title={t('solution.external.apiToken')} sub={t('solution.external.apiTokenSub')} />}>
-            <input value={extCfg.apiToken} onChange={(e) => setExtCfg({ ...extCfg, apiToken: e.target.value })} style={styles.input} disabled={!isMaster} />
-          </Row>
-          <Row label={<RowLabel title={t('solution.external.syslog')} sub={t('solution.external.syslogSub')} />}>
-            <input value={extCfg.syslog} onChange={(e) => setExtCfg({ ...extCfg, syslog: e.target.value })} style={styles.input} disabled={!isMaster} />
-          </Row>
-        </div>
-      </Card>
+      {/* Internal scheduler / External integrations 카드 는 SchedulerPage 로 이동했음 (Phase 3). */}
 
       <div style={styles.footer}>
         © 2024–2026 KS Info System · All rights reserved
