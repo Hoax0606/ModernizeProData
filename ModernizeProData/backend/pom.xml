@@ -28,6 +28,10 @@
 	</scm>
 	<properties>
 		<java.version>21</java.version>
+		<javafx.version>21.0.4</javafx.version>
+		<!-- jpackage 인스톨러용 메인 클래스. spring-boot-maven-plugin 의
+		     repackage 가 이 값을 manifest 의 Start-Class 로 박는다. -->
+		<start-class>com.ksinfo.modernize_pro_data.launcher.Launcher</start-class>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -109,6 +113,22 @@
 			<version>23.4.0.24.05</version>
 		</dependency>
 
+		<!-- JavaFX — jpackage 인스톨러의 native 창 (WebView 로 React 렌더링).
+		     scope=provided: fat jar 에 포함하지 않음. 런타임 모듈은 build.ps1 이
+		     JavaFX SDK 를 다운로드해서 jpackage 의 module-path 로 주입. -->
+		<dependency>
+			<groupId>org.openjfx</groupId>
+			<artifactId>javafx-controls</artifactId>
+			<version>${javafx.version}</version>
+			<scope>provided</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.openjfx</groupId>
+			<artifactId>javafx-web</artifactId>
+			<version>${javafx.version}</version>
+			<scope>provided</scope>
+		</dependency>
+
 		<dependency>
 			<groupId>org.projectlombok</groupId>
 			<artifactId>lombok</artifactId>
@@ -164,6 +184,7 @@
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
 				<configuration>
+					<mainClass>${start-class}</mainClass>
 					<excludes>
 						<exclude>
 							<groupId>org.projectlombok</groupId>

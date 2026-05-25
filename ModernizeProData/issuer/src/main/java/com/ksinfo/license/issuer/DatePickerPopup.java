@@ -37,8 +37,8 @@ public final class DatePickerPopup {
     private static final Color NAVY_50     = new Color(0xe8f4f2);
     private static final Color TEXT        = new Color(0x0c1f1b);
     private static final Color TEXT_3      = new Color(0x678b86);
-    private static final Font  FONT        = new Font("Dialog", Font.PLAIN, 12);
-    private static final Font  FONT_BOLD   = new Font("Dialog", Font.BOLD, 13);
+    private static final Font  FONT        = new Font("Hoax Mono JP", Font.PLAIN, 12);
+    private static final Font  FONT_BOLD   = new Font("Hoax Mono JP", Font.BOLD, 13);
     private static final DateTimeFormatter MONTH_FMT = DateTimeFormatter.ofPattern("M月 yyyy");
     private static final String[] DOW_HEADERS = {"日", "月", "火", "水", "木", "金", "土"};
 

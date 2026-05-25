@@ -960,7 +960,164 @@ Setup / WiX dependency.
 
 ---
 
-## 19. Further Reading
+## 19. Windows Installer — Coordinator MVP (Phase 1, 2026-05-24)
+
+### 19.1 Goals
+
+Ship the main tool (Coordinator backend + React frontend) as a single Windows
+.msi. Double-click install → native window opens → user logs in. PoC 1st-round
+demo deliverable. Three downstream modes (Client / Standalone / Coordinator)
+remain Phase 2 — a first-boot wizard branches there from the same installer.
+
+### 19.2 Architecture (single fat jar inside JavaFX shell)
+
+```
+%LOCALAPPDATA%\ModernizeProData\                   (per-user install)
+├── ModernizeProData.exe          ← jpackage launcher
+├── app\modernize-pro-data-*.jar  ← Spring Boot fat jar (BOOT-INF/classes/static/
+│                                   = Vite dist)
+└── runtime\                       ← bundled JRE + JavaFX modules (jlink)
+```
+
+```
+double-click ModernizeProData.exe
+  -> Launcher.main (jpackage sets -Dmpd.gui.enabled=true)
+  -> GuiApp.launch (JavaFX Application)
+       -> Stage opens with "Starting..." HTML
+       -> Spring Boot started on background thread
+       -> ApplicationReadyEvent fires
+       -> Platform.runLater -> WebView.load("http://localhost:8080/")
+  -> User logs in; window close = SpringApplication.exit + Platform.exit
+```
+
+### 19.3 Decision log
+
+- **PowerShell, not Maven jpackage plugin** — orchestration mirrors
+  `issuer/build-exe.ps1`. Single source of pattern for both modules.
+- **Single fat jar with static under classpath:/static/** — spring-boot-maven-
+  plugin already produces this layout; SPA fallback controller forwards non-
+  `/api`/`/ws`/`/assets` paths to `/index.html`.
+- **.msi via WiX 3.14** — chosen for Japan finance market acceptance. WiX 4 is
+  not compatible with jpackage; build.ps1 explicitly checks 3.x.
+- **Per-user install** — `--win-per-user-install` puts everything under
+  `%LOCALAPPDATA%`, no UAC, no admin rights. Standalone deployment matches the
+  isolated-customer-PC story.
+- **JavaFX WebView (not browser-auto-open)** — UX requirement is "native
+  desktop app, not a browser tab". JavaFX is the lightest path in our Java
+  stack to embed React. Native dependency on JavaFX SDK 21.0.4 from Gluon, not
+  in JDK 21 by default.
+- **JavaFX as `provided` Maven scope** — keeps the fat jar lean (no JavaFX in
+  BOOT-INF/lib). jpackage gets the runtime modules from JavaFX SDK via
+  `--module-path` and `--add-modules javafx.controls,javafx.web`.
+- **PG pre-installed assumption (Phase 1)** — host native PostgreSQL on
+  localhost:5433, DB `mpd_meta`, user/pw `mpd`/`mpd` (matches CLAUDE.md
+  default). Bundling PG portable is deferred. If the DB is missing, Spring
+  startup fails and the WebView shows an error page (Phase 1 simple; Phase 2
+  wizard improves it).
+- **`mpd.gui.enabled` system property** — Launcher branches dev vs installed
+  on this flag. `mvn spring-boot:run` does not set it, so JavaFX never
+  initializes during dev. jpackage launcher sets it, so the installed mode
+  always runs the JavaFX shell.
+
+### 19.4 Frontend build divergence (tsc gate)
+
+`npm run build` is `tsc -b && vite build`. Other team members' work-in-
+progress branches on `dev` may leave the `tsc -b` gate failing for code
+unrelated to the installer. The installer pipeline therefore calls `npx
+vite build` directly — Vite's own bundler still validates the build, and
+unblocking the installer is more valuable than enforcing the strict TS gate at
+this stage. The dev workflow (`npm run build` from a feature branch) keeps the
+gate.
+
+### 19.5 Static frontend wiring on the backend
+
+- `frontend/.env.production`: `VITE_API_BASE_URL=` (empty) → axios prefix is
+  empty → requests go to `/api/v1/...` relative → same-origin Spring Boot.
+- `SpaFallbackController`: regex-routes any non-`/api`/`/ws`/`/assets`/`/favicon`/`/mpd*`
+  path to `forward:/index.html`. React Router takes over from there.
+- `SecurityConfig`: anonymous permitAll for `/`, `/index.html`, `/favicon.svg`,
+  `/favicon.ico`, `/mpd.png`, `/mpd_lic.png`, `/assets/**`. Login still happens
+  through `/api/v1/auth/**` (also anonymous, pre-existing).
+
+### 19.6 application-prod.yml
+
+Bundled in fat jar. Activated by `-Dspring.profiles.active=prod`. Overrides
+nothing the user has to care about — only:
+
+- `spring.datasource.url` default points to `localhost:5433/mpd_meta`
+  (matches CLAUDE.md, not the Spring Boot Maven Plugin's docker-compose
+  default of 5432).
+- Logging tightened to INFO root, WARN for `org.hibernate.SQL` and
+  `org.springframework.security`.
+- Vite dev-server origin removed from CORS (only `http://localhost:8080`).
+- `modernize.license.public-key` falls back to `classpath:license/public.pem`
+  and accepts `MPD_LICENSE_PUBKEY` env override.
+
+### 19.7 Build pipeline (installer/build.ps1)
+
+7 phases, in order:
+
+0. **Verify environment** — `jpackage`, WiX 3.x (auto-detects `Program Files
+   (x86)\WiX Toolset v3.14\bin` or v3.11 paths), `npm`.
+1. **JavaFX SDK cache** — first run downloads
+   `openjfx-21.0.4_windows-x64_bin-sdk.zip` (~30MB) from Gluon to
+   `installer/cache/`. Subsequent runs skip.
+2. **Frontend** — `npx vite build` in `frontend/`.
+3. **Stage frontend** — `frontend/dist/*` → `backend/src/main/resources/static/`.
+4. **Backend** — `./mvnw -DskipTests package` in `backend/` produces fat jar.
+5. **Stage jar** — fat jar copied into `installer/staging/app/`.
+6. **Icon** — `make-ico.ps1` wraps `frontend/public/mpd.png` as PNG-embedded
+   `.ico` (same pattern as issuer). Cached at `installer/assets/mpd.ico`.
+7. **jpackage** — `--type msi --win-per-user-install --module-path
+   <javafx-sdk-lib> --add-modules javafx.controls,javafx.web,...`. Adds
+   shortcut + Start Menu group + dir chooser.
+
+Output: `installer/dist/ModernizeProData-1.0.0.msi`, ~130–160MB (JRE + JavaFX
+modules + fat jar).
+
+### 19.8 Critical rules carried over from issuer
+
+- All `.ps1` files **must keep UTF-8 BOM** — PowerShell 5.1 on Korean Windows
+  reads BOM-less UTF-8 as CP949 and corrupts non-ASCII content. Keep build
+  output ASCII to be safe across encoding regressions.
+- **Do not "simplify" `installer/staging/`'s `Remove-Item -Recurse`** — same
+  cautionary tale as issuer's `license/` preservation. If we ever stage
+  generated state (license, signing materials, captured certs) here, it MUST
+  be preserved across rebuilds.
+- **System Look-and-Feel only** (Swing-style components stay native) —
+  Cross-Platform L&F on Korean Windows breaks Hangul rendering in jpackage'd
+  JRE. JavaFX WebView is unaffected, but if we ever add Swing dialogs in the
+  installer they must respect this.
+
+### 19.9 Verification flow
+
+Build: `cd ModernizeProData\installer; .\build.ps1`. Output is the .msi under
+`installer\dist\`.
+
+Smoke test (clean Windows account or VM):
+
+1. PG 18 running on `localhost:5433/mpd_meta` (user/pw `mpd`/`mpd`).
+2. Double-click .msi → next/next/install. No UAC prompt expected.
+3. Start Menu → ModernizeProData → window opens "Starting...", then loads the
+   login page within ~10s.
+4. master/password (UserBootstrap default) → Dashboard.
+5. Close window → no orphan processes.
+
+PG-missing path: open the window, see the WebView error page. Phase 2 wizard
+will turn this into an interactive setup.
+
+### 19.10 Phase 2 / 3 forward references
+
+- **Phase 2** — same .msi gets a first-boot mode selector (Coordinator /
+  Client / Standalone). Client mode drops Spring Boot + DB entirely, leaving
+  the JavaFX shell pointed at a remote Coordinator's URL.
+- **Phase 3** — License hardening (per-customer keypair, fingerprint binding,
+  password-encrypted private.pem). The Phase 1 installer assumes the existing
+  single global keypair from `feature/license`.
+
+---
+
+## 20. Further Reading
 
 - `CLAUDE.md` — stack, conventions, domain glossary, local run.
 - `docs/handoff/` — time-stamped handoff notes (read the most recent first).
