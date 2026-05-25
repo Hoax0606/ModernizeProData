@@ -1,0 +1,28 @@
+-- ==========================================================================
+--  Project: trade (取引明細)
+--  AS-IS Oracle. 依存: 01_master (M_PRODUCT), 03_account (M_ACCOUNT)
+-- ==========================================================================
+
+CREATE SEQUENCE SEQ_T_TRADE START WITH 1 INCREMENT BY 1 NOCACHE;
+
+CREATE TABLE T_TRADE (
+    TRADE_ID           NUMBER(14)     NOT NULL,
+    ACCOUNT_ID         NUMBER(12)     NOT NULL,
+    PRODUCT_ID         NUMBER(8)      NOT NULL,
+    TRADE_TYPE_CD      CHAR(1)        NOT NULL,
+    TRADE_QTY          NUMBER(12)     NOT NULL,
+    TRADE_PRICE        NUMBER(15,4)   NOT NULL,
+    TRADE_DT           DATE           NOT NULL,
+    ENTRY_TS           DATE           DEFAULT SYSDATE NOT NULL,
+    CONSTRAINT PK_T_TRADE          PRIMARY KEY (TRADE_ID),
+    CONSTRAINT CK_T_TRADE_TYPE     CHECK (TRADE_TYPE_CD IN ('B', 'S')),
+    CONSTRAINT FK_T_TRADE_ACCOUNT  FOREIGN KEY (ACCOUNT_ID) REFERENCES M_ACCOUNT (ACCOUNT_ID),
+    CONSTRAINT FK_T_TRADE_PRODUCT  FOREIGN KEY (PRODUCT_ID) REFERENCES M_PRODUCT (PRODUCT_ID)
+);
+
+CREATE INDEX IX_T_TRADE_ACCOUNT_DT ON T_TRADE (ACCOUNT_ID, TRADE_DT);
+
+COMMENT ON TABLE  T_TRADE                IS '取引明細';
+COMMENT ON COLUMN T_TRADE.TRADE_TYPE_CD  IS '取引種別 B=買付 / S=売却';
+COMMENT ON COLUMN T_TRADE.TRADE_QTY      IS '取引数量';
+COMMENT ON COLUMN T_TRADE.TRADE_PRICE    IS '約定単価';

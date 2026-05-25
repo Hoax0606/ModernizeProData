@@ -39,13 +39,14 @@ public class JwtService {
         this.expirationMillis = expirationHours * 60 * 60 * 1000;
     }
 
-    /** 토큰 발급 — username + role 클레임 포함. */
-    public String issue(String username, String role) {
+    /** 토큰 발급 — username + role + sid (active session 식별자) 클레임 포함. */
+    public String issue(String username, String role, String sessionId) {
         Instant now = Instant.now();
         Instant exp = now.plusMillis(expirationMillis);
         return Jwts.builder()
                 .subject(username)
                 .claim("role", role)
+                .claim("sid", sessionId)
                 .issuedAt(Date.from(now))
                 .expiration(Date.from(exp))
                 .signWith(key)
@@ -82,5 +83,9 @@ public class JwtService {
 
     public Optional<String> roleOf(String token) {
         return parse(token).map(c -> c.get("role", String.class));
+    }
+
+    public Optional<String> sidOf(String token) {
+        return parse(token).map(c -> c.get("sid", String.class));
     }
 }

@@ -1,23 +1,29 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authApi } from '../api/auth';
 import { ApiError } from '../api/client';
 import { useAuthStore } from '../store/auth';
+import { useSettingsStore, type Language } from '../store/settings';
 import { BrandName } from '../components/BrandName';
-import { useT } from '../i18n';
+import { useT, LANGUAGE_LABELS } from '../i18n';
 
 export function LoginPage() {
   const t = useT();
   const navigate = useNavigate();
   const setAuth = useAuthStore((s) => s.setAuth);
+  const language = useSettingsStore((s) => s.language);
+  const setLanguage = useSettingsStore((s) => s.setLanguage);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [sessionConflict, setSessionConflict] = useState(false);
+  const [evicting, setEvicting] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setSessionConflict(false);
     setLoading(true);
     try {
       const res = await authApi.login({ username, password });
@@ -25,9 +31,11 @@ export function LoginPage() {
       navigate('/');
     } catch (err) {
       if (err instanceof ApiError) {
-        if (err.code === 'AUTH_USER_NOT_FOUND')         setError(t('login.error.userNotFound'));
-        else if (err.code === 'AUTH_PASSWORD_INVALID')  setError(t('login.error.invalidPassword'));
-        else                                            setError(err.message || t('login.error'));
+        if (err.code === 'AUTH_USER_NOT_FOUND')                setError(t('login.error.userNotFound'));
+        else if (err.code === 'AUTH_PASSWORD_INVALID')         setError(t('login.error.invalidPassword'));
+        else if (err.code === 'AUTH_SESSION_ACTIVE_ELSEWHERE') setSessionConflict(true);
+        else if (err.code === 'AUTH_LICENSE_BLOCKED')          setError(t('login.error.licenseBlocked'));
+        else                                                    setError(err.message || t('login.error'));
       } else {
         setError((err as Error).message ?? t('login.error'));
       }
@@ -36,8 +44,37 @@ export function LoginPage() {
     }
   };
 
+  // "끊고 로그인" — 본인 비번 재인증으로 다른 곳 세션 무효화 후 자동 재로그인.
+  const handleEvictAndLogin = async () => {
+    setEvicting(true);
+    setError(null);
+    try {
+      await authApi.forceSelfLogout(username, password);
+      const res = await authApi.login({ username, password });
+      setAuth(res.token, { username: res.username, role: res.role }, res.expiresAt, res.lastSignInAt);
+      setSessionConflict(false);
+      navigate('/');
+    } catch (err) {
+      setSessionConflict(false);
+      if (err instanceof ApiError) {
+        if (err.code === 'AUTH_PASSWORD_INVALID') setError(t('login.error.invalidPassword'));
+        else                                       setError(err.message || t('login.error'));
+      } else {
+        setError((err as Error).message ?? t('login.error'));
+      }
+    } finally {
+      setEvicting(false);
+    }
+  };
+
+  const handleCancelEvict = () => {
+    setSessionConflict(false);
+    setError(null);
+  };
+
   return (
     <div style={styles.wrap}>
+
       <div style={styles.column}>
         {/* 브랜드 — 로고 위, 타이틀 아래 */}
         <div style={styles.brandBlock}>
@@ -48,7 +85,10 @@ export function LoginPage() {
         {/* 로그인 카드 */}
         <form style={styles.card} onSubmit={handleSubmit}>
           <label style={styles.label}>
-            <span style={styles.labelText}>{t('login.username')}</span>
+            <div style={styles.labelRow}>
+              <span style={styles.labelText}>{t('login.username')}</span>
+              <LanguageDropdown language={language} onChange={setLanguage} />
+            </div>
             <input
               type="text"
               value={username}
@@ -74,13 +114,48 @@ export function LoginPage() {
 
           {error && <div style={styles.error}>{error}</div>}
 
-          <button
-            type="submit"
-            disabled={loading}
-            style={{ ...styles.button, ...(loading ? styles.buttonDisabled : {}) }}
-          >
-            {loading ? t('login.loading') : t('login.submit')}
-          </button>
+          {sessionConflict ? (
+            <div style={styles.conflictBox}>
+              <div style={styles.conflictHead}>
+                <span style={styles.conflictIcon} aria-hidden>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="4" y="11" width="16" height="9" rx="2" />
+                    <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+                  </svg>
+                </span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={styles.conflictTitle}>{t('login.conflict.title')}</div>
+                  <div style={styles.conflictDesc}>{t('login.conflict.desc')}</div>
+                </div>
+              </div>
+              <div style={styles.conflictActions}>
+                <button
+                  type="button"
+                  onClick={handleCancelEvict}
+                  disabled={evicting}
+                  style={{ ...styles.conflictBtnGhost, ...(evicting ? styles.buttonDisabled : {}) }}
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleEvictAndLogin}
+                  disabled={evicting}
+                  style={{ ...styles.conflictBtnAmber, ...(evicting ? styles.buttonDisabled : {}) }}
+                >
+                  {evicting ? t('login.conflict.evicting') : t('login.conflict.evictAndLogin')}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="submit"
+              disabled={loading}
+              style={{ ...styles.button, ...(loading ? styles.buttonDisabled : {}) }}
+            >
+              {loading ? t('login.loading') : t('login.submit')}
+            </button>
+          )}
 
           <div style={styles.hint}>
             {t('login.devHint.role')}: <code style={styles.code}>master</code> / <code style={styles.code}>admin</code> / <code style={styles.code}>viewer</code>
@@ -97,6 +172,126 @@ export function LoginPage() {
   );
 }
 
+function LanguageDropdown({ language, onChange }: { language: Language; onChange: (l: Language) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const langs = Object.keys(LANGUAGE_LABELS) as Language[];
+
+  return (
+    <div ref={ref} style={dropdownStyles.wrap}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        style={{ ...dropdownStyles.trigger, ...(open ? dropdownStyles.triggerOpen : {}) }}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <span>{LANGUAGE_LABELS[language]}</span>
+        <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ transform: open ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform .12s' }}>
+          <path d="M2 3.5L5 6.5L8 3.5" />
+        </svg>
+      </button>
+      {open && (
+        <div role="listbox" style={dropdownStyles.menu}>
+          {langs.map((k) => {
+            const active = k === language;
+            return (
+              <button
+                key={k}
+                type="button"
+                role="option"
+                aria-selected={active}
+                onClick={() => { onChange(k); setOpen(false); }}
+                style={{ ...dropdownStyles.item, ...(active ? dropdownStyles.itemActive : {}) }}
+              >
+                {LANGUAGE_LABELS[k]}
+                {active && (
+                  <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M2 6L5 9L10 3" />
+                  </svg>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const dropdownStyles: Record<string, React.CSSProperties> = {
+  wrap: { position: 'relative', display: 'inline-block' },
+  trigger: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '3px 8px',
+    border: '1px solid var(--border)',
+    borderRadius: 3,
+    background: 'var(--panel)',
+    color: 'var(--text-2)',
+    fontSize: 11,
+    fontWeight: 500,
+    cursor: 'pointer',
+    lineHeight: 1.3,
+  },
+  triggerOpen: {
+    borderColor: 'var(--navy)',
+    color: 'var(--navy)',
+    background: 'var(--navy-50)',
+  },
+  menu: {
+    position: 'absolute',
+    top: 'calc(100% + 4px)',
+    right: 0,
+    minWidth: 120,
+    background: 'var(--panel)',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 4,
+    boxShadow: '0 6px 18px rgba(12,31,27,0.12)',
+    padding: 3,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 1,
+    zIndex: 50,
+  },
+  item: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    padding: '6px 10px',
+    border: 'none',
+    background: 'transparent',
+    color: 'var(--text)',
+    fontSize: 11.5,
+    fontWeight: 500,
+    cursor: 'pointer',
+    borderRadius: 3,
+    textAlign: 'left',
+  },
+  itemActive: {
+    background: 'var(--navy-50)',
+    color: 'var(--navy)',
+    fontWeight: 700,
+  },
+};
+
 const styles: Record<string, React.CSSProperties> = {
   wrap: {
     minHeight: '100vh',
@@ -105,6 +300,7 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'center',
     background: 'var(--bg)',
     padding: 20,
+    position: 'relative',
   },
   column: {
     width: 420,
@@ -173,6 +369,63 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 4,
   },
   buttonDisabled: { opacity: 0.6, cursor: 'wait' },
+  conflictBox: {
+    padding: 16,
+    background: 'var(--panel)',
+    border: '1px solid var(--navy)',
+    borderLeft: '3px solid var(--navy)',
+    borderRadius: 5,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 14,
+    boxShadow: '0 1px 3px rgba(14,114,104,0.08)',
+  },
+  conflictHead: { display: 'flex', alignItems: 'flex-start', gap: 12 },
+  conflictIcon: {
+    width: 32, height: 32,
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    background: 'var(--navy-50)',
+    color: 'var(--navy)',
+    borderRadius: '50%',
+    flexShrink: 0,
+  },
+  conflictTitle: {
+    fontSize: 13.5,
+    fontWeight: 700,
+    color: 'var(--text)',
+    marginBottom: 4,
+  },
+  conflictDesc: {
+    fontSize: 12,
+    color: 'var(--text-2)',
+    lineHeight: 1.55,
+  },
+  conflictActions: {
+    display: 'grid',
+    gridTemplateColumns: '1fr 1fr',
+    gap: 8,
+  },
+  conflictBtnGhost: {
+    padding: '9px 14px',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 4,
+    background: 'var(--panel)',
+    color: 'var(--text-2)',
+    fontSize: 12.5,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  conflictBtnAmber: {
+    padding: '9px 14px',
+    border: '1px solid var(--navy)',
+    borderRadius: 4,
+    background: 'var(--navy)',
+    color: '#fff',
+    fontSize: 12.5,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  labelRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
   error: {
     padding: '8px 10px',
     background: 'var(--red-50)',

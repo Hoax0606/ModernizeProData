@@ -14,8 +14,10 @@ import { Toast } from '../components/Toast';
 import { useT } from '../i18n';
 import { formatTimestamp, formatDuration } from '../lib/formatters';
 
-/** AppShell 의 AS-IS/TO-BE 램프 클릭 → navigate(..., { state: { highlightSide } }) 로 전달. */
-type HighlightSide = 'asis' | 'tobe';
+/** AppShell 의 AS-IS/TO-BE 램프 클릭 → navigate(..., { state: { highlightSide } }) 로 전달.
+ *  'asis-csv' 는 MappingPage 의 "CSV not imported" 배지에서 들어오는 경우에 쓰이며
+ *  AS-IS 섹션의 CSV 카드를 하이라이트한다. */
+type HighlightSide = 'asis' | 'asis-csv' | 'tobe';
 interface HighlightState { highlightSide?: HighlightSide }
 
 const ALL_PHASES: ProjectPhase[] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
@@ -365,12 +367,12 @@ function PSNotify({ project }: { project: Project }) {
   // Solution settings 의 Enable notifications. false 면 Event subscriptions 토글 일괄 비활성.
   const globalNotifEnabled = useSettingsStore((s) => s.notifications);
   const events = [
+    { k: 'run.started',      l: t('projectSettings.notify.event.runStarted.label'),      d: t('projectSettings.notify.event.runStarted.desc') },
     { k: 'run.failed',       l: t('projectSettings.notify.event.runFailed.label'),       d: t('projectSettings.notify.event.runFailed.desc') },
+    { k: 'run.finished',     l: t('projectSettings.notify.event.runFinished.label'),     d: t('projectSettings.notify.event.runFinished.desc') },
     { k: 'snapshot.pending', l: t('projectSettings.notify.event.snapPending.label'),     d: t('projectSettings.notify.event.snapPending.desc') },
     { k: 'snapshot.approved',l: t('projectSettings.notify.event.snapApproved.label'),    d: t('projectSettings.notify.event.snapApproved.desc') },
     { k: 'snapshot.rejected',l: t('projectSettings.notify.event.snapRejected.label'),    d: t('projectSettings.notify.event.snapRejected.desc') },
-    { k: 'cutover.started',  l: t('projectSettings.notify.event.cutoverStarted.label'),  d: t('projectSettings.notify.event.cutoverStarted.desc') },
-    { k: 'cutover.finished', l: t('projectSettings.notify.event.cutoverFinished.label'), d: t('projectSettings.notify.event.cutoverFinished.desc') },
   ];
 
   const subsMap          = useNotificationPrefsStore((s) => s.subs);

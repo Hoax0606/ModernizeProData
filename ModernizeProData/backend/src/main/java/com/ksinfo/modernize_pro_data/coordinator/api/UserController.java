@@ -2,6 +2,7 @@ package com.ksinfo.modernize_pro_data.coordinator.api;
 
 import com.ksinfo.modernize_pro_data.common.dto.ApiResponse;
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.coordinator.auth.AuthService;
 import com.ksinfo.modernize_pro_data.coordinator.user.User;
 import com.ksinfo.modernize_pro_data.coordinator.user.UserRepository;
 import com.ksinfo.modernize_pro_data.coordinator.user.UserRole;
@@ -43,6 +44,7 @@ public class UserController {
 
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
+    private final AuthService authService;
 
     /* ── DTOs ─────────────────────────────────────────────────────── */
 
@@ -51,11 +53,15 @@ public class UserController {
             String username,
             UserRole role,
             OffsetDateTime createdAt,
-            OffsetDateTime lastSignInAt
+            OffsetDateTime lastSignInAt,
+            boolean hasActiveSession
     ) {
         static UserDto from(User u) {
+            boolean active = u.getCurrentSessionId() != null
+                    && u.getCurrentSessionExpiresAt() != null
+                    && u.getCurrentSessionExpiresAt().isAfter(OffsetDateTime.now());
             return new UserDto(u.getId(), u.getUsername(), u.getRole(),
-                    u.getCreatedAt(), u.getLastSignInAt());
+                    u.getCreatedAt(), u.getLastSignInAt(), active);
         }
     }
 
@@ -66,6 +72,15 @@ public class UserController {
     ) {}
 
     public record UpdateRoleRequest(@NotNull UserRole role) {}
+
+    public record ChangePasswordRequest(
+            @NotBlank String currentPassword,
+            @NotBlank @Size(min = 4, max = 128) String newPassword
+    ) {}
+
+    public record ResetPasswordRequest(
+            @NotBlank @Size(min = 4, max = 128) String newPassword
+    ) {}
 
     /* ── Endpoints ─────────────────────────────────────────────────── */
 
@@ -115,6 +130,90 @@ public class UserController {
         }
         userRepository.delete(target);
         log.info("User deleted: {} ({})", target.getUsername(), target.getRole());
+        return ApiResponse.ok(null);
+    }
+
+    @PostMapping("/me/password")
+    @Transactional
+    public ApiResponse<Void> changeMyPassword(
+            @Valid @RequestBody ChangePasswordRequest req,
+            org.springframework.security.core.Authentication auth
+    ) {
+        if (auth == null || auth.getName() == null) {
+            throw new ApiException("UNAUTHORIZED", "로그인이 필요합니다", HttpStatus.UNAUTHORIZED);
+        }
+        User u = userRepository.findByUsername(auth.getName())
+                .orElseThrow(() -> new ApiException(
+                        "USER_NOT_FOUND", "사용자를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
+
+        if (!passwordEncoder.matches(req.currentPassword(), u.getPasswordHash())) {
+            throw new ApiException(
+                    "CURRENT_PASSWORD_INVALID",
+                    "현재 비밀번호가 일치하지 않습니다",
+                    HttpStatus.BAD_REQUEST);
+        }
+        if (req.currentPassword().equals(req.newPassword())) {
+            throw new ApiException(
+                    "PASSWORD_SAME",
+                    "새 비밀번호가 기존과 동일합니다",
+                    HttpStatus.BAD_REQUEST);
+        }
+        u.setPasswordHash(passwordEncoder.encode(req.newPassword()));
+        userRepository.save(u);
+        log.info("Password changed: {}", u.getUsername());
+        return ApiResponse.ok(null);
+    }
+
+    @PostMapping("/{id}/password")
+    @PreAuthorize("hasRole('MASTER')")
+    @Transactional
+    public ApiResponse<Void> resetPassword(
+            @PathVariable String id,
+            @Valid @RequestBody ResetPasswordRequest req,
+            org.springframework.security.core.Authentication auth
+    ) {
+        User target = userRepository.findById(id)
+                .orElseThrow(() -> new ApiException(
+                        "USER_NOT_FOUND", "사용자를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
+
+        // 자기 자신 reset 은 me/password 사용 (current password 검증 위해)
+        if (auth != null && target.getUsername().equals(auth.getName())) {
+            throw new ApiException(
+                    "PASSWORD_SELF_RESET",
+                    "자기 자신의 비밀번호는 Account profile 에서 변경하세요",
+                    HttpStatus.BAD_REQUEST);
+        }
+
+        target.setPasswordHash(passwordEncoder.encode(req.newPassword()));
+        // 보안: 비번 강제 변경되었으므로 대상 user 의 활성 세션 무효화 (다음 요청에서 401).
+        target.setCurrentSessionId(null);
+        target.setCurrentSessionIssuedAt(null);
+        target.setCurrentSessionExpiresAt(null);
+        userRepository.save(target);
+
+        log.info("Password reset by admin: {} (by {})", target.getUsername(),
+                auth != null ? auth.getName() : "system");
+        return ApiResponse.ok(null);
+    }
+
+    @PostMapping("/{id}/force-logout")
+    @PreAuthorize("hasRole('MASTER')")
+    @Transactional
+    public ApiResponse<Void> forceLogout(
+            @PathVariable String id,
+            org.springframework.security.core.Authentication auth
+    ) {
+        User target = userRepository.findById(id)
+                .orElseThrow(() -> new ApiException(
+                        "USER_NOT_FOUND", "사용자를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
+
+        if (auth != null && target.getUsername().equals(auth.getName())) {
+            throw new ApiException(
+                    "FORCE_LOGOUT_SELF",
+                    "자기 자신의 세션은 강제 종료할 수 없습니다. Sign out 으로 종료하세요.",
+                    HttpStatus.BAD_REQUEST);
+        }
+        authService.forceLogout(target.getUsername(), auth != null ? auth.getName() : "system");
         return ApiResponse.ok(null);
     }
 

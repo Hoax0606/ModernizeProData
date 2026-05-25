@@ -3,6 +3,7 @@ package com.ksinfo.modernize_pro_data.common.config;
 import com.ksinfo.modernize_pro_data.coordinator.auth.ApiTokenAuthFilter;
 import com.ksinfo.modernize_pro_data.coordinator.auth.JwtAuthFilter;
 import com.ksinfo.modernize_pro_data.coordinator.auth.WorkerTokenAuthFilter;
+import com.ksinfo.modernize_pro_data.coordinator.license.LicenseEnforcementFilter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -35,6 +36,7 @@ public class SecurityConfig {
     private final JwtAuthFilter jwtAuthFilter;
     private final ApiTokenAuthFilter apiTokenAuthFilter;
     private final WorkerTokenAuthFilter workerTokenAuthFilter;
+    private final LicenseEnforcementFilter licenseEnforcementFilter;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
@@ -53,6 +55,8 @@ public class SecurityConfig {
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
                 .addFilterBefore(workerTokenAuthFilter, UsernamePasswordAuthenticationFilter.class)
                 .addFilterBefore(apiTokenAuthFilter, UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterAfter(licenseEnforcementFilter, JwtAuthFilter.class);
 
         return http.build();
     }

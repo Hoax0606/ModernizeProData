@@ -44,6 +44,8 @@ public class SiteController {
             @NotBlank String asisEncoding,
             @NotBlank String tobeEncoding,
             String csvPath,
+            String asisDbType,
+            String asisDbVersion,
             String notes,
             String environment,
             Map<String, Object> tobeDbByEnv,
@@ -57,6 +59,8 @@ public class SiteController {
             String asisEncoding,
             String tobeEncoding,
             String csvPath,
+            String asisDbType,
+            String asisDbVersion,
             String notes,
             String environment,
             Map<String, Object> tobeDbByEnv,
@@ -92,6 +96,8 @@ public class SiteController {
                 req.tobeDbByEnv(), req.tobeDbLocks(),
                 auth.getName()
         );
+        if (req.asisDbType() != null)    site.setAsisDbType(req.asisDbType());
+        if (req.asisDbVersion() != null) site.setAsisDbVersion(req.asisDbVersion());
         siteRepository.save(site);
         log.info("Site created: {} ({})", site.getName(), site.getId());
         return ApiResponse.ok(site);
@@ -115,6 +121,8 @@ public class SiteController {
         if (req.asisEncoding() != null) site.setAsisEncoding(req.asisEncoding());
         if (req.tobeEncoding() != null) site.setTobeEncoding(req.tobeEncoding());
         if (req.csvPath() != null)      site.setCsvPath(req.csvPath());
+        if (req.asisDbType() != null)    site.setAsisDbType(req.asisDbType().isEmpty() ? null : req.asisDbType());
+        if (req.asisDbVersion() != null) site.setAsisDbVersion(req.asisDbVersion().isEmpty() ? null : req.asisDbVersion());
         if (req.notes() != null)        site.setNotes(req.notes());
         if (req.environment() != null)  site.setEnvironment(req.environment());
         if (req.tobeDbByEnv() != null)  site.setTobeDbByEnv(req.tobeDbByEnv());

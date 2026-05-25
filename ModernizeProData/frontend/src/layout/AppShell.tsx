@@ -1,6 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useAuthStore, roleLabel } from '../store/auth';
+import { authApi } from '../api/auth';
 import { useUsersStore } from '../store/users';
 import { BrandName } from '../components/BrandName';
 import { AboutModal } from '../components/AboutModal';
@@ -13,8 +14,12 @@ import { CreateProjectModal } from '../components/CreateProjectModal';
 import { SignOutModal } from '../components/SignOutModal';
 import { ClusterAdminModal } from '../components/ClusterAdminModal';
 import { NotificationToast } from '../components/NotificationToast';
+import { LicenseBanner } from '../components/LicenseBanner';
 import { LockIcon } from '../components/LockIcon';
+import { HourglassHalfIcon } from '../components/HourglassHalfIcon';
+import { useLicenseStore } from '../store/license';
 import { useWorkspaceStore } from '../store/workspace';
+import { useUiStore } from '../store/ui';
 import { isProjectReadOnly } from '../store/readOnly';
 import { useSnapshotsStore } from '../store/snapshots';
 import { useAuditLogStore } from '../store/auditLog';
@@ -62,6 +67,7 @@ export function AppShell() {
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [clusterAdminOpen, setClusterAdminOpen] = useState(false);
   const [siteSettingsOpen, setSiteSettingsOpen] = useState(false);
+  const [siteSettingsFocus, setSiteSettingsFocus] = useState<import('../store/ui').SiteSettingsFocus>(undefined);
   const [siteMenuOpen, setSiteMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifTab, setNotifTab] = useState<'all' | 'unread'>('all');
@@ -80,12 +86,31 @@ export function AppShell() {
   const fetchSites = useWorkspaceStore((s) => s.fetchSites);
   const fetchProjects = useWorkspaceStore((s) => s.fetchProjects);
 
+  // 외부 페이지(MappingPage 등)에서 site settings 모달 open 요청 감지
+  const siteSettingsRequest = useUiStore((s) => s.siteSettingsRequest);
+  useEffect(() => {
+    if (!siteSettingsRequest) return;
+    setSiteSettingsFocus(siteSettingsRequest.focus);
+    setSiteSettingsOpen(true);
+    useUiStore.getState().consumeSiteSettingsRequest();
+  }, [siteSettingsRequest]);
+
   // 모달이 열려있으면 polling 일시 중지 (편집 중 서버 데이터로 덮어쓰기 방지)
   const isEditing = siteSettingsOpen || createSiteOpen || createProjectOpen;
   const isEditingRef = useRef(isEditing);
   isEditingRef.current = isEditing;
 
   const fetchSnapshots = useSnapshotsStore((s) => s.fetchBySite);
+
+  // 사이드바 project row 옆에 pending snapshot 모래시계 — Versions 에서 Request Review 한 직후 표시.
+  const allSnapshots = useSnapshotsStore((s) => s.snapshots);
+  const pendingProjectIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const s of allSnapshots) {
+      if (s.status === 'pending') ids.add(s.projectId);
+    }
+    return ids;
+  }, [allSnapshots]);
 
   // navigate 시 location.state.activateProjectId 로 전달된 값을 setActiveProject 에 반영.
   // 알림 클릭처럼 라우트 전환 + 프로젝트 변경을 한 번에 해야 하는 경우, 핸들러에서 setActiveProject 를
@@ -140,10 +165,32 @@ export function AppShell() {
   };
   const stageShort = (env: string) => STAGE_SHORT[env] ?? env.slice(0, 4).toUpperCase();
 
+  // site 의 raw DB type 을 짧은 라벨로. 알 수 없으면 빈 문자열.
+  const dialectLabel = (raw: string | null | undefined): string => {
+    if (!raw) return '';
+    const s = raw.trim().toLowerCase();
+    if (!s) return '';
+    if (s.includes('postgres')) return 'PostgreSQL';
+    if (s.includes('sql server') || s === 'mssql' || s.includes('microsoft')) return 'SQL Server';
+    if (s.includes('mysql') || s.includes('mariadb')) return 'MySQL';
+    if (s.includes('db2')) return 'DB2';
+    if (s.includes('oracle')) return 'Oracle';
+    return raw.trim();
+  };
+  const siteDialects = (s: typeof sites[number]) => {
+    const tobeRaw = (s.tobeDbByEnv?.[s.environment] as { type?: string } | undefined)?.type;
+    return { asis: dialectLabel(s.asisDbType), tobe: dialectLabel(tobeRaw) };
+  };
+
   const projectSort = useSettingsStore((s) => s.projectSort);
   const setProjectSort = useSettingsStore((s) => s.setProjectSort);
+  const [projectSearch, setProjectSearch] = useState('');
   const projects = useMemo(() => {
-    const list = allProjects.filter((p) => p.siteId === activeSiteId).slice();
+    const q = projectSearch.trim().toLowerCase();
+    const list = allProjects
+      .filter((p) => p.siteId === activeSiteId)
+      .filter((p) => !q || p.name.toLowerCase().includes(q))
+      .slice();
     list.sort((a, b) => {
       switch (projectSort) {
         case 'created-asc':  return a.createdAt.localeCompare(b.createdAt);
@@ -155,7 +202,7 @@ export function AppShell() {
       }
     });
     return list;
-  }, [allProjects, activeSiteId, projectSort]);
+  }, [allProjects, activeSiteId, projectSort, projectSearch]);
 
   const notifItems = useMemo(() => {
     // Solution settings 에서 Enable notifications 가 OFF 면 모든 프로젝트의 알림 일괄 비활성.
@@ -245,7 +292,10 @@ export function AppShell() {
     return () => window.removeEventListener('click', close);
   }, [notifOpen]);
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    // first-wins 정책: server-side 세션도 무효화해야 다음 로그인이 허용됨.
+    // 네트워크 실패/토큰 만료 등은 swallow — 클라이언트 정리는 그래도 진행.
+    try { await authApi.logout(); } catch { /* noop */ }
     logout();
     resetUsers();
     navigate('/login');
@@ -258,8 +308,18 @@ export function AppShell() {
     }
   }, [user?.role, user?.username, loadUsers]);
 
+  // 라이선스 상태 — 마운트 시 + 30분마다 polling. banner / write 차단 hint 용.
+  const refreshLicense = useLicenseStore((s) => s.refresh);
+  useEffect(() => {
+    void refreshLicense();
+    const id = setInterval(() => void refreshLicense(), 30 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [refreshLicense]);
+
   return (
-    <div style={styles.wrap}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+      <LicenseBanner />
+      <div style={styles.wrap}>
       {sidebarOpen && (
         <aside style={styles.sidebar}>
           {/* 브랜드 */}
@@ -361,7 +421,23 @@ export function AppShell() {
                 <line x1="9.2" y1="9.2" x2="12" y2="12" />
               </svg>
             </span>
-            <input style={styles.searchInput} placeholder={t('shell.searchPlaceholder')} />
+            <input
+              style={styles.searchInput}
+              placeholder={t('shell.searchPlaceholder')}
+              value={projectSearch}
+              onChange={(e) => setProjectSearch(e.target.value)}
+            />
+            {projectSearch && (
+              <button
+                type="button"
+                onClick={() => setProjectSearch('')}
+                style={styles.searchClear}
+                aria-label="Clear search"
+                title="Clear"
+              >
+                ×
+              </button>
+            )}
           </div>
 
           {/* All projects */}
@@ -406,7 +482,9 @@ export function AppShell() {
           <div style={styles.projectList}>
             {projects.length === 0 ? (
               <div style={styles.emptyState}>
-                {activeSite
+                {projectSearch.trim()
+                  ? t('shell.searchEmpty', { q: projectSearch.trim() })
+                  : activeSite
                   ? <>{t('shell.projectsEmpty.withSite.before')}<code style={styles.kbd}>+</code>{t('shell.projectsEmpty.withSite.after')}</>
                   : <>{t('shell.projectsEmpty.noSite')}</>}
               </div>
@@ -432,6 +510,15 @@ export function AppShell() {
                   >
                     <div style={styles.projectNameRow}>
                       <span style={styles.projectName}>{p.name}</span>
+                      {pendingProjectIds.has(p.id) && p.phase === 'test' && p.runStatus === 'completed' && (
+                        <span
+                          style={styles.projectPendingIcon}
+                          title={t('siteOverview.pendingSnapshotIcon.title')}
+                          aria-label={t('siteOverview.pendingSnapshotIcon.title')}
+                        >
+                          <HourglassHalfIcon size={11} color="var(--amber)" />
+                        </span>
+                      )}
                       {readOnly && (
                         <span style={styles.projectReadOnlyIcon} aria-label={t('shell.readOnly.projectTooltip')}>
                           <LockIcon open={false} color="var(--amber)" size={11} />
@@ -545,7 +632,19 @@ export function AppShell() {
                   })()}
                 </div>
                 <div style={styles.topTitleSub}>
-                  {activeProject.tableCount} tables
+                  {activeSite && (() => {
+                    const d = siteDialects(activeSite);
+                    if (!d.asis && !d.tobe) return null;
+                    return (
+                      <span style={styles.topDialectChip} title={`AS-IS: ${d.asis || '?'}  →  TO-BE: ${d.tobe || '?'}`}>
+                        <span style={styles.topDialectName}>{d.asis || '?'}</span>
+                        <span style={styles.topDialectArrow}>→</span>
+                        <span style={styles.topDialectName}>{d.tobe || '?'}</span>
+                      </span>
+                    );
+                  })()}
+                  <span style={styles.topDialectSep}>·</span>
+                  <span>{activeProject.tableCount} tables</span>
                 </div>
               </>
             ) : activeSite ? (
@@ -729,6 +828,7 @@ export function AppShell() {
           <div style={styles.tabbar}>
             <Tab to="/" end label={t('tab.siteOverview')} />
             <Tab to="/site/execution" label={t('tab.executionOverview')} />
+            <Tab to="/site/quarantine" label={t('tab.siteQuarantine')} />
             <Tab to="/site/approvals" label={t('tab.approvals')} />
             <Tab to="/site/export" label={t('tab.siteExport')} />
             <Tab to="/site/audit" label={t('tab.auditLog')} />
@@ -758,7 +858,11 @@ export function AppShell() {
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
       <AccountProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
       <SolutionSettingsModal open={solutionOpen} onClose={() => setSolutionOpen(false)} />
-      <SiteSettingsModal open={siteSettingsOpen} onClose={() => setSiteSettingsOpen(false)} />
+      <SiteSettingsModal
+        open={siteSettingsOpen}
+        focus={siteSettingsFocus}
+        onClose={() => { setSiteSettingsOpen(false); setSiteSettingsFocus(undefined); }}
+      />
       <ClusterAdminModal open={clusterAdminOpen} onClose={() => setClusterAdminOpen(false)} />
       <CreateSiteModal open={createSiteOpen} onClose={() => setCreateSiteOpen(false)} />
       <CreateProjectModal open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} />
@@ -768,6 +872,7 @@ export function AppShell() {
         onConfirm={() => { setSignOutOpen(false); handleLogout(); }}
       />
       <NotificationToast />
+      </div>
     </div>
   );
 }
@@ -775,7 +880,7 @@ export function AppShell() {
 function notifTypeColor(type: string): string {
   switch (type) {
     case 'pending':       return 'var(--amber)';            // 황토색
-    case 'snapshot':      return 'var(--phase-analysis)';   // 하늘색 — 파란색
+    case 'snapshot':      return 'var(--snapshot)';         // royal blue — snapshot 전용 (phase-analysis 와 구분)
     case 'approved':      return 'var(--green)';            // 상세 페이지 approved 배지와 동일
     case 'rejected':      return 'var(--red)';
     case 'run-start':     return 'var(--gray)';
@@ -1151,6 +1256,13 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     flexShrink: 0,
   },
+  projectPendingIcon: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    flexShrink: 0,
+    // flex 기하 중심 → 텍스트 caps 옵티컬 중심 보정 (1px 위)
+    transform: 'translateY(-1px)',
+  },
   readOnlyBanner: {
     display: 'flex',
     alignItems: 'center',
@@ -1232,10 +1344,28 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'center',
     pointerEvents: 'none',
   },
+  searchClear: {
+    position: 'absolute',
+    right: 14,
+    top: '50%',
+    transform: 'translateY(-50%)',
+    width: 16,
+    height: 16,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    border: 'none',
+    background: 'transparent',
+    color: 'var(--text-3)',
+    cursor: 'pointer',
+    fontSize: 14,
+    lineHeight: 1,
+    padding: 0,
+  },
   searchInput: {
     width: '100%',
     height: 24,
-    padding: '0 8px 0 24px',
+    padding: '0 22px 0 24px',
     border: '1px solid var(--border)',
     borderRadius: 4,
     background: 'var(--panel)',
@@ -1267,6 +1397,18 @@ const styles: Record<string, React.CSSProperties> = {
   },
   allProjectsLabel: { fontSize: 11.5, fontWeight: 500, color: 'var(--text)' },
   countMono: { fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-3)' },
+
+  topDialectChip: {
+    display: 'inline-flex', alignItems: 'center', gap: 4,
+    whiteSpace: 'nowrap',
+  },
+  topDialectName: {
+    fontFamily: 'var(--mono)', fontSize: 9.5, fontWeight: 500,
+    color: 'var(--text-4)', letterSpacing: 0.2,
+  },
+  topDialectArrow: {
+    fontSize: 9, color: 'var(--text-4)', fontFamily: 'var(--mono)',
+  },
 
   sectionHeader: {
     padding: '8px 14px 4px',
@@ -1483,7 +1625,11 @@ const styles: Record<string, React.CSSProperties> = {
   },
   topTitle: { display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 },
   topTitleMain: { fontSize: 13, fontWeight: 600, letterSpacing: -0.1 },
-  topTitleSub: { fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
+  topTitleSub: {
+    fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)',
+    display: 'flex', alignItems: 'center', gap: 6,
+  },
+  topDialectSep: { color: 'var(--text-4)' },
 
   bellBtn: {
     position: 'relative',

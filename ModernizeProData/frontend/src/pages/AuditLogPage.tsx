@@ -78,13 +78,6 @@ export function AuditLogPage() {
 
   return (
     <div>
-      <div style={styles.header}>
-        <div style={{ flex: 1 }} />
-        <button disabled style={styles.btnGhostDisabled}>
-          {t('auditLog.export')}
-        </button>
-      </div>
-
       {/* Filter bar */}
       <div style={styles.filterBar}>
         <Filter label={t('auditLog.filter.timeRange')}>
@@ -174,9 +167,7 @@ export function AuditLogPage() {
                     </td>
                     <td style={{ ...styles.td, ...styles.mono }}>{log.user}</td>
                     <td style={styles.td}>
-                      <span style={{ ...styles.actionTag, ...actionTagColor(log.action) }}>
-                        {log.action.replace(/\b\w/g, (c) => c.toUpperCase())}
-                      </span>
+                      {renderActionCell(log.action)}
                     </td>
                     <td style={{ ...styles.td, ...styles.mono }}>{log.snapshotName ?? '—'}</td>
                     <td style={{ ...styles.td, whiteSpace: 'pre-wrap', ...styles.mono }}>{log.description}</td>
@@ -204,7 +195,7 @@ function Th({ children }: { children: React.ReactNode }) {
   return <th style={styles.th}>{children}</th>;
 }
 
-// action 별 색상 — VersionsPage / Approvals 의 snapshot 상태 색과 통일.
+// action 별 색상 — VersionsPage / Approvals / Notification 의 snapshot 상태 색과 통일.
 function actionTagColor(action: string): React.CSSProperties {
   const a = action.toLowerCase();
   if (a.includes('cutover')) {
@@ -220,12 +211,35 @@ function actionTagColor(action: string): React.CSSProperties {
     return { background: 'var(--amber-50)', color: 'var(--amber)', borderColor: 'var(--amber)' };
   }
   if (a.includes('snapshot') || a.includes('created') || a.includes('create')) {
-    return { background: 'var(--navy-50)', color: 'var(--navy)', borderColor: 'var(--navy)' };
-  }
-  if (a.includes('delete')) {
-    return { background: 'var(--panel-2)', color: 'var(--text-3)', borderColor: 'var(--border-strong)' };
+    // snapshot 전용 파랑 (--snapshot) — phase-analysis 의 하늘색과 구분
+    return { background: 'var(--snapshot-50)', color: 'var(--snapshot)', borderColor: 'var(--snapshot)' };
   }
   return {};
+}
+
+// action 별 chip 표시 — notification panel 의 type chip 톤과 일치.
+// snapshot deleted = chip 없이 빨간 'DELETED' plain text. 그 외는 짧은 키워드 chip.
+function renderActionCell(action: string): React.ReactNode {
+  const a = action.toLowerCase();
+  if (a.includes('delete')) {
+    return <span style={styles.actionDeleted}>DELETED</span>;
+  }
+  return (
+    <span style={{ ...styles.actionTag, ...actionTagColor(action) }}>
+      {actionChipLabel(a)}
+    </span>
+  );
+}
+
+function actionChipLabel(a: string): string {
+  if (a.includes('cutover')) return 'CUTOVER';
+  if (a.includes('approve')) return 'APPROVED';
+  if (a.includes('reject'))  return 'REJECTED';
+  if (a.includes('request') || a.includes('pending')) return 'PENDING';
+  if (a.includes('snapshot') || a.includes('created') || a.includes('create')) return 'SNAPSHOT';
+  if (a.includes('phase'))    return 'PHASE';
+  if (a.includes('assignee')) return 'ASSIGN';
+  return a.toUpperCase();
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -325,6 +339,14 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     color: 'var(--text)',
     whiteSpace: 'nowrap',
+  },
+  actionDeleted: {
+    color: 'var(--red)',
+    fontFamily: 'var(--mono)',
+    fontWeight: 700,
+    fontSize: 11,
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
   },
   actionTag: {
     display: 'inline-block',

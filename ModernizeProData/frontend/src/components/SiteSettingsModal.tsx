@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Modal } from './Modal';
 import {
   useWorkspaceStore,
@@ -34,6 +34,10 @@ function siteInitials(name: string): string {
 
 interface Props {
   open: boolean;
+  /** 외부에서 특정 영역을 강조하며 모달을 열 때.
+   *    'tobe-db'  → TO-BE Target DB 카드
+   *    'asis-csv' → AS-IS CSV path 필드 */
+  focus?: 'tobe-db' | 'asis-csv' | 'general';
   onClose: () => void;
 }
 
@@ -60,11 +64,12 @@ const PROJECT_ENV_LABEL: Record<ProjectEnvironment, TranslationKey> = {
 };
 
 const DB_TYPES = ['PostgreSQL', 'Oracle', 'MySQL', 'SQL Server', 'Db2'];
+const ASIS_DB_TYPES = ['Oracle', 'DB2', 'Mainframe DB2', 'SQL Server', 'PostgreSQL', 'MySQL', 'Other'];
 
 /**
  * Site settings — name·envs·encoding·notes·운영 단계·TO-BE DB 편집 + 삭제.
  */
-export function SiteSettingsModal({ open, onClose }: Props) {
+export function SiteSettingsModal({ open, focus, onClose }: Props) {
   const t = useT();
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
@@ -83,7 +88,8 @@ export function SiteSettingsModal({ open, onClose }: Props) {
   const [asisEncoding, setAsisEncoding] = useState<SourceEncoding>('shift_jis');
   const [tobeEncoding, setTobeEncoding] = useState<SourceEncoding>('utf-8');
   const [csvPath, setCsvPath] = useState('');
-  const [notes, setNotes] = useState('');
+  const [asisDbType, setAsisDbType] = useState('');
+  const [asisDbVersion, setAsisDbVersion] = useState('');
   const [stage, setStage] = useState<ProjectEnvironment>('dev');
   const [tobeDbByEnv, setTobeDbByEnv] = useState<TobeDbByEnv>({});
   const [tobeDbLocks, setTobeDbLocks] = useState<TobeDbLocks>({});
@@ -92,6 +98,29 @@ export function SiteSettingsModal({ open, onClose }: Props) {
   const [testStatus, setTestStatus] = useState<TestStatus>('idle');
   const [testMessage, setTestMessage] = useState<string | null>(null);
   const [siteUnlocked, setSiteUnlocked] = useState(false);
+  const [tobeDbPulse, setTobeDbPulse] = useState(false);
+  const tobeDbRef = useRef<HTMLDivElement | null>(null);
+  const [csvPathPulse, setCsvPathPulse] = useState(false);
+  const csvPathRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    if (focus === 'tobe-db') {
+      setTobeDbPulse(true);
+      const scrollT = window.setTimeout(() => {
+        tobeDbRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 50);
+      const pulseT = window.setTimeout(() => setTobeDbPulse(false), 1500);
+      return () => { window.clearTimeout(scrollT); window.clearTimeout(pulseT); };
+    }
+    if (focus === 'asis-csv') {
+      setCsvPathPulse(true);
+      const scrollT = window.setTimeout(() => {
+        csvPathRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 50);
+      const pulseT = window.setTimeout(() => setCsvPathPulse(false), 1500);
+      return () => { window.clearTimeout(scrollT); window.clearTimeout(pulseT); };
+    }
+  }, [open, focus]);
 
   useEffect(() => {
     if (!open || !site) return;
@@ -101,7 +130,8 @@ export function SiteSettingsModal({ open, onClose }: Props) {
     setAsisEncoding(site.asisEncoding);
     setTobeEncoding(site.tobeEncoding);
     setCsvPath(site.csvPath ?? '');
-    setNotes(site.notes ?? '');
+    setAsisDbType(site.asisDbType ?? '');
+    setAsisDbVersion(site.asisDbVersion ?? '');
     setStage(site.environment);
     setTobeDbByEnv({ ...site.tobeDbByEnv });
     setTobeDbLocks({ ...site.tobeDbLocks });
@@ -186,7 +216,8 @@ export function SiteSettingsModal({ open, onClose }: Props) {
     asisEncoding !== site.asisEncoding ||
     tobeEncoding !== site.tobeEncoding ||
     csvPath !== (site.csvPath ?? '') ||
-    (notes || '') !== (site.notes ?? '') ||
+    asisDbType !== (site.asisDbType ?? '') ||
+    asisDbVersion !== (site.asisDbVersion ?? '') ||
     stage !== site.environment ||
     JSON.stringify(tobeDbByEnv) !== JSON.stringify(site.tobeDbByEnv) ||
     JSON.stringify(tobeDbLocks) !== JSON.stringify(site.tobeDbLocks);
@@ -228,7 +259,8 @@ export function SiteSettingsModal({ open, onClose }: Props) {
       asisEncoding,
       tobeEncoding,
       csvPath: csvPath.trim(),
-      notes: notes.trim() || undefined,
+      asisDbType: asisDbType.trim(),
+      asisDbVersion: asisDbVersion.trim(),
       environment: stage,
       tobeDbByEnv: finalByEnv,
       tobeDbLocks: finalLocks,
@@ -345,25 +377,46 @@ export function SiteSettingsModal({ open, onClose }: Props) {
         </select>
       </Field>
 
-      <Field label={t('siteSettings.csvPath')}>
-        <CsvPathField value={csvPath} onChange={setCsvPath} />
-      </Field>
+      <div style={styles.twoCol}>
+        <Field label={t('siteSettings.asisDbType')}>
+          <select value={asisDbType} onChange={(e) => setAsisDbType(e.target.value)} style={styles.input}>
+            <option value="">— {t('siteSettings.asisDbTypePlaceholder')} —</option>
+            {ASIS_DB_TYPES.map((d) => <option key={d}>{d}</option>)}
+          </select>
+        </Field>
+        <Field label={t('siteSettings.asisDbVersion')}>
+          <input
+            value={asisDbVersion}
+            onChange={(e) => setAsisDbVersion(e.target.value)}
+            placeholder={t('siteSettings.asisDbVersionPlaceholder')}
+            style={styles.input}
+          />
+        </Field>
+      </div>
 
-      <Field label={t('siteSettings.notes')}>
-        <textarea
-          value={notes}
-          onChange={(e) => setNotes(e.target.value)}
-          style={{ ...styles.input, resize: 'vertical', minHeight: 56, fontFamily: 'var(--mono)' }}
-          rows={2}
-        />
-      </Field>
+      <div
+        ref={csvPathRef}
+        style={csvPathPulse
+          ? { boxShadow: '0 0 0 3px var(--green)', borderRadius: 4, transition: 'box-shadow 200ms' }
+          : undefined}
+      >
+        <Field label={t('siteSettings.csvPath')}>
+          <CsvPathField value={csvPath} onChange={setCsvPath} />
+        </Field>
+      </div>
 
       <Field label={t('siteSettings.stage')}>
         <StagePills value={stage} onChange={setStage} byEnv={tobeDbByEnv} locks={tobeDbLocks} t={t} />
       </Field>
 
       {/* TO-BE DB */}
-      <div style={styles.dbCard}>
+      <div
+        ref={tobeDbRef}
+        style={{
+          ...styles.dbCard,
+          ...(tobeDbPulse ? { boxShadow: '0 0 0 3px var(--green)', transition: 'box-shadow 200ms' } : {}),
+        }}
+      >
         <div style={styles.dbHeader}>
           <span>{t('siteSettings.tobeDb')}</span>
           {dbConfigured

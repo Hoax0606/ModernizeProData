@@ -4,7 +4,7 @@ A team-shared document summarizing the accumulated design decisions for the data
 
 **Prerequisite** — The one-line project intro, tech stack, directory map, and domain glossary live in the repo-root `CLAUDE.md`. This document covers the design details not (or only briefly) covered there.
 
-Updated: 2026-05-19
+Updated: 2026-05-21
 
 ---
 
@@ -668,6 +668,299 @@ comments for traceability.
 ---
 
 ## 18. Further Reading
+## 17. Site Export — Client-side zip Delivery (added 2026-05-21)
+
+The bulk-export feature that lets a Coordinator user package all artifacts of
+a site into a single `.zip` and hand it off (USB stick, email, etc.) to the
+review side. Lives on the `All projects` page under the `Site export` tab
+(`/site/export`).
+
+### 17.1 Why client-side
+
+The backend `/api/v1/sites/{id}/export` endpoint with Apache POI and signed
+ZIP streaming is **not yet built**. To unblock PoC delivery, the entire zip
+assembly currently runs in the browser using `jszip` (zip container) and
+`exceljs` (real `.xlsx` workbooks). When the backend export job lands, the
+frontend will hand the same UX off to a single API call and dispose of the
+client-side builders.
+
+`xlsx` (SheetJS) was rejected in favour of `exceljs` because the npm-published
+SheetJS version carries two open CVEs (Prototype Pollution, ReDoS). They are
+not exploitable in write-only flows like ours, but `npm audit` warnings would
+keep reappearing in the financial-grade security review.
+
+### 17.2 Picker categories (4)
+
+| Section | Category | Per-table? | Notes |
+|---|---|---|---|
+| Artifact formats | Migration (`.sql`) | yes | Currently a 4-line stub with `-- TODO: {tableName}`. Real CREATE TABLE / INDEX / FK / SEQUENCE / GRANT blocks come when backend export job is wired. |
+| Artifact formats | Mapping (`.xlsx`) | yes | 1-sheet empty Cover ("Not yet populated") workbook. Real Rules sheet with `Source col / Source type / Target col / Target type / Rule / Status / Note` columns comes when mapping snapshot data is wired. |
+| Artifact formats | Validation (`.xlsx`) | yes | 1-sheet empty Cover workbook. Real Checks sheet (`Check / Scope / Expected / Actual / Δ / Verdict / Note`) comes when test/rehearsal/cutover runs land. |
+| Documents | Site summary (`.xlsx`) | site-level | **Already works with real data.** Sheets: Cover / Phase mix / All tables / one per project. |
+
+DDL and Pipeline categories were intentionally removed (DDL is the customer-
+supplied input, Pipeline is internal runtime config — neither is a customer
+deliverable in their own right).
+
+### 17.3 Bundle layout
+
+```
+site-export-<site>-YYYY-MM-DD-HHmm.zip
+└── site-export-<site>-YYYY-MM-DD-HHmm/            (folder name == zip stem)
+    ├── <project>/
+    │   ├── migration/tbl_NNN.up.sql
+    │   ├── mapping/tbl_NNN.map.xlsx
+    │   └── validation/tbl_NNN.report.xlsx
+    └── site-summary.xlsx
+```
+
+- Korean / Japanese site / project names are preserved as-is (only `\ / : * ? "
+  < > |` are sanitised to `_`). Two helpers in `lib/siteExportManifest.ts` —
+  `slugify` for ASCII-only IDs (Document IDs etc.) and `pathSafeName` for
+  filesystem names that should keep their original characters.
+- The zip filename stem and the inner top-level folder name are identical, so
+  unpacking several exports side-by-side never collides.
+
+### 17.4 Key files
+
+- `frontend/src/pages/SiteExportPage.tsx` — composes the picker + preview,
+  computes `bundleStem` (`site-export-<slug>-<stamp>`) once per render, passes
+  it to manifest + zip filename so they stay in sync.
+- `frontend/src/components/SiteExportPicker.tsx` — left 300 px column.
+  Checkboxes + Download CTA. No total-size display (the old `rand()`-based
+  estimate was removed; only `blob.size` after download would be honest, and
+  the OS file manager already shows that).
+- `frontend/src/components/SiteExportPreview.tsx` — right pane. Two tabs:
+  **Site summary** (Excel-style preview of the live workbook) and **Manifest**
+  (collapsible per-category file path list, no sizes).
+- `frontend/src/lib/siteExportManifest.ts` — the core. `buildManifest` (no
+  side effects), `generateZipBundle` (async, returns Blob),
+  `buildSiteSummaryWorkbook` (real data), `buildEmptyArtifactWorkbook`
+  (1-sheet placeholder Cover for Mapping / Validation), `pathSafeName`,
+  `slugify`, `triggerBlobDownload`, `fmtBytes`.
+
+### 17.5 What the next session must do for real data
+
+Before writing builders, agree the JSON shape with backend (the meta DB
+already has `mapping_snapshot`, `schema_diff`, `migration_run` — the export
+endpoint will pull from there). Suggested shape:
+
+```ts
+{ tableName: string;
+  mapping?:    { rules:  Array<{ sourceCol; sourceType; targetCol; targetType; ruleExpr; status: 'auto'|'lookup'|'custom'; note }> };
+  validation?: { checks: Array<{ check; scope; expected; actual; delta; verdict: 'PASS'|'WARN'|'FAIL'; note }> };
+  migration?:  { blocks: Array<{ kind: 'CREATE_TABLE'|'INDEX'|'FK'|'SEQUENCE'|'GRANT'; sql }> };
+}
+```
+
+Then add three builders in `siteExportManifest.ts` next to the existing
+`buildEmptyArtifactWorkbook`:
+
+```ts
+function buildMigrationSql(args, data): string
+function buildMappingWorkbook(args, data): Promise<ArrayBuffer>
+function buildValidationWorkbook(args, data): Promise<ArrayBuffer>
+```
+
+`generateZipBundle` already has clean branches per category — point them at
+the new builders when data is present, fall through to the empty workbook
+otherwise. The infrastructure (manifest, picker, zip assembly, file naming,
+download trigger) does **not** need to change.
+
+### 17.6 Pitfalls / decisions worth knowing
+
+- **No fake data, ever.** Several iterations during 2026-05-21 added sample
+  mapping / validation rows for meeting demos; all were removed before
+  commit. Future demos must use either real backend data or a clearly
+  branched demo route — not inline sample arrays.
+- **Cover sheet metadata is conservative.** Only Document ID / Issued /
+  Author. `Version` and `Classification` were removed because they had no
+  data source.
+- **Manifest entry has no `size` field.** Pre-download size estimation was
+  pseudo-random (`rand()` function) and misled users when the actual zip was
+  far smaller. The size display is gone from picker, button, and Manifest
+  tab.
+- **Excel chrome (title bar / ribbon / formula bar / sheet tabs) is shared
+  visually between ArtifactsPage and SiteExportPreview** — keep them in sync
+  when adjusting colours / fonts.
+- **`/mockup` route and `lib/artifactSamples.ts` are deleted history.** Do
+  not resurrect.
+
+### 17.7 Out of scope (intentionally deferred)
+
+- Backend Apache POI `/api/v1/sites/{id}/export` endpoint.
+- SHA-256 + GPG signing + audit log entry on download.
+- tar.gz bundle option (removed; zip only).
+- In-app inline preview of `.sql` / placeholder file contents inside the
+  Manifest tab — would need split-view layout; skipped because the workbook
+  in Site summary already shows the substantive deliverable.
+- Artifacts-page download (the project-scoped sibling of Site export). The
+  page currently shows only the empty Excel chrome; its `Download bundle`
+  button is disabled. When wired it will reuse `generateZipBundle` with a
+  single-project manifest.
+
+---
+
+## 18. License (Ed25519 .lic verification — finalized 2026-05-22)
+
+### 18.1 Goals
+
+Stop unauthorized use of the tool after the agreed term, without depending on
+network reachability (target sites are fully air-gapped). The license is a
+signed JSON file (`.lic`) delivered to the site by USB and uploaded through
+the in-app UI.
+
+### 18.2 Cryptographic shape
+
+- **Signature**: Ed25519 (java.security built-in, no extra libs).
+- **One global keypair**: HQ holds the single `private.pem`; every shipped
+  backend binary embeds the matching `public.pem` at build time. New
+  customers ≠ new keypair; new keypair = full backend rebuild + redeploy.
+- **Public key embed path**: `backend/src/main/resources/license/public.pem` (same filename the issuer produces — drop the file as-is, no rename).
+- **Fingerprint** = first 16 bytes of SHA-256 over the public key DER, hex
+  encoded. Stored in each `.lic` as `publicKeyFp` so corruption / wrong-key
+  uploads can be diagnosed quickly.
+
+### 18.3 .lic file format
+
+```json
+{
+  "alg": "Ed25519",
+  "payload": {
+    "v": 1,
+    "licenseId": "MPD-2026-05-22-kdb-bank",
+    "customer": "KDB Bank",
+    "siteId": "kdb-prod-2026",
+    "edition": "standard",
+    "features": [],
+    "issuedAt": "2026-05-22",
+    "expiresAt": "2027-05-22",
+    "graceDays": 14,
+    "publicKeyFp": "a3f1...c920"
+  },
+  "signature": "base64(ed25519-sig-over-jackson-bytes(payload))"
+}
+```
+
+- `edition` is currently always `"standard"` (no tiering yet).
+- `features` is currently always `[]` — feature gating was implemented and
+  then removed because there is no second tier. The field is preserved to
+  keep the JSON shape stable in case tiers are introduced later.
+
+### 18.4 Lifecycle stages (`LicenseStatus`)
+
+```
+issued                expires           expires+grace      expires+grace+15d
+   │                     │                     │                  │
+   │ ACTIVE      ──►    │   IN_GRACE   ──►    │   READ_ONLY  ──►  │  EXPIRED
+   │ (60d before expiry: EXPIRING — banner, no functional change)
+```
+
+| Status      | Behavior                                                  |
+|-------------|-----------------------------------------------------------|
+| `ACTIVE`    | Normal.                                                   |
+| `EXPIRING`  | Amber banner; ≤60 days remaining.                         |
+| `IN_GRACE`  | Amber banner; past expiry, still within `graceDays`.      |
+| `READ_ONLY` | Write APIs return 403 `LICENSE_READ_ONLY`. 15-day window. |
+| `EXPIRED`   | All non-whitelisted APIs return 403.                      |
+| `MISSING`   | No `.lic` ever uploaded — same blocking as EXPIRED.       |
+| `INVALID`   | Signature failed or clock-rollback detected.              |
+
+`statusOf()` uses `ChronoUnit.DAYS.between(today, expires)` — not
+`Period.getDays()` (which returns only the day component of a Period).
+
+### 18.5 Enforcement filter (`LicenseEnforcementFilter`)
+
+Runs after `JwtAuthFilter`. Always-allowed path prefixes regardless of
+status (so the user can recover from MISSING/EXPIRED):
+
+```
+/api/v1/health/**
+/api/v1/auth/**
+/api/v1/license       (GET + master POST + master DELETE)
+/ws/**
+```
+
+For other paths it gates on `LicenseStatus.isFullyBlocked()` /
+`isWriteBlocked()`. Throttled `last_seen_at` touch (5-min) updates both the
+DB column and the sealed-clock file on each request.
+
+### 18.6 Clock-rollback detection (`LicenseSealedClock`)
+
+A tiny AES-GCM-sealed file written next to the live license tracks the
+last-seen wall-clock time. If the OS clock is later observed earlier than
+the sealed value by more than 5 minutes, the verifier flips the status to
+`INVALID` and emits a `LICENSE_CLOCK_TAMPER` audit row.
+
+- Sealed file lives at `${user.home}/.ksinfo-modernize/license-seen.bin`
+  (configurable via `modernize.license.sealed-file`).
+- AES-GCM key is derived from `SHA-256(public-key-fingerprint + fixed salt)`.
+  Defeating it requires source code or the keypair — sufficient for the
+  honest-operator threat model.
+
+### 18.7 Backend artefacts
+
+- `coordinator/license/` package — `License` entity, `LicenseRepository`,
+  `LicenseService`, `LicenseDocument` record, `LicenseStatus` enum,
+  `LicenseVerifier`, `LicenseSealedClock`, `LicenseEnforcementFilter`,
+  `LicenseStartupLoader`.
+- `coordinator/api/LicenseController` — `GET` returns status DTO,
+  `POST` uploads a `.lic` (master only, multipart), `DELETE` wipes
+  (master only, dev-mode shortcut).
+- Migration: `V20260522114140__license.sql` adds the `license` table with
+  `last_seen_at` and `imported_at` columns. Audit log gets two new actions:
+  `LICENSE_LOADED`, `LICENSE_INVALID_SIG`, plus `LICENSE_CLEARED` and
+  `LICENSE_CLOCK_TAMPER`.
+
+### 18.8 Frontend artefacts
+
+- `api/license.ts` — `get()`, `upload(File)`, `clear()` (dev).
+- `store/license.ts` — singleton zustand store with 30-min polling. Banner
+  reads from this; LicenseCard refreshes it after upload/clear so the
+  banner reacts immediately.
+- `components/LicenseBanner.tsx` — amber/red header band shown for any
+  non-`ACTIVE` status. Mounted by `AppShell` above the main flex column.
+- `components/SolutionSettingsModal.tsx` → `LicenseCard` — shows
+  customer / edition / dates / days-remaining badge / status chip. Master-
+  only `Update license` button triggers a hidden file picker. In Vite dev
+  builds, an extra red `Clear (dev)` button wipes the license server-side.
+
+### 18.9 Issuer module (`ModernizeProData/issuer/`)
+
+A standalone Maven module (Spring-free, Jackson only) that produces both a
+CLI and a Swing GUI for issuing `.lic` files. Build script `build-exe.ps1`
+packages it via jpackage `--type app-image` into a self-contained Windows
+bundle (LicenseIssuer\) with bundled JRE — no separate installer, no Inno
+Setup / WiX dependency.
+
+- Default key location: `LicenseIssuer\license\` (portable — copies with
+  the install folder, survives PC handover via USB).
+- jpackage's bundled JRE uses **System Look-and-Feel** so OS-level font
+  composite handles Korean/Japanese/Latin glyphs in the GUI without manual
+  fontconfig surgery.
+- `--icon mpd.ico` (generated from `mpd_lic.png` by `make-ico.ps1`) — sets
+  the Windows Explorer / taskbar / title-bar icon for both launchers.
+- `build-exe.ps1` preserves the `license\` folder across rebuilds by
+  moving it to `%TEMP%` before `jpackage` and restoring it after. Without
+  this, rebuilds would silently destroy the keypair.
+- Issuer keypair must never be regenerated except for security-incident
+  rotation. Rotation = full backend rebuild + redeployment to every
+  customer site. PC handover should be `license\` folder copy, not regen.
+
+### 18.10 Open items (intentionally deferred)
+
+- Per-customer keypair (currently one global key for all customers — same
+  fingerprint everywhere). Per-customer would isolate blast radius but
+  needs a per-customer backend build pipeline.
+- Hardware-bound license (e.g. tied to machine UUID). Not required by the
+  current threat model.
+- License rotation tooling — currently manual (delete `license\` folder,
+  regenerate, rebuild backend). A CLI/UI flow could automate the warning
+  about cascading rebuilds.
+
+---
+
+## 19. Further Reading
 
 - `CLAUDE.md` — stack, conventions, domain glossary, local run.
 - `docs/handoff/` — time-stamped handoff notes (read the most recent first).
