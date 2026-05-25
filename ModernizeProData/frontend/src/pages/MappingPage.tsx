@@ -3,11 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import { useWorkspaceStore } from '../store/workspace';
 import { useAsisDdlStore } from '../store/asisDdl';
 import { useTobeDdlStore } from '../store/tobeDdl';
-import { useT } from '../i18n';
+import { useT, type TranslationKey } from '../i18n';
 import { useMappingEditsStore, type TableBindingEdit } from '../store/mappingEdits';
 import { useUiStore } from '../store/ui';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
-import { projectApi } from '../api/workspace';
 import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
 import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult } from '../api/mappingImport';
 import { MappingOnboarding } from './DashboardPage';
@@ -741,6 +740,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [importMappingOpen, setImportMappingOpen] = useState(false);
   const [importYamlOpen, setImportYamlOpen] = useState(false);
+  const [yamlImported, setYamlImported] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   // 슬롯별 현재 활성 파일명 — rules/code_maps 가 실제 비어있으면 null (삭제 후 반영)
   const [mappingStatus, setMappingStatus] = useState<MappingStatusDto>({
@@ -874,6 +874,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
           savedNotNull: r.notNullOverride || undefined,
           savedStrategy: strat,
           ruleOrigin: r.ruleOrigin,
+          savedNotes: r.notes ?? undefined,
         };
       }
       useMappingEditsStore.getState().replaceRowEdits(projectId, edits);
@@ -917,19 +918,10 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   );
   const [testStatus, setTestStatus] = useState<'idle' | 'running' | 'completed'>('idle');
   const [testProgress, setTestProgress] = useState(0);
-  const startTest = useCallback(async () => {
+  // Trial 은 DuckDB 위 in-memory 미리보기 — TO-BE DB 적재도, project phase 변경도 하지 않는다.
+  const startTest = useCallback(() => {
     setTestStatus('running');
     setTestProgress(0);
-    const active = useWorkspaceStore.getState().getActiveProject();
-    if (active) {
-      try {
-        await projectApi.update(active.id, { phase: 'test', runStatus: 'running' });
-        const siteId = useWorkspaceStore.getState().activeSiteId;
-        if (siteId) await useWorkspaceStore.getState().fetchProjects(siteId);
-      } catch (e) {
-        console.error('[mapping] phase update (start) failed', e);
-      }
-    }
   }, []);
   useEffect(() => {
     if (testStatus !== 'running') return;
@@ -938,15 +930,6 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         if (p >= 100) {
           window.clearInterval(id);
           setTestStatus('completed');
-          const active = useWorkspaceStore.getState().getActiveProject();
-          if (active) {
-            projectApi.update(active.id, { phase: 'test', runStatus: 'completed' })
-              .then(() => {
-                const siteId = useWorkspaceStore.getState().activeSiteId;
-                if (siteId) return useWorkspaceStore.getState().fetchProjects(siteId);
-              })
-              .catch((e) => console.error('[mapping] phase update (complete) failed', e));
-          }
           return 100;
         }
         return Math.min(100, p + 4);
@@ -1031,7 +1014,9 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         && re.savedStrategy !== 'null' && re.savedStrategy !== 'default') {
       eff = 'unmapped';
     }
-    return eff === r.rule ? r : { ...r, rule: eff };
+    const noteFromEdit = re.savedNotes && re.savedNotes.trim() ? re.savedNotes : undefined;
+    if (eff === r.rule && noteFromEdit === r.note) return r;
+    return { ...r, rule: eff, note: noteFromEdit ?? r.note };
   }), [rows, rowEdits]);
 
   const visibleRows = useMemo(() => allRows.filter((r) => r.rule !== 'skip'), [allRows]);
@@ -1063,29 +1048,16 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
     .map((s) => ASIS_TABLES.find((a) => a.name === s.table))
     .filter((a): a is AsisTable => !!a && !a.imported);
   // TO-BE Target DB 가 Site Settings 에서 "configured" 상태인지 검사 — Site Settings 의
-  // 녹색 stage 와 동일 로직 (type/host/database/username 4 개 필드 모두 채워졌는지).
-  // tobeDbLocks 는 저장 시 자동 true 가 되어 신뢰할 수 없어 사용하지 않는다.
-  const activeSite = useWorkspaceStore((s) => {
-    const ap = s.projects.find((p) => p.id === s.activeProjectId);
-    return ap ? (s.sites.find((st) => st.id === ap.siteId) ?? null) : null;
-  });
-  const tobeDb = activeSite ? activeSite.tobeDbByEnv?.[activeSite.environment] : undefined;
-  const tobeDbConnected = !!tobeDb
-    && !!tobeDb.type?.trim()
-    && !!tobeDb.host?.trim()
-    && !!tobeDb.database?.trim()
-    && !!tobeDb.username?.trim();
+  // Trial 은 in-memory 미리보기라 TO-BE DB 연결 여부와 무관 — 매핑 정합성만 검사.
   const testDisabled =
     counts.unmapped > 0
     || bindingSources.length === 0
-    || missingImports.length > 0
-    || !tobeDbConnected;
+    || missingImports.length > 0;
   const testDisabledReason =
-    !tobeDbConnected ? 'TO-BE Target DB connection 정보가 Site Settings 에 완전히 채워져 있지 않습니다. (Site 의 현재 stage 가 녹색이어야 합니다.)'
-    : bindingSources.length === 0 ? 'AS-IS source 가 연결되어 있지 않습니다.'
+    bindingSources.length === 0 ? 'AS-IS source 가 연결되어 있지 않습니다.'
     : missingImports.length > 0 ? `AS-IS extracted data 가 임포트되지 않았습니다: ${missingImports.map((a) => a.short).join(', ')}`
     : counts.unmapped > 0 ? `Unmapped 컬럼이 ${counts.unmapped}개 남아 있습니다.`
-    : 'Run test migration for this table';
+    : 'Run trial transformation for this table';
 
   return (
     <div style={styles.workspace}>
@@ -1096,19 +1068,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         <div style={{ flex: 1 }} />
         <div style={styles.statusCounts}>
           {(() => {
-            // 우선순위 — 환경 설정부터 매핑 작업 순. 한 번에 하나씩만 표시.
-            if (!tobeDbConnected) {
-              return (
-                <button
-                  type="button"
-                  onClick={() => useUiStore.getState().requestOpenSiteSettings({ focus: 'tobe-db' })}
-                  title="Site Settings → TO-BE Target DB 카드를 엽니다."
-                  style={styles.csvMissingBtn}
-                >
-                  <StatusBadge tone="warn">TO-BE DB not configured →</StatusBadge>
-                </button>
-              );
-            }
+            // 우선순위 — 매핑 작업 순. 한 번에 하나씩만 표시.
             if (bindingSources.length === 0) {
               return (
                 <button
@@ -1190,13 +1150,21 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
         </div>
         <div style={{ flex: 1 }} />
         <button
-          style={styles.btnGhost}
+          style={yamlImported
+            ? { ...styles.btnSecondary, color: 'var(--text-3)' }
+            : styles.btnSecondary}
           onClick={() => setImportYamlOpen(true)}
-        ><Ic.download /> Import YAML</button>
+        >{yamlImported
+            ? <><Ic.check /> YAML Imported</>
+            : <><i className="fa-solid fa-download" style={{ fontSize: 11 }} /> Import YAML</>}</button>
         <button
-          style={styles.btnSecondary}
+          style={mappingImported
+            ? { ...styles.btnSecondary, color: 'var(--text-3)' }
+            : styles.btnSecondary}
           onClick={() => setImportMappingOpen(true)}
-        >{mappingImported ? 'Auto-mapping' : 'Auto-map unmapped'}</button>
+        >{mappingImported
+            ? <><Ic.check /> Mapping Imported</>
+            : <><i className="fa-solid fa-download" style={{ fontSize: 11 }} /> Import Mapping</>}</button>
       </div>
       {importMappingOpen && (
         <MappingDefinitionImportModal
@@ -1213,6 +1181,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
           acceptLabel=".yml · .yaml"
           hint="YAML 정의서로 매핑을 일괄 임포트합니다. 매칭된 unmapped 행만 채워지고, 이미 매핑된 행은 덮어쓰지 않습니다."
           onClose={() => setImportYamlOpen(false)}
+          onImported={() => setYamlImported(true)}
         />
       )}
 
@@ -1737,7 +1706,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
 }
 
 // Per-row saved edits (lifted to TobeMappingDetail so they survive row switches)
-type RowEdit = { savedSrc?: string[]; savedRule?: string; savedDefault?: string; savedNotNull?: boolean; savedStrategy?: 'expression' | 'null' | 'default'; ruleOrigin?: 'imported' | 'manual' };
+type RowEdit = { savedSrc?: string[]; savedRule?: string; savedDefault?: string; savedNotNull?: boolean; savedStrategy?: 'expression' | 'null' | 'default'; ruleOrigin?: 'imported' | 'manual'; savedNotes?: string };
 
 // Module-level helper so it can be called from useEffect closures
 function resolveSrcType(s: string, sources: TobeTable['sources']): string {
@@ -1804,7 +1773,19 @@ const _cmt = (s: string) => `<span style="color:#7a8aa6">${_e(s)}</span>`;
 const _num = (s: string) => `<span style="color:#79c0ff">${_e(s)}</span>`;
 const _def = (s: string) => `<span style="color:#cad7e8">${_e(s)}</span>`;
 
-const SQL_KW = new Set(['SELECT','FROM','WHERE','AND','OR','NOT','IN','IS','NULL','AS','CAST','JOIN','LEFT','RIGHT','INNER','OUTER','FULL','ON','TO_DATE','TO_TIMESTAMP','ICONV','UNPACK_COMP3','DROP','DEFAULT','UNION','ALL','DISTINCT','CASE','WHEN','THEN','ELSE','END','TRUE','FALSE','WITH','INSERT','UPDATE','DELETE','LIKE','BETWEEN','EXISTS','COALESCE','NULLIF','TRIM','UPPER','LOWER','SUBSTR','SUBSTRING','LENGTH','CONCAT','EXTRACT','NOW','CURRENT_DATE','CURRENT_TIMESTAMP','NUMERIC','INTEGER','VARCHAR','CHAR','DATE','TIMESTAMP','BOOLEAN','UUID','TEXT','JSONB','INT','BIGINT','FLOAT','DOUBLE','USING','INTO','RETURNS','ORDER','GROUP','BY','HAVING','LIMIT','OFFSET']);
+const SQL_KW = new Set(['SELECT','FROM','WHERE','AND','OR','NOT','IN','IS','NULL','AS','CAST','TRY_CAST','JOIN','LEFT','RIGHT','INNER','OUTER','FULL','ON','TO_DATE','TO_TIMESTAMP','STRPTIME','ICONV','UNPACK_COMP3','DROP','DEFAULT','UNION','ALL','DISTINCT','CASE','WHEN','THEN','ELSE','END','TRUE','FALSE','WITH','INSERT','UPDATE','DELETE','LIKE','BETWEEN','EXISTS','COALESCE','NULLIF','TRIM','UPPER','LOWER','SUBSTR','SUBSTRING','LENGTH','CONCAT','EXTRACT','NOW','CURRENT_DATE','CURRENT_TIMESTAMP','NUMERIC','INTEGER','VARCHAR','CHAR','DATE','TIMESTAMP','BOOLEAN','UUID','TEXT','JSONB','INT','BIGINT','FLOAT','DOUBLE','USING','INTO','RETURNS','ORDER','GROUP','BY','HAVING','LIMIT','OFFSET']);
+
+/**
+ * SQL 키워드/함수만 대문자화. 문자열 리터럴('...') 과 식별자(컬럼/별칭) 는 원본 그대로.
+ * Transform 입력에서 사용자가 친 컬럼명/리터럴이 자동으로 대문자화되면 DB 데이터까지 망가지기 때문.
+ */
+function upperSqlKeywords(s: string): string {
+  return s.replace(/'(?:[^']|'')*'|[A-Za-z_][A-Za-z_0-9]*/g, (m) => {
+    if (m.startsWith("'")) return m;
+    const u = m.toUpperCase();
+    return SQL_KW.has(u) ? u : m;
+  });
+}
 
 function highlightSql(raw: string): string {
   const out: string[] = [];
@@ -2012,6 +1993,8 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   const [savedStrategy, setSavedStrategy] = useState<'expression' | 'null' | 'default' | null>(null);
   const [userFnOpen, setUserFnOpen] = useState(false);
   const [javaCode, setJavaCode] = useState('');
+  const [notesOpen, setNotesOpen] = useState(false);
+  useEffect(() => { setNotesOpen(false); }, [active?.tgt]);
   useEffect(() => {
     // 같은 컬럼이면 effective rule 갱신으로 active 객체 reference 가 새로 만들어져도
     // 편집 모드를 종료하지 않는다 — active.tgt 만 dep 로 사용.
@@ -2040,7 +2023,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     // AS-IS type 을 TO-BE dialect 로 정규화한 결과가 TO-BE 컬럼 type 과 같으면 단순 컬럼.
     const translatedSrcT = translateTypeToTobe(srcT, TOBE_DIALECT);
     const same = translatedSrcT.toUpperCase() === active.tgtType.toUpperCase();
-    return (same ? srcCol : `CAST(${srcCol} AS ${active.tgtType})`).toUpperCase();
+    return same ? srcCol : `CAST(${srcCol} AS ${active.tgtType})`;
   };
 
   const handleEdit = () => {
@@ -2052,7 +2035,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
       || (active.src !== '—' ? (active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src) : undefined);
     const initialAutoCast = computeAutoCast(firstSrcForCast);
     prevAutoCastRef.current = initialAutoCast;
-    setEditValue((savedRule ?? initialAutoCast).toUpperCase());
+    setEditValue(savedRule ?? initialAutoCast);
     // Filter out stale alias references no longer present in current binding
     const rawSrc = savedSrc ?? initSrc;
     const cleanedSrc = rawSrc.filter((s) => {
@@ -2216,10 +2199,56 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
             ? <span style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-2)' }}>{active.ddlDefault}</span>
             : <span style={{ color: 'var(--text-4)' }}>—</span>}
         </MetaRow>
+        <MetaRow k="Notes">
+          {active.note ? (
+            <button
+              type="button"
+              onClick={() => setNotesOpen((v) => !v)}
+              title={notesOpen ? 'Collapse' : 'Expand'}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                padding: 0,
+                cursor: 'pointer',
+                color: 'var(--navy)',
+                lineHeight: 1,
+                fontFamily: 'inherit',
+              }}
+            >
+              <i
+                className="fa-regular"
+                style={{
+                  fontSize: 13,
+                  color: 'var(--navy)',
+                  transform: notesOpen ? 'rotate(180deg)' : 'none',
+                  transition: 'transform 0.15s',
+                  display: 'inline-block',
+                }}
+              >&#xf150;</i>
+            </button>
+          ) : (
+            <span style={{ color: 'var(--text-4)' }}>—</span>
+          )}
+        </MetaRow>
+        {active.note && notesOpen && (
+          <div style={{
+            margin: '4px 0 8px',
+            padding: '6px 8px',
+            background: 'var(--panel-2)',
+            border: '1px solid var(--border-strong)',
+            borderRadius: 4,
+            fontSize: 11.5,
+            color: 'var(--text-2)',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+          }}>
+            {active.note}
+          </div>
+        )}
       </div>
 
       <div style={styles.section}>
-        <div style={styles.sectionLabel}>Transform</div>
+        <div style={styles.sectionLabel}>Rule</div>
         {editingRule ? (
           <>
             {(() => {
@@ -2269,7 +2298,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
                 <>
                   <HighlightEditor
                     value={editValue}
-                    onChange={(v) => { setEditValue(v.toUpperCase()); if (ruleError) setRuleError(null); }}
+                    onChange={(v) => { setEditValue(upperSqlKeywords(v)); if (ruleError) setRuleError(null); }}
                     language="sql"
                     placeholder={transformPlain(active)}
                     hasError={!!ruleError}
@@ -2398,7 +2427,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
 }
 
 function ImportFileModal({
-  title, accept, acceptLabel, templateHref, templateFilename, hint, onClose,
+  title, accept, acceptLabel, templateHref, templateFilename, hint, onClose, onImported,
 }: {
   title: string;
   accept: string;
@@ -2407,6 +2436,7 @@ function ImportFileModal({
   templateFilename?: string;
   hint: string;
   onClose: () => void;
+  onImported?: () => void;
 }) {
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -2482,6 +2512,7 @@ function ImportFileModal({
             onClick={() => {
               // TODO: 백엔드 import API 가 생기면 여기서 호출.
               console.log(`[${title}] would import`, file?.name);
+              onImported?.();
               onClose();
             }}
           >Import</button>
@@ -2993,12 +3024,6 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
           ⏳ {t('mapping.report.loading')}
         </div>
       )}
-      {report && report.error && (
-        <div style={{ padding: '8px 14px', background: '#fde2e2', color: '#a02020', borderBottom: '1px solid #e8e8e8', fontSize: 11.5, fontFamily: 'var(--mono)' }}>
-          ⚠ {report.error}
-          {report.sql && <div style={{ marginTop: 4, fontSize: 10.5, opacity: 0.8 }}>SQL: {report.sql}</div>}
-        </div>
-      )}
 
       {/* 데이터 그리드 */}
       <div style={styles.dbvGridArea}>
@@ -3023,7 +3048,26 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
             </tr>
           </thead>
           <tbody>
-            {Array.from({ length: dataRowCount }, (_, i) => {
+            {report?.error ? (
+              <tr>
+                <td
+                  colSpan={rows.length + 1}
+                  style={{
+                    padding: '14px 16px',
+                    background: '#fde2e2',
+                    color: '#a02020',
+                    fontFamily: 'var(--mono)',
+                    fontSize: 11.5,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    verticalAlign: 'top',
+                    borderBottom: '1px solid #f5b5b5',
+                  }}
+                >
+                  ⚠ {buildReportErrorMessage(report, t)}
+                </td>
+              </tr>
+            ) : Array.from({ length: dataRowCount }, (_, i) => {
               const zebra = i % 2 === 1;
               return (
                 <tr key={i}>
@@ -3104,6 +3148,32 @@ function fmtDate(d: Date): string {
 }
 function fmtTime(d: Date): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+}
+
+/**
+ * 백엔드의 구조화된 ReportResult error 필드를 현재 언어 메시지로 합성.
+ * 키 정의: i18n/{ko,ja,en}.ts 의 `mapping.report.error.*`.
+ */
+function buildReportErrorMessage(
+  report: MappingReportResult,
+  t: ReturnType<typeof useT>,
+): string {
+  const typeKey = report.errorType ?? 'UNKNOWN';
+  const typeLabel = t(`mapping.report.error.type.${typeKey}` as TranslationKey);
+  const typeLine = `${t('mapping.report.error.typeLabel')}: ${typeLabel}`;
+  if (report.errorKind === 'EXPRESSION_FAILED' && report.errorColumn) {
+    const head = t('mapping.report.error.expressionFailed', { column: report.errorColumn });
+    const expr = `${t('mapping.report.error.expressionLabel')}: ${report.errorExpression ?? ''}`;
+    return `${head}\n${expr}\n${typeLine}`;
+  }
+  if (report.errorKind === 'FROM_FAILED') {
+    return `${t('mapping.report.error.fromFailed')}\n${typeLine}`;
+  }
+  if (report.errorKind === 'NO_RULES') {
+    return t('mapping.report.error.noRules');
+  }
+  // UNKNOWN 또는 누락 — 일반 메시지 + 분류 라벨
+  return `${t('mapping.report.error.unknown')}\n${typeLine}`;
 }
 
 function MetaRow({ k, children }: { k: string; children: React.ReactNode }) {
@@ -3445,13 +3515,14 @@ function GuidePanel() {
 
 type TobeRuleFilter = 'all' | 'unmapped' | 'auto' | 'rule' | 'null' | 'default';
 
-// Unmapped 만 빨강; 나머지는 같은 초록 계열, Default 를 기준으로 점점 옅어진다.
+// Unmapped 만 빨강; 나머지는 #059669 → #8aedc3 사이를 RGB 직선 보간으로 균등 4 분할.
+// 순서 (진함 → 옅음): Pass · Rule · Default · Null
 const TOBE_RULE_COLORS: Record<Exclude<TobeRuleFilter, 'all'>, string> = {
   unmapped: 'var(--red)',
-  auto:     '#059669',  // green 600 (darkest)
-  rule:     '#34d399',  // green 400
-  null:     '#6ee7b7',  // green 200
-  default:  '#a7f3d0',  // green 100 (lightest)
+  auto:     '#059669',  // step 0/3 — darkest
+  rule:     '#31B387',  // step 1/3
+  default:  '#5ED0A5',  // step 2/3
+  null:     '#8AEDC3',  // step 3/3 — lightest
 };
 
 function TobeCoverageBar({ total, ruleCounts, filter, onFilter }: {
@@ -3488,18 +3559,18 @@ function TobeCoverageBar({ total, ruleCounts, filter, onFilter }: {
         <div style={styles.coverageFilters}>
           {btn('all',      'All',         total)}
           {btn('unmapped', 'Unmapped',    ruleCounts.unmapped, TOBE_RULE_COLORS.unmapped)}
-          {btn('auto',     'Passthrough', ruleCounts.auto,     TOBE_RULE_COLORS.auto)}
-          {btn('rule',     'Transform',   ruleCounts.rule,     TOBE_RULE_COLORS.rule)}
-          {btn('null',     'Null',        ruleCounts.null,     TOBE_RULE_COLORS.null)}
+          {btn('auto',     'Pass',        ruleCounts.auto,     TOBE_RULE_COLORS.auto)}
+          {btn('rule',     'Rule',        ruleCounts.rule,     TOBE_RULE_COLORS.rule)}
           {btn('default',  'Default',     ruleCounts.default,  TOBE_RULE_COLORS.default)}
+          {btn('null',     'Null',        ruleCounts.null,     TOBE_RULE_COLORS.null)}
         </div>
       </div>
       <div style={styles.coverageTrack}>
         <div style={{ width: `${pct(ruleCounts.unmapped)}%`, background: TOBE_RULE_COLORS.unmapped }} />
         <div style={{ width: `${pct(ruleCounts.auto)}%`,     background: TOBE_RULE_COLORS.auto }} />
         <div style={{ width: `${pct(ruleCounts.rule)}%`,     background: TOBE_RULE_COLORS.rule }} />
-        <div style={{ width: `${pct(ruleCounts.null)}%`,     background: TOBE_RULE_COLORS.null }} />
         <div style={{ width: `${pct(ruleCounts.default)}%`,  background: TOBE_RULE_COLORS.default }} />
+        <div style={{ width: `${pct(ruleCounts.null)}%`,     background: TOBE_RULE_COLORS.null }} />
       </div>
     </div>
   );
@@ -3548,17 +3619,35 @@ function StatusBadge({ tone, children }: { tone: 'ok' | 'warn' | 'err' | 'info' 
 
 function RuleTag({ rule, status }: { rule: MappingRow['rule']; status?: MappingRow['status'] }) {
   const labels: Record<MappingRow['rule'], string> = {
-    auto: 'pass', rule: 'rule', null: 'null', default: 'def',
-    unmapped: 'unmapped', added: 'new', skip: 'skip',
+    auto: 'Pass', rule: 'Rule', null: 'Null', default: 'Default',
+    unmapped: 'Unmapped', added: 'New', skip: 'Skip',
   };
-  let tone: Parameters<typeof StatusBadge>[0]['tone'];
-  if (rule === 'skip') tone = 'skip';
-  else if (rule === 'unmapped') tone = 'err';
-  else if (status === 'err') tone = 'err';
-  else if (status === 'warn') tone = 'warn';
-  else if (rule === 'auto') tone = 'blue';
-  else tone = 'ok';
-  return <StatusBadge tone={tone}>{labels[rule]}</StatusBadge>;
+  // status err/warn 은 색을 덮어쓴다 (룰과 무관하게 위험 신호 우선).
+  if (status === 'err') return <StatusBadge tone="err">{labels[rule]}</StatusBadge>;
+  if (status === 'warn') return <StatusBadge tone="warn">{labels[rule]}</StatusBadge>;
+  if (rule === 'skip') return <StatusBadge tone="skip">{labels[rule]}</StatusBadge>;
+  if (rule === 'added') return <StatusBadge tone="info">{labels[rule]}</StatusBadge>;
+  // Pass / Rule / Null / Default / Unmapped — 필터바 dot 색을 좌측 dot 으로 가져오고
+  // 칩 자체는 같은 hue 의 옅은 배경 + 진한 텍스트로 통일. unmapped 만 red 팔레트.
+  const dot = TOBE_RULE_COLORS[rule];
+  const isUnmapped = rule === 'unmapped';
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 5,
+      padding: '1px 7px 1px 6px', borderRadius: 10,
+      fontFamily: 'var(--mono)', fontSize: 10, fontWeight: 700,
+      color: isUnmapped ? '#b91c1c' : '#065f46',
+      background: isUnmapped ? '#fef2f2' : '#ecfdf5',
+      border: `1px solid ${dot}`,
+      letterSpacing: 0.2, whiteSpace: 'nowrap',
+    }}>
+      <span style={{
+        display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+        background: dot, flexShrink: 0,
+      }} />
+      {labels[rule]}
+    </span>
+  );
 }
 
 function TypeBadge({ children }: { children: React.ReactNode }) {

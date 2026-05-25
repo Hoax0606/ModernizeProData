@@ -23,6 +23,9 @@ export interface MappingStatus {
   codeMapCount: number;
 }
 
+export type MappingReportErrorKind = 'EXPRESSION_FAILED' | 'FROM_FAILED' | 'NO_RULES' | 'UNKNOWN';
+export type MappingReportErrorType = 'SYNTAX' | 'BINDER' | 'CATALOG' | 'CONVERSION' | 'IO' | 'UNKNOWN';
+
 export interface MappingReportResult {
   tobeSchema: string;
   tobeTable: string;
@@ -32,6 +35,10 @@ export interface MappingReportResult {
   truncated: boolean;
   sql: string | null;
   error: string | null;
+  errorKind: MappingReportErrorKind | null;
+  errorColumn: string | null;
+  errorExpression: string | null;
+  errorType: MappingReportErrorType | null;
 }
 
 export interface MappingTableBindingSourceDto {
