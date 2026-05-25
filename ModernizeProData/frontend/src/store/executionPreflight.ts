@@ -35,6 +35,10 @@ interface PreflightEntry {
   selectedSnapshotId: string | null;
   preflightPhase: PreflightPhase;
   preflightResults: PreflightCheck[];
+  /* selection / snapshot 이 변경됐을 때 옛 done 결과를 재검증 필요로 표시. */
+  isStale: boolean;
+  /* Project 별 누적 run count. Discard → Start over 마다 +1. Retry 는 같은 run 이라 증가 X. */
+  runCounter: number;
   activeRun: ActiveRunState | null;
 }
 
@@ -43,13 +47,15 @@ const EMPTY_ENTRY: PreflightEntry = Object.freeze({
   selectedSnapshotId: null,
   preflightPhase: 'idle',
   preflightResults: [],
+  isStale: false,
+  runCounter: 0,
   activeRun: null,
 }) as PreflightEntry;
 
-/** activeRun 생성 시 failure 관련 필드는 모두 null. */
-function newActiveRun(selectedTables: string[]): ActiveRunState {
+/** activeRun 생성 시 failure 관련 필드는 모두 null. runId 는 `{projectId} - {runIndex}` 형식. */
+function newActiveRun(projectId: string, runIndex: number, selectedTables: string[]): ActiveRunState {
   return {
-    runId: `reh-${Date.now()}`,
+    runId: `${projectId} - ${runIndex}`,
     selectedTables: [...selectedTables],
     startedAt: Date.now(),
     pausedAt: null,
@@ -101,39 +107,53 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
       },
 
       setSelected: (projectId, tables) => {
-        set((s) => ({
-          byProject: {
-            ...s.byProject,
-            [projectId]: {
-              ...(s.byProject[projectId] ?? EMPTY_ENTRY),
-              selectedTables: tables,
+        set((s) => {
+          const prev = s.byProject[projectId] ?? EMPTY_ENTRY;
+          const wasDone = prev.preflightPhase === 'done';
+          return {
+            byProject: {
+              ...s.byProject,
+              [projectId]: {
+                ...prev,
+                selectedTables: tables,
+                isStale: wasDone ? true : prev.isStale,
+              },
             },
-          },
-        }));
+          };
+        });
       },
 
       setSelectedSnapshot: (projectId, snapshotId) => {
-        set((s) => ({
-          byProject: {
-            ...s.byProject,
-            [projectId]: {
-              ...(s.byProject[projectId] ?? EMPTY_ENTRY),
-              selectedSnapshotId: snapshotId,
+        set((s) => {
+          const prev = s.byProject[projectId] ?? EMPTY_ENTRY;
+          const wasDone = prev.preflightPhase === 'done';
+          return {
+            byProject: {
+              ...s.byProject,
+              [projectId]: {
+                ...prev,
+                selectedSnapshotId: snapshotId,
+                isStale: wasDone ? true : prev.isStale,
+              },
             },
-          },
-        }));
+          };
+        });
       },
 
       setPhase: (projectId, phase) => {
-        set((s) => ({
-          byProject: {
-            ...s.byProject,
-            [projectId]: {
-              ...(s.byProject[projectId] ?? EMPTY_ENTRY),
-              preflightPhase: phase,
+        set((s) => {
+          const prev = s.byProject[projectId] ?? EMPTY_ENTRY;
+          return {
+            byProject: {
+              ...s.byProject,
+              [projectId]: {
+                ...prev,
+                preflightPhase: phase,
+                isStale: phase === 'idle' ? false : prev.isStale,
+              },
             },
-          },
-        }));
+          };
+        });
       },
 
       setResults: (projectId, results) => {
@@ -143,7 +163,7 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
           return {
             byProject: {
               ...s.byProject,
-              [projectId]: { ...prev, preflightResults: next },
+              [projectId]: { ...prev, preflightResults: next, isStale: false },
             },
           };
         });
@@ -157,15 +177,20 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
       },
 
       startActiveRun: (projectId, selectedTables) => {
-        set((s) => ({
-          byProject: {
-            ...s.byProject,
-            [projectId]: {
-              ...(s.byProject[projectId] ?? EMPTY_ENTRY),
-              activeRun: newActiveRun(selectedTables),
+        set((s) => {
+          const prev = s.byProject[projectId] ?? EMPTY_ENTRY;
+          const nextCount = (prev.runCounter ?? 0) + 1;
+          return {
+            byProject: {
+              ...s.byProject,
+              [projectId]: {
+                ...prev,
+                runCounter: nextCount,
+                activeRun: newActiveRun(projectId, nextCount, selectedTables),
+              },
             },
-          },
-        }));
+          };
+        });
       },
 
       pauseActiveRun: (projectId) => {
@@ -313,7 +338,27 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
       name: 'mpd:exec-preflight',
       // v0 → v1 (2026-05-24): approved-snapshot 체크 항목 제거. 옛 캐시 (8개 체크 결과 포함)
       // 와 신 schema (7개) 가 호환 안 돼서 그냥 invalidate — 사용자가 Pre-flight 다시 한 번 돌리면 회복.
-      version: 1,
+      // v1 → v2 (2026-05-25): runId 형식 변경 (reh-{timestamp} → {projectId} - {runIndex}).
+      // 옛 형식 activeRun 만 invalidate — selection / snapshot / pre-flight 결과는 보존.
+      version: 2,
+      migrate: (persistedState: unknown, version: number) => {
+        if (version < 2 && persistedState && typeof persistedState === 'object') {
+          const state = persistedState as { byProject?: Record<string, PreflightEntry> };
+          if (state.byProject) {
+            const fixed: Record<string, PreflightEntry> = {};
+            for (const id in state.byProject) {
+              const entry = state.byProject[id];
+              if (entry.activeRun?.runId?.startsWith('reh-')) {
+                fixed[id] = { ...entry, activeRun: null, runCounter: 0 };
+              } else {
+                fixed[id] = entry;
+              }
+            }
+            return { ...state, byProject: fixed };
+          }
+        }
+        return persistedState;
+      },
     },
   ),
 );

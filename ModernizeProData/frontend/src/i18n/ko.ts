@@ -341,7 +341,7 @@ export const ko = {
   /* Run header */
   'execution.run.noActive':           'No active run',
   'execution.run.active':             'Active run',
-  'execution.run.noHistory':          '실행 이력이 없습니다 — 아직 분석/설계 단계입니다.',
+  'execution.run.noHistory':          '실행 이력이 없습니다 — 아직 매핑 단계입니다.',
   'execution.run.lastRun':            'last run: {id} · {when} · {result}',
   'execution.run.startBtn':           'Start run',
   'execution.run.startOver':          'Start over',
@@ -380,6 +380,9 @@ export const ko = {
   'execution.preflight.hint.idle':                         '테이블 선택 후 검사를 시작하세요',
   'execution.preflight.hint.allPass':                      'All checks pass — ready to run',
   'execution.preflight.hint.blocked':                      '실행이 차단되었습니다 — 위 항목을 먼저 해결하세요.',
+  'execution.preflight.hint.stale':                        'Pre-flight results are stale',
+  'execution.preflight.stale.title':                       'Pre-flight results are stale',
+  'execution.preflight.stale.detail':                      '선택 항목 또는 스냅샷이 변경되었습니다. Pre-flight 를 다시 실행해주세요.',
   'execution.preflight.count.pass':                        '{n} pass',
   'execution.preflight.count.fail':                        '{n} fail',
   'execution.preflight.count.skip':                        '{n} n/a',

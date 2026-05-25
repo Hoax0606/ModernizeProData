@@ -337,7 +337,7 @@ export const en: Record<TranslationKey, string> = {
   /* Run header */
   'execution.run.noActive':           'No active run',
   'execution.run.active':             'Active run',
-  'execution.run.noHistory':          'No run history yet — still in analysis / design phase.',
+  'execution.run.noHistory':          'No run history yet — still in mapping phase.',
   'execution.run.lastRun':            'last run: {id} · {when} · {result}',
   'execution.run.startBtn':           'Start run',
   'execution.run.startOver':          'Start over',
@@ -376,6 +376,9 @@ export const en: Record<TranslationKey, string> = {
   'execution.preflight.hint.idle':                         'Select tables and start the check',
   'execution.preflight.hint.allPass':                      'All checks pass — ready to run',
   'execution.preflight.hint.blocked':                      'Run is blocked — resolve the failing items above first.',
+  'execution.preflight.hint.stale':                        'Pre-flight results are stale',
+  'execution.preflight.stale.title':                       'Pre-flight results are stale',
+  'execution.preflight.stale.detail':                      'Selection or snapshot has changed. Please re-run Pre-flight.',
   'execution.preflight.count.pass':                        '{n} pass',
   'execution.preflight.count.fail':                        '{n} fail',
   'execution.preflight.count.skip':                        '{n} n/a',

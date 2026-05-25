@@ -13,7 +13,7 @@ export type ProjectPhase =
   | 'hypercare'
   | 'done';
 
-export type RunStatus = 'idle' | 'running' | 'completed' | 'failed' | 'aborted';
+export type RunStatus = 'idle' | 'running' | 'paused' | 'completed' | 'failed' | 'aborted';
 
 export type SiteEnv = 'mainframe' | 'midrange' | 'cloud' | 'on-prem' | 'other';
 export type SourceEncoding = 'shift_jis' | 'euc-jp' | 'utf-8' | 'ebcdic';

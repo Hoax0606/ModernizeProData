@@ -34,9 +34,9 @@ interface Stage {
   sub: string;
   pct: number;
   tone: StageTone;
-  color: string;
   rate: string;
   eta: string;
+  shortName?: string;
 }
 
 interface Run {
@@ -105,6 +105,26 @@ export function ExecutionPage() {
   }, [project?.id, tobeSchema, fetchTobeDdl]);
   const tobeTables = tobeSchema?.tables.map((tc) => tc.table.physicalName) ?? [];
 
+  /* Demo 모드: stale flag 시연용. store 의 isStale 가드는 wasDone (preflightPhase === 'done') 인데
+     demo 의 store phase 는 'idle' 이라 안 걸린다. demoStale 로컬 state 로 시각 흐름만 흉내낸다.
+     - 진입/이탈 시 reset
+     - 사용자가 selection 변경하면 true
+     - Pre-flight Start 누르면 false 로 해제 (시연 reset 진입로) */
+  const [demoStale, setDemoStale] = useState(false);
+  useEffect(() => {
+    setDemoStale(false);
+  }, [isDemo, demoMode, project?.id]);
+
+  /* Demo 진입 시 fixture 의 모든 TO-BE 테이블 자동 선택 — 사용자가 바로 stale 시연 가능. */
+  useEffect(() => {
+    if (!isDemo || !project) return;
+    const store = useExecutionPreflightStore.getState();
+    const entry = store.byProject[project.id];
+    if ((entry?.selectedTables.length ?? 0) === 0 && tobeTables.length > 0) {
+      store.setSelected(project.id, tobeTables);
+    }
+  }, [isDemo, project?.id, tobeTables.length]);
+
   /* approved-snapshot 체크는 phase 가 아니라 snapshots store 의 실제 데이터로 판정 — phase 는
      단방향 전환이라 snapshot 삭제 후 sign-off 에 머무르는 케이스에서 거짓 pass 가 됐었음. */
   const snapshots = useSnapshotsStore((s) => s.snapshots);
@@ -114,14 +134,17 @@ export function ExecutionPage() {
   const entrySnapshot = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.selectedSnapshotId : undefined);
   const entryPhase    = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.preflightPhase : undefined);
   const entryResults  = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.preflightResults : undefined);
+  const entryStale    = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.isStale : undefined);
   const selectedTables = useMemo(() => new Set(entrySelected ?? []), [entrySelected]);
   const selectedSnapshotId: string | null = entrySnapshot ?? null;
   const preflightPhase: PreflightPhase = entryPhase ?? 'idle';
   const preflightResults: PreflightCheck[] = entryResults ?? [];
+  const isStale: boolean = entryStale ?? false;
 
   const setSelectedTables = (next: Set<string>) => {
     if (!project) return;
     useExecutionPreflightStore.getState().setSelected(project.id, [...next]);
+    if (isDemo) setDemoStale(true);
   };
 
   /* 현재 project 의 snapshot 만 — SnapshotDisplay 가 selectedSnapshotId 로 찾을 때 사용. */
@@ -143,6 +166,11 @@ export function ExecutionPage() {
   }
 
   const startPreflight = () => {
+    /* Demo 시연: Pre-flight ▶ 누르면 stale 만 해제. 실제 체크 흐름은 안 돈다 (fixture 가 항상 표시). */
+    if (isDemo) {
+      setDemoStale(false);
+      return;
+    }
     if (selectedTables.size === 0 || preflightPhase === 'checking') return;
     const checks = buildPreflightChecks(project, Array.from(selectedTables), t);
     const store = useExecutionPreflightStore.getState();
@@ -166,7 +194,9 @@ export function ExecutionPage() {
       ? buildDemoPreflightChecks(t)
       : preflightResults;
   const displayedPhase: PreflightPhase = isDemo ? 'done' : preflightPhase;
+  const displayedStale = isDemo ? demoStale : isStale;
   const preflightPassed = displayedPhase === 'done'
+    && !displayedStale
     && displayedResults.length > 0
     && displayedResults.every((c) => c.status !== 'fail');
 
@@ -201,8 +231,10 @@ export function ExecutionPage() {
     if (!storeActiveRun) return;
     if (storeActiveRun.pausedAt === null) {
       useExecutionPreflightStore.getState().pauseActiveRun(project.id);
+      useWorkspaceStore.getState().setProjectRunStatus(project.id, 'paused').catch(() => { /* mock */ });
     } else {
       useExecutionPreflightStore.getState().resumeActiveRun(project.id);
+      useWorkspaceStore.getState().setProjectRunStatus(project.id, 'running').catch(() => { /* mock */ });
     }
   };
 
@@ -275,7 +307,8 @@ export function ExecutionPage() {
           t={t}
           checks={displayedResults}
           phase={displayedPhase}
-          canStart={!isDemo && selectedTables.size > 0}
+          isStale={displayedStale}
+          canStart={selectedTables.size > 0}
           onStart={startPreflight}
           onReset={() => useExecutionPreflightStore.getState().resetForProject(project.id)}
           isDemo={isDemo}
@@ -383,16 +416,11 @@ function RunHeader({
         eta: formatDuration(remainingMs),
       });
 
-  const phaseChipTone: BadgeTone =
-    isFailed ? 'err'
-    : isAborted ? 'warn'
-    : isCompleted ? 'queued'
-    : 'ok';
   const statusChipTone: BadgeTone =
     isFailed ? 'err'
     : isAborted ? 'warn'
-    : isCompleted ? 'ok'
-    : running ? 'running'
+    : isCompleted ? 'queued'
+    : running ? 'ok'
     : 'warn';
   const statusChipText =
     isFailed ? t('execution.run.status.failed')
@@ -414,7 +442,6 @@ function RunHeader({
           <div style={styles.runHeaderLabel}>{t('execution.run.active')}</div>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
             <span style={{ fontFamily: 'var(--mono)', fontSize: 16, fontWeight: 600 }}>{activeRun.runId}</span>
-            <StatusBadge tone={phaseChipTone}>{project.phase}</StatusBadge>
             <StatusBadge tone={statusChipTone}>{statusChipText}</StatusBadge>
             <span style={{ fontSize: 12, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>{elapsedLabel}</span>
           </div>
@@ -434,7 +461,7 @@ function RunHeader({
           <button
             type="button"
             onClick={onDiscard}
-            style={styles.btnGhost}
+            style={{ ...styles.btnDanger, padding: '6px 14px', minWidth: 80 }}
             title={t('execution.run.discardHint')}
           >
             {t('execution.run.discard')}
@@ -609,10 +636,11 @@ function SnapshotDisplay({ t, pinned }: { t: T; pinned: MappingSnapshot | null }
 
 /* ───────────────────────── Pre-flight panel ────────────────────── */
 
-function PreflightPanel({ t, checks, phase, canStart, onStart, onReset, isDemo, demoMode, onExitDemo }: {
+function PreflightPanel({ t, checks, phase, isStale, canStart, onStart, onReset, isDemo, demoMode, onExitDemo }: {
   t: T;
   checks: PreflightCheck[];
   phase: PreflightPhase;
+  isStale: boolean;
   canStart: boolean;
   onStart: () => void;
   onReset: () => void;
@@ -668,10 +696,12 @@ function PreflightPanel({ t, checks, phase, canStart, onStart, onReset, isDemo, 
     }
   };
 
-  const bg = hasBlocking ? 'var(--red-50)' : 'var(--panel)';
-  const headColor = hasBlocking ? 'var(--red)' : 'var(--text-2)';
+  const showStale = isStale && isDone;
+  const bg = hasBlocking ? 'var(--red-50)' : showStale ? 'var(--amber-50)' : 'var(--panel)';
+  const headColor = hasBlocking ? 'var(--red)' : showStale ? 'var(--amber)' : 'var(--text-2)';
   const hint = isChecking
     ? t('execution.preflight.checking')
+    : showStale ? t('execution.preflight.hint.stale')
     : hasBlocking ? t('execution.preflight.hint.blocked')
     : isDone ? t('execution.preflight.hint.allPass')
     : t('execution.preflight.hint.idle');
@@ -727,6 +757,17 @@ function PreflightPanel({ t, checks, phase, canStart, onStart, onReset, isDemo, 
 
       {open && (
         <div style={{ padding: '4px 18px 14px' }}>
+          {showStale && (
+            <div style={styles.staleBanner}>
+              <span style={{ fontSize: 14 }}>⚠</span>
+              <div>
+                <div style={{ fontWeight: 600 }}>{t('execution.preflight.stale.title')}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2, fontFamily: 'var(--mono)' }}>
+                  {t('execution.preflight.stale.detail')}
+                </div>
+              </div>
+            </div>
+          )}
           <div style={{ border: '1px solid var(--border)', borderRadius: 4, background: 'var(--panel)' }}>
             {checks.length === 0 && !isChecking && (
               <div style={{ padding: 14, textAlign: 'center', fontSize: 12, color: 'var(--text-3)' }}>
@@ -787,10 +828,10 @@ function OverallProgress({ t, stages }: { t: T; stages: Stage[] }) {
               <div style={{
                 width: `${st.pct}%`, height: '100%',
                 background:
-                  st.tone === 'ok' ? 'var(--green)'
+                  st.tone === 'ok' ? 'var(--text-3)'
+                  : st.tone === 'running' ? 'var(--green)'
                   : st.tone === 'err' ? 'var(--red)'
-                  : st.tone === 'idle' ? 'var(--text-4)'
-                  : st.color,
+                  : 'var(--amber)',
                 transition: 'width .4s ease',
               }} />
             </div>
@@ -799,7 +840,7 @@ function OverallProgress({ t, stages }: { t: T; stages: Stage[] }) {
         <div style={{ display: 'flex', gap: 2, marginTop: 4 }}>
           {stages.map((st) => (
             <div key={st.id} style={{ flex: 1, textAlign: 'center', fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>
-              {st.name.toLowerCase().split(' ')[0]}
+              {st.shortName ?? st.name.toLowerCase().split(' ')[0]}
             </div>
           ))}
         </div>
@@ -826,7 +867,8 @@ function PipelineStages({ t, stages }: { t: T; stages: Stage[] }) {
                 padding: '10px 14px',
                 borderBottom: i < stages.length - 1 ? '1px solid var(--border)' : 'none',
                 background:
-                  st.tone === 'running' ? 'var(--amber-50)'
+                  st.tone === 'running' ? 'var(--green-50)'
+                  : st.tone === 'idle' ? 'var(--amber-50)'
                   : st.tone === 'err' ? 'var(--red-50)'
                   : 'var(--panel)',
               }}
@@ -837,16 +879,16 @@ function PipelineStages({ t, stages }: { t: T; stages: Stage[] }) {
                 <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-3)' }}>{st.sub}</div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <ProgressBar pct={st.pct} tone={st.tone} color={st.color} />
+                <ProgressBar pct={st.pct} tone={st.tone} />
                 <div style={{ width: 44, textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-2)' }}>{st.pct.toFixed(0)}%</div>
               </div>
               <div style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-2)' }}>{st.rate}</div>
               <div style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-3)' }}>{t('execution.stages.etaPrefix')} {st.eta}</div>
               <div>
-                {st.tone === 'ok' && <StatusBadge tone="ok">{t('execution.stages.status.done')}</StatusBadge>}
-                {st.tone === 'running' && <StatusBadge tone="running">{t('execution.stages.status.live')}</StatusBadge>}
+                {st.tone === 'ok' && <StatusBadge tone="queued">{t('execution.stages.status.done')}</StatusBadge>}
+                {st.tone === 'running' && <StatusBadge tone="ok">{t('execution.stages.status.live')}</StatusBadge>}
                 {st.tone === 'err' && <StatusBadge tone="err">{t('execution.stages.status.failed')}</StatusBadge>}
-                {st.tone === 'idle' && <StatusBadge tone="queued">{t('execution.stages.status.queued')}</StatusBadge>}
+                {st.tone === 'idle' && <StatusBadge tone="running">{t('execution.stages.status.queued')}</StatusBadge>}
               </div>
             </div>
           ))}
@@ -894,12 +936,12 @@ function StatusDot({ tone }: { tone: BadgeTone }) {
   return <span style={{ width: 9, height: 9, borderRadius: '50%', background: color, display: 'inline-block' }} />;
 }
 
-function ProgressBar({ pct, tone, color }: { pct: number; tone: StageTone; color: string }) {
+function ProgressBar({ pct, tone }: { pct: number; tone: StageTone }) {
   const fill =
-    tone === 'ok'  ? 'var(--green)'
-    : tone === 'err' ? 'var(--red)'
-    : tone === 'idle' ? 'var(--text-4)'
-    : color;
+    tone === 'ok'       ? 'var(--text-3)'
+    : tone === 'running'? 'var(--green)'
+    : tone === 'err'    ? 'var(--red)'
+    : 'var(--amber)';
   return (
     <div style={{ flex: 1, height: 6, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
       <div style={{ width: `${Math.min(pct, 100)}%`, height: '100%', background: fill, transition: 'width .4s ease' }} />
@@ -910,13 +952,13 @@ function ProgressBar({ pct, tone, color }: { pct: number; tone: StageTone; color
 /* ───────────────────────── Mock data + helpers ─────────────────── */
 
 const BASE_STAGES: Array<Omit<Stage, 'pct' | 'tone'> & { defaultPct: number; defaultTone: StageTone }> = [
-  { id: 'extract',  name: 'Extract',  sub: 'AS-IS CSV → Parquet', defaultPct: 0, defaultTone: 'idle', color: 'var(--phase-analysis)',  rate: '—', eta: '—' },
-  { id: 'profile',  name: 'Profile',  sub: 'row counts · null %',  defaultPct: 0, defaultTone: 'idle', color: 'var(--phase-analysis)',  rate: '—', eta: '—' },
-  { id: 'transform',name: 'Transform',sub: 'apply rule engine',    defaultPct: 0, defaultTone: 'idle', color: 'var(--phase-test)',      rate: '—', eta: '—' },
-  { id: 'validate', name: 'Validate', sub: 'PK · FK · NOT NULL',   defaultPct: 0, defaultTone: 'idle', color: 'var(--phase-test)',      rate: '—', eta: '—' },
-  { id: 'stage',    name: 'Stage',    sub: 'load to staging',      defaultPct: 0, defaultTone: 'idle', color: 'var(--phase-rehearsal)', rate: '—', eta: '—' },
-  { id: 'load',     name: 'Load',     sub: 'apply to TO-BE',       defaultPct: 0, defaultTone: 'idle', color: 'var(--phase-rehearsal)', rate: '—', eta: '—' },
-  { id: 'verify',   name: 'Verify',   sub: 'row count parity',     defaultPct: 0, defaultTone: 'idle', color: 'var(--phase-cutover)',   rate: '—', eta: '—' },
+  { id: 'check',              name: 'Check',                sub: 'source format & encoding check', shortName: 'check',     defaultPct: 0, defaultTone: 'idle', rate: '—', eta: '—' },
+  { id: 'extract',            name: 'Extract',              sub: 'UTF-8 CSV → Parquet (CP1)',      shortName: 'extract',   defaultPct: 0, defaultTone: 'idle', rate: '—', eta: '—' },
+  { id: 'reconcile',          name: 'Reconcile',            sub: 'CSV ↔ CP1 parity',               shortName: 'reconcile', defaultPct: 0, defaultTone: 'idle', rate: '—', eta: '—' },
+  { id: 'transform',          name: 'Transform',            sub: 'apply rule engine → CP2',        shortName: 'transform', defaultPct: 0, defaultTone: 'idle', rate: '—', eta: '—' },
+  { id: 'audit',              name: 'Audit',                 sub: 'CP1 ↔ CP2 parity',               shortName: 'audit',     defaultPct: 0, defaultTone: 'idle', rate: '—', eta: '—' },
+  { id: 'load',               name: 'Load',                 sub: 'apply to TO-BE',                 shortName: 'load',      defaultPct: 0, defaultTone: 'idle', rate: '—', eta: '—' },
+  { id: 'verify',             name: 'Verify',               sub: 'CP2 ↔ TO-BE parity',             shortName: 'verify',    defaultPct: 0, defaultTone: 'idle', rate: '—', eta: '—' },
 ];
 
 function buildStages(phase: ProjectPhase): Stage[] {
@@ -1158,6 +1200,17 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--amber)',
     fontSize: 12, fontWeight: 500, fontFamily: 'var(--mono)',
     display: 'flex', alignItems: 'center', gap: 10,
+  },
+
+  staleBanner: {
+    padding: '10px 14px',
+    marginBottom: 8,
+    border: '1px solid var(--amber)',
+    borderRadius: 4,
+    background: 'var(--amber-50)',
+    color: 'var(--amber)',
+    fontSize: 12,
+    display: 'flex', alignItems: 'flex-start', gap: 10,
   },
 
   section:        { borderBottom: '1px solid var(--border)' },

@@ -342,7 +342,7 @@ export const ja: Record<TranslationKey, string> = {
   /* Run header */
   'execution.run.noActive':           'No active run',
   'execution.run.active':             'Active run',
-  'execution.run.noHistory':          '実行履歴がありません — まだ分析・設計フェーズです。',
+  'execution.run.noHistory':          '実行履歴がありません — まだマッピング段階です。',
   'execution.run.lastRun':            'last run: {id} · {when} · {result}',
   'execution.run.startBtn':           'Start run',
   'execution.run.startOver':          'Start over',
@@ -381,6 +381,9 @@ export const ja: Record<TranslationKey, string> = {
   'execution.preflight.hint.idle':                         'テーブル選択後に検査を開始してください',
   'execution.preflight.hint.allPass':                      'All checks pass — ready to run',
   'execution.preflight.hint.blocked':                      '実行がブロックされました — 上の項目を先に解決してください。',
+  'execution.preflight.hint.stale':                        'Pre-flight results are stale',
+  'execution.preflight.stale.title':                       'Pre-flight results are stale',
+  'execution.preflight.stale.detail':                      '選択項目またはスナップショットが変更されました。Pre-flight を再実行してください。',
   'execution.preflight.count.pass':                        '{n} pass',
   'execution.preflight.count.fail':                        '{n} fail',
   'execution.preflight.count.skip':                        '{n} n/a',

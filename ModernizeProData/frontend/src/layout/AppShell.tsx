@@ -896,10 +896,11 @@ function siteBadge(name: string): string {
 }
 
 /** phase 별 의미색 (badge bg / border / text). 사이드바·탑바 phase badge 공통.
- *  test/rehearsal completed → 흰배경 + 검정글씨 + 검정테두리.
- *  test/rehearsal/cutover 는 running 중에만 고유색, idle 이면 표시 안 됨 (phase 자체가 바뀜). */
+ *  test/rehearsal/cutover 는 running 중에만 고유색 — paused/completed/failed/aborted/idle 은 모두 흰색.
+ *  그 외 phase (planning/analysis/sign-off/ready/hypercare/done) 는 항상 고유색. */
 function phaseColors(phase: string, runStatus?: string): { bg: string; color: string; border: string } {
-  if (runStatus === 'completed' && (phase === 'test' || phase === 'rehearsal')) {
+  const activePhase = phase === 'test' || phase === 'rehearsal' || phase === 'cutover';
+  if (activePhase && runStatus !== 'running') {
     return {
       bg:     'var(--panel)',
       color:  'var(--text)',
