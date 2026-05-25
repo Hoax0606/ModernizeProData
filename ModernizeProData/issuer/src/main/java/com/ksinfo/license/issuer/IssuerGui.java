@@ -71,9 +71,9 @@ public final class IssuerGui {
     private static final Color RED           = new Color(0xc42f2f);
 
     // Java logical font "Dialog" → JRE 의 composite 가 Korean/Japanese/Latin 자동 fallback.
-    private static final Font FONT_BASE  = new Font("Dialog", Font.PLAIN, 12);
-    private static final Font FONT_TITLE = new Font("Dialog", Font.BOLD, 13);
-    private static final Font FONT_LABEL = new Font("Dialog", Font.PLAIN, 12);
+    private static final Font FONT_BASE  = new Font("Hoax Mono JP", Font.PLAIN, 12);
+    private static final Font FONT_TITLE = new Font("Hoax Mono JP", Font.BOLD, 13);
+    private static final Font FONT_LABEL = new Font("Hoax Mono JP", Font.PLAIN, 12);
     public static void launch() {
         // System L&F = Windows native L&F. 글꼴도 Windows 시스템 폰트 (Segoe UI 등) 를
         // 그대로 가져오기 때문에 OS 단의 CJK fallback 이 자동으로 동작 (Korean → Malgun Gothic,
