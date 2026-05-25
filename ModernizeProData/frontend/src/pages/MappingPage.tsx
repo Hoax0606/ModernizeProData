@@ -1068,7 +1068,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   return (
     <div style={styles.workspace}>
       {/* Context bar */}
-      <div style={styles.contextBar}>
+      <div style={{ ...styles.contextBar, display: reportOpen ? 'none' : 'flex' }}>
         <span style={{ ...styles.sidePill, color: 'var(--navy)', background: 'var(--navy-50)', borderColor: 'var(--navy)' }}>TO-BE</span>
         <div style={styles.tableChip}>{table.short}</div>
         <div style={{ flex: 1 }} />
@@ -3092,13 +3092,6 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
             </div>
           );
         })}
-      </div>
-
-      {/* ⑤ 서브탭 */}
-      <div style={styles.dbvSubtabs}>
-        <span style={styles.dbvSubtab}>Properties</span>
-        <span style={{ ...styles.dbvSubtab, ...styles.dbvSubtabActive }}>Data</span>
-        <span style={styles.dbvSubtab}>Diagram</span>
       </div>
 
       {/* ⑥ 필터바 */}
