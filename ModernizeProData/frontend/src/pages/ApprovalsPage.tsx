@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useWorkspaceStore, type ProjectPhase } from '../store/workspace';
-import { useSnapshotsStore, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
+import { useSnapshotsStore, usePinnedSnapshotsStore, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
 import { projectApi } from '../api/workspace';
 import { useAuthStore } from '../store/auth';
 import { useAuditLogStore } from '../store/auditLog';
@@ -26,6 +26,7 @@ export function ApprovalsPage() {
   const fetchBySite = useSnapshotsStore((s) => s.fetchBySite);
   const approveSnapshot = useSnapshotsStore((s) => s.approveSnapshot);
   const rejectSnapshot = useSnapshotsStore((s) => s.rejectSnapshot);
+  const setPin = usePinnedSnapshotsStore((s) => s.setPin);
   const addAuditLog = useAuditLogStore((s) => s.add);
 
   // 마운트 시 사이트 전체 스냅샷 fetch
@@ -77,7 +78,8 @@ export function ApprovalsPage() {
   const handleApprove = async (id: string) => {
     const snap = allSnapshots.find((s) => s.id === id);
     await approveSnapshot(id);
-    // Approve 시 phase 전환: mapping → sign-off, cutover → ready
+    // Approve 시 phase 전환: mapping → sign-off, cutover → ready.
+    // 동시에 방금 승인된 snapshot 을 자동 pin → 새 phase 에 맞는 snapshot 이 상단에 노출됨.
     if (snap) {
       const proj = siteProjects.find((p) => p.id === snap.projectId);
       if (proj) {
@@ -86,6 +88,7 @@ export function ApprovalsPage() {
           await projectApi.update(proj.id, { phase: newPhase, runStatus: 'idle' });
         } catch { /* polling 에서 동기화 */ }
       }
+      setPin(snap.id);
       addAuditLog({
         projectId: snap.projectId,
         user: user?.username || 'Unknown',

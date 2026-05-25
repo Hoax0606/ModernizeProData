@@ -294,6 +294,21 @@ export const en: Record<TranslationKey, string> = {
   'versions.cutoverConfirm.desc':    'This snapshot marks the project as ready for production cutover. Once approved by the Coordinator, the project phase will change to Ready.',
   'versions.cutoverConfirm.proceed': 'Proceed',
 
+  'versions.statusDesc.draftReady':  'This snapshot is ready for an approval request.',
+  'versions.statusDesc.pending':     'Waiting for the Coordinator to approve.',
+  'versions.statusDesc.approved':    'Approved by {who} on {date}.',
+  'versions.statusDesc.rejected':    'Rejected by {who} on {date}.',
+  'versions.descError.repeat':       'The same character cannot be repeated 10 or more times in a row.',
+
+  'versions.pin.section':            'Pin',
+  'versions.pin.descPinned':         'This snapshot is pinned to the top of the list.',
+  'versions.pin.descEligible':       'Pin this snapshot to the top of the list.',
+  'versions.pin.descIneligible':     'This snapshot cannot be pinned in the current phase.',
+  'versions.pin.toggleTitlePin':     'Click to pin to top',
+  'versions.pin.toggleTitleUnpin':   'Click to unpin',
+  'versions.pin.toggleTitleIneligible': 'Cannot pin in the current phase',
+  'versions.pin.iconAria':           'Pinned to top',
+
   'approvals.title':           'Approvals',
   'approvals.subtitle':        'Site-wide snapshot approvals & rejection history',
   'approvals.empty':           'No snapshots yet',

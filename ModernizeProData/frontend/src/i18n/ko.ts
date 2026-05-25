@@ -298,6 +298,21 @@ export const ko = {
   'versions.cutoverConfirm.desc':    '이 스냅샷은 프로젝트를 production cutover 준비 상태로 표시합니다. Coordinator 승인 후 phase 가 Ready 로 변경됩니다.',
   'versions.cutoverConfirm.proceed': 'Proceed',
 
+  'versions.statusDesc.draftReady':  '이 스냅샷은 승인 요청 준비가 되었습니다.',
+  'versions.statusDesc.pending':     '코디네이터의 승인을 기다리고 있습니다.',
+  'versions.statusDesc.approved':    '{date}에 {who}님이 승인했습니다.',
+  'versions.statusDesc.rejected':    '{date}에 {who}님이 반려했습니다.',
+  'versions.descError.repeat':       '같은 글자를 10번 이상 연속으로 입력할 수 없습니다.',
+
+  'versions.pin.section':            'Pin',
+  'versions.pin.descPinned':         '이 스냅샷은 목록 상단에 고정되어 있습니다.',
+  'versions.pin.descEligible':       '이 스냅샷을 목록 상단에 고정합니다.',
+  'versions.pin.descIneligible':     '현재 phase 에서는 이 스냅샷을 pin 할 수 없습니다.',
+  'versions.pin.toggleTitlePin':     'Click to pin to top',
+  'versions.pin.toggleTitleUnpin':   'Click to unpin',
+  'versions.pin.toggleTitleIneligible': '현재 phase 에서는 pin 불가',
+  'versions.pin.iconAria':           'Pinned to top',
+
   'approvals.title':           'Approvals',
   'approvals.subtitle':        '사이트 전체 스냅샷 승인 / 거부 처리 및 이력',
   'approvals.empty':           'No snapshots yet',

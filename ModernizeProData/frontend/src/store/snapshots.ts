@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import { snapshotApi } from '../api/workspace';
 
 export type SnapshotStatus = 'draft' | 'pending' | 'approved' | 'rejected';
@@ -104,3 +105,58 @@ export const useSnapshotsStore = create<SnapshotsState>()(
     },
   }),
 );
+
+/**
+ * Versions 화면에서 사용자가 상단에 고정한 snapshot id 집합.
+ * UI-only — 백엔드 비저장. localStorage 영속.
+ */
+interface PinnedSnapshotsState {
+  pinnedIds: string[];
+  togglePin: (id: string) => void;
+  setPin: (id: string) => void;
+  clearPin: () => void;
+  isPinned: (id: string) => boolean;
+}
+
+export const usePinnedSnapshotsStore = create<PinnedSnapshotsState>()(
+  persist(
+    (set, get) => ({
+      pinnedIds: [],
+      // 한 번에 단 한 개의 snapshot 만 고정 가능 — 새로 고정 시 기존 고정 해제.
+      togglePin: (id) =>
+        set((st) => ({
+          pinnedIds: st.pinnedIds.includes(id) ? [] : [id],
+        })),
+      // approve 직후 자동 pin — 기존 pin 은 교체됨.
+      setPin: (id) => set({ pinnedIds: [id] }),
+      clearPin: () => set({ pinnedIds: [] }),
+      isPinned: (id) => get().pinnedIds.includes(id),
+    }),
+    { name: 'modernize-pinned-snapshots' },
+  ),
+);
+
+/**
+ * Phase 별 pin 가능 규칙.
+ *  - planning / analysis / test       : approved 아닌 mapping snapshot
+ *  - sign-off / rehearsal             : approved mapping snapshot
+ *  - ready / cutover / hypercare / done: approved cutover snapshot
+ */
+export function isPinEligible(
+  snapshot: Pick<MappingSnapshot, 'type' | 'status'>,
+  phase: string,
+): boolean {
+  const type = snapshot.type ?? 'mapping';
+  const isApproved = snapshot.status === 'approved';
+
+  if (['planning', 'analysis', 'test'].includes(phase)) {
+    return type === 'mapping' && !isApproved;
+  }
+  if (['sign-off', 'rehearsal'].includes(phase)) {
+    return type === 'mapping' && isApproved;
+  }
+  if (['ready', 'cutover', 'hypercare', 'done'].includes(phase)) {
+    return type === 'cutover' && isApproved;
+  }
+  return false;
+}
