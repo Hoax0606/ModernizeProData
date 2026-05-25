@@ -1,5 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
-import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
+import { Outlet, NavLink, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuthStore, roleLabel } from '../store/auth';
 import { authApi } from '../api/auth';
 import { useUsersStore } from '../store/users';
@@ -22,6 +22,17 @@ import { useWorkspaceStore } from '../store/workspace';
 import { useUiStore } from '../store/ui';
 import { isProjectReadOnly } from '../store/readOnly';
 import { useSnapshotsStore } from '../store/snapshots';
+import { useAsisDdlStore } from '../store/asisDdl';
+import { useTobeDdlStore } from '../store/tobeDdl';
+import {
+  DEMO_ASIS_SCHEMA,
+  DEMO_PROJECT,
+  DEMO_PROJECT_ID,
+  DEMO_SITE,
+  DEMO_SITE_ID,
+  DEMO_TOBE_SCHEMA,
+} from '../lib/demoFixtures';
+import { useDemoMode } from '../lib/useDemoMode';
 import { useAuditLogStore } from '../store/auditLog';
 import { useNotificationStore } from '../store/notifications';
 import { useNotificationPrefsStore, isEventEnabled, actionToEventKey } from '../store/notificationPreferences';
@@ -35,7 +46,63 @@ import { useT } from '../i18n';
 export function AppShell() {
   const navigate = useNavigate();
   const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
   const t = useT();
+
+  // `?demo=preflight` 진입 시 workspace + asisDdl + tobeDdl store 에 demo fixture 를
+  // 한 번 inject 하고, demo 가 빠질 때 정확히 원복. demo flag 는 sessionStorage
+  // 기반이라 URL 에서 query 가 빠져도 (다른 페이지로 navigate 해도) 유지된다.
+  const { isDemo } = useDemoMode();
+
+  // Pre-flight 의 csv-arrived / conn-tobe Fix 가 `?siteSettings=csv|tobe-db` 를 붙이면
+  // SiteSettingsModal 을 자동 open + 해당 섹션을 1초 강조. URL 쿼리는 즉시 정리해서
+  // 다음 navigate 시 또 트리거되지 않도록.
+  //
+  // 주의: highlight set + setSearchParams + setTimeout(reset) 을 한 effect 안에 두면
+  // setSearchParams 가 deps(searchParams) 를 바꿔 effect 재실행 + cleanup 이 setTimeout
+  // 을 취소 → highlight 가 영원히 reset 되지 않는다. 그래서 두 effect 로 분리한다.
+  const [siteSettingsHighlight, setSiteSettingsHighlight] = useState<'csv' | 'tobe-db' | null>(null);
+  useEffect(() => {
+    const h = searchParams.get('siteSettings');
+    if (h !== 'csv' && h !== 'tobe-db') return;
+    setSiteSettingsOpen(true);
+    setSiteSettingsHighlight(h);
+    const next = new URLSearchParams(searchParams);
+    next.delete('siteSettings');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+  useEffect(() => {
+    if (!siteSettingsHighlight) return;
+    const id = window.setTimeout(() => setSiteSettingsHighlight(null), 1000);
+    return () => window.clearTimeout(id);
+  }, [siteSettingsHighlight]);
+  useEffect(() => {
+    if (!isDemo) return;
+    /* 실 데이터 백업 — exit 시 정확히 복원하기 위함. demo 동안엔 sandbox 처럼 real 숨김. */
+    const ws = useWorkspaceStore.getState();
+    const prev = {
+      sites: ws.sites,
+      projects: ws.projects,
+      activeSiteId: ws.activeSiteId,
+      activeProjectId: ws.activeProjectId,
+    };
+    const asisPrev = useAsisDdlStore.getState().schemasByProject;
+    const tobePrev = useTobeDdlStore.getState().schemasByProject;
+    /* demo 동안엔 real 숨기고 demo 만 노출. */
+    useWorkspaceStore.setState({
+      sites: [DEMO_SITE],
+      projects: [DEMO_PROJECT],
+      activeSiteId: DEMO_SITE_ID,
+      activeProjectId: DEMO_PROJECT_ID,
+    });
+    useAsisDdlStore.setState({ schemasByProject: { [DEMO_PROJECT_ID]: DEMO_ASIS_SCHEMA } });
+    useTobeDdlStore.setState({ schemasByProject: { [DEMO_PROJECT_ID]: DEMO_TOBE_SCHEMA } });
+    return () => {
+      useWorkspaceStore.setState(prev);
+      useAsisDdlStore.setState({ schemasByProject: asisPrev });
+      useTobeDdlStore.setState({ schemasByProject: tobePrev });
+    };
+  }, [isDemo]);
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
   const loadUsers = useUsersStore((s) => s.loadUsers);
@@ -127,9 +194,13 @@ export function AppShell() {
     setActiveProject(st.activateProjectId ?? null);
   }, [location.key, setActiveProject]);
 
-  // 10초 간격으로 서버 동기화 (sites → projects → snapshots → audit logs 순서 보장)
+  // 10초 간격으로 서버 동기화 (sites → projects → snapshots → audit logs 순서 보장).
+  // demo 중엔 polling 전체 skip — 백업한 real data 를 서버 응답으로 덮어쓰지 않도록.
+  const isDemoRef = useRef(isDemo);
+  isDemoRef.current = isDemo;
   useEffect(() => {
     const sync = async () => {
+      if (isDemoRef.current) return;
       if (isEditingRef.current) return;
       await fetchSites();
       const siteId = useWorkspaceStore.getState().activeSiteId;
@@ -858,11 +929,7 @@ export function AppShell() {
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
       <AccountProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
       <SolutionSettingsModal open={solutionOpen} onClose={() => setSolutionOpen(false)} />
-      <SiteSettingsModal
-        open={siteSettingsOpen}
-        focus={siteSettingsFocus}
-        onClose={() => { setSiteSettingsOpen(false); setSiteSettingsFocus(undefined); }}
-      />
+      <SiteSettingsModal open={siteSettingsOpen} onClose={() => setSiteSettingsOpen(false)} highlight={siteSettingsHighlight} />
       <ClusterAdminModal open={clusterAdminOpen} onClose={() => setClusterAdminOpen(false)} />
       <CreateSiteModal open={createSiteOpen} onClose={() => setCreateSiteOpen(false)} />
       <CreateProjectModal open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} />
@@ -906,10 +973,11 @@ function siteBadge(name: string): string {
 }
 
 /** phase 별 의미색 (badge bg / border / text). 사이드바·탑바 phase badge 공통.
- *  test/rehearsal completed → 흰배경 + 검정글씨 + 검정테두리.
- *  test/rehearsal/cutover 는 running 중에만 고유색, idle 이면 표시 안 됨 (phase 자체가 바뀜). */
+ *  test/rehearsal/cutover 는 running 중에만 고유색 — paused/completed/failed/aborted/idle 은 모두 흰색.
+ *  그 외 phase (planning/analysis/sign-off/ready/hypercare/done) 는 항상 고유색. */
 function phaseColors(phase: string, runStatus?: string): { bg: string; color: string; border: string } {
-  if (runStatus === 'completed' && (phase === 'test' || phase === 'rehearsal')) {
+  const activePhase = phase === 'test' || phase === 'rehearsal' || phase === 'cutover';
+  if (activePhase && runStatus !== 'running') {
     return {
       bg:     'var(--panel)',
       color:  'var(--text)',

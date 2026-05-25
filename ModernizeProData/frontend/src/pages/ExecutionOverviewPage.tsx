@@ -392,7 +392,8 @@ function Th({ children, align, width }: { children?: React.ReactNode; align?: 'l
 }
 
 function phaseChipColor(phase: string, runStatus?: string): React.CSSProperties {
-  if (runStatus === 'completed' && (phase === 'test' || phase === 'rehearsal')) {
+  const activePhase = phase === 'test' || phase === 'rehearsal' || phase === 'cutover';
+  if (activePhase && runStatus !== 'running') {
     return {
       background: 'var(--panel)',
       color:      'var(--text)',

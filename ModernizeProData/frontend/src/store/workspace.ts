@@ -13,7 +13,7 @@ export type ProjectPhase =
   | 'hypercare'
   | 'done';
 
-export type RunStatus = 'idle' | 'running' | 'completed';
+export type RunStatus = 'idle' | 'running' | 'paused' | 'completed' | 'failed' | 'aborted';
 
 export type SiteEnv = 'mainframe' | 'midrange' | 'cloud' | 'on-prem' | 'other';
 export type SourceEncoding = 'shift_jis' | 'euc-jp' | 'utf-8' | 'ebcdic';
@@ -135,6 +135,10 @@ interface WorkspaceState {
   setProjectAssignee: (projectId: string, assignee: string | undefined) => Promise<void>;
   /** Project 실행 담당자 지정. undefined = 미배정. */
   setProjectExecutionAssignee: (projectId: string, executionAssignee: string | undefined) => Promise<void>;
+  /** Project phase 전환 (test/sign-off/... 변경). cutover 흐름과 별개의 일반 전환용. */
+  setProjectPhase: (projectId: string, phase: ProjectPhase) => Promise<void>;
+  /** Project runStatus 전환 (running/completed/idle). undefined = 초기화. */
+  setProjectRunStatus: (projectId: string, runStatus: RunStatus | undefined) => Promise<void>;
 }
 
 export const emptyDbConnection = (): SiteDbConnection => ({
@@ -365,6 +369,24 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         const updated = await projectApi.update(projectId, { executionAssignee: value });
         set((s) => ({
           projects: s.projects.map((p) => (p.id === projectId ? updated : p)),
+        }));
+      },
+
+      setProjectPhase: async (projectId, phase) => {
+        await projectApi.update(projectId, { phase });
+        set((s) => ({
+          projects: s.projects.map((p) =>
+            p.id === projectId ? { ...p, phase } : p
+          ),
+        }));
+      },
+
+      setProjectRunStatus: async (projectId, runStatus) => {
+        await projectApi.update(projectId, { runStatus });
+        set((s) => ({
+          projects: s.projects.map((p) =>
+            p.id === projectId ? { ...p, runStatus } : p
+          ),
         }));
       },
     }),

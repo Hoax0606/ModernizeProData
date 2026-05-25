@@ -147,6 +147,7 @@ cd ModernizeProData/frontend; npx tsc --noEmit
 | AS-IS DB (도구 내장) | 운영팀 야간 CSV 추출 파일을 도구가 받아 DuckDB 로 적재 — 외부 DB 직접 접속 X. |
 | Artifact | 프로젝트가 생성하는 산출물 (DDL · Migration SQL · Mapping spec · Schema diff · Validation report · Dashboard snapshot). `/artifacts` 페이지에서 Excel-style 워크북 미리보기 + 다운로드. |
 | Site export | All projects 페이지의 `Site export` 탭(`/site/export`). 사이트 단위로 산출물 4 종 (Migration / Mapping / Validation / Site summary) 을 zip 으로 일괄 다운로드. 현재는 client-side (JSZip + ExcelJS), 백엔드 export job 도입 시점에 서버 측 생성으로 교체 예정. |
+| Pre-flight | Test / Rehearsal / Cutover 실행 직전의 readiness 게이트. 8개 체크가 모두 pass 일 때만 Start run 활성. 상태는 `pass · fail · skip` 3종. `approved-snapshot` 은 ALL 선택 시에만 검사 (부분 선택 = skip). 상세는 `docs/ONBOARDING.md` §18. |
 
 ## 세션 시작 시 권장 동작
 

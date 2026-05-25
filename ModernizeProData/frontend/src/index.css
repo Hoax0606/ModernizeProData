@@ -125,3 +125,19 @@ input, select, textarea { font-family: inherit; }
   border: 2px solid var(--panel);
 }
 *::-webkit-scrollbar-thumb:hover { background: var(--text-4); }
+
+/* Pre-flight Fix 도착지 강조 — DdlSchemaPanel 의 정적 highlight 효과를 className 으로
+   재사용 가능하게. 부모가 className 을 1초간 토글 → 0.4s transition 으로 부드럽게 ON/OFF. */
+.mpd-fix-highlight {
+  background-color: #D0EAEA !important;
+  /* 외곽 2px deep teal (DdlSchemaPanel border 와 동일, layout shift 없음)
+     + 그 바깥 4px glow (DdlSchemaPanel box-shadow 와 동일) → 총 spread 6px. */
+  box-shadow: 0 0 0 2px #0E7C7B, 0 0 0 6px rgba(14, 124, 123, 0.22) !important;
+  border-radius: 4px;
+  transition: background-color 0.4s ease, box-shadow 0.4s ease;
+}
+/* table row 의 td inline background (zebra / isActive) 를 덮기 위한 자식 셀렉터. */
+.mpd-fix-highlight > td {
+  background-color: #D0EAEA !important;
+  transition: background-color 0.4s ease;
+}
