@@ -1,5 +1,6 @@
 package com.ksinfo.modernize_pro_data.common.duckdb;
 
+import com.ksinfo.modernize_pro_data.common.duckdb.udf.UdfRegistry;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -45,6 +46,8 @@ public class DuckDbService {
             String url = memoryMode ? "jdbc:duckdb:" : "jdbc:duckdb:" + filePath;
             connection = DriverManager.getConnection(url);
             log.info("DuckDB connection opened: {}", url);
+            // DuckDB 의 UDF 는 connection 별로 등록 — 새 connection 마다 일괄 register.
+            UdfRegistry.registerAll(connection);
         }
         return connection;
     }
