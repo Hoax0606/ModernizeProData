@@ -430,6 +430,9 @@ export const ja: Record<TranslationKey, string> = {
   'versions.pin.toggleTitleIneligible': '現在の phase ではピン留め不可',
   'versions.pin.iconAria':           'Pinned to top',
 
+  'versions.preflight.blocked':      'Execution 画面でこのスナップショットを pin して preflight を全 pass させると Request Review が有効になります',
+  'versions.preflight.notRun':       'Execution 画面でこのスナップショットを pin して preflight を実行してください',
+
   'approvals.title':           'Approvals',
   'approvals.subtitle':        'サイト全体のスナップショット承認 / 却下と履歴',
   'approvals.empty':           'No snapshots yet',
@@ -571,6 +574,34 @@ export const ja: Record<TranslationKey, string> = {
   'execution.preflight.demo.csvArrived.fail':              '抽出ファイル未到着 (デモ用)',
   'execution.preflight.demo.unmappedCols.fail':            '4 件の TO-BE カラムが未マッピング (デモ用)',
   'execution.preflight.demo.passDetail':                   'OK (デモ用)',
+
+  /* Pre-flight — per-table 化 new keys */
+  'execution.preflight.check.csvArrived.failNoPath':       'CSV パスが Site 設定に登録されていません',
+  'execution.preflight.check.connTobe.passConfigured':     '{env} 環境の TO-BE DB 設定済み',
+  'execution.preflight.check.connTobe.failMissing':        '{env} 環境の TO-BE DB host/database/username が未設定',
+  'execution.preflight.check.tobeBindings.passOne':        'バインディング OK',
+  'execution.preflight.check.tobeBindings.failOne':        'AS-IS ソースにバインディングされていません',
+  'execution.preflight.check.unmappedCols.passOne':        '全 {n} カラムマッピング済み',
+  'execution.preflight.check.unmappedCols.failOne':        '未マッピング {n} 件: {cols}',
+  'execution.preflight.check.unmappedCols.skipNoDdl':      'TO-BE DDL に該当テーブルなし',
+  'execution.preflight.check.asisUnmapped.passOne':        'AS-IS カラム利用 OK',
+  'execution.preflight.check.asisUnmapped.failOne':        '未使用 AS-IS カラム {n} 件: {cols}',
+  'execution.preflight.check.asisUnmapped.skipNoBinding':  'バインディングがなく検証対象なし',
+
+  'execution.preflight.aggregate.notRun':                  'まだ実行されていません',
+  'execution.preflight.aggregate.allPass':                 '全 {n} テーブル pass',
+  'execution.preflight.aggregate.skipped':                 '{skip}/{total} skip',
+  'execution.preflight.aggregate.mixed':                   '{pass} pass · {fail} fail / {total}',
+  'execution.preflight.aggregate.statusPass':              'pass',
+  'execution.preflight.aggregate.statusFail':              'fail',
+  'execution.preflight.aggregate.statusSkip':              'skip',
+  'execution.preflight.aggregate.noTables':                '対象テーブルがありません',
+  'execution.preflight.trigger.disabledNoPin':             'Versions 画面でスナップショットを Pin してください',
+
+  'execution.run.startBlocked.noPin':                      '実行するには Versions 画面でスナップショットを Pin してください',
+  'execution.run.startBlocked.phaseEnv':                   '{env} 環境 + {phase} フェーズでは run を起動できません',
+  'execution.run.startBtn.cutover':                        'Start cutover',
+  'execution.run.startBtn.rehearsal':                      'Start rehearsal',
 
   /* Overall progress */
   'execution.progress.title':         'Overall progress',

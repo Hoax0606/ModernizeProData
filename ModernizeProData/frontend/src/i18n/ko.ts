@@ -428,6 +428,9 @@ export const ko = {
   'versions.pin.toggleTitleIneligible': '현재 phase 에서는 pin 불가',
   'versions.pin.iconAria':           'Pinned to top',
 
+  'versions.preflight.blocked':      'Execution 화면에서 이 스냅샷을 pin 하고 preflight 를 모두 pass 시켜야 Request Review 가 가능합니다',
+  'versions.preflight.notRun':       'Execution 화면에서 이 스냅샷을 pin 한 후 preflight 를 실행해주세요',
+
   'approvals.title':           'Approvals',
   'approvals.subtitle':        '사이트 전체 스냅샷 승인 / 거부 처리 및 이력',
   'approvals.empty':           'No snapshots yet',
@@ -569,6 +572,34 @@ export const ko = {
   'execution.preflight.demo.csvArrived.fail':              '추출 파일 미도착 (시연용)',
   'execution.preflight.demo.unmappedCols.fail':            '4개 TO-BE 컬럼 매핑 누락 (시연용)',
   'execution.preflight.demo.passDetail':                   'OK (시연용)',
+
+  /* Pre-flight — per-table 化 new keys */
+  'execution.preflight.check.csvArrived.failNoPath':       'CSV 경로가 Site 설정에 등록되어 있지 않습니다',
+  'execution.preflight.check.connTobe.passConfigured':     '{env} 환경 TO-BE DB 설정 완료',
+  'execution.preflight.check.connTobe.failMissing':        '{env} 환경 TO-BE DB host/database/username 미설정',
+  'execution.preflight.check.tobeBindings.passOne':        '바인딩 OK',
+  'execution.preflight.check.tobeBindings.failOne':        'AS-IS 소스에 바인딩되지 않음',
+  'execution.preflight.check.unmappedCols.passOne':        '전체 {n}개 컬럼 매핑됨',
+  'execution.preflight.check.unmappedCols.failOne':        '미매핑 컬럼 {n}개: {cols}',
+  'execution.preflight.check.unmappedCols.skipNoDdl':      'TO-BE DDL 에 해당 테이블 없음',
+  'execution.preflight.check.asisUnmapped.passOne':        'AS-IS 컬럼 사용 OK',
+  'execution.preflight.check.asisUnmapped.failOne':        '미사용 AS-IS 컬럼 {n}개: {cols}',
+  'execution.preflight.check.asisUnmapped.skipNoBinding':  '바인딩이 없어 검증 대상이 없음',
+
+  'execution.preflight.aggregate.notRun':                  '아직 실행되지 않음',
+  'execution.preflight.aggregate.allPass':                 '전체 {n}개 테이블 pass',
+  'execution.preflight.aggregate.skipped':                 '{skip}/{total} skip',
+  'execution.preflight.aggregate.mixed':                   '{pass} pass · {fail} fail / {total}',
+  'execution.preflight.aggregate.statusPass':              'pass',
+  'execution.preflight.aggregate.statusFail':              'fail',
+  'execution.preflight.aggregate.statusSkip':              'skip',
+  'execution.preflight.aggregate.noTables':                '대상 테이블이 없습니다',
+  'execution.preflight.trigger.disabledNoPin':             'Versions 화면에서 스냅샷을 핀해야 합니다',
+
+  'execution.run.startBlocked.noPin':                      '실행하려면 Versions 화면에서 스냅샷을 핀하세요',
+  'execution.run.startBlocked.phaseEnv':                   '{env} 환경 + {phase} 단계에서는 run 을 시작할 수 없습니다',
+  'execution.run.startBtn.cutover':                        'Start cutover',
+  'execution.run.startBtn.rehearsal':                      'Start rehearsal',
 
   /* Overall progress */
   'execution.progress.title':         'Overall progress',

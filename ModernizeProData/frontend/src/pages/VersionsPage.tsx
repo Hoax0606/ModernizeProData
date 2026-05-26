@@ -5,6 +5,8 @@ import { useSnapshotsStore, usePinnedSnapshotsStore, isPinEligible, type Snapsho
 import { useAuthStore } from '../store/auth';
 import { useActiveProjectReadOnly } from '../store/readOnly';
 import { useAuditLogStore } from '../store/auditLog';
+import { useExecutionPreflightStore, type PreflightSnapshotResult } from '../store/executionPreflight';
+import { isAllPass } from '../lib/preflightValidation';
 import { useT, type TranslationKey } from '../i18n';
 
 /**
@@ -24,6 +26,13 @@ export function VersionsPage() {
     () => projects.find((p) => p.id === activeProjectId) ?? null,
     [projects, activeProjectId],
   );
+
+  /* Per-snapshot preflight result cache — populated by Execution page only.
+     Versions reads it as a gate for Request Review.  Fallback は undefined にして
+     매 render 마다 새 reference 가 되는 무한 루프 회피. */
+  const preflightBySnapshot = useExecutionPreflightStore(
+    (s) => activeProjectId ? s.byProject[activeProjectId]?.bySnapshot : undefined,
+  ) as Record<string, PreflightSnapshotResult> | undefined;
 
   const allSnapshots = useSnapshotsStore((s) => s.snapshots);
   const fetchByProject = useSnapshotsStore((s) => s.fetchByProject);
@@ -453,6 +462,9 @@ export function VersionsPage() {
               isPinned={pinnedIds.includes(selectedSnapshot.id)}
               pinEligible={isPinEligible(selectedSnapshot, project.phase)}
               onTogglePin={() => togglePin(selectedSnapshot.id)}
+              preflightResultExists={!!preflightBySnapshot?.[selectedSnapshot.id]}
+              preflightPassed={!!preflightBySnapshot?.[selectedSnapshot.id]?.results
+                && isAllPass(preflightBySnapshot[selectedSnapshot.id].results)}
             />
           ) : (
             <div style={styles.noSelectionMessage}>
@@ -543,7 +555,10 @@ function ChangeRow({ kind, table, detail }: { kind: 'added' | 'modified'; table:
   );
 }
 
-function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligible, onTogglePin }: {
+function SnapshotDetailView({
+  snapshot, onRequest, readOnly, isPinned, pinEligible, onTogglePin,
+  preflightResultExists, preflightPassed,
+}: {
   snapshot: {
     id: string;
     name: string;
@@ -566,10 +581,22 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
   isPinned: boolean;
   pinEligible: boolean;
   onTogglePin: () => void;
+  /** Execution 画面でこの snapshot に対して preflight を走らせた結果が cache されているか. */
+  preflightResultExists: boolean;
+  /** その結果が all-pass か. */
+  preflightPassed: boolean;
 }) {
   const t = useT();
   const user = useAuthStore((s) => s.user);
   const [confirmingRequest, setConfirmingRequest] = useState(false);
+
+  /* Request Review ゲート: Execution 画面側で preflight all-pass の cache が必要. */
+  const requestBlockedReason = !preflightResultExists
+    ? t('versions.preflight.notRun')
+    : !preflightPassed
+      ? t('versions.preflight.blocked')
+      : '';
+  const canRequest = !readOnly && preflightPassed;
 
   return (
     <div style={styles.detailContent}>
@@ -642,6 +669,11 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
                     ? <>{t('versions.confirmRequestPre')}<b>{snapshot.name}</b>{t('versions.confirmRequestPost')}</>
                     : t('versions.statusDesc.draftReady')}
                 </div>
+                {!confirmingRequest && requestBlockedReason && (
+                  <div style={{ fontSize: 11, color: 'var(--amber)', marginTop: 4, fontFamily: 'var(--mono)' }}>
+                    ⚠ {requestBlockedReason}
+                  </div>
+                )}
               </div>
               {confirmingRequest ? (
                 <div style={{ display: 'flex', gap: 8 }}>
@@ -650,8 +682,9 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
                       setConfirmingRequest(false);
                       onRequest();
                     }}
-                    style={{ ...styles.btnPrimary, ...(readOnly ? styles.btnDisabled : {}) }}
-                    disabled={readOnly}
+                    style={{ ...styles.btnPrimary, ...(canRequest ? {} : styles.btnDisabled) }}
+                    disabled={!canRequest}
+                    title={requestBlockedReason}
                   >
                     Confirm
                   </button>
@@ -660,7 +693,12 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
                   </button>
                 </div>
               ) : (
-                <button onClick={() => setConfirmingRequest(true)} style={{ ...styles.btnPrimary, ...(readOnly ? styles.btnDisabled : {}) }} disabled={readOnly}>
+                <button
+                  onClick={() => setConfirmingRequest(true)}
+                  style={{ ...styles.btnPrimary, ...(canRequest ? {} : styles.btnDisabled) }}
+                  disabled={!canRequest}
+                  title={requestBlockedReason}
+                >
                   Request Review
                 </button>
               )}

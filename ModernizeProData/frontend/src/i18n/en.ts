@@ -424,6 +424,9 @@ export const en: Record<TranslationKey, string> = {
   'versions.pin.toggleTitleIneligible': 'Cannot pin in the current phase',
   'versions.pin.iconAria':           'Pinned to top',
 
+  'versions.preflight.blocked':      'Pin this snapshot on the Execution page and pass preflight to enable Request Review',
+  'versions.preflight.notRun':       'Pin this snapshot on the Execution page and run preflight first',
+
   'approvals.title':           'Approvals',
   'approvals.subtitle':        'Site-wide snapshot approvals & rejection history',
   'approvals.empty':           'No snapshots yet',
@@ -565,6 +568,34 @@ export const en: Record<TranslationKey, string> = {
   'execution.preflight.demo.csvArrived.fail':              'AS-IS extract not received (demo)',
   'execution.preflight.demo.unmappedCols.fail':            '4 TO-BE columns unmapped (demo)',
   'execution.preflight.demo.passDetail':                   'OK (demo)',
+
+  /* Pre-flight — per-table new keys */
+  'execution.preflight.check.csvArrived.failNoPath':       'CSV path is not configured in Site settings',
+  'execution.preflight.check.connTobe.passConfigured':     'TO-BE DB configured for {env} environment',
+  'execution.preflight.check.connTobe.failMissing':        '{env} TO-BE DB host / database / username missing',
+  'execution.preflight.check.tobeBindings.passOne':        'binding OK',
+  'execution.preflight.check.tobeBindings.failOne':        'no binding to an AS-IS source',
+  'execution.preflight.check.unmappedCols.passOne':        'all {n} columns mapped',
+  'execution.preflight.check.unmappedCols.failOne':        '{n} unmapped: {cols}',
+  'execution.preflight.check.unmappedCols.skipNoDdl':      'no matching TO-BE DDL table',
+  'execution.preflight.check.asisUnmapped.passOne':        'AS-IS columns OK',
+  'execution.preflight.check.asisUnmapped.failOne':        '{n} unused AS-IS columns: {cols}',
+  'execution.preflight.check.asisUnmapped.skipNoBinding':  'no binding — nothing to check',
+
+  'execution.preflight.aggregate.notRun':                  'not run yet',
+  'execution.preflight.aggregate.allPass':                 'all {n} tables pass',
+  'execution.preflight.aggregate.skipped':                 '{skip} / {total} skipped',
+  'execution.preflight.aggregate.mixed':                   '{pass} pass · {fail} fail / {total}',
+  'execution.preflight.aggregate.statusPass':              'pass',
+  'execution.preflight.aggregate.statusFail':              'fail',
+  'execution.preflight.aggregate.statusSkip':              'skip',
+  'execution.preflight.aggregate.noTables':                'no tables to check',
+  'execution.preflight.trigger.disabledNoPin':             'Pin a snapshot on the Versions page first',
+
+  'execution.run.startBlocked.noPin':                      'Pin a snapshot on the Versions page before starting a run',
+  'execution.run.startBlocked.phaseEnv':                   'Cannot start a run when env={env} and phase={phase}',
+  'execution.run.startBtn.cutover':                        'Start cutover',
+  'execution.run.startBtn.rehearsal':                      'Start rehearsal',
 
   /* Overall progress */
   'execution.progress.title':         'Overall progress',

@@ -109,6 +109,8 @@ interface SnapshotsState {
   approveSnapshot: (id: string) => Promise<void>;
   rejectSnapshot: (id: string, reason: string) => Promise<void>;
   deleteSnapshot: (id: string) => Promise<void>;
+  /** snapshotData (rules / bindings / codeMaps) を lazy fetch 하고 cache. 既に在ればそのまま返す. */
+  ensureSnapshotData: (id: string) => Promise<SnapshotData>;
 }
 
 /**
@@ -179,6 +181,25 @@ export const useSnapshotsStore = create<SnapshotsState>()(
       set((st) => ({
         snapshots: st.snapshots.filter((s) => s.id !== id),
       }));
+    },
+
+    ensureSnapshotData: async (id) => {
+      const existing = get().snapshots.find((s) => s.id === id);
+      if (existing?.snapshotData) return existing.snapshotData;
+      const raw = await snapshotApi.getMapping(id);
+      /* BE が空の mapping (rules/bindings/codeMaps が無い snapshot) を返すと null/undefined
+         になる場合があるので空配列で正規化. runPreflight が input.snapshotData.bindings 등을
+         non-null 으로 가정한다. */
+      const data: SnapshotData = raw ?? { rules: [], bindings: [], codeMaps: [] };
+      const normalized: SnapshotData = {
+        rules: data.rules ?? [],
+        bindings: data.bindings ?? [],
+        codeMaps: data.codeMaps ?? [],
+      };
+      set((st) => ({
+        snapshots: st.snapshots.map((s) => s.id === id ? { ...s, snapshotData: normalized } : s),
+      }));
+      return normalized;
     },
   }),
 );

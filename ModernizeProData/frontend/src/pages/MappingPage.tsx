@@ -306,7 +306,7 @@ export function MappingPage() {
   const consumedFocusKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const state = location.state as {
-      fixTarget?: { kind: 'unmapped-tobe' | 'unmapped-asis' | 'unbound-tobe' };
+      fixTarget?: { kind: 'unmapped-tobe' | 'unmapped-asis' | 'unbound-tobe'; table?: string };
       focusTable?: { internalName: string };
     } | null;
 
@@ -328,17 +328,27 @@ export function MappingPage() {
     }
 
     const kind = state?.fixTarget?.kind;
+    const targetTable = state?.fixTarget?.table;
     if (!kind) return;
     // unmapped-asis: AS-IS 사이드로 자동 전환해야 AsisTableDetail 이 mount 되고
-    // [data-fix-row="asis-unmapped"] 마커가 DOM 에 등장. 첫 AS-IS 테이블로 switch.
+    // [data-fix-row="asis-unmapped"] 마커가 DOM 에 등장. table 명시 시 그 AS-IS table, 없으면 첫번째.
     if (kind === 'unmapped-asis' && ASIS_TABLES.length > 0) {
-      setSelected({ side: 'asis', name: ASIS_TABLES[0].name });
+      const target = targetTable
+        ? ASIS_TABLES.find((tt) => tt.name === targetTable || tt.internalName === targetTable)
+        : null;
+      const pick = target ?? ASIS_TABLES[0];
+      setSelected({ side: 'asis', name: pick.name });
     }
-    // unbound-tobe: 첫 unbound TO-BE 테이블(sources 비어있는)을 활성으로 → CollapsibleBinding 렌더.
-    if (kind === 'unbound-tobe') {
-      const firstUnbound = effectiveTobe.find((t) => t.sources.length === 0);
-      if (firstUnbound) {
-        setSelected({ side: 'tobe', name: firstUnbound.name, internalName: firstUnbound.internalName });
+    // unbound-tobe / unmapped-tobe: table 指定 → その TO-BE を選択. なければ最初の該当を選択.
+    if (kind === 'unbound-tobe' || kind === 'unmapped-tobe') {
+      let chosen = targetTable
+        ? effectiveTobe.find((tt) => tt.name === targetTable || tt.internalName === targetTable)
+        : null;
+      if (!chosen && kind === 'unbound-tobe') {
+        chosen = effectiveTobe.find((tt) => tt.sources.length === 0);
+      }
+      if (chosen) {
+        setSelected({ side: 'tobe', name: chosen.name, internalName: chosen.internalName });
       }
     }
     const id = window.setTimeout(() => {
