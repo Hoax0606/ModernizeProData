@@ -297,9 +297,36 @@ export function MappingPage() {
 
   // Pre-flight Fix → 첫 unmapped row 찾아 scrollIntoView + 1초 teal pulse.
   // ExecutionPage 가 navigate('/mapping', { state: { fixTarget: { kind } } }) 로 진입.
+  // Dashboard 행 클릭 → state.focusTable.internalName 로 해당 TO-BE 테이블을 active 화.
   const location = useLocation();
+  const routerNavigate = useNavigate();
+  // 同じ focusTable を hydrationTick の度に再適用しないためのガード.
+  // window.history.replaceState だけだと React Router の location.state は更新されず, 結果として
+  // schema 再 fetch (= hydrationTick++) のたびに同じテーブルへ強制リセットされていた.
+  const consumedFocusKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    const state = location.state as { fixTarget?: { kind: 'unmapped-tobe' | 'unmapped-asis' | 'unbound-tobe' } } | null;
+    const state = location.state as {
+      fixTarget?: { kind: 'unmapped-tobe' | 'unmapped-asis' | 'unbound-tobe' };
+      focusTable?: { internalName: string };
+    } | null;
+
+    // Dashboard row → focus a specific TO-BE table.
+    if (state?.focusTable) {
+      const id = state.focusTable.internalName;
+      if (consumedFocusKeyRef.current === id) return;  // 既に処理済み
+      if (TOBE_TABLES.length === 0) return;            // hydrate 待ち
+      const target = TOBE_TABLES.find((t) => t.internalName === id);
+      if (target) {
+        setSelected({ side: 'tobe', name: target.name, internalName: target.internalName });
+        // 自動初期選択を抑止 — 既に欲しい行を選んだ.
+        didInitialSelectRef.current = true;
+        consumedFocusKeyRef.current = id;
+        // React Router の location.state を実際にクリア (history.replaceState だけでは不足).
+        routerNavigate(location.pathname, { replace: true });
+      }
+      return;
+    }
+
     const kind = state?.fixTarget?.kind;
     if (!kind) return;
     // unmapped-asis: AS-IS 사이드로 자동 전환해야 AsisTableDetail 이 mount 되고
@@ -354,6 +381,7 @@ export function MappingPage() {
   // 프로젝트 변경 시 selection lock 해제.
   useEffect(() => {
     didInitialSelectRef.current = false;
+    consumedFocusKeyRef.current = null;
     setSelected(null);
   }, [activeProjectId]);
   // hydrate 후 첫 TOBE 자동 선택 (프로젝트당 한 번).
