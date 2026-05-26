@@ -1,0 +1,5 @@
+domain,source_value,target_value,description
+BRANCH_KIND,01,HQ,本店 / Headquarters — AS-IS M_BRANCH.BRANCH_KBN '01' → TO-BE branch.branch_kind 'HQ'
+BRANCH_KIND,02,BRANCH,支店 / Branch — AS-IS M_BRANCH.BRANCH_KBN '02' → TO-BE branch.branch_kind 'BRANCH'
+BRANCH_KIND,03,SATELLITE,出張所 / Satellite — AS-IS M_BRANCH.BRANCH_KBN '03' → TO-BE branch.branch_kind 'SATELLITE'
+BRANCH_KIND,04,ONLINE,オンライン支店 / Online — AS-IS M_BRANCH.BRANCH_KBN '04' → TO-BE branch.branch_kind 'ONLINE'

@@ -1,737 +1,796 @@
 #!/usr/bin/env python3
-"""Generate stage-keyed sample CSVs for both TO-BE (PostgreSQL) and AS-IS (Oracle extract).
+"""
+Generate sample CSVs for both AS-IS (Oracle extract) and TO-BE (PostgreSQL).
+
+새 schema (16 + 18 tables). 매핑 시나리오를 의도적으로 포함:
+  - 1:N column split  : CUST_ADDR → zip/prefecture/city/street_line1/2
+                        CUST_NM_FULL → family_kanji/given_kanji
+                        KOZA_KBN 4桁 → account_type/member_tier/permission_flag
+                        TANTO_CD 8桁 → department_code/position_code/permission_flag
+  - 1:N table  split  : T_TRADE (wide) → trade + trade_fee + trade_settlement_link
+                        M_PRODUCT_HIST.CLOB → product_history.old/new_snapshot JSONB
+  - N:1 table  merge  : M_BRANCH + M_BRANCH_CONTACT → branch
+                        M_CUSTOMER_KANA + M_CUSTOMER 의 일부 → customer_name
+  - code value mapping: GENDER 1/2 → M/F, TORIHIKI_KBN 1/2/3 → BUY/SELL/TRANSFER
+                        BRANCH_KBN 01/02/03/04 → HQ/BRANCH/SATELLITE/ONLINE
+                        STATUS_CD A/C/F/P → ACTIVE/CLOSED/FROZEN/PENDING
 
 Outputs:
-  db/sample_data/tobe/{stage}/{table}.csv          — UTF-8 BOM, LF, Excel-friendly
-  db/sample_data/asis/{stage}/{ORACLE_TABLE}.csv   — UTF-8 no BOM, CRLF, ops-extract style
-
-Stages: dev / test / staging / prod
-Tables: customer, product, branch, employee, account, account_product, trade, market_quote, settlement
-
-- Deterministic: same seed per stage → byte-identical CSVs on every run.
-- FK integrity: customer → product → branch → employee → account → account_product → trade → market_quote → settlement.
-- Self-ref FK guarded: employee.manager_id and branch.parent_branch_id always reference smaller ids.
-- Masking applied to the TO-BE `test` stage only (customer_name, email, phone). AS-IS extracts are never masked (operations dump is raw).
-- Encodings:
-    TO-BE  → UTF-8 with BOM  (Excel mojibake-free)
-    AS-IS  → UTF-8 no BOM, CRLF  (canonical Oracle SQL*Plus / nightly extract style)
+  db/sample_data/asis/{stage}/{ORACLE_TABLE}.csv   — UTF-8 no BOM, CRLF, uppercase headers
+  db/sample_data/tobe/{stage}/{table}.csv          — UTF-8 BOM, LF, snake_case headers
 
 Run from repo root:
-    python3 scripts/gen_sample_data.py
+    python scripts/gen_sample_data.py            # all stages
+    python scripts/gen_sample_data.py dev test   # only those stages
 """
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import random
+import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Iterable
+
+# Make sibling module importable whether run from repo root or scripts/ dir.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fixtures_jp as F   # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-OUT_ROOT_TOBE = REPO_ROOT / "db" / "sample_data" / "tobe"
-OUT_ROOT_ASIS = REPO_ROOT / "db" / "sample_data" / "asis"
+OUT_ASIS = REPO_ROOT / "db" / "sample_data" / "asis"
+OUT_TOBE = REPO_ROOT / "db" / "sample_data" / "tobe"
 
-STAGES = ("dev", "test", "staging", "prod")
+ALL_STAGES = ("dev", "test", "staging", "prod")
 
 # ────────────────────────────────────────────────────────────────────────────
-# Row counts per stage
+# Row counts per stage (driven by user spec: dev=light, prod=heavy).
+# Numbers are tuned so trade≈customer×1, market_quote≈product×days, etc.
+# Tables not listed are derived (e.g. customer_name is per-customer 1:1).
 # ────────────────────────────────────────────────────────────────────────────
 ROW_COUNTS: dict[str, dict[str, int]] = {
-    "dev":     {"customer":  10, "product":  8, "branch":  5,  "employee":  12, "account":  15, "account_product":  18, "trade":  20, "market_quote":  30, "settlement":  15},
-    "test":    {"customer":  50, "product": 20, "branch":  8,  "employee":  40, "account":  80, "account_product":  90, "trade": 100, "market_quote": 150, "settlement":  80},
-    "staging": {"customer": 100, "product": 40, "branch": 12,  "employee":  80, "account": 180, "account_product": 200, "trade": 200, "market_quote": 400, "settlement": 160},
-    "prod":    {"customer": 200, "product": 60, "branch": 20,  "employee": 150, "account": 380, "account_product": 420, "trade": 400, "market_quote":1000, "settlement": 320},
-}
-
-# ────────────────────────────────────────────────────────────────────────────
-# Japanese name pools
-# ────────────────────────────────────────────────────────────────────────────
-SURNAMES = [
-    "山田", "鈴木", "佐藤", "田中", "高橋", "渡辺", "中村", "小林", "加藤", "吉田",
-    "山本", "斎藤", "松本", "井上", "木村", "林", "清水", "山口", "池田", "阿部",
-    "橋本", "山崎", "森", "石川", "前田", "藤田", "後藤", "岡田", "長谷川", "村上",
-]
-SURNAMES_KANA = [
-    "ヤマダ", "スズキ", "サトウ", "タナカ", "タカハシ", "ワタナベ", "ナカムラ", "コバヤシ", "カトウ", "ヨシダ",
-    "ヤマモト", "サイトウ", "マツモト", "イノウエ", "キムラ", "ハヤシ", "シミズ", "ヤマグチ", "イケダ", "アベ",
-    "ハシモト", "ヤマザキ", "モリ", "イシカワ", "マエダ", "フジタ", "ゴトウ", "オカダ", "ハセガワ", "ムラカミ",
-]
-GIVEN_M = [
-    "太郎", "健一", "雄太", "翔", "大輔", "拓也", "隆", "浩二", "剛", "誠",
-    "浩", "智", "智之", "直樹", "一郎", "修", "哲也", "達也", "慎一", "圭",
-    "亮", "健太", "諒", "翼", "蓮", "颯太", "陽介", "大樹", "雄一", "慎太郎",
-]
-GIVEN_M_KANA = [
-    "タロウ", "ケンイチ", "ユウタ", "ショウ", "ダイスケ", "タクヤ", "タカシ", "コウジ", "ツヨシ", "マコト",
-    "ヒロシ", "サトシ", "トモユキ", "ナオキ", "イチロウ", "オサム", "テツヤ", "タツヤ", "シンイチ", "ケイ",
-    "リョウ", "ケンタ", "リョウ", "ツバサ", "レン", "ソウタ", "ヨウスケ", "ダイキ", "ユウイチ", "シンタロウ",
-]
-GIVEN_F = [
-    "花子", "美咲", "由美", "智子", "真理", "香織", "恵子", "直美", "加奈", "京子",
-    "麻衣", "久美子", "千恵", "千秋", "知美", "裕子", "麻美", "結衣", "萌", "美穂",
-    "葵", "凜", "桜", "美月", "玲奈", "陽菜", "莉子", "杏", "詩織", "七海",
-]
-GIVEN_F_KANA = [
-    "ハナコ", "ミサキ", "ユミ", "トモコ", "マリ", "カオリ", "ケイコ", "ナオミ", "カナ", "キョウコ",
-    "マイ", "クミコ", "チエ", "チアキ", "トモミ", "ユウコ", "アサミ", "ユイ", "モエ", "ミホ",
-    "アオイ", "リン", "サクラ", "ミツキ", "レイナ", "ヒナ", "リコ", "アン", "シオリ", "ナナミ",
-]
-
-EMAIL_DOMAINS = ["example.jp", "example.co.jp", "test.jp"]
-
-# ────────────────────────────────────────────────────────────────────────────
-# Product pool (securities domain)
-# ────────────────────────────────────────────────────────────────────────────
-PRODUCT_POOL: list[tuple[str, str, str]] = [
-    ("10", "STK001", "トヨタ自動車"),
-    ("10", "STK002", "ソニーグループ"),
-    ("10", "STK003", "任天堂"),
-    ("10", "STK004", "三菱UFJフィナンシャル"),
-    ("10", "STK005", "日立製作所"),
-    ("10", "STK006", "パナソニック"),
-    ("10", "STK007", "本田技研工業"),
-    ("10", "STK008", "NTT"),
-    ("10", "STK009", "ソフトバンクグループ"),
-    ("10", "STK010", "武田薬品工業"),
-    ("10", "STK011", "キーエンス"),
-    ("10", "STK012", "ファーストリテイリング"),
-    ("10", "STK013", "東京エレクトロン"),
-    ("10", "STK014", "信越化学工業"),
-    ("10", "STK015", "村田製作所"),
-    ("10", "STK016", "三井住友フィナンシャル"),
-    ("10", "STK017", "JR東日本"),
-    ("10", "STK018", "オリエンタルランド"),
-    ("10", "STK019", "リクルートホールディングス"),
-    ("10", "STK020", "KDDI"),
-    ("20", "BND001", "日本国債10年"),
-    ("20", "BND002", "日本国債20年"),
-    ("20", "BND003", "日本国債30年"),
-    ("20", "BND004", "米国債5年"),
-    ("20", "BND005", "米国債10年"),
-    ("20", "BND006", "豪国債10年"),
-    ("20", "BND007", "三菱UFJ社債A"),
-    ("20", "BND008", "三井住友社債B"),
-    ("20", "BND009", "東京電力社債"),
-    ("20", "BND010", "政府保証債J1"),
-    ("20", "BND011", "政府保証債J2"),
-    ("20", "BND012", "ソフトバンク社債"),
-    ("20", "BND013", "JR東日本社債"),
-    ("20", "BND014", "NTT社債"),
-    ("20", "BND015", "日本郵政社債"),
-    ("30", "MFD001", "グローバル株式ファンド"),
-    ("30", "MFD002", "国内債券ファンド"),
-    ("30", "MFD003", "アジアREITファンド"),
-    ("30", "MFD004", "テクノロジー集中投信"),
-    ("30", "MFD005", "ESGバランスファンド"),
-    ("30", "MFD006", "新興国株式ファンド"),
-    ("30", "MFD007", "国内中小型株ファンド"),
-    ("30", "MFD008", "米国株式インデックス"),
-    ("30", "MFD009", "ヘルスケア集中投信"),
-    ("30", "MFD010", "グローバルREITファンド"),
-    ("30", "MFD011", "高配当株ファンド"),
-    ("30", "MFD012", "コモディティファンド"),
-    ("30", "MFD013", "AI関連株ファンド"),
-    ("30", "MFD014", "クリーンエネルギー投信"),
-    ("30", "MFD015", "オールカントリー株式"),
-    ("30", "MFD016", "為替ヘッジ債券F"),
-    ("30", "MFD017", "新興国債券ファンド"),
-    ("30", "MFD018", "短期金融F"),
-    ("30", "MFD019", "バランス型F"),
-    ("30", "MFD020", "アクティブ運用F"),
-    ("30", "MFD021", "リスク抑制F"),
-    ("30", "MFD022", "成長株集中F"),
-    ("30", "MFD023", "バリュー株F"),
-    ("30", "MFD024", "海外REITF"),
-    ("30", "MFD025", "国内REITF"),
-]
-
-# ────────────────────────────────────────────────────────────────────────────
-# Branch pool — (code, name, parent_code or None). Parent must appear before child.
-# ────────────────────────────────────────────────────────────────────────────
-BRANCH_POOL: list[tuple[str, str, str | None]] = [
-    ("HQ001", "本部",         None),
-    ("BR001", "東京本店",     "HQ001"),
-    ("BR002", "大阪本店",     "HQ001"),
-    ("BR003", "渋谷支店",     "BR001"),
-    ("BR004", "新宿支店",     "BR001"),
-    ("BR005", "横浜支店",     "BR001"),
-    ("BR006", "千葉支店",     "BR001"),
-    ("BR007", "梅田支店",     "BR002"),
-    ("BR008", "難波支店",     "BR002"),
-    ("BR009", "京都支店",     "BR002"),
-    ("BR010", "名古屋支店",   "HQ001"),
-    ("BR011", "福岡支店",     "HQ001"),
-    ("BR012", "札幌支店",     "HQ001"),
-    ("BR013", "仙台支店",     "HQ001"),
-    ("BR014", "広島支店",     "BR002"),
-    ("BR015", "神戸支店",     "BR002"),
-    ("BR016", "天王寺支店",   "BR002"),
-    ("BR017", "鎌倉出張所",   "BR005"),
-    ("BR018", "立川出張所",   "BR001"),
-    ("BR019", "さいたま支店", "BR001"),
-]
-
-ADDRESS_POOL = [
-    "東京都千代田区大手町1-1-1",
-    "東京都中央区銀座2-3-4",
-    "東京都港区六本木3-1-2",
-    "東京都新宿区西新宿2-8-1",
-    "東京都渋谷区道玄坂1-9-2",
-    "東京都目黒区中目黒1-4-5",
-    "大阪府大阪市北区梅田1-1-3",
-    "大阪府大阪市中央区難波5-1-60",
-    "神奈川県横浜市西区高島2-19-12",
-    "愛知県名古屋市中村区名駅1-1-4",
-    "福岡県福岡市中央区天神2-14-13",
-    "北海道札幌市中央区大通西4-1",
-    "京都府京都市下京区烏丸通四条下る5",
-    "兵庫県神戸市中央区三宮町1-1-1",
-    "宮城県仙台市青葉区中央1-2-3",
-    "広島県広島市中区基町6-78",
-]
-
-EMPLOYEE_ROLES = ["営業", "営業", "営業", "営業", "営業", "管理", "管理", "事務", "事務", "事務", "監査", "IT"]
-TRADE_SOURCES = ["EXCHANGE", "OTC", "EXCHANGE", "EXCHANGE"]
-
-# ────────────────────────────────────────────────────────────────────────────
-# ASIS Oracle column name mapping per TO-BE table
-# ────────────────────────────────────────────────────────────────────────────
-ASIS_COLUMN_MAP: dict[str, dict[str, str]] = {
-    "customer": {
-        "customer_id":        "CUSTOMER_ID",
-        "customer_code":      "CUSTOMER_CD",
-        "customer_name":      "CUSTOMER_NM",
-        "customer_name_kana": "CUSTOMER_NM_KANA",
-        "birth_date":         "BIRTH_DT",
-        "gender":             "GENDER_CD",
-        "email":              "EMAIL",
-        "phone":              "PHONE",
-        "created_at":         "ENTRY_TS",
-        "updated_at":         "UPDATE_TS",
+    "dev": {
+        "customer": 100, "product": 50, "branch": 5, "employee": 20,
+        "account": 150, "account_product": 200, "trade": 500,
+        "trade_detail_per_trade_max": 2, "trade_log_per_trade": 2,
+        "market_quote_days": 30,  "settlement": 500, "product_history": 100,
     },
-    "product": {
-        "product_id":     "PRODUCT_ID",
-        "product_code":   "PRODUCT_CD",
-        "product_name":   "PRODUCT_NM",
-        "product_kind":   "PRODUCT_KIND_CD",
-        "unit_price":     "UNIT_PRICE",
-        "currency_code":  "CURRENCY_CD",
-        "created_at":     "ENTRY_TS",
+    "test": {
+        "customer": 5000, "product": 200, "branch": 20, "employee": 100,
+        "account": 8000, "account_product": 10000, "trade": 10000,
+        "trade_detail_per_trade_max": 2, "trade_log_per_trade": 2,
+        "market_quote_days": 60, "settlement": 9000, "product_history": 1000,
     },
-    "branch": {
-        "branch_id":        "BRANCH_ID",
-        "branch_code":      "BRANCH_CD",
-        "branch_name":      "BRANCH_NM",
-        "parent_branch_id": "PARENT_BRANCH_ID",
-        "address":          "ADDRESS",
-        "opened_date":      "OPENED_DT",
-        "is_active":        "ACTIVE_FLG",
-        "created_at":       "ENTRY_TS",
+    "staging": {
+        "customer": 50000, "product": 500, "branch": 50, "employee": 500,
+        "account": 80000, "account_product": 100000, "trade": 100000,
+        "trade_detail_per_trade_max": 1, "trade_log_per_trade": 2,
+        "market_quote_days": 120, "settlement": 90000, "product_history": 5000,
     },
-    "employee": {
-        "employee_id":   "EMPLOYEE_ID",
-        "employee_code": "EMPLOYEE_CD",
-        "employee_name": "EMPLOYEE_NM",
-        "branch_id":     "BRANCH_ID",
-        "manager_id":    "MANAGER_ID",
-        "role":          "ROLE_CD",
-        "email":         "EMAIL",
-        "hired_date":    "HIRED_DT",
-        "is_active":     "ACTIVE_FLG",
-        "created_at":    "ENTRY_TS",
-    },
-    "account": {
-        "account_id":   "ACCOUNT_ID",
-        "customer_id":  "CUSTOMER_ID",
-        "branch_id":    "BRANCH_ID",
-        "account_no":   "ACCOUNT_NO",
-        "account_kind": "ACCOUNT_KIND_CD",
-        "balance":      "BALANCE",
-        "opened_date":  "OPENED_DT",
-        "status":       "STATUS_CD",
-        "created_at":   "ENTRY_TS",
-        "updated_at":   "UPDATE_TS",
-    },
-    "account_product": {
-        "account_id":  "ACCOUNT_ID",
-        "product_id":  "PRODUCT_ID",
-        "holding_qty": "HOLDING_QTY",
-        "start_date":  "START_DT",
-        "end_date":    "END_DT",
-        "created_at":  "ENTRY_TS",
-    },
-    "trade": {
-        "trade_id":    "TRADE_ID",
-        "account_id":  "ACCOUNT_ID",
-        "product_id":  "PRODUCT_ID",
-        "trade_type":  "TRADE_TYPE_CD",
-        "trade_qty":   "TRADE_QTY",
-        "trade_price": "TRADE_PRICE",
-        "trade_date":  "TRADE_DT",
-        "created_at":  "ENTRY_TS",
-    },
-    "settlement": {
-        "trade_id":          "TRADE_ID",
-        "settlement_date":   "SETTLEMENT_DT",
-        "account_id":        "ACCOUNT_ID",
-        "settlement_amount": "SETTLEMENT_AMOUNT",
-        "fee":               "FEE",
-        "status":            "STATUS_CD",
-        "settled_at":        "SETTLED_TS",
-        "created_at":        "ENTRY_TS",
+    "prod": {
+        "customer": 500000, "product": 1000, "branch": 200, "employee": 2000,
+        "account": 800000, "account_product": 1000000, "trade": 1000000,
+        "trade_detail_per_trade_max": 1, "trade_log_per_trade": 1,
+        "market_quote_days": 250, "settlement": 900000, "product_history": 50000,
     },
 }
 
-
-# ────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ────────────────────────────────────────────────────────────────────────────
-def stage_seed(stage: str) -> int:
-    h = hashlib.sha256(stage.encode("utf-8")).hexdigest()
-    return int(h[:16], 16)
-
-
-def romaji(surname_kana: str, given_kana: str) -> str:
-    pool = "abcdefghijklmnopqrstuvwxyz"
-    src = surname_kana + given_kana
-    return "".join(pool[ord(ch) % 26] for ch in src)[:8]
-
-
-def mask_name(name: str) -> str:
-    parts = name.split(" ", 1)
-    if len(parts) != 2:
-        return name
-    surname, given = parts
-    return f"{surname} {'*' * len(given)}"
-
-
-def mask_email(email: str) -> str:
-    if "@" not in email:
-        return email
-    local, domain = email.split("@", 1)
-    if len(local) <= 2:
-        return f"{local}****@{domain}"
-    return f"{local[:2]}****@{domain}"
-
-
-def mask_phone(phone: str) -> str:
-    segs = phone.split("-")
-    if len(segs) != 3:
-        return phone
-    return f"{segs[0]}-****-{segs[2]}"
-
-
-def iso_date(d: date) -> str:
-    return d.isoformat()
-
-
-def iso_ts(dt: datetime) -> str:
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+# Deterministic seed per stage so re-runs produce byte-identical CSVs.
+STAGE_SEEDS = {"dev": 1001, "test": 1002, "staging": 1003, "prod": 1004}
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Generators
+# CSV writer helpers — AS-IS vs TO-BE differ by encoding/EOL/header case.
 # ────────────────────────────────────────────────────────────────────────────
-def gen_customer(n: int, rng: random.Random, mask: bool) -> list[dict]:
-    rows = []
-    for i in range(1, n + 1):
-        si = rng.randrange(len(SURNAMES))
-        is_male = rng.random() < 0.55
-        if is_male:
-            gi = rng.randrange(len(GIVEN_M))
-            given, given_kana = GIVEN_M[gi], GIVEN_M_KANA[gi]
-            gender = "M"
-        else:
-            gi = rng.randrange(len(GIVEN_F))
-            given, given_kana = GIVEN_F[gi], GIVEN_F_KANA[gi]
-            gender = "F"
-        name = f"{SURNAMES[si]} {given}"
-        name_kana = f"{SURNAMES_KANA[si]} {given_kana}"
-        age_days = rng.randrange(25 * 365, 70 * 365)
-        birth = date(2024, 1, 1) - timedelta(days=age_days)
-        local = romaji(SURNAMES_KANA[si], given_kana) + str(i)
-        email = f"{local}@{EMAIL_DOMAINS[i % len(EMAIL_DOMAINS)]}"
-        phone = f"090-{rng.randrange(1000, 10000)}-{rng.randrange(1000, 10000)}"
-        entered = datetime(2020, 1, 1) + timedelta(
-            days=rng.randrange(0, 1500), seconds=rng.randrange(0, 86400)
-        )
-        rows.append({
-            "customer_id":        i,
-            "customer_code":      f"C{i:06d}",
-            "customer_name":      mask_name(name) if mask else name,
-            "customer_name_kana": name_kana,
-            "birth_date":         iso_date(birth),
-            "gender":             gender,
-            "email":              mask_email(email) if mask else email,
-            "phone":              mask_phone(phone) if mask else phone,
-            "created_at":         iso_ts(entered),
-            "updated_at":         "",
-        })
-    return rows
+class AsIsWriter:
+    """Oracle extract style: UTF-8 no BOM, CRLF, UPPERCASE headers, empty string for NULL."""
+    def __init__(self, path: Path, headers: list[str]):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.f = open(path, "w", encoding="utf-8", newline="")
+        self.w = csv.writer(self.f, lineterminator="\r\n", quoting=csv.QUOTE_MINIMAL)
+        self.w.writerow([h.upper() for h in headers])
+
+    def write(self, row: list):
+        self.w.writerow(["" if v is None else v for v in row])
+
+    def close(self):
+        self.f.close()
 
 
-def gen_product(n: int, rng: random.Random) -> list[dict]:
-    rows = []
-    pool = PRODUCT_POOL[:n] if n <= len(PRODUCT_POOL) else PRODUCT_POOL[:]
-    for i, (kind, code, name) in enumerate(pool, start=1):
-        if kind == "10":
-            price = round(rng.uniform(500, 50000), 2)
-        elif kind == "20":
-            price = round(rng.uniform(95, 105), 4)
-        else:
-            price = round(rng.uniform(8000, 25000), 4)
-        entered = datetime(2019, 1, 1) + timedelta(days=rng.randrange(0, 1800))
-        rows.append({
-            "product_id":    i,
-            "product_code":  code,
-            "product_name":  name,
-            "product_kind":  kind,
-            "unit_price":    f"{price}",
-            "currency_code": "JPY",
-            "created_at":    iso_ts(entered),
-        })
-    return rows
+class ToBeWriter:
+    """TO-BE PG style: UTF-8 with BOM, LF, snake_case headers, empty string for NULL."""
+    def __init__(self, path: Path, headers: list[str]):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Write BOM manually then UTF-8 (utf-8-sig appends ZWNBSP on each row in some libs).
+        self.f = open(path, "wb")
+        self.f.write(b"\xef\xbb\xbf")
+        self.f.close()
+        self.f = open(path, "a", encoding="utf-8", newline="")
+        self.w = csv.writer(self.f, lineterminator="\n", quoting=csv.QUOTE_MINIMAL)
+        self.w.writerow(headers)
 
+    def write(self, row: list):
+        self.w.writerow(["" if v is None else v for v in row])
 
-def gen_branch(n: int, rng: random.Random) -> list[dict]:
-    """Branch with self-ref FK parent_branch_id. Parent always has smaller id."""
-    pool = BRANCH_POOL[:n] if n <= len(BRANCH_POOL) else BRANCH_POOL[:]
-    code_to_id = {code: i for i, (code, _, _) in enumerate(pool, start=1)}
-    rows = []
-    for i, (code, name, parent_code) in enumerate(pool, start=1):
-        parent_id: int | str = code_to_id[parent_code] if parent_code else ""
-        if isinstance(parent_id, int) and parent_id >= i:
-            parent_id = ""  # safety net
-        address = ADDRESS_POOL[i % len(ADDRESS_POOL)]
-        opened = date(2010, 4, 1) + timedelta(days=rng.randrange(0, 4500))
-        active = rng.random() > 0.05
-        entered = datetime.combine(opened, datetime.min.time()) + timedelta(
-            seconds=rng.randrange(0, 86400)
-        )
-        rows.append({
-            "branch_id":        i,
-            "branch_code":      code,
-            "branch_name":      name,
-            "parent_branch_id": parent_id,
-            "address":          address,
-            "opened_date":      iso_date(opened),
-            "is_active":        active,
-            "created_at":       iso_ts(entered),
-        })
-    return rows
-
-
-def gen_employee(n: int, n_branch: int, rng: random.Random) -> list[dict]:
-    """manager_id always references a previously-inserted (smaller id) employee."""
-    rows = []
-    for i in range(1, n + 1):
-        si = rng.randrange(len(SURNAMES))
-        is_male = rng.random() < 0.6
-        given_pool = GIVEN_M if is_male else GIVEN_F
-        gi = rng.randrange(len(given_pool))
-        name = f"{SURNAMES[si]} {given_pool[gi]}"
-        branch_id = rng.randint(1, n_branch)
-        if i <= max(1, n // 10):
-            manager_id: int | str = ""
-        else:
-            manager_id = rng.randint(1, max(1, i - 1))
-        role = rng.choice(EMPLOYEE_ROLES)
-        email = f"emp{i:05d}@{EMAIL_DOMAINS[i % len(EMAIL_DOMAINS)]}"
-        hired = date(2015, 4, 1) + timedelta(days=rng.randrange(0, 3500))
-        active = rng.random() > 0.10
-        entered = datetime.combine(hired, datetime.min.time()) + timedelta(
-            seconds=rng.randrange(0, 86400)
-        )
-        rows.append({
-            "employee_id":   i,
-            "employee_code": f"E{i:06d}",
-            "employee_name": name,
-            "branch_id":     branch_id,
-            "manager_id":    manager_id,
-            "role":          role,
-            "email":         email,
-            "hired_date":    iso_date(hired),
-            "is_active":     active,
-            "created_at":    iso_ts(entered),
-        })
-    return rows
-
-
-def gen_account(n: int, n_customer: int, n_branch: int, rng: random.Random) -> list[dict]:
-    rows = []
-    for i in range(1, n + 1):
-        cust_id = rng.randint(1, n_customer)
-        branch_id = rng.randint(1, n_branch)
-        kind = "01" if rng.random() < 0.6 else "02"
-        balance = round(rng.uniform(0, 5_000_000), 2)
-        opened = date(2020, 1, 1) + timedelta(days=rng.randrange(0, 1500))
-        status = rng.choices(["A", "C", "F"], weights=[80, 15, 5])[0]
-        entered = datetime.combine(opened, datetime.min.time()) + timedelta(
-            seconds=rng.randrange(0, 86400)
-        )
-        rows.append({
-            "account_id":   i,
-            "customer_id":  cust_id,
-            "branch_id":    branch_id,
-            "account_no":   f"{rng.randrange(1000, 10000)}-{rng.randrange(100000, 1000000)}",
-            "account_kind": kind,
-            "balance":      f"{balance}",
-            "opened_date":  iso_date(opened),
-            "status":       status,
-            "created_at":   iso_ts(entered),
-            "updated_at":   "",
-        })
-    return rows
-
-
-def gen_account_product(n: int, n_account: int, n_product: int, rng: random.Random) -> list[dict]:
-    seen: set[tuple[int, int]] = set()
-    rows = []
-    attempts = 0
-    while len(rows) < n and attempts < n * 20:
-        attempts += 1
-        aid = rng.randint(1, n_account)
-        pid = rng.randint(1, n_product)
-        if (aid, pid) in seen:
-            continue
-        seen.add((aid, pid))
-        qty = round(rng.uniform(1, 1000), 4)
-        start = date(2021, 1, 1) + timedelta(days=rng.randrange(0, 1000))
-        end = "" if rng.random() < 0.8 else iso_date(start + timedelta(days=rng.randrange(30, 1000)))
-        entered = datetime.combine(start, datetime.min.time()) + timedelta(
-            seconds=rng.randrange(0, 86400)
-        )
-        rows.append({
-            "account_id":  aid,
-            "product_id":  pid,
-            "holding_qty": f"{qty}",
-            "start_date":  iso_date(start),
-            "end_date":    end,
-            "created_at":  iso_ts(entered),
-        })
-    return rows
-
-
-def gen_trade(n: int, n_account: int, n_product: int, rng: random.Random) -> list[dict]:
-    rows = []
-    for i in range(1, n + 1):
-        aid = rng.randint(1, n_account)
-        pid = rng.randint(1, n_product)
-        ttype = "B" if rng.random() < 0.55 else "S"
-        qty = rng.randint(10, 5000)
-        price = round(rng.uniform(95, 50000), 4)
-        td = date(2023, 1, 1) + timedelta(days=rng.randrange(0, 700))
-        entered = datetime.combine(td, datetime.min.time()) + timedelta(
-            seconds=rng.randrange(28800, 64800)
-        )
-        rows.append({
-            "trade_id":    i,
-            "account_id":  aid,
-            "product_id":  pid,
-            "trade_type":  ttype,
-            "trade_qty":   qty,
-            "trade_price": f"{price}",
-            "trade_date":  iso_date(td),
-            "created_at":  iso_ts(entered),
-        })
-    return rows
-
-
-def gen_market_quote(n: int, n_product: int, rng: random.Random) -> list[dict]:
-    """TOBE: source + payload JSONB. ASIS: BID_PRICE/ASK_PRICE/VOLUME split + PAYLOAD_JSON."""
-    rows = []
-    for i in range(1, n + 1):
-        pid = rng.randint(1, n_product)
-        ts = datetime(2024, 1, 1) + timedelta(
-            days=rng.randrange(0, 400), seconds=rng.randrange(0, 86400)
-        )
-        bid = round(rng.uniform(95, 50000), 4)
-        ask = round(bid + rng.uniform(0.01, 5), 4)
-        volume = rng.randint(100, 1_000_000)
-        source = rng.choice(TRADE_SOURCES)
-        payload = json.dumps(
-            {"bid": bid, "ask": ask, "volume": volume, "spread": round(ask - bid, 4)},
-            ensure_ascii=False,
-        )
-        rows.append({
-            "quote_id":   i,
-            "product_id": pid,
-            "quote_ts":   iso_ts(ts),
-            "bid":        bid,
-            "ask":        ask,
-            "volume":     volume,
-            "source":     source,
-            "payload":    payload,
-        })
-    return rows
-
-
-def gen_settlement(n: int, trade_rows: list[dict], rng: random.Random) -> list[dict]:
-    """Settlement references trade. settlement_date = trade_date + T+2."""
-    if not trade_rows:
-        return []
-    chosen = rng.sample(trade_rows, min(n, len(trade_rows)))
-    rows = []
-    for t in chosen:
-        td = datetime.strptime(t["trade_date"], "%Y-%m-%d").date()
-        settle_dt = td + timedelta(days=2)
-        amount = round(float(t["trade_price"]) * int(t["trade_qty"]), 2)
-        fee = round(amount * 0.001, 2)
-        status = rng.choices(["S", "P", "F"], weights=[75, 20, 5])[0]
-        settled_at = ""
-        if status == "S":
-            settled_at = iso_ts(
-                datetime.combine(settle_dt, datetime.min.time())
-                + timedelta(hours=rng.randint(9, 17))
-            )
-        entered = datetime.combine(settle_dt, datetime.min.time()) + timedelta(
-            seconds=rng.randrange(0, 86400)
-        )
-        rows.append({
-            "trade_id":          t["trade_id"],
-            "settlement_date":   iso_date(settle_dt),
-            "account_id":        t["account_id"],
-            "settlement_amount": f"{amount}",
-            "fee":               f"{fee}",
-            "status":            status,
-            "settled_at":        settled_at,
-            "created_at":        iso_ts(entered),
-        })
-    return rows
+    def close(self):
+        self.f.close()
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Column order (TOBE)
+# Utility — sample helpers
 # ────────────────────────────────────────────────────────────────────────────
-COLUMN_ORDER: dict[str, list[str]] = {
-    "customer":        ["customer_id", "customer_code", "customer_name", "customer_name_kana", "birth_date", "gender", "email", "phone", "created_at", "updated_at"],
-    "product":         ["product_id", "product_code", "product_name", "product_kind", "unit_price", "currency_code", "created_at"],
-    "branch":          ["branch_id", "branch_code", "branch_name", "parent_branch_id", "address", "opened_date", "is_active", "created_at"],
-    "employee":        ["employee_id", "employee_code", "employee_name", "branch_id", "manager_id", "role", "email", "hired_date", "is_active", "created_at"],
-    "account":         ["account_id", "customer_id", "branch_id", "account_no", "account_kind", "balance", "opened_date", "status", "created_at", "updated_at"],
-    "account_product": ["account_id", "product_id", "holding_qty", "start_date", "end_date", "created_at"],
-    "trade":           ["trade_id", "account_id", "product_id", "trade_type", "trade_qty", "trade_price", "trade_date", "created_at"],
-    "market_quote":    ["quote_id", "product_id", "quote_ts", "source", "payload"],
-    "settlement":      ["trade_id", "settlement_date", "account_id", "settlement_amount", "fee", "status", "settled_at", "created_at"],
-}
+def random_date(rnd: random.Random, start: date, end: date) -> date:
+    days = (end - start).days
+    return start + timedelta(days=rnd.randrange(days + 1))
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# CSV writers
-# ────────────────────────────────────────────────────────────────────────────
-def _tobe_cell(v):
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    return v
+def fmt_oracle_dt(d: date | datetime | None) -> str | None:
+    """Oracle DATE / TIMESTAMP literal form used in nightly extracts."""
+    if d is None:
+        return None
+    if isinstance(d, datetime):
+        return d.strftime("%Y-%m-%d %H:%M:%S")
+    return d.strftime("%Y-%m-%d")
 
 
-def _asis_cell(v):
-    if isinstance(v, bool):
-        return "Y" if v else "N"
-    return v
+def fmt_pg_ts(d: datetime | None) -> str | None:
+    if d is None:
+        return None
+    return d.strftime("%Y-%m-%d %H:%M:%S")
 
 
-def write_csv_tobe(path: Path, rows: Iterable[dict], columns: list[str]) -> int:
-    """TO-BE CSV: UTF-8 BOM, LF, Excel-friendly."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    n = 0
-    with path.open("w", encoding="utf-8-sig", newline="") as f:
-        w = csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
-        w.writerow(columns)
-        for row in rows:
-            w.writerow([_tobe_cell(row.get(c, "")) for c in columns])
-            n += 1
-    return n
+def jp_zip(rnd: random.Random) -> str:
+    return f"{rnd.randint(100, 999):03d}-{rnd.randint(0, 9999):04d}"
 
 
-def write_csv_asis(path: Path, rows: Iterable[dict], columns: list[str], asis_mapping: dict[str, str]) -> int:
-    """AS-IS CSV: UTF-8 NO BOM, CRLF, Oracle uppercase headers."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    headers = [asis_mapping[c] for c in columns]
-    n = 0
-    with path.open("w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
-        w.writerow(headers)
-        for row in rows:
-            w.writerow([_asis_cell(row.get(c, "")) for c in columns])
-            n += 1
-    return n
+def fictional_address(rnd: random.Random):
+    pref_kj, pref_kn, city = rnd.choice(F.PREFECTURES)
+    block = f"{rnd.randint(1, 9)}-{rnd.randint(1, 30)}-{rnd.randint(1, 30)}"
+    bldg_choices = ["", "メゾン桜", "プラザビル", "中央タワー", "サンライズ館"]
+    bldg = rnd.choice(bldg_choices)
+    return pref_kj, city, block, bldg
 
 
-def write_asis_market_quote(path: Path, rows: Iterable[dict]) -> int:
-    """ASIS market_quote uses legacy split layout (separate BID/ASK/VOLUME columns)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    headers = ["QUOTE_ID", "PRODUCT_ID", "QUOTE_TS", "BID_PRICE", "ASK_PRICE", "VOLUME", "SOURCE_CD", "PAYLOAD_JSON"]
-    n = 0
-    with path.open("w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f, quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
-        w.writerow(headers)
-        for r in rows:
-            w.writerow([
-                r["quote_id"], r["product_id"], r["quote_ts"],
-                r["bid"], r["ask"], r["volume"], r["source"], r["payload"],
-            ])
-            n += 1
-    return n
+def jp_phone(rnd: random.Random) -> str:
+    return f"0{rnd.randint(3, 9)}-{rnd.randint(1000, 9999)}-{rnd.randint(1000, 9999)}"
+
+
+def jp_email(rnd: random.Random, romaji_seed: str) -> str:
+    domain = rnd.choice(["example.jp", "example.co.jp", "test.jp", "modernizepro.jp"])
+    suffix = rnd.randint(1, 9999)
+    return f"{romaji_seed.lower().replace(' ', '')}.{suffix}@{domain}"
+
+
+def to_romaji(family_kana: str, given_kana: str) -> str:
+    """Crude katakana → romaji.  Good enough for sample addresses / emails."""
+    table = str.maketrans({
+        "ア": "A", "イ": "I", "ウ": "U", "エ": "E", "オ": "O",
+        "カ": "KA", "キ": "KI", "ク": "KU", "ケ": "KE", "コ": "KO",
+        "サ": "SA", "シ": "SHI", "ス": "SU", "セ": "SE", "ソ": "SO",
+        "タ": "TA", "チ": "CHI", "ツ": "TSU", "テ": "TE", "ト": "TO",
+        "ナ": "NA", "ニ": "NI", "ヌ": "NU", "ネ": "NE", "ノ": "NO",
+        "ハ": "HA", "ヒ": "HI", "フ": "FU", "ヘ": "HE", "ホ": "HO",
+        "マ": "MA", "ミ": "MI", "ム": "MU", "メ": "ME", "モ": "MO",
+        "ヤ": "YA", "ユ": "YU", "ヨ": "YO",
+        "ラ": "RA", "リ": "RI", "ル": "RU", "レ": "RE", "ロ": "RO",
+        "ワ": "WA", "ン": "N", "ガ": "GA", "ギ": "GI", "グ": "GU",
+        "ゲ": "GE", "ゴ": "GO", "ザ": "ZA", "ジ": "JI", "ズ": "ZU",
+        "ゼ": "ZE", "ゾ": "ZO", "ダ": "DA", "ヂ": "JI", "ヅ": "ZU",
+        "デ": "DE", "ド": "DO", "バ": "BA", "ビ": "BI", "ブ": "BU",
+        "ベ": "BE", "ボ": "BO", "パ": "PA", "ピ": "PI", "プ": "PU",
+        "ペ": "PE", "ポ": "PO", "ョ": "YO", "ュ": "YU", "ャ": "YA",
+        "ッ": "", "ー": "",
+    })
+    fam = "".join(c if c.isascii() else c.translate(table) for c in family_kana)
+    giv = "".join(c if c.isascii() else c.translate(table) for c in given_kana)
+    return f"{fam} {giv}"
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Driver
+# Main: generate one stage end-to-end.
 # ────────────────────────────────────────────────────────────────────────────
 def generate_stage(stage: str) -> dict[str, int]:
-    counts = ROW_COUNTS[stage]
-    rng = random.Random(stage_seed(stage))
-    mask = (stage == "test")
+    """Generate all AS-IS + TO-BE CSVs for one stage. Returns row counts."""
+    rnd = random.Random(STAGE_SEEDS[stage])
+    cfg = ROW_COUNTS[stage]
+    asis_dir = OUT_ASIS / stage
+    tobe_dir = OUT_TOBE / stage
+    asis_dir.mkdir(parents=True, exist_ok=True)
+    tobe_dir.mkdir(parents=True, exist_ok=True)
 
-    customers = gen_customer(counts["customer"], rng, mask=mask)
-    products  = gen_product(counts["product"], rng)
-    branches  = gen_branch(counts["branch"], rng)
-    employees = gen_employee(counts["employee"], counts["branch"], rng)
-    accounts  = gen_account(counts["account"], counts["customer"], counts["branch"], rng)
-    account_products = gen_account_product(counts["account_product"], counts["account"], counts["product"], rng)
-    trades = gen_trade(counts["trade"], counts["account"], counts["product"], rng)
-    quotes = gen_market_quote(counts["market_quote"], counts["product"], rng)
-    settlements = gen_settlement(counts["settlement"], trades, rng)
+    counts: dict[str, int] = {}
+    today = date(2026, 5, 26)
 
-    tobe_dir = OUT_ROOT_TOBE / stage
-    asis_dir = OUT_ROOT_ASIS / stage
+    # ---------- 07_code: M_CODE_MASTER / M_CURRENCY (small + static) -----
+    w_code_asis = AsIsWriter(asis_dir / "M_CODE_MASTER.csv",
+                             ["DOMAIN_CD", "SOURCE_CD", "TARGET_CD", "LABEL_JA", "LABEL_EN",
+                              "SORT_NO", "ACTIVE_FLG", "ENTRY_TS", "UPDATE_TS"])
+    w_code_tobe = ToBeWriter(tobe_dir / "code_dictionary.csv",
+                             ["domain", "source_code", "target_code", "label_ja", "label_en",
+                              "sort_order", "active", "created_at", "updated_at"])
+    now = datetime(2026, 1, 1, 9, 0, 0)
+    for (domain, src, tgt, ja, en, sort) in F.CODE_DICTIONARY:
+        w_code_asis.write([domain, src, tgt, ja, en, sort, "Y", fmt_oracle_dt(now), None])
+        w_code_tobe.write([domain, src, tgt, ja, en, sort, "true", fmt_pg_ts(now), None])
+    w_code_asis.close()
+    w_code_tobe.close()
+    counts["code_dictionary"] = len(F.CODE_DICTIONARY)
 
-    out: dict[str, int] = {}
-    out["customer"]        = write_csv_tobe(tobe_dir / "customer.csv",        customers,        COLUMN_ORDER["customer"])
-    out["product"]         = write_csv_tobe(tobe_dir / "product.csv",         products,         COLUMN_ORDER["product"])
-    out["branch"]          = write_csv_tobe(tobe_dir / "branch.csv",          branches,         COLUMN_ORDER["branch"])
-    out["employee"]        = write_csv_tobe(tobe_dir / "employee.csv",        employees,        COLUMN_ORDER["employee"])
-    out["account"]         = write_csv_tobe(tobe_dir / "account.csv",         accounts,         COLUMN_ORDER["account"])
-    out["account_product"] = write_csv_tobe(tobe_dir / "account_product.csv", account_products, COLUMN_ORDER["account_product"])
-    out["trade"]           = write_csv_tobe(tobe_dir / "trade.csv",           trades,           COLUMN_ORDER["trade"])
-    out["market_quote"]    = write_csv_tobe(tobe_dir / "market_quote.csv",    quotes,           COLUMN_ORDER["market_quote"])
-    out["settlement"]      = write_csv_tobe(tobe_dir / "settlement.csv",      settlements,      COLUMN_ORDER["settlement"])
+    w_cur_asis = AsIsWriter(asis_dir / "M_CURRENCY.csv",
+                            ["CURRENCY_CD", "CURRENCY_NM_JA", "CURRENCY_NM_EN",
+                             "DECIMAL_DIGITS", "SYMBOL"])
+    w_cur_tobe = ToBeWriter(tobe_dir / "currency.csv",
+                            ["currency_code", "name_ja", "name_en",
+                             "decimal_digits", "symbol"])
+    for (code, ja, en, dig, sym) in F.CURRENCIES:
+        w_cur_asis.write([code, ja, en, dig, sym])
+        w_cur_tobe.write([code, ja, en, dig, sym])
+    w_cur_asis.close()
+    w_cur_tobe.close()
+    counts["currency"] = len(F.CURRENCIES)
 
-    write_csv_asis(asis_dir / "M_CUSTOMER.csv",        customers,        COLUMN_ORDER["customer"],        ASIS_COLUMN_MAP["customer"])
-    write_csv_asis(asis_dir / "M_PRODUCT.csv",         products,         COLUMN_ORDER["product"],         ASIS_COLUMN_MAP["product"])
-    write_csv_asis(asis_dir / "M_BRANCH.csv",          branches,         COLUMN_ORDER["branch"],          ASIS_COLUMN_MAP["branch"])
-    write_csv_asis(asis_dir / "M_EMPLOYEE.csv",        employees,        COLUMN_ORDER["employee"],        ASIS_COLUMN_MAP["employee"])
-    write_csv_asis(asis_dir / "M_ACCOUNT.csv",         accounts,         COLUMN_ORDER["account"],         ASIS_COLUMN_MAP["account"])
-    write_csv_asis(asis_dir / "R_ACCOUNT_PRODUCT.csv", account_products, COLUMN_ORDER["account_product"], ASIS_COLUMN_MAP["account_product"])
-    write_csv_asis(asis_dir / "T_TRADE.csv",           trades,           COLUMN_ORDER["trade"],           ASIS_COLUMN_MAP["trade"])
-    write_asis_market_quote(asis_dir / "T_MARKET_QUOTE.csv", quotes)
-    write_csv_asis(asis_dir / "T_SETTLEMENT.csv",      settlements,      COLUMN_ORDER["settlement"],      ASIS_COLUMN_MAP["settlement"])
+    # ---------- 02_organization: M_BRANCH / M_BRANCH_CONTACT → branch ----
+    n_branch = cfg["branch"]
+    w_br_asis = AsIsWriter(asis_dir / "M_BRANCH.csv",
+                           ["BRANCH_ID", "SHITEN_CD", "SHITEN_NM", "SHITEN_NM_KANA",
+                            "BRANCH_KBN", "PARENT_BRANCH_ID", "OPEN_DT", "CLOSE_DT",
+                            "ENTRY_TS", "UPDATE_TS"])
+    w_brc_asis = AsIsWriter(asis_dir / "M_BRANCH_CONTACT.csv",
+                            ["BRANCH_ID", "PHONE", "FAX", "EMAIL", "ADDR_ZIP",
+                             "ADDR_LINE", "OPENING_HOURS"])
+    w_br_tobe = ToBeWriter(tobe_dir / "branch.csv",
+                           ["branch_id", "branch_code", "branch_kind", "parent_branch_id",
+                            "name_kanji", "name_kana", "phone", "fax", "email",
+                            "zip", "address_line", "opening_hours",
+                            "opened_at", "closed_at", "created_at", "updated_at"])
 
-    return out
+    branches: list[tuple[int, str]] = []  # (branch_id, currency hint)
+    for i in range(1, n_branch + 1):
+        if i == 1:
+            kj, kn = "東京本店", "トウキョウホンテン"
+            kbn = "01"; parent = None
+            kind_pg = "HQ"
+        else:
+            city_kj, city_kn = rnd.choice(F.BRANCH_CITY_BASE)
+            suf_kj, suf_kn = rnd.choice(F.BRANCH_KIND_SUFFIX)
+            kj, kn = f"{city_kj}{suf_kj}", f"{city_kn}{suf_kn}"
+            kbn = "02"; parent = 1
+            kind_pg = "BRANCH"
+        shiten_cd = f"{i:03d}-{rnd.randint(10, 99):02d}"
+        opened = random_date(rnd, date(2010, 1, 1), date(2024, 12, 31))
+        phone = jp_phone(rnd); fax = jp_phone(rnd)
+        email = f"branch{i:03d}@modernizepro.jp"
+        zip_ = jp_zip(rnd)
+        pref_kj, _, city = rnd.choice(F.PREFECTURES)[:3]
+        addr = f"{pref_kj}{city}{rnd.randint(1, 9)}-{rnd.randint(1, 20)}-{rnd.randint(1, 20)}"
+        hours = "平日 9:00-17:00 / 土日祝休"
+        entry_ts = datetime.combine(opened, datetime.min.time())
+        w_br_asis.write([i, shiten_cd, kj, kn, kbn, parent,
+                         fmt_oracle_dt(opened), None,
+                         fmt_oracle_dt(entry_ts), None])
+        w_brc_asis.write([i, phone, fax, email, zip_, addr, hours])
+        w_br_tobe.write([i, shiten_cd, kind_pg, parent, kj, kn,
+                         phone, fax, email, zip_, addr, hours,
+                         fmt_pg_ts(datetime.combine(opened, datetime.min.time())),
+                         None, fmt_pg_ts(entry_ts), None])
+        branches.append((i, "JPY"))
+    w_br_asis.close(); w_brc_asis.close(); w_br_tobe.close()
+    counts["branch"] = n_branch
+
+    # ---------- 02_organization: M_EMPLOYEE → employee -------------------
+    n_emp = cfg["employee"]
+    w_emp_asis = AsIsWriter(asis_dir / "M_EMPLOYEE.csv",
+                            ["EMPLOYEE_ID", "EMPLOYEE_CD", "BRANCH_ID", "TANTO_CD",
+                             "EMP_NM_FULL", "EMP_NM_KANA", "ROLE_CD", "MANAGER_ID",
+                             "JOIN_DT", "LEAVE_DT", "ENTRY_TS", "UPDATE_TS"])
+    w_emp_tobe = ToBeWriter(tobe_dir / "employee.csv",
+                            ["employee_id", "employee_code", "branch_id", "manager_id",
+                             "department_code", "position_code", "permission_flag",
+                             "family_kanji", "given_kanji", "family_kana", "given_kana",
+                             "role_code", "joined_at", "left_at",
+                             "created_at", "updated_at"])
+    role_map = {"10": "SALES", "20": "ADMIN", "30": "OPS"}
+    for i in range(1, n_emp + 1):
+        fam_kj, fam_kn = rnd.choice(F.FAMILY_NAMES)
+        is_male = rnd.random() < 0.55
+        giv_kj, giv_kn = rnd.choice(F.GIVEN_NAMES_MALE if is_male else F.GIVEN_NAMES_FEMALE)
+        nm_full = f"{fam_kj} {giv_kj}"
+        nm_kana = f"{fam_kn} {giv_kn}"
+        tanto = rnd.choice(F.TANTO_CD_SAMPLES)
+        dept, pos, perm = tanto[:2], tanto[2:4], tanto[4:5]
+        role_cd = rnd.choice(list(role_map.keys()))
+        branch_id = rnd.choice(branches)[0]
+        manager_id = rnd.randint(1, max(1, i - 1)) if i > 5 else None
+        joined = random_date(rnd, date(2015, 1, 1), date(2025, 6, 30))
+        left = None if rnd.random() < 0.95 else random_date(rnd, joined, date(2026, 4, 30))
+        entry_ts = datetime.combine(joined, datetime.min.time())
+        emp_cd = f"E{i:06d}"
+        w_emp_asis.write([i, emp_cd, branch_id, tanto, nm_full, nm_kana, role_cd, manager_id,
+                          fmt_oracle_dt(joined), fmt_oracle_dt(left),
+                          fmt_oracle_dt(entry_ts), None])
+        w_emp_tobe.write([i, emp_cd, branch_id, manager_id, dept, pos, perm,
+                          fam_kj, giv_kj, fam_kn, giv_kn, role_map[role_cd],
+                          fmt_pg_ts(datetime.combine(joined, datetime.min.time())),
+                          fmt_pg_ts(datetime.combine(left, datetime.min.time())) if left else None,
+                          fmt_pg_ts(entry_ts), None])
+    w_emp_asis.close(); w_emp_tobe.close()
+    counts["employee"] = n_emp
+
+    # ---------- 01_master: M_CUSTOMER (+_KANA) → customer + name + addr + acctype -
+    n_cust = cfg["customer"]
+    w_cu_asis = AsIsWriter(asis_dir / "M_CUSTOMER.csv",
+                           ["CUSTOMER_ID", "CUSTOMER_CD", "CUST_NM_FULL", "CUST_NM_KANA",
+                            "CUST_ADDR", "BIRTH_DT", "GENDER_CD", "KOZA_KBN",
+                            "EMAIL", "PHONE", "ENTRY_TS", "UPDATE_TS"])
+    w_cuk_asis = AsIsWriter(asis_dir / "M_CUSTOMER_KANA.csv",
+                            ["CUSTOMER_ID", "NM_KANJI_FAMILY", "NM_KANJI_GIVEN",
+                             "NM_KANA_FAMILY", "NM_KANA_GIVEN", "NM_ROMAJI"])
+    w_cu_tobe   = ToBeWriter(tobe_dir / "customer.csv",
+                             ["customer_id", "customer_code", "gender", "birth_date",
+                              "email", "phone", "created_at", "updated_at"])
+    w_cun_tobe  = ToBeWriter(tobe_dir / "customer_name.csv",
+                             ["customer_id", "family_kanji", "given_kanji",
+                              "family_kana", "given_kana", "romaji"])
+    w_cua_tobe  = ToBeWriter(tobe_dir / "customer_address.csv",
+                             ["customer_id", "zip", "prefecture", "city",
+                              "street_line1", "street_line2"])
+    w_cuat_tobe = ToBeWriter(tobe_dir / "customer_account_type.csv",
+                             ["customer_id", "account_type", "member_tier", "permission_flag"])
+
+    koza_type_map = {"01": "GENERAL", "02": "SPECIFIC", "03": "NISA", "04": "JUNIOR_NISA"}
+    koza_tier_map = {"1": "BRONZE", "2": "SILVER", "3": "GOLD", "9": "VIP"}
+    koza_perm_map = {"0": "R", "1": "W", "X": "A"}
+
+    for i in range(1, n_cust + 1):
+        fam_kj, fam_kn = rnd.choice(F.FAMILY_NAMES)
+        is_male = rnd.random() < 0.5
+        giv_kj, giv_kn = rnd.choice(F.GIVEN_NAMES_MALE if is_male else F.GIVEN_NAMES_FEMALE)
+        gender_asis = "1" if is_male else "2"
+        gender_tobe = "M" if is_male else "F"
+        nm_full = f"{fam_kj} {giv_kj}"
+        nm_kana = f"{fam_kn} {giv_kn}"
+        romaji = to_romaji(fam_kn, giv_kn)
+        zip_ = jp_zip(rnd)
+        pref_kj, city, block, bldg = fictional_address(rnd)
+        addr_full = f"{zip_} {pref_kj}{city}{block}" + (f" {bldg}" if bldg else "")
+        birth = random_date(rnd, date(1955, 1, 1), date(2005, 12, 31))
+        koza_kbn = rnd.choice(F.KOZA_KBN_SAMPLES)
+        k_type = koza_kbn[0:2]
+        k_tier = koza_kbn[2]
+        k_perm = koza_kbn[3]
+        email = jp_email(rnd, romaji)
+        phone = jp_phone(rnd)
+        entry = datetime(2018, 1, 1) + timedelta(days=rnd.randint(0, 2500),
+                                                 seconds=rnd.randint(0, 86399))
+        cust_cd = f"C{i:08d}"
+        w_cu_asis.write([i, cust_cd, nm_full, nm_kana, addr_full,
+                         fmt_oracle_dt(birth), gender_asis, koza_kbn,
+                         email, phone, fmt_oracle_dt(entry), None])
+        w_cuk_asis.write([i, fam_kj, giv_kj, fam_kn, giv_kn, romaji])
+        w_cu_tobe.write([i, cust_cd, gender_tobe, fmt_oracle_dt(birth),
+                         email, phone, fmt_pg_ts(entry), None])
+        w_cun_tobe.write([i, fam_kj, giv_kj, fam_kn, giv_kn, romaji])
+        w_cua_tobe.write([i, zip_, pref_kj, city, block, bldg or None])
+        w_cuat_tobe.write([i,
+                           koza_type_map.get(k_type, "GENERAL"),
+                           koza_tier_map.get(k_tier, "BRONZE"),
+                           koza_perm_map.get(k_perm, "W")])
+    w_cu_asis.close(); w_cuk_asis.close()
+    w_cu_tobe.close(); w_cun_tobe.close(); w_cua_tobe.close(); w_cuat_tobe.close()
+    counts["customer"] = n_cust
+
+    # ---------- 01_master: M_PRODUCT → product ---------------------------
+    n_prod = cfg["product"]
+    w_pr_asis = AsIsWriter(asis_dir / "M_PRODUCT.csv",
+                           ["PRODUCT_ID", "PRODUCT_CD", "PRODUCT_NM", "PRODUCT_NM_KANA",
+                            "PRODUCT_KIND_CD", "CURRENCY_CD", "LISTING_DT", "DELISTING_DT",
+                            "ENTRY_TS", "UPDATE_TS"])
+    w_pr_tobe = ToBeWriter(tobe_dir / "product.csv",
+                           ["product_id", "product_code", "name_kanji", "name_kana",
+                            "product_kind", "currency_code", "listing_date", "delisting_date",
+                            "created_at", "updated_at"])
+    prodkind_map = {"10": "EQUITY", "20": "FUND", "30": "BOND", "40": "FX_MMF"}
+
+    products: list[tuple[int, str, str]] = []  # (id, kind_asis, currency)
+    for i in range(1, n_prod + 1):
+        pref = rnd.choice(F.PRODUCT_PREFIXES)
+        suf_kj, suf_kn, kind_pg = rnd.choice(F.PRODUCT_SUFFIXES)
+        if kind_pg == "EQUITY":
+            kind_asis = "10"; cur = "JPY"
+        elif kind_pg == "FUND":
+            kind_asis = "20"; cur = "JPY"
+        elif kind_pg == "BOND":
+            kind_asis = "30"; cur = "JPY"
+        else:
+            kind_asis = "40"; cur = rnd.choice(["USD", "EUR", "AUD"])
+        nm_kj = f"{pref}{suf_kj}"
+        nm_kn = f"{pref}{suf_kn}" if not suf_kn.startswith("ジェイ") else suf_kn
+        listing = random_date(rnd, date(1995, 1, 1), date(2023, 12, 31))
+        delist = None if rnd.random() < 0.95 else random_date(rnd, listing, date(2026, 5, 1))
+        entry = datetime.combine(listing, datetime.min.time())
+        prod_cd = f"P{i:06d}"
+        w_pr_asis.write([i, prod_cd, nm_kj, nm_kn, kind_asis, cur,
+                         fmt_oracle_dt(listing), fmt_oracle_dt(delist),
+                         fmt_oracle_dt(entry), None])
+        w_pr_tobe.write([i, prod_cd, nm_kj, nm_kn, prodkind_map[kind_asis], cur,
+                         fmt_oracle_dt(listing),
+                         fmt_oracle_dt(delist) if delist else None,
+                         fmt_pg_ts(entry), None])
+        products.append((i, kind_asis, cur))
+    w_pr_asis.close(); w_pr_tobe.close()
+    counts["product"] = n_prod
+
+    # ---------- 01_master: M_PRODUCT_HIST → product_history --------------
+    n_phist = cfg["product_history"]
+    w_phist_asis = AsIsWriter(asis_dir / "M_PRODUCT_HIST.csv",
+                              ["HIST_ID", "PRODUCT_ID", "CHANGE_DT", "CHANGE_TYPE_CD",
+                               "OLD_VALUES", "NEW_VALUES", "CHANGED_BY"])
+    w_phist_tobe = ToBeWriter(tobe_dir / "product_history.csv",
+                              ["history_id", "product_id", "change_date", "change_type",
+                               "old_snapshot", "new_snapshot", "changed_by"])
+    type_map = {"I": "INSERT", "U": "UPDATE", "D": "DELETE"}
+    for i in range(1, n_phist + 1):
+        pid = rnd.randint(1, n_prod)
+        cdt = random_date(rnd, date(2018, 1, 1), date(2026, 4, 30))
+        ctype = rnd.choice(["I", "U", "U", "U", "D"])
+        old_v = {"name_kanji": f"OLD_{pid}", "currency": "JPY"} if ctype != "I" else None
+        new_v = {"name_kanji": f"NEW_{pid}", "currency": "JPY"} if ctype != "D" else None
+        # Oracle CLOB JSON-like with single quotes (legacy escape style)
+        old_str = json.dumps(old_v, ensure_ascii=False) if old_v else None
+        new_str = json.dumps(new_v, ensure_ascii=False) if new_v else None
+        changed_by = f"BATCH_{rnd.randint(1, 9)}"
+        w_phist_asis.write([i, pid, fmt_oracle_dt(cdt), ctype, old_str, new_str, changed_by])
+        w_phist_tobe.write([i, pid, fmt_oracle_dt(cdt), type_map[ctype],
+                            old_str, new_str, changed_by])
+    w_phist_asis.close(); w_phist_tobe.close()
+    counts["product_history"] = n_phist
+
+    # ---------- 03_account: M_ACCOUNT + R_ACCOUNT_PRODUCT → account + account_product -
+    n_acct = cfg["account"]
+    n_acct_prod = cfg["account_product"]
+    w_ac_asis = AsIsWriter(asis_dir / "M_ACCOUNT.csv",
+                           ["ACCOUNT_ID", "ACCOUNT_NO", "CUSTOMER_ID", "BRANCH_ID",
+                            "KOZA_KBN", "CURRENCY_CD", "STATUS_CD",
+                            "OPEN_DT", "CLOSE_DT", "ENTRY_TS", "UPDATE_TS"])
+    w_acp_asis = AsIsWriter(asis_dir / "R_ACCOUNT_PRODUCT.csv",
+                            ["ACCOUNT_ID", "PRODUCT_ID", "START_DT", "END_DT",
+                             "QUANTITY", "AVG_COST", "ENTRY_TS", "UPDATE_TS"])
+    w_ac_tobe = ToBeWriter(tobe_dir / "account.csv",
+                           ["account_id", "account_number", "customer_id", "branch_id",
+                            "account_type", "member_tier", "permission_flag",
+                            "currency_code", "status", "opened_at", "closed_at",
+                            "created_at", "updated_at"])
+    w_acp_tobe = ToBeWriter(tobe_dir / "account_product.csv",
+                            ["account_id", "product_id", "start_date", "end_date",
+                             "quantity", "average_cost", "created_at", "updated_at"])
+    status_map = {"A": "ACTIVE", "C": "CLOSED", "F": "FROZEN", "P": "PENDING"}
+    accounts: list[tuple[int, str]] = []  # (id, currency)
+    for i in range(1, n_acct + 1):
+        cust = rnd.randint(1, n_cust)
+        br = rnd.choice(branches)[0]
+        koza = rnd.choice(F.KOZA_KBN_SAMPLES)
+        cur = rnd.choices(["JPY", "USD", "EUR"], weights=[0.85, 0.10, 0.05])[0]
+        status_a = rnd.choices(["A", "A", "A", "C", "F", "P"], k=1)[0]
+        opened = random_date(rnd, date(2019, 1, 1), date(2025, 12, 31))
+        closed = random_date(rnd, opened, date(2026, 4, 30)) if status_a == "C" else None
+        acct_no = f"{br:03d}-{koza[:2]}-{rnd.randint(1000000, 9999999)}"
+        entry = datetime.combine(opened, datetime.min.time())
+        k_type = koza[0:2]; k_tier = koza[2]; k_perm = koza[3]
+        w_ac_asis.write([i, acct_no, cust, br, koza, cur, status_a,
+                         fmt_oracle_dt(opened), fmt_oracle_dt(closed),
+                         fmt_oracle_dt(entry), None])
+        w_ac_tobe.write([i, acct_no, cust, br,
+                         koza_type_map.get(k_type, "GENERAL"),
+                         koza_tier_map.get(k_tier, "BRONZE"),
+                         koza_perm_map.get(k_perm, "W"),
+                         cur, status_map[status_a],
+                         fmt_oracle_dt(opened),
+                         fmt_oracle_dt(closed) if closed else None,
+                         fmt_pg_ts(entry), None])
+        accounts.append((i, cur))
+    w_ac_asis.close(); w_ac_tobe.close()
+    counts["account"] = n_acct
+
+    # account_product: unique (account, product) pairs
+    seen = set()
+    written_ap = 0
+    while written_ap < n_acct_prod:
+        a = rnd.randint(1, n_acct)
+        p = rnd.randint(1, n_prod)
+        if (a, p) in seen:
+            continue
+        seen.add((a, p))
+        start = random_date(rnd, date(2020, 1, 1), date(2025, 12, 31))
+        end = random_date(rnd, start, date(2026, 4, 30)) if rnd.random() < 0.1 else None
+        qty = round(rnd.uniform(10, 10000), 2)
+        avg = round(rnd.uniform(50, 5000), 4)
+        entry = datetime.combine(start, datetime.min.time())
+        w_acp_asis.write([a, p, fmt_oracle_dt(start), fmt_oracle_dt(end), qty, avg,
+                          fmt_oracle_dt(entry), None])
+        w_acp_tobe.write([a, p, fmt_oracle_dt(start),
+                          fmt_oracle_dt(end) if end else None, qty, avg,
+                          fmt_pg_ts(entry), None])
+        written_ap += 1
+    w_acp_asis.close(); w_acp_tobe.close()
+    counts["account_product"] = written_ap
+
+    # ---------- 04_trade: T_TRADE (+ DETAIL + LOG) → trade + fee + settlement_link + audit -
+    n_trade = cfg["trade"]
+    w_tr_asis = AsIsWriter(asis_dir / "T_TRADE.csv",
+                           ["TRADE_ID", "TRADE_NO", "TRADE_DT", "ACCOUNT_ID", "PRODUCT_ID",
+                            "TORIHIKI_KBN", "QUANTITY", "UNIT_PRICE", "GROSS_AMT",
+                            "FEE_AMT", "TAX_AMT", "NET_AMT", "SETTLEMENT_ID",
+                            "SETTLEMENT_DT", "SETTLEMENT_STATUS_CD", "MEMO",
+                            "ENTRY_TS", "UPDATE_TS"])
+    w_trd_asis = AsIsWriter(asis_dir / "T_TRADE_DETAIL.csv",
+                            ["TRADE_ID", "SEQ", "DETAIL_KBN", "AMOUNT", "DESCRIPTION"])
+    w_trl_asis = AsIsWriter(asis_dir / "T_TRADE_LOG.csv",
+                            ["LOG_ID", "TRADE_ID", "EVENT_KBN", "EVENT_TS",
+                             "ACTOR_CD", "PAYLOAD"])
+    w_tr_tobe   = ToBeWriter(tobe_dir / "trade.csv",
+                             ["trade_id", "trade_number", "trade_date", "account_id",
+                              "product_id", "trade_type", "quantity", "unit_price",
+                              "gross_amount", "net_amount", "memo",
+                              "created_at", "updated_at"])
+    w_fee_tobe  = ToBeWriter(tobe_dir / "trade_fee.csv",
+                             ["fee_id", "trade_id", "fee_kind", "amount",
+                              "currency_code", "description", "created_at"])
+    w_tsl_tobe  = ToBeWriter(tobe_dir / "trade_settlement_link.csv",
+                             ["trade_id", "settlement_id", "settled_amount",
+                              "settled_at", "status"])
+    w_tau_tobe  = ToBeWriter(tobe_dir / "trade_audit.csv",
+                             ["audit_id", "trade_id", "event_type", "event_at",
+                              "actor_code", "payload"])
+
+    trade_map = {"1": "BUY", "2": "SELL", "3": "TRANSFER"}
+    set_status_map = {"P": "PENDING", "C": "CONFIRMED", "X": "CANCELLED"}
+    fee_id = 0
+    audit_id = 0
+    for i in range(1, n_trade + 1):
+        acc_id, acc_cur = accounts[rnd.randint(0, len(accounts) - 1)]
+        prod_id, _, prod_cur = products[rnd.randint(0, len(products) - 1)]
+        kbn = rnd.choices(["1", "2", "3"], weights=[0.55, 0.40, 0.05])[0]
+        qty = round(rnd.uniform(10, 5000), 2)
+        unit = round(rnd.uniform(50, 8000), 4)
+        gross = round(qty * unit, 2)
+        fee = round(gross * 0.001, 2)
+        tax = round(gross * 0.001, 2)
+        net = round(gross - (fee + tax) if kbn == "2" else gross + fee + tax, 2)
+        tdt = random_date(rnd, date(2024, 1, 1), date(2026, 5, 25))
+        set_id = i  # 1:1 mapping for simplicity
+        sdt = tdt + timedelta(days=2)
+        sst_a = rnd.choices(["C", "C", "P", "X"], k=1)[0]
+        memo = rnd.choice([None, None, "通常取引", "成行注文", "指値注文", "夜間処理分"])
+        entry = datetime.combine(tdt, datetime.min.time()) + timedelta(seconds=rnd.randint(28800, 64799))
+        trade_no = f"TR{tdt.strftime('%Y%m%d')}{i:08d}"
+        w_tr_asis.write([i, trade_no, fmt_oracle_dt(tdt), acc_id, prod_id, kbn,
+                         qty, unit, gross, fee, tax, net,
+                         set_id, fmt_oracle_dt(sdt), sst_a, memo,
+                         fmt_oracle_dt(entry), None])
+        w_tr_tobe.write([i, trade_no, fmt_oracle_dt(tdt), acc_id, prod_id,
+                         trade_map[kbn], qty, unit, gross, net, memo,
+                         fmt_pg_ts(entry), None])
+        # fee/tax split into trade_fee rows
+        fee_id += 1
+        w_fee_tobe.write([fee_id, i, "BROKER_FEE", fee, acc_cur,
+                          "委託手数料 0.1%", fmt_pg_ts(entry)])
+        fee_id += 1
+        w_fee_tobe.write([fee_id, i, "TAX", tax, acc_cur,
+                          "消費税相当", fmt_pg_ts(entry)])
+        # settlement_link 1:1 (could be 1:N for partial settlements)
+        w_tsl_tobe.write([i, set_id, net, fmt_oracle_dt(sdt), set_status_map[sst_a]])
+        # T_TRADE_DETAIL — small number per trade (dividend / interest)
+        if rnd.random() < 0.10:
+            seq = 1
+            kind = rnd.choice(["D", "I", "X"])
+            amount = round(rnd.uniform(10, 5000), 2)
+            desc = {"D": "配当金", "I": "利息", "X": "その他費用"}[kind]
+            w_trd_asis.write([i, seq, kind, amount, desc])
+            # 同じ事象を trade_fee 側で表現 (DIVIDEND/INTEREST/OTHER)
+            fee_id += 1
+            kind_pg = {"D": "DIVIDEND", "I": "INTEREST", "X": "OTHER"}[kind]
+            w_fee_tobe.write([fee_id, i, kind_pg, amount, acc_cur, desc, fmt_pg_ts(entry)])
+        # T_TRADE_LOG — 1-2 events
+        for ev_kind_a, ev_kind_pg in (("CR", "CREATE"), ("SE", "SETTLE")):
+            audit_id += 1
+            log_id = audit_id
+            ts = entry + timedelta(seconds=rnd.randint(60, 86400))
+            actor = f"BATCH_{rnd.randint(1, 9)}"
+            payload = json.dumps({"trade_id": i, "amount": net}, ensure_ascii=False)
+            w_trl_asis.write([log_id, i, ev_kind_a, fmt_oracle_dt(ts), actor, payload])
+            w_tau_tobe.write([log_id, i, ev_kind_pg, fmt_pg_ts(ts), actor, payload])
+    w_tr_asis.close(); w_trd_asis.close(); w_trl_asis.close()
+    w_tr_tobe.close(); w_fee_tobe.close(); w_tsl_tobe.close(); w_tau_tobe.close()
+    counts["trade"] = n_trade
+
+    # ---------- 05_market: T_MARKET_QUOTE → market_quote -----------------
+    n_market_days = cfg["market_quote_days"]
+    w_mq_asis = AsIsWriter(asis_dir / "T_MARKET_QUOTE.csv",
+                           ["QUOTE_DT", "PRODUCT_ID", "OPEN_PRICE", "HIGH_PRICE",
+                            "LOW_PRICE", "CLOSE_PRICE", "VOLUME", "VWAP",
+                            "SOURCE_CD", "ENTRY_TS"])
+    w_mq_tobe = ToBeWriter(tobe_dir / "market_quote.csv",
+                           ["quote_date", "product_id", "open_price", "high_price",
+                            "low_price", "close_price", "volume", "vwap",
+                            "source", "created_at"])
+    market_rows = 0
+    for d in range(n_market_days):
+        qd = today - timedelta(days=d)
+        for (pid, _, _) in products:
+            o = round(rnd.uniform(100, 5000), 4)
+            h = round(o * rnd.uniform(1.0, 1.05), 4)
+            lo = round(o * rnd.uniform(0.95, 1.0), 4)
+            c = round(rnd.uniform(lo, h), 4)
+            vol = round(rnd.uniform(1000, 1000000), 2)
+            vwap = round((h + lo + c) / 3, 4)
+            src = rnd.choice(["TSE", "OSE", "NSE", "FUKU"])
+            entry = datetime.combine(qd, datetime.min.time()).replace(hour=15, minute=30)
+            w_mq_asis.write([fmt_oracle_dt(qd), pid, o, h, lo, c, vol, vwap, src,
+                             fmt_oracle_dt(entry)])
+            w_mq_tobe.write([fmt_oracle_dt(qd), pid, o, h, lo, c, vol, vwap, src,
+                             fmt_pg_ts(entry)])
+            market_rows += 1
+    w_mq_asis.close(); w_mq_tobe.close()
+    counts["market_quote"] = market_rows
+
+    # ---------- 06_settlement: T_SETTLEMENT → settlement -----------------
+    n_set = cfg["settlement"]
+    w_st_asis = AsIsWriter(asis_dir / "T_SETTLEMENT.csv",
+                           ["SETTLEMENT_ID", "SETTLEMENT_DT", "ACCOUNT_ID", "TRADE_ID",
+                            "GROSS_AMT", "FEE_AMT", "TAX_AMT", "NET_AMT",
+                            "CURRENCY_CD", "STATUS_CD", "CONFIRMED_DT",
+                            "ENTRY_TS", "UPDATE_TS"])
+    w_st_tobe = ToBeWriter(tobe_dir / "settlement.csv",
+                           ["settlement_id", "settlement_date", "account_id",
+                            "gross_amount", "fee_amount", "tax_amount", "net_amount",
+                            "currency_code", "status", "confirmed_at",
+                            "created_at", "updated_at"])
+    for i in range(1, n_set + 1):
+        # link to a real trade if possible (trade_id == settlement_id 1:1 above)
+        trade_id = min(i, n_trade) if n_trade > 0 else 1
+        acc_id = accounts[rnd.randint(0, len(accounts) - 1)][0]
+        sdt = today - timedelta(days=rnd.randint(0, 365))
+        gross = round(rnd.uniform(1000, 5000000), 2)
+        fee = round(gross * 0.001, 2)
+        tax = round(gross * 0.001, 2)
+        net = round(gross - fee - tax, 2)
+        status_a = rnd.choices(["C", "C", "P", "X"], k=1)[0]
+        confirmed = sdt + timedelta(days=1) if status_a == "C" else None
+        entry = datetime.combine(sdt, datetime.min.time())
+        w_st_asis.write([i, fmt_oracle_dt(sdt), acc_id, trade_id,
+                         gross, fee, tax, net, "JPY", status_a,
+                         fmt_oracle_dt(confirmed) if confirmed else None,
+                         fmt_oracle_dt(entry), None])
+        w_st_tobe.write([i, fmt_oracle_dt(sdt), acc_id,
+                         gross, fee, tax, net, "JPY", set_status_map[status_a],
+                         fmt_oracle_dt(confirmed) if confirmed else None,
+                         fmt_pg_ts(entry), None])
+    w_st_asis.close(); w_st_tobe.close()
+    counts["settlement"] = n_set
+
+    # ---------- emit load.sql for docker init -----------------------------
+    # Mounted at /docker-entrypoint-initdb.d/07_load_sample.sql.
+    # \copy with explicit column lists + HEADER true → first row (which is
+    # BOM + header in our TO-BE CSVs) is skipped wholesale. After loads,
+    # reset IDENTITY sequences so further INSERTs don't collide with loaded
+    # PK values.
+    load_sql = tobe_dir / "load.sql"
+    with open(load_sql, "w", encoding="utf-8", newline="\n") as f:
+        f.write("-- Auto-generated by scripts/gen_sample_data.py.\n")
+        f.write("\\set ON_ERROR_STOP on\n")
+        f.write("SET search_path TO securities;\n\n")
+
+        copy_order = [
+            ("code_dictionary", ["domain", "source_code", "target_code",
+                                 "label_ja", "label_en", "sort_order",
+                                 "active", "created_at", "updated_at"]),
+            ("currency", ["currency_code", "name_ja", "name_en",
+                          "decimal_digits", "symbol"]),
+            ("branch", ["branch_id", "branch_code", "branch_kind",
+                        "parent_branch_id", "name_kanji", "name_kana",
+                        "phone", "fax", "email", "zip", "address_line",
+                        "opening_hours", "opened_at", "closed_at",
+                        "created_at", "updated_at"]),
+            ("customer", ["customer_id", "customer_code", "gender",
+                          "birth_date", "email", "phone",
+                          "created_at", "updated_at"]),
+            ("customer_name", ["customer_id", "family_kanji", "given_kanji",
+                               "family_kana", "given_kana", "romaji"]),
+            ("customer_address", ["customer_id", "zip", "prefecture",
+                                  "city", "street_line1", "street_line2"]),
+            ("customer_account_type", ["customer_id", "account_type",
+                                       "member_tier", "permission_flag"]),
+            ("product", ["product_id", "product_code", "name_kanji",
+                         "name_kana", "product_kind", "currency_code",
+                         "listing_date", "delisting_date",
+                         "created_at", "updated_at"]),
+            ("product_history", ["history_id", "product_id", "change_date",
+                                 "change_type", "old_snapshot",
+                                 "new_snapshot", "changed_by"]),
+            ("employee", ["employee_id", "employee_code", "branch_id",
+                          "manager_id", "department_code", "position_code",
+                          "permission_flag", "family_kanji", "given_kanji",
+                          "family_kana", "given_kana", "role_code",
+                          "joined_at", "left_at",
+                          "created_at", "updated_at"]),
+            ("account", ["account_id", "account_number", "customer_id",
+                         "branch_id", "account_type", "member_tier",
+                         "permission_flag", "currency_code", "status",
+                         "opened_at", "closed_at",
+                         "created_at", "updated_at"]),
+            ("account_product", ["account_id", "product_id", "start_date",
+                                 "end_date", "quantity", "average_cost",
+                                 "created_at", "updated_at"]),
+            ("trade", ["trade_id", "trade_number", "trade_date",
+                       "account_id", "product_id", "trade_type",
+                       "quantity", "unit_price", "gross_amount",
+                       "net_amount", "memo",
+                       "created_at", "updated_at"]),
+            ("trade_fee", ["fee_id", "trade_id", "fee_kind", "amount",
+                           "currency_code", "description", "created_at"]),
+            ("trade_settlement_link", ["trade_id", "settlement_id",
+                                       "settled_amount", "settled_at",
+                                       "status"]),
+            ("trade_audit", ["audit_id", "trade_id", "event_type",
+                             "event_at", "actor_code", "payload"]),
+            ("market_quote", ["quote_date", "product_id", "open_price",
+                              "high_price", "low_price", "close_price",
+                              "volume", "vwap", "source", "created_at"]),
+            ("settlement", ["settlement_id", "settlement_date",
+                            "account_id", "gross_amount", "fee_amount",
+                            "tax_amount", "net_amount", "currency_code",
+                            "status", "confirmed_at",
+                            "created_at", "updated_at"]),
+        ]
+        for tbl, cols in copy_order:
+            col_list = ", ".join(cols)
+            f.write(f"\\copy securities.{tbl} ({col_list}) "
+                    f"FROM '/sample/{tbl}.csv' "
+                    f"WITH (FORMAT csv, HEADER true);\n")
+
+        f.write("""
+-- Reset IDENTITY sequences to MAX(id)+1 so further inserts don't collide.
+DO $$
+DECLARE
+    r RECORD;
+    max_id BIGINT;
+    seq_name TEXT;
+BEGIN
+    FOR r IN
+        SELECT c.table_name, c.column_name
+        FROM information_schema.columns c
+        WHERE c.table_schema = 'securities'
+          AND c.is_identity = 'YES'
+    LOOP
+        seq_name := pg_get_serial_sequence('securities.' || r.table_name, r.column_name);
+        IF seq_name IS NULL THEN
+            CONTINUE;
+        END IF;
+        EXECUTE format('SELECT COALESCE(MAX(%I), 0) FROM securities.%I',
+                       r.column_name, r.table_name) INTO max_id;
+        IF max_id > 0 THEN
+            EXECUTE format('SELECT setval(%L, %s)', seq_name, max_id);
+        END IF;
+    END LOOP;
+END $$;
+""")
+    return counts
 
 
-def main() -> int:
-    print(f"Repo root: {REPO_ROOT}")
-    print(f"TOBE out:  {OUT_ROOT_TOBE}")
-    print(f"ASIS out:  {OUT_ROOT_ASIS}")
-    for stage in STAGES:
-        c = generate_stage(stage)
-        print(f"  [{stage:7}] " + "  ".join(f"{k}={v}" for k, v in c.items()))
-    print("done.")
-    return 0
+def main():
+    stages = sys.argv[1:] if len(sys.argv) > 1 else list(ALL_STAGES)
+    for st in stages:
+        if st not in ALL_STAGES:
+            print(f"unknown stage: {st}; expected one of {ALL_STAGES}", file=sys.stderr)
+            sys.exit(2)
+    for st in stages:
+        print(f"=== stage: {st} ===", flush=True)
+        t0 = datetime.now()
+        counts = generate_stage(st)
+        elapsed = (datetime.now() - t0).total_seconds()
+        for t, n in counts.items():
+            print(f"  {t:<24s} {n:>10,d}")
+        print(f"  total elapsed {elapsed:.1f}s")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

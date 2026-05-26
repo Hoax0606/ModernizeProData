@@ -1,0 +1,5 @@
+domain,source_value,target_value,description
+MARKET_SOURCE,TSE,TSE,東京証券取引所 / Tokyo Stock Exchange — pass-through
+MARKET_SOURCE,OSE,OSE,大阪取引所 / Osaka Exchange — pass-through
+MARKET_SOURCE,NSE,NSE,名古屋証券取引所 / Nagoya Stock Exchange — pass-through
+MARKET_SOURCE,FUKU,FUKU,福岡証券取引所 / Fukuoka Stock Exchange — pass-through

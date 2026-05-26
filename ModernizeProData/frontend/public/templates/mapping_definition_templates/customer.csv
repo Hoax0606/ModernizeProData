@@ -1,0 +1,24 @@
+asis_table,asis_column,asis_type,tobe_table,tobe_column,tobe_type,code_domain,default_value,notes
+M_CUSTOMER,CUSTOMER_ID,NUMBER(10),customer,customer_id,BIGINT,,,1:1 PK passthrough
+M_CUSTOMER,CUSTOMER_CD,VARCHAR2(20),customer,customer_code,VARCHAR(20),,,1:1
+M_CUSTOMER,GENDER_CD,CHAR(1),customer,gender,CHAR(1),GENDER,,Code lookup: 1→M / 2→F
+M_CUSTOMER,BIRTH_DT,DATE,customer,birth_date,DATE,,,Type cast Oracle DATE → PG DATE
+M_CUSTOMER,EMAIL,VARCHAR2(128),customer,email,VARCHAR(128),,,1:1
+M_CUSTOMER,PHONE,VARCHAR2(20),customer,phone,VARCHAR(20),,,1:1
+M_CUSTOMER,ENTRY_TS,DATE,customer,created_at,TIMESTAMP,,,Oracle DATE (SYSDATE) → PG TIMESTAMP
+M_CUSTOMER,UPDATE_TS,DATE,customer,updated_at,TIMESTAMP,,,1:1 nullable
+M_CUSTOMER,CUST_NM_FULL,VARCHAR2(100),customer_name,family_kanji+given_kanji,VARCHAR(50)+VARCHAR(50),,,"1:N split — 半角スペースで分割: SPLIT_PART(CUST_NM_FULL,' ',1) / SPLIT_PART(...,2)"
+M_CUSTOMER,CUST_NM_KANA,VARCHAR2(200),customer_name,family_kana+given_kana,VARCHAR(100)+VARCHAR(100),,,1:N split — 同上
+M_CUSTOMER_KANA,NM_KANJI_FAMILY,VARCHAR2(50),customer_name,family_kanji,VARCHAR(50),,,"N:1 merge — 両方ある場合は M_CUSTOMER_KANA を優先 (COALESCE)"
+M_CUSTOMER_KANA,NM_KANJI_GIVEN,VARCHAR2(50),customer_name,given_kanji,VARCHAR(50),,,N:1 merge
+M_CUSTOMER_KANA,NM_KANA_FAMILY,VARCHAR2(100),customer_name,family_kana,VARCHAR(100),,,N:1 merge
+M_CUSTOMER_KANA,NM_KANA_GIVEN,VARCHAR2(100),customer_name,given_kana,VARCHAR(100),,,N:1 merge
+M_CUSTOMER_KANA,NM_ROMAJI,VARCHAR2(100),customer_name,romaji,VARCHAR(100),,,1:1
+M_CUSTOMER,CUST_ADDR,VARCHAR2(500),customer_address,zip,VARCHAR(8),,,1:N split (1/5) — 先頭の郵便番号 (REGEXP_SUBSTR で 7-8文字)
+M_CUSTOMER,CUST_ADDR,VARCHAR2(500),customer_address,prefecture,VARCHAR(20),,,1:N split (2/5) — 都道府県 (47都道府県辞書とのマッチ)
+M_CUSTOMER,CUST_ADDR,VARCHAR2(500),customer_address,city,VARCHAR(50),,,1:N split (3/5) — 市区町村
+M_CUSTOMER,CUST_ADDR,VARCHAR2(500),customer_address,street_line1,VARCHAR(200),,,1:N split (4/5) — 番地
+M_CUSTOMER,CUST_ADDR,VARCHAR2(500),customer_address,street_line2,VARCHAR(200),,,"1:N split (5/5) — ビル名・部屋番号 (空文字なら NULL)"
+M_CUSTOMER,KOZA_KBN,VARCHAR2(4),customer_account_type,account_type,VARCHAR(20),KOZA_TYPE,,Decompose 4桁 (1-2桁) → account_type via KOZA_TYPE
+M_CUSTOMER,KOZA_KBN,VARCHAR2(4),customer_account_type,member_tier,VARCHAR(10),KOZA_TIER,,Decompose 4桁 (3桁) → member_tier via KOZA_TIER
+M_CUSTOMER,KOZA_KBN,VARCHAR2(4),customer_account_type,permission_flag,CHAR(1),KOZA_PERMISSION,,Decompose 4桁 (4桁) → permission_flag via KOZA_PERMISSION
