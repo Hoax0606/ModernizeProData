@@ -209,33 +209,47 @@ export const usePinnedSnapshotsStore = create<PinnedSnapshotsState>()(
     (set, get) => ({
       pinnedIds: [],
       // 같은 프로젝트 안에서만 단일 핀 — 새 핀 set 시 그 프로젝트의 기존 핀만 해제.
-      // 낙관적 갱신: store 먼저 업데이트하고 백엔드 호출. 실패해도 다음 fetch 가 정정.
+      //
+      // Restore 모델: setBaseline 은 backend 에서 mapping_* 를 snapshot 시점으로 wipe+replace 함.
+      // pinnedIds 를 낙관적으로 즉시 갱신하면 MappingPage 의 main hydrate effect 가 setBaseline
+      // 완료 전에 listRules 를 호출하여 옛 (v3) 데이터를 가져와 깜빡임이 발생.
+      // → set 케이스는 setBaseline 완료 후 pinnedIds 갱신 + snapshots refetch (baseline 필드 sync).
+      // → clear 케이스는 mapping_* 가 그대로라 즉시 낙관적 갱신.
       togglePin: (id) => {
         const wasPinned = get().pinnedIds.includes(id);
         const projectId = projectIdOf(id);
-        set((st) => {
-          if (wasPinned) {
-            return { pinnedIds: st.pinnedIds.filter((pid) => pid !== id) };
+        if (wasPinned) {
+          set((st) => ({ pinnedIds: st.pinnedIds.filter((pid) => pid !== id) }));
+          snapshotApi.clearBaseline(id).catch(() => {});
+          return;
+        }
+        snapshotApi.setBaseline(id).then(() => {
+          set((st) => {
+            const others = projectId
+              ? st.pinnedIds.filter((pid) => projectIdOf(pid) !== projectId)
+              : st.pinnedIds.filter((pid) => pid !== id);
+            return { pinnedIds: [...others, id] };
+          });
+          if (projectId) {
+            useSnapshotsStore.getState().fetchByProject(projectId).catch(() => {});
           }
-          // 같은 프로젝트의 기존 핀만 제외하고 새 id 추가
-          const others = projectId
-            ? st.pinnedIds.filter((pid) => projectIdOf(pid) !== projectId)
-            : st.pinnedIds.filter((pid) => pid !== id);
-          return { pinnedIds: [...others, id] };
-        });
-        (wasPinned ? snapshotApi.clearBaseline(id) : snapshotApi.setBaseline(id))
-          .catch(() => { /* 실패 시 다음 fetch 가 백엔드 truth 로 정정 */ });
+        }).catch(() => { /* 실패 시 다음 fetch 가 백엔드 truth 로 정정 */ });
       },
       // approve 직후 자동 pin — 같은 프로젝트의 기존 pin 만 교체됨.
+      // togglePin 의 set 케이스와 동일 패턴 (Restore 모델 race 회피).
       setPin: (id) => {
         const projectId = projectIdOf(id);
-        set((st) => {
-          const others = projectId
-            ? st.pinnedIds.filter((pid) => projectIdOf(pid) !== projectId)
-            : st.pinnedIds.filter((pid) => pid !== id);
-          return { pinnedIds: [...others, id] };
-        });
-        snapshotApi.setBaseline(id).catch(() => {});
+        snapshotApi.setBaseline(id).then(() => {
+          set((st) => {
+            const others = projectId
+              ? st.pinnedIds.filter((pid) => projectIdOf(pid) !== projectId)
+              : st.pinnedIds.filter((pid) => pid !== id);
+            return { pinnedIds: [...others, id] };
+          });
+          if (projectId) {
+            useSnapshotsStore.getState().fetchByProject(projectId).catch(() => {});
+          }
+        }).catch(() => {});
       },
       // 인자 없으면 모든 핀 해제, id 주면 그 핀만 해제.
       clearPin: (id) => {

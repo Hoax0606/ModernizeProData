@@ -6,9 +6,11 @@ import { useTobeDdlStore } from '../store/tobeDdl';
 import { useT, type TranslationKey } from '../i18n';
 import { useMappingEditsStore, type TableBindingEdit } from '../store/mappingEdits';
 import { useUiStore } from '../store/ui';
+import { useSnapshotsStore, usePinnedSnapshotsStore, type FrozenBinding, type FrozenRule } from '../store/snapshots';
+import { PinIconSvg } from './VersionsPage';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
 import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
-import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult } from '../api/mappingImport';
+import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult, type MappingRuleDto, type MappingTableBindingDto } from '../api/mappingImport';
 import { MappingOnboarding } from './DashboardPage';
 import { isDemoProjectId } from '../lib/demoFixtures';
 
@@ -797,6 +799,29 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   const [activeIdx, setActiveIdx] = useState(0);
   const activeProjectIdForRow = useWorkspaceStore((s) => s.activeProjectId);
 
+  // 프로젝트의 고정핀(baseline) snapshot — context bar 의 table chip 옆에 version 표시.
+  // 진입 시 1 회 fetch (이미 다른 화면에서 불러와 있으면 store 가 채워둠).
+  // baselineSnapshot 검색은 usePinnedSnapshotsStore.pinnedIds 기준 — clearPin 호출 시
+  // 즉시 store 가 갱신돼 chip 도 자동으로 사라진다 (snapshots[].baseline 은 다음 fetch 까지 stale).
+  const snapshots = useSnapshotsStore((s) => s.snapshots);
+  const fetchSnapshotsByProject = useSnapshotsStore((s) => s.fetchByProject);
+  const pinnedIds = usePinnedSnapshotsStore((s) => s.pinnedIds);
+  const clearBaselinePin = usePinnedSnapshotsStore((s) => s.clearPin);
+  useEffect(() => {
+    if (activeProjectIdForRow) {
+      fetchSnapshotsByProject(activeProjectIdForRow).catch(() => { /* polling 에서 재시도 */ });
+    }
+  }, [activeProjectIdForRow, fetchSnapshotsByProject]);
+  const baselineSnapshot = useMemo(
+    () => snapshots.find((s) => s.projectId === activeProjectIdForRow && pinnedIds.includes(s.id)),
+    [snapshots, activeProjectIdForRow, pinnedIds],
+  );
+  // mapping rule 수정 시 baseline 핀 자동 해제 — snapshot 이 실제 룰과 어긋나면 안 됨.
+  // clearPin 이 backend + store 동시 갱신 → baselineSnapshot 자동 null → chip 사라짐.
+  const clearBaselineIfPinned = useCallback(() => {
+    if (baselineSnapshot) clearBaselinePin(baselineSnapshot.id);
+  }, [baselineSnapshot, clearBaselinePin]);
+
   /**
    * DB 의 mapping_table_bindings → zustand 의 tableBindingEdits 로 hydrate.
    * 임포트 직후 / 페이지 마운트 시 호출. 해당 project 의 binding edits 전부 교체.
@@ -955,10 +980,13 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
       });
     // TobeMappingDetail 은 MappingPage 가 DDL 로드 완료 후에야 렌더되므로
     // TOBE_TABLES 는 마운트 시점에 이미 채워져 있음. 추가 trigger 불필요.
+    // Restore 모델: baseline 핀이 setBaseline 호출로 live mapping_* 를 snapshot 시점으로
+    // 복원함. 따라서 frontend 는 항상 backend 의 live 만 hydrate 하면 됨 (override 불필요).
+    // baselineSnapshot 변경 (set/clear) → main effect 가 fresh fetch.
     hydrateBindingsFromDb(activeProjectIdForRow);
     hydrateRowEditsFromDb(activeProjectIdForRow);
     return () => { cancelled = true; };
-  }, [activeProjectIdForRow, hydrateBindingsFromDb, hydrateRowEditsFromDb]);
+  }, [activeProjectIdForRow, baselineSnapshot?.id, hydrateBindingsFromDb, hydrateRowEditsFromDb]);
   const rowEdits = useMappingEditsStore(
     (s) => (activeProjectIdForRow ? s.rowEdits[activeProjectIdForRow]?.[table.internalName] : undefined) || EMPTY_ROW_EDITS,
   );
@@ -983,7 +1011,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
     }, 80);
     return () => window.clearInterval(id);
   }, [testStatus]);
-  const handleSaveEdit = useCallback((r: MappingRow, edit: RowEdit) => {
+  const handleSaveEdit = useCallback(async (r: MappingRow, edit: RowEdit) => {
     if (!activeProjectIdForRow) return;
     // 사용자가 row 편집기에서 저장한 것 = manual
     const editWithOrigin: RowEdit = { ...edit, ruleOrigin: 'manual' };
@@ -1017,18 +1045,27 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
       }
     }
     const strategy = edit.savedStrategy ?? 'expression';
-    mappingImportApi.upsertRule(activeProjectIdForRow, {
-      tobeSchema: tobeSplit.schema,
-      tobeTable: tobeSplit.table,
-      tobeColumn: r.tgt,
-      asisSchema, asisTable, asisColumn,
-      strategy,
-      transformRule: edit.savedRule ?? null,
-      transformSql: edit.savedRule ?? null,
-      defaultValue: edit.savedDefault ?? null,
-      notNullOverride: edit.savedNotNull ?? false,
-    }).catch((e) => console.warn('[mapping] upsertRule failed', e));
-  }, [activeProjectIdForRow, table.internalName, table.name, bindingEdit]);
+    try {
+      await mappingImportApi.upsertRule(activeProjectIdForRow, {
+        tobeSchema: tobeSplit.schema,
+        tobeTable: tobeSplit.table,
+        tobeColumn: r.tgt,
+        asisSchema, asisTable, asisColumn,
+        strategy,
+        transformRule: edit.savedRule ?? null,
+        transformSql: edit.savedRule ?? null,
+        defaultValue: edit.savedDefault ?? null,
+        notNullOverride: edit.savedNotNull ?? false,
+      });
+    } catch (e) {
+      console.warn('[mapping] upsertRule failed', e);
+    }
+    // baseline 고정 상태에서의 수정 — 핀 자동 해제. **upsertRule 완료 후** 호출하는 이유:
+    // clearPin 이 main hydrate effect 를 트리거 → 그 시점 backend 에 사용자 값이 들어가 있어야
+    // listRules 가 사용자 값을 받고 rowEdits 에 정상 반영. 먼저 clearPin 하면 hydrate 가
+    // 옛 live 데이터를 가져와 사용자 변경값을 덮어쓰는 race 가 발생.
+    clearBaselineIfPinned();
+  }, [activeProjectIdForRow, table.internalName, table.name, bindingEdit, clearBaselineIfPinned]);
   const [bindingSources, setBindingSources] = useState(bindingEdit?.sources ?? table.sources);
   const [bindingMode, setBindingMode] = useState<'join' | 'union'>(
     bindingEdit?.mode ?? (table.compositionKind === 'union' ? 'union' : 'join'),
@@ -1115,6 +1152,17 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
       <div style={{ ...styles.contextBar, display: reportOpen ? 'none' : 'flex' }}>
         <span style={{ ...styles.sidePill, color: 'var(--navy)', background: 'var(--navy-50)', borderColor: 'var(--navy)' }}>TO-BE</span>
         <div style={styles.tableChip}>{table.short}</div>
+        {baselineSnapshot && (
+          <button
+            type="button"
+            onClick={() => navigate('/versions', { state: { selectSnapshotId: baselineSnapshot.id } })}
+            style={styles.baselinePinChip}
+            title={`Pinned baseline: ${baselineSnapshot.name}  (click → Versions)`}
+          >
+            <PinIconSvg size={11} />
+            {baselineSnapshot.version}
+          </button>
+        )}
         <div style={{ flex: 1 }} />
         <div style={styles.statusCounts}>
           {(() => {
@@ -2684,6 +2732,69 @@ type SlotPending =
   | { kind: 'upload'; file: File }
   | { kind: 'delete' };
 
+/**
+ * Snapshot baseline 비교용 시그니처 helper.
+ * snapshot 의 frozen rules/bindings 와 apply 후 live mapping_rules/bindings 가 의미적으로 같은지 판단.
+ * id / timestamp / createdBy 같은 메타 필드는 무시하고, 사용자 의도가 담긴 필드만 비교.
+ */
+function ruleSignature(r: {
+  tobeSchema: string; tobeTable: string; tobeColumn: string;
+  asisSchema?: string | null; asisTable?: string | null;
+  asisColumn?: string[] | null; strategy: string;
+  transformRule?: string | null; transformSql?: string | null;
+  defaultValue?: string | null; notNullOverride: boolean;
+  notes?: string | null;
+}): string {
+  return JSON.stringify({
+    k: `${r.tobeSchema}|${r.tobeTable}|${r.tobeColumn}`,
+    aS: r.asisSchema ?? null,
+    aT: r.asisTable ?? null,
+    aC: r.asisColumn ?? null,
+    st: r.strategy,
+    tr: r.transformRule ?? null,
+    ts: r.transformSql ?? null,
+    dv: r.defaultValue ?? null,
+    nn: !!r.notNullOverride,
+    nt: r.notes ?? null,
+  });
+}
+
+function rulesEqual(a: FrozenRule[], b: MappingRuleDto[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = a.map(ruleSignature).sort();
+  const sb = b.map(ruleSignature).sort();
+  for (let i = 0; i < sa.length; i++) if (sa[i] !== sb[i]) return false;
+  return true;
+}
+
+function bindingSignature(b: {
+  tobeSchema: string; tobeTable: string;
+  compositionKind: string; whereFilter?: string | null;
+  sources: Array<{
+    ordinal: number; asisSchema?: string | null; asisTable: string;
+    alias: string; role: string; joinType?: string | null; joinOn?: string | null;
+  }>;
+}): string {
+  const srcs = [...b.sources].sort((x, y) => x.ordinal - y.ordinal).map((s) => ({
+    o: s.ordinal, aS: s.asisSchema ?? null, aT: s.asisTable,
+    al: s.alias, r: s.role, jt: s.joinType ?? null, jo: s.joinOn ?? null,
+  }));
+  return JSON.stringify({
+    k: `${b.tobeSchema}|${b.tobeTable}`,
+    ck: b.compositionKind,
+    wf: b.whereFilter ?? null,
+    srcs,
+  });
+}
+
+function bindingsEqual(a: FrozenBinding[], b: MappingTableBindingDto[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = a.map(bindingSignature).sort();
+  const sb = b.map(bindingSignature).sort();
+  for (let i = 0; i < sa.length; i++) if (sa[i] !== sb[i]) return false;
+  return true;
+}
+
 function MappingDefinitionImportModal({
   projectId, activeFiles, onClose, onChanged,
 }: {
@@ -2723,6 +2834,31 @@ function MappingDefinitionImportModal({
         await mappingImportApi.reapplyLatest(projectId);
       }
       await mappingImportApi.rebuildBindings(projectId);
+
+      // Snapshot baseline 자동 해제: apply 후 데이터가 frozen snapshotData 와 달라지면 핀 해제.
+      // - code CSV 변경 (codePending != 'none') → frozen codeMaps 와 다를 가능성 매우 큼.
+      //   (현재 listCodeMaps API 미존재 → pending 신호로 보조 판단.)
+      // - rules / bindings 는 fetch 후 시그니처 비교 — id/timestamp 제외한 의미상 동일성 확인.
+      // 같은 파일로 단순 reapply 라 결과가 동일하면 핀 유지.
+      const pinnedIds = usePinnedSnapshotsStore.getState().pinnedIds;
+      const baseline = useSnapshotsStore.getState().snapshots.find(
+        (s) => s.projectId === projectId && pinnedIds.includes(s.id),
+      );
+      if (baseline?.snapshotData) {
+        const sd = baseline.snapshotData;
+        let changed = codePending.kind !== 'none';
+        if (!changed) {
+          const [newRules, newBindings] = await Promise.all([
+            mappingImportApi.listRules(projectId),
+            mappingImportApi.listBindings(projectId),
+          ]);
+          changed = !rulesEqual(sd.rules, newRules) || !bindingsEqual(sd.bindings, newBindings);
+        }
+        if (changed) {
+          usePinnedSnapshotsStore.getState().clearPin(baseline.id);
+        }
+      }
+
       const unmatched = await onChanged();
       if (unmatched.length > 0) {
         const shown = unmatched.slice(0, 5).join(', ');
@@ -3966,6 +4102,16 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '3px 8px', borderRadius: 4,
     border: '1px solid var(--border)', background: 'var(--panel-2)',
     fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 500,
+  },
+  // 프로젝트의 고정핀 snapshot version 표시. green 강조 + 클릭 시 Versions 페이지로 이동.
+  baselinePinChip: {
+    display: 'inline-flex', alignItems: 'center', gap: 4,
+    padding: '3px 8px', borderRadius: 4,
+    border: '1px solid var(--green)', background: 'var(--green-50)',
+    color: 'var(--green)',
+    fontFamily: 'var(--mono)', fontSize: 11.5, fontWeight: 600,
+    whiteSpace: 'nowrap',
+    cursor: 'pointer',
   },
   statusCounts: {
     display: 'flex', alignItems: 'center', gap: 6,
