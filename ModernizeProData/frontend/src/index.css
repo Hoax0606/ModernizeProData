@@ -1,4 +1,8 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* 한국어·영문 = Pretendard Variable (SF Pro 영감, 가변 가중치, 단일 파일).
+   일본어     = Noto Sans JP (가나·한자 표준).
+   코드      = JetBrains Mono. */
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.css');
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root, [data-theme="light"] {
   --bg: #f9fafb;
@@ -45,8 +49,10 @@
   --phase-done:         #678b86; /* 회색 */
   --phase-done-50:      #f2f4f3;
 
-  --mono: 'Hoax Mono JP', 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-  --sans: 'Hoax Mono JP', 'Inter', -apple-system, system-ui, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* 본문: Pretendard Variable 이 한·영을 깔끔하게 처리.
+     일본어 글자는 Noto Sans JP 로 fallback (브라우저 자동 코드포인트 매칭). */
+  --sans: 'Pretendard Variable', 'Noto Sans JP', -apple-system, system-ui, sans-serif;
 }
 
 [data-theme="dark"] {
@@ -105,7 +111,9 @@ html, body {
   color: var(--text);
   font-family: var(--sans);
   font-size: 12px;
-  line-height: 1.35;
+  line-height: 1.45;
+  letter-spacing: -0.005em;
+  font-feature-settings: 'ss01', 'cv01', 'cv11', 'tnum';
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;

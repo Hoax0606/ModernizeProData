@@ -72,6 +72,37 @@ export interface FrozenBindingSource {
   joinOn: string | null;
 }
 
+/**
+ * snapshot 생성 시점에 박제된 "이전 버전 대비 변경사항".
+ * 백엔드 SnapshotChanges record 와 1:1. snapshots.changes (jsonb) 직렬화.
+ */
+export interface SnapshotChanges {
+  /** 비교 기준이 된 snapshot id. 첫 snapshot 이면 null. */
+  previousVersionId: string | null;
+  /** 비교 기준이 된 snapshot version (e.g. "v1.2"). */
+  previousVersion: string | null;
+  summary: { added: number; modified: number; removed: number };
+  items: ChangeItem[];
+}
+
+export interface ChangeItem {
+  kind: 'added' | 'modified' | 'removed';
+  category: 'rule' | 'binding' | 'codeMap';
+  /** 사람이 읽을 식별자 (e.g. "public.customer.gender"). */
+  key: string;
+  /** 짧은 설명. */
+  detail: string;
+  /** modified 일 때만 채워짐. 어느 필드가 어떤 값에서 어떤 값으로 바뀌었는지. */
+  fieldChanges?: FieldChange[] | null;
+}
+
+/** modified 항목의 필드 단위 변경. before/after 는 문자열로 정규화. */
+export interface FieldChange {
+  field: string;
+  before: string;
+  after: string;
+}
+
 export interface MappingSnapshot {
   id: string;
   projectId: string;
@@ -97,6 +128,10 @@ export interface MappingSnapshot {
    * getter 를 Jackson 이 직렬화하면 JSON key 가 "baseline" 으로 나오기 때문.
    */
   baseline?: boolean;
+  /** 생성 시점에 박제된 이전 버전 대비 변경 요약 + 항목. */
+  changes?: SnapshotChanges;
+  /** changes.previousVersionId 와 같은 값을 entity-level 에서도 노출. */
+  previousVersionId?: string;
 }
 
 interface SnapshotsState {

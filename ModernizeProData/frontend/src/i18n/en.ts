@@ -424,6 +424,21 @@ export const en: Record<TranslationKey, string> = {
   'versions.pin.toggleTitleIneligible': 'Cannot pin in the current phase',
   'versions.pin.iconAria':           'Pinned to top',
 
+  // CHANGES section (versions detail panel)
+  'versions.changes.title':           'Changes',
+  'versions.changes.status.added':    'ADDED',
+  'versions.changes.status.modified': 'MODIFIED',
+  'versions.changes.status.deleted':  'DELETED',
+  'versions.changes.field.asisColumn':'Asis Column',
+  'versions.changes.field.rule':      'Rule',
+  'versions.changes.compareLabel':    'compared to {version}',
+  'versions.changes.firstSnapshot':   'first snapshot — all items added',
+  'versions.changes.noChanges':       'No changes recorded.',
+  'versions.changes.unassigned':      '(unassigned)',
+  'versions.changes.label.column':    'column changed',
+  'versions.changes.label.rule':      'rule changed',
+  'versions.changes.label.both':      'column / rule changed',
+
   'approvals.title':           'Approvals',
   'approvals.subtitle':        'Site-wide snapshot approvals & rejection history',
   'approvals.empty':           'No snapshots yet',

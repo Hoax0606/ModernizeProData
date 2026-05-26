@@ -428,6 +428,21 @@ export const ko = {
   'versions.pin.toggleTitleIneligible': '현재 phase 에서는 pin 불가',
   'versions.pin.iconAria':           'Pinned to top',
 
+  // CHANGES section (versions detail panel)
+  'versions.changes.title':           'Changes',                          // *.title — 영문 통일
+  'versions.changes.status.added':    'ADDED',                            // *.status.* — 영문 통일
+  'versions.changes.status.modified': 'MODIFIED',
+  'versions.changes.status.deleted':  'DELETED',
+  'versions.changes.field.asisColumn':'Asis Column',                      // field 라벨 — 영문 통일
+  'versions.changes.field.rule':      'Rule',
+  'versions.changes.compareLabel':    '{version} 과 비교',                 // desc — 번역
+  'versions.changes.firstSnapshot':   '첫 스냅샷 — 모든 항목 추가됨',
+  'versions.changes.noChanges':       '변경 사항이 기록되지 않았습니다.',
+  'versions.changes.unassigned':      '(미지정)',                          // backend sentinel "(unassigned)" 의 번역
+  'versions.changes.label.column':    '컬럼 변경',                         // MODIFIED 헤더 우측 라벨
+  'versions.changes.label.rule':      '룰 변경',
+  'versions.changes.label.both':      '컬럼/룰 변경',
+
   'approvals.title':           'Approvals',
   'approvals.subtitle':        '사이트 전체 스냅샷 승인 / 거부 처리 및 이력',
   'approvals.empty':           'No snapshots yet',
