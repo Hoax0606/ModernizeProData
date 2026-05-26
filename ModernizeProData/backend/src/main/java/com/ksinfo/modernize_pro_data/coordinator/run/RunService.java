@@ -116,9 +116,12 @@ public class RunService {
             }
         }
 
-        // 2. Lock check — run_status が idle (or NULL) でなければ LOCKED
+        // 2. Lock check — 실행 중 (running / paused) 만 LOCKED.
+        // idle / null / completed 는 새 run trigger 허용.
+        // completed = 이전 run 결과 (frontend mock simulation 잔재 포함) — 새 run 막을 이유 없음.
         String currentStatus = project.getRunStatus();
-        if (currentStatus != null && !STATUS_IDLE.equals(currentStatus)) {
+        boolean isActuallyRunning = STATUS_RUNNING.equals(currentStatus) || "paused".equals(currentStatus);
+        if (isActuallyRunning) {
             log.info("startRun locked: projectId={} run_status={}", projectId, currentStatus);
             return RunResult.locked("project already in run_status: " + currentStatus);
         }
