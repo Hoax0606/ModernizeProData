@@ -75,6 +75,13 @@ public class Snapshot {
     private int codeMapCount;
 
     /**
+     * 프로젝트의 현재 "고정핀" 표시. partial unique index 가 project_id 당 단 1개만 허용.
+     * MappingPage 등 다른 컨텍스트가 "현재 기준 snapshot" 을 찾을 때 사용.
+     */
+    @Column(name = "is_baseline", nullable = false)
+    private boolean baseline;
+
+    /**
      * 생성 시점의 mapping working set (rules + codeMaps + bindings) 동결본.
      * Immutable — 한 번 채워진 뒤 라이브 mapping 변경에 영향받지 않는다.
      */

@@ -1142,6 +1142,7 @@ export const ko = {
   'mapping.report.error.type.CONVERSION':  '타입 변환 실패',
   'mapping.report.error.type.IO':          '파일 읽기 실패',
   'mapping.report.error.type.UNKNOWN':     '실행 오류',
+  'mapping.report.error.hintLabel':        '힌트',
   'mapping.inspector.combineHint':         '-- combine: 변환식을 직접 입력하세요 (예: MAKE_DATE / CONCAT)',
 } as const;
 

@@ -67,4 +67,12 @@ export const snapshotApi = {
   /** snapshot 생성 시점에 동결된 mapping payload (rules + codeMaps + bindings). */
   getMapping: (id: string) =>
     unwrap(api.get<ApiResponse<SnapshotData>>(`/api/v1/snapshots/${id}/mapping`)),
+
+  /** 이 snapshot 을 project 의 고정핀(baseline)으로 설정 — 기존 baseline 은 자동 해제. */
+  setBaseline: (id: string) =>
+    unwrap(api.post<ApiResponse<MappingSnapshot>>(`/api/v1/snapshots/${id}/baseline`)),
+
+  /** 고정핀 해제. */
+  clearBaseline: (id: string) =>
+    unwrap(api.delete<ApiResponse<MappingSnapshot>>(`/api/v1/snapshots/${id}/baseline`)),
 };

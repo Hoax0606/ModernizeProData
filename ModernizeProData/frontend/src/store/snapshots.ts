@@ -91,6 +91,12 @@ export interface MappingSnapshot {
   ruleCount: number;
   codeMapCount: number;
   snapshotData?: SnapshotData;
+  /**
+   * 프로젝트의 현재 고정핀(baseline). 백엔드의 snapshots.is_baseline 과 1:1.
+   * 키 이름이 `baseline` 인 이유: Java 의 boolean 필드 `baseline` + Lombok isBaseline()
+   * getter 를 Jackson 이 직렬화하면 JSON key 가 "baseline" 으로 나오기 때문.
+   */
+  baseline?: boolean;
 }
 
 interface SnapshotsState {
@@ -122,6 +128,7 @@ export const useSnapshotsStore = create<SnapshotsState>()(
             ...list,
           ],
         }));
+        syncPinnedFromList(list);
       } catch { /* polling에서 재시도 */ }
     },
 
@@ -136,6 +143,7 @@ export const useSnapshotsStore = create<SnapshotsState>()(
             ...list,
           ],
         }));
+        syncPinnedFromList(list);
       } catch { /* polling에서 재시도 */ }
     },
 
@@ -177,33 +185,91 @@ export const useSnapshotsStore = create<SnapshotsState>()(
 
 /**
  * Versions 화면에서 사용자가 상단에 고정한 snapshot id 집합.
- * UI-only — 백엔드 비저장. localStorage 영속.
+ *
+ * 정책: **프로젝트당 1개 핀**. 한 프로젝트에서 새 핀을 set 해도 다른 프로젝트의 핀은 유지.
+ * pinnedIds 는 여러 프로젝트의 baseline 들을 동시에 담는다 (프로젝트 수만큼).
+ *
+ * 백엔드 snapshots.is_baseline 과 동기화. localStorage 는 캐시 역할 (오프라인/초기 paint).
  */
 interface PinnedSnapshotsState {
   pinnedIds: string[];
   togglePin: (id: string) => void;
   setPin: (id: string) => void;
-  clearPin: () => void;
+  clearPin: (id?: string) => void;
   isPinned: (id: string) => boolean;
+}
+
+/** id 로 snapshot 의 projectId 찾기. 없으면 undefined. */
+function projectIdOf(id: string): string | undefined {
+  return useSnapshotsStore.getState().snapshots.find((s) => s.id === id)?.projectId;
 }
 
 export const usePinnedSnapshotsStore = create<PinnedSnapshotsState>()(
   persist(
     (set, get) => ({
       pinnedIds: [],
-      // 한 번에 단 한 개의 snapshot 만 고정 가능 — 새로 고정 시 기존 고정 해제.
-      togglePin: (id) =>
-        set((st) => ({
-          pinnedIds: st.pinnedIds.includes(id) ? [] : [id],
-        })),
-      // approve 직후 자동 pin — 기존 pin 은 교체됨.
-      setPin: (id) => set({ pinnedIds: [id] }),
-      clearPin: () => set({ pinnedIds: [] }),
+      // 같은 프로젝트 안에서만 단일 핀 — 새 핀 set 시 그 프로젝트의 기존 핀만 해제.
+      // 낙관적 갱신: store 먼저 업데이트하고 백엔드 호출. 실패해도 다음 fetch 가 정정.
+      togglePin: (id) => {
+        const wasPinned = get().pinnedIds.includes(id);
+        const projectId = projectIdOf(id);
+        set((st) => {
+          if (wasPinned) {
+            return { pinnedIds: st.pinnedIds.filter((pid) => pid !== id) };
+          }
+          // 같은 프로젝트의 기존 핀만 제외하고 새 id 추가
+          const others = projectId
+            ? st.pinnedIds.filter((pid) => projectIdOf(pid) !== projectId)
+            : st.pinnedIds.filter((pid) => pid !== id);
+          return { pinnedIds: [...others, id] };
+        });
+        (wasPinned ? snapshotApi.clearBaseline(id) : snapshotApi.setBaseline(id))
+          .catch(() => { /* 실패 시 다음 fetch 가 백엔드 truth 로 정정 */ });
+      },
+      // approve 직후 자동 pin — 같은 프로젝트의 기존 pin 만 교체됨.
+      setPin: (id) => {
+        const projectId = projectIdOf(id);
+        set((st) => {
+          const others = projectId
+            ? st.pinnedIds.filter((pid) => projectIdOf(pid) !== projectId)
+            : st.pinnedIds.filter((pid) => pid !== id);
+          return { pinnedIds: [...others, id] };
+        });
+        snapshotApi.setBaseline(id).catch(() => {});
+      },
+      // 인자 없으면 모든 핀 해제, id 주면 그 핀만 해제.
+      clearPin: (id) => {
+        if (!id) {
+          const all = get().pinnedIds;
+          set({ pinnedIds: [] });
+          all.forEach((pid) => { snapshotApi.clearBaseline(pid).catch(() => {}); });
+          return;
+        }
+        set((st) => ({ pinnedIds: st.pinnedIds.filter((pid) => pid !== id) }));
+        snapshotApi.clearBaseline(id).catch(() => {});
+      },
       isPinned: (id) => get().pinnedIds.includes(id),
     }),
     { name: 'modernize-pinned-snapshots' },
   ),
 );
+
+/**
+ * snapshot list 응답으로부터 pinnedIds 갱신.
+ * - 응답 list 에 포함된 snapshot id 들은 응답의 baseline 값을 신뢰 (true 면 유지/추가, false 면 제거).
+ * - 응답 list 에 없는 id (= 다른 프로젝트의 핀) 는 그대로 유지.
+ */
+function syncPinnedFromList(list: MappingSnapshot[]) {
+  if (list.length === 0) return;
+  const inListIds = new Set(list.map((s) => s.id));
+  const newBaselines = list.filter((s) => s.baseline).map((s) => s.id);
+  usePinnedSnapshotsStore.setState((st) => ({
+    pinnedIds: [
+      ...st.pinnedIds.filter((pid) => !inListIds.has(pid)),
+      ...newBaselines,
+    ],
+  }));
+}
 
 /**
  * Phase 별 pin 가능 규칙.

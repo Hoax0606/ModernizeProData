@@ -753,16 +753,7 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
                     ...styles.pinToggleKnob,
                     ...(isPinned ? styles.pinToggleKnobOn : {}),
                   }}
-                >
-                  <span
-                    style={{
-                      ...styles.pinToggleKnobIcon,
-                      color: isPinned ? 'var(--navy)' : 'var(--text-4)',
-                    }}
-                  >
-                    <PinIconSvg size={9} />
-                  </span>
-                </span>
+                />
               </button>
             </div>
           </div>

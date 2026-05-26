@@ -39,6 +39,8 @@ import java.util.List;
  * DELETE /api/v1/snapshots/{id}                   — 삭제
  * GET    /api/v1/sites/{siteId}/snapshots        — 사이트 전체 스냅샷 (Approvals 용)
  * GET    /api/v1/snapshots/{id}/mapping          — snapshot 의 frozen 매핑 (rules/bindings/codeMaps)
+ * POST   /api/v1/snapshots/{id}/baseline         — 이 snapshot 을 project 의 고정핀(baseline) 으로 설정
+ * DELETE /api/v1/snapshots/{id}/baseline         — 고정핀 해제
  */
 @Slf4j
 @RestController
@@ -194,6 +196,52 @@ public class SnapshotController {
     @GetMapping("/api/v1/snapshots/{id}/mapping")
     public ApiResponse<SnapshotData> getMapping(@PathVariable String id) {
         return ApiResponse.ok(findOrThrow(id).getSnapshotData());
+    }
+
+    /**
+     * 프로젝트의 "고정핀" 을 이 snapshot 으로 설정. 단일 트랜잭션 안에서 기존 baseline 을 false 로
+     * 내리고 본인을 true 로 올린다. partial unique index 가 동시성 race 도 안전망으로 잡아준다.
+     */
+    @PostMapping("/api/v1/snapshots/{id}/baseline")
+    @Transactional
+    public ApiResponse<Snapshot> setBaseline(@PathVariable String id, Authentication auth) {
+        Snapshot s = findOrThrow(id);
+        if (s.isBaseline()) {
+            return ApiResponse.ok(s);
+        }
+        snapshotRepository.findByProjectIdAndBaselineTrue(s.getProjectId()).ifPresent(prev -> {
+            prev.setBaseline(false);
+            snapshotRepository.save(prev);
+        });
+        snapshotRepository.flush(); // partial unique index 충돌 방지: prev false 가 새 true 보다 먼저 DB 에 도달
+        s.setBaseline(true);
+        snapshotRepository.save(s);
+        log.info("Snapshot baseline set: {} ({}) by {}", s.getName(), s.getId(), auth.getName());
+
+        projectRepository.findById(s.getProjectId()).ifPresent(p ->
+                auditLogService.record(p, auth.getName(), "baseline set")
+                        .snapshot(s.getId(), s.getName())
+                        .save());
+        return ApiResponse.ok(s);
+    }
+
+    /** baseline 해제 — 현재 baseline 이 아니더라도 idempotent. */
+    @DeleteMapping("/api/v1/snapshots/{id}/baseline")
+    @Transactional
+    public ApiResponse<Snapshot> clearBaseline(@PathVariable String id, Authentication auth) {
+        Snapshot s = findOrThrow(id);
+        if (!s.isBaseline()) {
+            return ApiResponse.ok(s);
+        }
+        s.setBaseline(false);
+        snapshotRepository.save(s);
+        log.info("Snapshot baseline cleared: {} ({}) by {}", s.getName(), s.getId(), auth.getName());
+
+        projectRepository.findById(s.getProjectId()).ifPresent(p ->
+                auditLogService.record(p, auth.getName(), "baseline cleared")
+                        .snapshot(s.getId(), s.getName())
+                        .save());
+        return ApiResponse.ok(s);
     }
 
     @DeleteMapping("/api/v1/snapshots/{id}")

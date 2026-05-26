@@ -39,6 +39,8 @@ export interface MappingReportResult {
   errorColumn: string | null;
   errorExpression: string | null;
   errorType: MappingReportErrorType | null;
+  /** DuckDB raw 메시지의 첫 줄 — 값/포맷/참조 등 결정적 힌트. */
+  errorHint: string | null;
 }
 
 export interface MappingTableBindingSourceDto {
