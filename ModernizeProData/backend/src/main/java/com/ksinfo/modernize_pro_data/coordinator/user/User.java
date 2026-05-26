@@ -55,6 +55,10 @@ public class User {
     @Column(name = "current_session_expires_at")
     private OffsetDateTime currentSessionExpiresAt;
 
+    /** admin (= Worker role) 인 경우 그 user 가 속한 site. master/viewer 는 null. */
+    @Column(name = "site_id", length = 40)
+    private String siteId;
+
     /** 새 사용자 생성용 팩토리 — id 자동 부여, createdAt = now. */
     public static User create(String username, String passwordHash, UserRole role) {
         User u = new User();

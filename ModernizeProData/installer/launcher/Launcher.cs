@@ -1,24 +1,25 @@
-﻿// ModernizeProData installer launcher.
+// ModernizeProData installer launcher.
 //
-// Pops a tiny WinForms dialog asking for language, then invokes msiexec
-// with TRANSFORMS=:<lang-code> and APP_LANG=<lang> so the .msi installs
-// the matching locale strings and the installed app remembers the choice.
+// Pops a single setup dialog asking for:
+//   - UI language (en/ko/ja)
+//   - Current PC's hardware fingerprint (read from
+//     HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid -- the same value the
+//     installed backend reads, so a license issued for this PC matches)
+//   - Optional .lic file to install at the same time
 //
-// Compile with .NET Framework's csc.exe (always present on Win10/11):
-//   csc.exe /target:winexe /out:Launcher.exe ^
-//           /reference:System.Windows.Forms.dll ^
-//           /reference:System.Drawing.dll Launcher.cs
+// On OK it runs msiexec for the matching per-language .msi, then -- if the
+// user picked a .lic -- copies it into %LOCALAPPDATA%\ModernizeProData\
+// license.lic. The backend's LicenseStartupLoader picks that file up on the
+// first boot and imports it.
 //
-// Language targeting:
-//   ko -> 1042 (ko-KR)
-//   ja -> 1041 (ja-JP)
-//   en -> 1033 (en-US)
+// Compile: build-launcher.ps1 -> csc.exe (.NET Framework 4.x).
 
 using System;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 internal static class Launcher
 {
@@ -28,7 +29,7 @@ internal static class Launcher
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
-        using (var dialog = new LanguageDialog())
+        using (var dialog = new SetupDialog())
         {
             if (dialog.ShowDialog() != DialogResult.OK)
             {
@@ -36,13 +37,8 @@ internal static class Launcher
             }
 
             string lang = dialog.SelectedLanguage;
+            string mode = dialog.SelectedMode;
 
-            // Per-language .msi rather than a single transform-embedded MSI:
-            // sub-storage embedding requires msitran.exe / msidb.exe which are
-            // not present on this build host, so we ship three pre-built MSIs
-            // and dispatch to the one matching the user's selection. The
-            // ProductCode is identical across all three, so only one ever
-            // installs at a time.
             string exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? ".";
             string msi = Path.Combine(exeDir, "ModernizeProData-" + lang + "-1.0.0.msi");
             if (!File.Exists(msi))
@@ -55,22 +51,20 @@ internal static class Launcher
                 return 2;
             }
 
-            // APP_LANG goes into the installed app's registry so React picks
-            // the right UI language on first boot. /l*v captures a verbose
-            // install log next to the launcher for troubleshooting.
             string logPath = Path.Combine(exeDir, "install-" + lang + ".log");
-            string arguments = "/i \"" + msi + "\" APP_LANG=" + lang + " /l*v \"" + logPath + "\"";
+            string arguments = "/i \"" + msi + "\" APP_LANG=" + lang + " APP_MODE=" + mode + " /l*v \"" + logPath + "\"";
             var psi = new ProcessStartInfo("msiexec.exe", arguments)
             {
-                UseShellExecute = true   // msiexec needs shell so UAC prompts work properly.
+                UseShellExecute = true
             };
 
+            int exitCode;
             try
             {
                 using (var proc = Process.Start(psi))
                 {
                     proc.WaitForExit();
-                    return proc.ExitCode;
+                    exitCode = proc.ExitCode;
                 }
             }
             catch (Exception ex)
@@ -82,6 +76,10 @@ internal static class Launcher
                     MessageBoxIcon.Error);
                 return 3;
             }
+
+            // License + Coordinator URL are no longer collected at install
+            // time -- those are entered in-app on first boot.
+            return exitCode;
         }
     }
 
@@ -97,138 +95,266 @@ internal static class Launcher
 }
 
 
-
-internal sealed class LanguageDialog : Form
+internal sealed class SetupDialog : Form
 {
     public string SelectedLanguage { get; private set; }
+    public string SelectedMode { get; private set; }
 
-    private readonly ComboBox _combo;
+    private readonly ComboBox _langCombo;
+    private readonly ComboBox _modeCombo;
+    private readonly TextBox _hwBox;
 
-    // Unified brand font across the launcher dialog and the React UI.
-    private static readonly System.Drawing.Font BrandFont =
-        new System.Drawing.Font("Hoax Mono JP", 10.5F);
-    private static readonly System.Drawing.Font KoFont = BrandFont;
-    private static readonly System.Drawing.Font JaFont = BrandFont;
-    private static readonly System.Drawing.Font EnFont = BrandFont;
+    // Hoax Mono JP across the dialog so it matches the React UI.
+    private static readonly System.Drawing.Font BodyFont =
+        new System.Drawing.Font("Hoax Mono JP", 9.0F);
+    private static readonly System.Drawing.Font SectionFont =
+        new System.Drawing.Font("Hoax Mono JP", 8.5F, System.Drawing.FontStyle.Bold);
+    private static readonly System.Drawing.Font HintFont =
+        new System.Drawing.Font("Hoax Mono JP", 8.0F);
+    private static readonly System.Drawing.Font TitleFont =
+        new System.Drawing.Font("Hoax Mono JP", 12F, System.Drawing.FontStyle.Bold);
 
-    public LanguageDialog()
+    // Match the WiX wizard chrome: native white background, dark navy
+    // accent for headings/buttons, neutral gray hints/borders.
+    private static readonly System.Drawing.Color Accent =
+        System.Drawing.Color.FromArgb(28, 61, 90);     // #1c3d5a deep navy
+    private static readonly System.Drawing.Color AccentHover =
+        System.Drawing.Color.FromArgb(44, 84, 122);    // lighter navy on hover
+    private static readonly System.Drawing.Color HairLine =
+        System.Drawing.Color.FromArgb(216, 222, 224);  // #d8dee0
+    private static readonly System.Drawing.Color TextMuted =
+        System.Drawing.Color.FromArgb(110, 117, 122);  // #6e757a
+    private static readonly System.Drawing.Color FieldBg =
+        System.Drawing.Color.White;
+
+    public SetupDialog()
     {
         SelectedLanguage = "en";
+        SelectedMode = "coordinator";
+
         Text = "ModernizeProData Setup";
-        Width = 440;
-        Height = 230;
+        Width = 520;
+        Height = 420;
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
         ShowInTaskbar = true;
-        // Yu Gothic UI renders Latin, Hangul, and Kana cleanly in one face so
-        // the mixed-script heading doesn't pick up jagged fallback glyphs.
-        Font = new System.Drawing.Font("Hoax Mono JP", 9.5F);
+        Font = BodyFont;
+        BackColor = System.Drawing.Color.White;
 
-        var heading = new Label
-        {
-            Text = "Select language / 언어 선택 / 言語選択",
-            Top = 18,
-            Left = 22,
-            Width = 380,
-            Height = 24,
-            Font = new System.Drawing.Font("Hoax Mono JP", 11F, System.Drawing.FontStyle.Bold)
-        };
-        Controls.Add(heading);
+        int padLeft = 28;
+        int width = 444;
 
-        var hint = new Label
+        // ---- Title strip (no accent bar; match WiX wizard's plain white header) ----
+        var title = new Label
         {
-            Text = "This sets the installer language and the app's default language.",
-            Top = 46,
-            Left = 22,
-            Width = 380,
-            Height = 32,
-            ForeColor = System.Drawing.SystemColors.GrayText
+            Text = "ModernizeProData",
+            Top = 18, Left = padLeft, Width = width, Height = 24,
+            Font = TitleFont,
+            ForeColor = Accent
         };
-        Controls.Add(hint);
+        Controls.Add(title);
 
-        _combo = new ComboBox
+        var subtitle = new Label
         {
-            Top = 84,
-            Left = 22,
-            Width = 380,
-            DropDownStyle = ComboBoxStyle.DropDownList,
-            DrawMode = DrawMode.OwnerDrawFixed,
-            ItemHeight = 26
+            Text = "Setup",
+            Top = 42, Left = padLeft, Width = width, Height = 16,
+            Font = HintFont,
+            ForeColor = TextMuted
         };
-        _combo.Items.Add("한국어 (Korean)");
-        _combo.Items.Add("日本語 (Japanese)");
-        _combo.Items.Add("English");
-        _combo.SelectedIndex = SystemDefaultIndex();
-        _combo.DrawItem += ComboDrawItem;
-        Controls.Add(_combo);
+        Controls.Add(subtitle);
 
-        var okBtn = new Button
+        var divider = new Panel
         {
-            Text = "OK",
-            Top = 140,
-            Left = 240,
-            Width = 78,
-            Height = 30,
-            DialogResult = DialogResult.OK
+            Top = 68, Left = padLeft, Width = width, Height = 1,
+            BackColor = HairLine
         };
+        Controls.Add(divider);
+
+        int y = 86;
+        int sectionGap = 16;
+
+        // ---- 1. Language ----
+        AddSection(padLeft, ref y, width, "1.  Language", "Sets the installer wizard and the app's default language.");
+
+        _langCombo = MakeCombo(padLeft, y, width);
+        _langCombo.Items.Add("한국어 (Korean)");
+        _langCombo.Items.Add("日本語 (Japanese)");
+        _langCombo.Items.Add("English");
+        _langCombo.SelectedIndex = SystemDefaultIndex();
+        _langCombo.DrawItem += (s, e) => DrawComboItem(_langCombo, e);
+        Controls.Add(_langCombo);
+        y += 24 + sectionGap;
+
+        // ---- 2. Role ----
+        AddSection(padLeft, ref y, width, "2.  Role", "Coordinator runs the meta DB; Worker connects to a Coordinator; Standalone is a single PC.");
+
+        _modeCombo = MakeCombo(padLeft, y, width);
+        _modeCombo.Items.Add("Coordinator (HQ)");
+        _modeCombo.Items.Add("Worker (field)");
+        _modeCombo.Items.Add("Standalone (single PC)");
+        _modeCombo.SelectedIndex = 0;
+        _modeCombo.DrawItem += (s, e) => DrawComboItem(_modeCombo, e);
+        Controls.Add(_modeCombo);
+        y += 24 + sectionGap;
+
+        // ---- 3. Hardware ID ----
+        AddSection(padLeft, ref y, width, "3.  Hardware ID", "Paste this into the issuer to bind a license to this PC.");
+
+        string hwId = ReadMachineGuid() ?? "(could not read MachineGuid)";
+        _hwBox = new TextBox
+        {
+            Top = y, Left = padLeft, Width = width - 76, Height = 24,
+            Text = hwId,
+            ReadOnly = true,
+            BackColor = FieldBg,
+            BorderStyle = BorderStyle.FixedSingle,
+            Font = BodyFont
+        };
+        Controls.Add(_hwBox);
+
+        var copyBtn = MakeFlatButton("Copy", Accent);
+        copyBtn.Top = y - 1;
+        copyBtn.Left = padLeft + width - 70;
+        copyBtn.Width = 70;
+        copyBtn.Height = 26;
+        copyBtn.Click += (s, e) =>
+        {
+            try { Clipboard.SetText(_hwBox.Text); } catch { /* clipboard busy */ }
+            copyBtn.Text = "Copied";
+            var t = new Timer { Interval = 1200 };
+            t.Tick += (s2, e2) => { copyBtn.Text = "Copy"; t.Stop(); t.Dispose(); };
+            t.Start();
+        };
+        Controls.Add(copyBtn);
+        y += 24 + sectionGap;
+
+        // License + Worker connection sections moved to in-app first-boot.
+
+        // ---- Bottom action row ----
+        var actionDivider = new Panel
+        {
+            Top = ClientSize.Height - 60, Left = padLeft, Width = width, Height = 1,
+            BackColor = HairLine
+        };
+        Controls.Add(actionDivider);
+
+        var cancelBtn = MakeFlatButton("Cancel", TextMuted);
+        cancelBtn.Top = ClientSize.Height - 45;
+        cancelBtn.Left = padLeft + width - 156;
+        cancelBtn.Width = 72;
+        cancelBtn.Height = 30;
+        cancelBtn.DialogResult = DialogResult.Cancel;
+        Controls.Add(cancelBtn);
+
+        var okBtn = MakeFlatButton("Install", Accent, primary: true);
+        okBtn.Top = ClientSize.Height - 45;
+        okBtn.Left = padLeft + width - 80;
+        okBtn.Width = 80;
+        okBtn.Height = 30;
+        okBtn.DialogResult = DialogResult.OK;
         okBtn.Click += (s, e) =>
         {
-            switch (_combo.SelectedIndex)
+            switch (_langCombo.SelectedIndex)
             {
                 case 0: SelectedLanguage = "ko"; break;
                 case 1: SelectedLanguage = "ja"; break;
                 default: SelectedLanguage = "en"; break;
             }
+            switch (_modeCombo.SelectedIndex)
+            {
+                case 1: SelectedMode = "worker"; break;
+                case 2: SelectedMode = "standalone"; break;
+                default: SelectedMode = "coordinator"; break;
+            }
         };
         Controls.Add(okBtn);
-
-        var cancelBtn = new Button
-        {
-            Text = "Cancel",
-            Top = 140,
-            Left = 324,
-            Width = 78,
-            Height = 30,
-            DialogResult = DialogResult.Cancel
-        };
-        Controls.Add(cancelBtn);
 
         AcceptButton = okBtn;
         CancelButton = cancelBtn;
     }
 
-    private void ComboDrawItem(object sender, DrawItemEventArgs e)
+    private void AddSection(int x, ref int y, int width, string title, string hint)
+    {
+        var lbl = new Label
+        {
+            Text = title,
+            Top = y, Left = x, Width = width, Height = 16,
+            Font = SectionFont,
+            ForeColor = Accent
+        };
+        Controls.Add(lbl);
+        y += 17;
+
+        var hintLbl = new Label
+        {
+            Text = hint,
+            Top = y, Left = x, Width = width, Height = 14,
+            Font = HintFont,
+            ForeColor = TextMuted
+        };
+        Controls.Add(hintLbl);
+        y += 17;
+    }
+
+    private static Button MakeFlatButton(string text, System.Drawing.Color color, bool primary = false)
+    {
+        var b = new Button
+        {
+            Text = text,
+            FlatStyle = FlatStyle.Flat,
+            UseVisualStyleBackColor = false,
+            Font = BodyFont
+        };
+        b.FlatAppearance.BorderColor = primary ? color : HairLine;
+        b.FlatAppearance.BorderSize = 1;
+        if (primary)
+        {
+            b.BackColor = color;
+            b.ForeColor = System.Drawing.Color.White;
+            b.FlatAppearance.MouseOverBackColor = AccentHover;
+        }
+        else
+        {
+            b.BackColor = System.Drawing.Color.White;
+            b.ForeColor = color;
+            b.FlatAppearance.MouseOverBackColor = System.Drawing.Color.FromArgb(245, 246, 247);
+        }
+        return b;
+    }
+
+    private static ComboBox MakeCombo(int x, int y, int width)
+    {
+        return new ComboBox
+        {
+            Top = y, Left = x, Width = width, Height = 24,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            DrawMode = DrawMode.OwnerDrawFixed,
+            ItemHeight = 22,
+            FlatStyle = FlatStyle.Flat,
+            Font = BodyFont,
+            BackColor = FieldBg
+        };
+    }
+
+    private static void DrawComboItem(ComboBox combo, DrawItemEventArgs e)
     {
         e.DrawBackground();
-        if (e.Index < 0) { return; }
-
-        System.Drawing.Font font;
-        switch (e.Index)
-        {
-            case 0:  font = KoFont; break;
-            case 1:  font = JaFont; break;
-            default: font = EnFont; break;
-        }
-
-        string text = _combo.Items[e.Index].ToString();
+        if (e.Index < 0) return;
+        string text = combo.Items[e.Index].ToString();
         using (var brush = new System.Drawing.SolidBrush(e.ForeColor))
         {
             var bounds = e.Bounds;
             bounds.X += 6;
-            // Vertical-center the text inside the row.
-            var size = e.Graphics.MeasureString(text, font);
-            float y = bounds.Y + (bounds.Height - size.Height) / 2;
+            var size = e.Graphics.MeasureString(text, BodyFont);
+            float yText = bounds.Y + (bounds.Height - size.Height) / 2;
             e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-            e.Graphics.DrawString(text, font, brush, bounds.X, y);
+            e.Graphics.DrawString(text, BodyFont, brush, bounds.X, yText);
         }
         e.DrawFocusRectangle();
     }
 
-    /// <summary>
-    /// Default the dropdown to the OS UI culture so most users just hit OK.
-    /// </summary>
     private static int SystemDefaultIndex()
     {
         string culture = System.Globalization.CultureInfo.InstalledUICulture.TwoLetterISOLanguageName;
@@ -238,5 +364,25 @@ internal sealed class LanguageDialog : Form
             case "ja": return 1;
             default:   return 2;
         }
+    }
+
+    /// <summary>
+    /// Read HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid -- same value the
+    /// backend reads via reg.exe so the two agree on what this PC is.
+    /// </summary>
+    private static string ReadMachineGuid()
+    {
+        try
+        {
+            // 64-bit view explicitly; default registry view on a 32-bit launcher
+            // would otherwise be redirected to WoW6432Node which lacks this key.
+            using (var hklm = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64))
+            using (var key = hklm.OpenSubKey(@"SOFTWARE\Microsoft\Cryptography"))
+            {
+                if (key == null) return null;
+                return (string)key.GetValue("MachineGuid");
+            }
+        }
+        catch { return null; }
     }
 }

@@ -70,7 +70,8 @@ public final class IssuerCli {
                 customer,
                 arg.get("site-id"),
                 LocalDate.parse(arg.get("expires")),
-                Integer.parseInt(arg.getOrDefault("grace-days", "14"))
+                Integer.parseInt(arg.getOrDefault("grace-days", "14")),
+                arg.get("hardware-id")   // optional -- omit for v=1, set for v=2
         );
         Path out = Paths.get(arg.get("out"));
         LicenseDocument doc = LicenseSigner.signToFile(in, out);
