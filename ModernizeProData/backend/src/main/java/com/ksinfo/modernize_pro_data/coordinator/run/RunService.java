@@ -73,13 +73,15 @@ public class RunService {
             return RunResult.rejected("project not found: " + projectId);
         }
 
-        // Phase 制約 — runType と phase が対応すること
-        // (CLAUDE.md: runStatus は test/rehearsal/cutover の sub-status)
-        if (!runType.name().equals(project.getPhase())) {
-            log.warn("startRun rejected: phase mismatch projectId={} phase={} runType={}",
-                    projectId, project.getPhase(), runType);
+        // Phase 制約 — runType に対応する phase であること.
+        // resolveRunTypeFromPhase 의 역방향 매칭 — ready phase 에서 cutover trigger.
+        String expectedPhase = expectedPhaseForRunType(runType);
+        if (!expectedPhase.equals(project.getPhase())) {
+            log.warn("startRun rejected: phase mismatch projectId={} phase={} runType={} expected={}",
+                    projectId, project.getPhase(), runType, expectedPhase);
             return RunResult.rejected("phase '" + project.getPhase()
-                    + "' does not allow runType '" + runType + "'");
+                    + "' does not allow runType '" + runType
+                    + "' (expected phase '" + expectedPhase + "')");
         }
 
         // Cutover は production 環境のみ
@@ -219,6 +221,20 @@ public class RunService {
      *
      * cutover 終了後は phase が hypercare に遷移する想定.
      */
+    /**
+     * RunType 별 trigger 가능한 phase. resolveRunTypeFromPhase 의 역방향.
+     *   - test       → phase=test
+     *   - rehearsal  → phase=rehearsal
+     *   - cutover    → phase=ready (CLAUDE.md: ready 에서 cutover 起動)
+     */
+    public static String expectedPhaseForRunType(RunType runType) {
+        return switch (runType) {
+            case test      -> "test";
+            case rehearsal -> "rehearsal";
+            case cutover   -> "ready";
+        };
+    }
+
     public static Optional<RunType> resolveRunTypeFromPhase(String phase) {
         if (phase == null) return Optional.empty();
         return switch (phase) {
