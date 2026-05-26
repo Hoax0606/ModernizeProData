@@ -2337,12 +2337,14 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
         <div style={styles.inspectorHeaderTopRow}>
           <span style={styles.inspectorEyebrow}>Mapping detail</span>
           <div style={{ flex: 1 }} />
-          <button
-            type="button"
-            onClick={handleClear}
-            title="이 컬럼의 매핑·룰 흔적을 모두 초기화합니다."
-            style={styles.inspectorHeaderIconBtn}
-          ><Ic.refresh /></button>
+          {editingRule && (
+            <button
+              type="button"
+              onClick={handleClear}
+              title="이 컬럼의 매핑·룰 흔적을 모두 초기화합니다."
+              style={styles.inspectorHeaderIconBtn}
+            ><Ic.refresh /></button>
+          )}
           <button
             type="button"
             onClick={onClose}
