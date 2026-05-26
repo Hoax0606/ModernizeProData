@@ -17,4 +17,7 @@ public interface RunHistoryRepository extends JpaRepository<RunHistory, String> 
 
     /** 全 project 横断의 최근 run (Dev test page / 운영 dashboard 용). */
     List<RunHistory> findTop50ByOrderByStartedAtDesc();
+
+    /** Project 의 누적 run 수 (output dir 의 runIndex 결정용). */
+    long countByProjectId(String projectId);
 }

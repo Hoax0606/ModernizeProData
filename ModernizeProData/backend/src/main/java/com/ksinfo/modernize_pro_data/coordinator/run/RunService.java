@@ -1,6 +1,15 @@
 package com.ksinfo.modernize_pro_data.coordinator.run;
 
 import com.ksinfo.modernize_pro_data.coordinator.dispatch.WorkerDispatcher;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingRepository;
+import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageCatalog;
+import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
+import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
+import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
+import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableResult;
+import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableResultRepository;
+import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableStatus;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.Site;
@@ -9,10 +18,13 @@ import com.ksinfo.modernize_pro_data.coordinator.site.Snapshot;
 import com.ksinfo.modernize_pro_data.coordinator.site.SnapshotRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -48,6 +60,10 @@ public class RunService {
     private final SnapshotRepository snapshotRepo;
     private final SiteRepository siteRepo;
     private final WorkerDispatcher workerDispatcher;
+    private final StageInstanceRepository stageInstanceRepo;
+    private final StageTableResultRepository stageTableResultRepo;
+    private final MappingTableBindingRepository bindingRepo;
+    private final ApplicationEventPublisher eventPublisher;
 
     /**
      * Run を起動する. 3 系統 (Nightly Quartz / CLI / REST) のすべてがこの入口を通る.
@@ -73,24 +89,30 @@ public class RunService {
             return RunResult.rejected("project not found: " + projectId);
         }
 
-        // Phase 制約 — runType と phase が対応すること
-        // (CLAUDE.md: runStatus は test/rehearsal/cutover の sub-status)
-        if (!runType.name().equals(project.getPhase())) {
-            log.warn("startRun rejected: phase mismatch projectId={} phase={} runType={}",
-                    projectId, project.getPhase(), runType);
-            return RunResult.rejected("phase '" + project.getPhase()
-                    + "' does not allow runType '" + runType + "'");
+        // Environment-based 가드 — Pre-flight 8 체크가 frontend 1차 방어선이라
+        // backend 는 environment 기준만 검사. phase 가드는 cutover 만.
+        //   - cutover  : prod 환경 + phase='ready' 만
+        //   - test/rehearsal : non-prod 환경에서 모든 phase 허용 (pre-flight 가 막음)
+        Site site = siteRepo.findById(project.getSiteId()).orElse(null);
+        if (site == null) {
+            return RunResult.rejected("site not found: " + project.getSiteId());
         }
+        boolean isProd = PROD_ENV.equals(site.getEnvironment());
 
-        // Cutover は production 環境のみ
         if (runType == RunType.cutover) {
-            Site site = siteRepo.findById(project.getSiteId()).orElse(null);
-            if (site == null) {
-                return RunResult.rejected("site not found: " + project.getSiteId());
-            }
-            if (!PROD_ENV.equals(site.getEnvironment())) {
+            if (!isProd) {
                 log.warn("startRun rejected: cutover on non-prod environment={}", site.getEnvironment());
                 return RunResult.rejected("cutover only allowed in production environment");
+            }
+            if (!"ready".equals(project.getPhase())) {
+                log.warn("startRun rejected: cutover requires phase=ready projectId={} phase={}",
+                        projectId, project.getPhase());
+                return RunResult.rejected("cutover requires phase='ready' (current: " + project.getPhase() + ")");
+            }
+        } else {
+            if (isProd) {
+                log.warn("startRun rejected: runType={} on prod environment", runType);
+                return RunResult.rejected("runType '" + runType + "' not allowed in production environment");
             }
         }
 
@@ -123,7 +145,17 @@ public class RunService {
         project.setRunStatus(STATUS_RUNNING);
         projectRepo.save(project);
 
-        // 5. WS dispatch — Worker へ RUN_START
+        // 5. Stage pre-create — runType 별 stage list 를 pending 상태로 사전 등록.
+        //    tables_total 은 run start 시점의 binding 수로 materialize (mid-run 변경 무시).
+        //    같은 @Transactional 안 — 이후 WS dispatch 실패 시 함께 rollback.
+        List<String> stageKeys = StageCatalog.forRunType(runType);
+        int tablesTotal = (int) bindingRepo.countByProjectId(projectId);
+        int seq = 1;
+        for (String stageKey : stageKeys) {
+            stageInstanceRepo.save(StageInstance.create(rh.getId(), stageKey, seq++, tablesTotal));
+        }
+
+        // 6. WS dispatch — Worker へ RUN_START
         try {
             workerDispatcher.dispatchRunStart(rh);
         } catch (Exception e) {
@@ -132,6 +164,10 @@ public class RunService {
             log.error("WS dispatch failed for runId={}, rolling back", rh.getId(), e);
             throw new RuntimeException("Failed to dispatch run to Worker: " + e.getMessage(), e);
         }
+
+        // 7. Local stage 실행 trigger — transaction commit 후 별 thread 에서 7-stage 실행.
+        //    @TransactionalEventListener(AFTER_COMMIT) + @Async (RunExecutionListener).
+        eventPublisher.publishEvent(new RunStartedEvent(rh.getId(), projectId));
 
         log.info("startRun started runId={} projectId={} runType={} trigger={}",
                 rh.getId(), projectId, runType, triggerSource);
@@ -219,13 +255,21 @@ public class RunService {
      *
      * cutover 終了後は phase が hypercare に遷移する想定.
      */
+    /**
+     * Project phase 로부터 default runType 결정.
+     *   - rehearsal → RunType.rehearsal
+     *   - ready     → RunType.cutover (단 prod 환경 가드 통과 필요)
+     *   - 그 외 (planning/analysis/test/sign-off/cutover/hypercare/done) → RunType.test
+     *
+     * Env-based 정책: non-prod 모든 phase 에서 default=test runType 으로 trigger 가능.
+     * Pre-flight 가 frontend 에서 미준비 상태 막음.
+     */
     public static Optional<RunType> resolveRunTypeFromPhase(String phase) {
         if (phase == null) return Optional.empty();
         return switch (phase) {
-            case "test"      -> Optional.of(RunType.test);
             case "rehearsal" -> Optional.of(RunType.rehearsal);
             case "ready"     -> Optional.of(RunType.cutover);
-            default          -> Optional.empty();
+            default          -> Optional.of(RunType.test);
         };
     }
 
@@ -250,5 +294,85 @@ public class RunService {
         }
         Optional<Snapshot> latest = snapshotRepo.findLatestApprovedByProjectIdAndType(projectId, snapshotType);
         return latest.map(Snapshot::getId).orElse(null);
+    }
+
+    // ============================================================
+    // Stage lifecycle — Worker callback 用 (run-level の startRun/completeRun/failRun 와는 분리).
+    //   - startStage:        pending → running, started_at = NOW
+    //   - completeStage:     running → success | failed (continue-on-error 모델)
+    //   - recordTableResult: stage 안 1 테이블 결과 upsert
+    // ============================================================
+
+    @Transactional
+    public StageInstance startStage(String runId, String stageKey) {
+        StageInstance si = stageInstanceRepo.findByRunIdAndStageKey(runId, stageKey)
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "stage_instance not found: runId=" + runId + " stageKey=" + stageKey));
+        if (si.getStatus() != StageStatus.pending) {
+            log.warn("startStage already started: runId={} stageKey={} status={}",
+                    runId, stageKey, si.getStatus());
+            return si;
+        }
+        si.setStatus(StageStatus.running);
+        si.setStartedAt(OffsetDateTime.now());
+        return stageInstanceRepo.save(si);
+    }
+
+    @Transactional
+    public StageInstance completeStage(String runId, String stageKey,
+                                       int tablesSuccess, int tablesFailed,
+                                       String errorSummary) {
+        StageInstance si = stageInstanceRepo.findByRunIdAndStageKey(runId, stageKey)
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "stage_instance not found: runId=" + runId + " stageKey=" + stageKey));
+
+        OffsetDateTime finishedAt = OffsetDateTime.now();
+        si.setStatus(tablesFailed == 0 ? StageStatus.success : StageStatus.failed);
+        si.setTablesSuccess(tablesSuccess);
+        si.setTablesFailed(tablesFailed);
+        si.setErrorSummary(errorSummary);
+        si.setFinishedAt(finishedAt);
+        if (si.getStartedAt() != null) {
+            si.setDurationMs(java.time.Duration.between(si.getStartedAt(), finishedAt).toMillis());
+        }
+        log.info("completeStage runId={} stageKey={} status={} success={} failed={}",
+                runId, stageKey, si.getStatus(), tablesSuccess, tablesFailed);
+        return stageInstanceRepo.save(si);
+    }
+
+    @Transactional
+    public StageTableResult recordTableResult(String runId, String stageKey,
+                                              String bindingId, StageTableStatus status,
+                                              Long rowCount, Integer errorCount,
+                                              Map<String, Object> errorDetail,
+                                              Long durationMs) {
+        StageInstance si = stageInstanceRepo.findByRunIdAndStageKey(runId, stageKey)
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "stage_instance not found: runId=" + runId + " stageKey=" + stageKey));
+
+        StageTableResult str = stageTableResultRepo
+                .findByStageInstanceIdAndBindingId(si.getId(), bindingId)
+                .orElseGet(() -> {
+                    MappingTableBinding b = bindingRepo.findById(bindingId)
+                            .orElseThrow(() -> new IllegalArgumentException(
+                                    "binding not found: " + bindingId));
+                    return StageTableResult.create(si.getId(), bindingId,
+                            b.getTobeSchema(), b.getTobeTable());
+                });
+
+        OffsetDateTime finishedAt = OffsetDateTime.now();
+        str.setStatus(status);
+        str.setRowCount(rowCount);
+        str.setErrorCount(errorCount);
+        str.setErrorDetail(errorDetail);
+        if (status != StageTableStatus.running) {
+            str.setFinishedAt(finishedAt);
+            if (durationMs != null) {
+                str.setDurationMs(durationMs);
+            } else if (str.getStartedAt() != null) {
+                str.setDurationMs(java.time.Duration.between(str.getStartedAt(), finishedAt).toMillis());
+            }
+        }
+        return stageTableResultRepo.save(str);
     }
 }
