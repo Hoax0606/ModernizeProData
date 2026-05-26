@@ -63,11 +63,10 @@
 			<artifactId>spring-boot-starter-websocket</artifactId>
 		</dependency>
 
-		<!-- 메타 DB — PostgreSQL -->
+		<!-- 메타 DB + TO-BE DB — PostgreSQL. compile scope = PgCopyManager 가 CopyManager API 사용. -->
 		<dependency>
 			<groupId>org.postgresql</groupId>
 			<artifactId>postgresql</artifactId>
-			<scope>runtime</scope>
 		</dependency>
 
 		<!-- Flyway — 스키마 마이그레이션 단일 관리 책임 (Spring Batch / Quartz 스크립트 포함) -->
