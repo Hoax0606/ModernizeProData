@@ -18,6 +18,7 @@ import com.ksinfo.modernize_pro_data.coordinator.site.Snapshot;
 import com.ksinfo.modernize_pro_data.coordinator.site.SnapshotRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -62,6 +63,7 @@ public class RunService {
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
     private final MappingTableBindingRepository bindingRepo;
+    private final ApplicationEventPublisher eventPublisher;
 
     /**
      * Run を起動する. 3 系統 (Nightly Quartz / CLI / REST) のすべてがこの入口を通る.
@@ -87,26 +89,30 @@ public class RunService {
             return RunResult.rejected("project not found: " + projectId);
         }
 
-        // Phase 制約 — runType に対応する phase であること.
-        // resolveRunTypeFromPhase 의 역방향 매칭 — ready phase 에서 cutover trigger.
-        String expectedPhase = expectedPhaseForRunType(runType);
-        if (!expectedPhase.equals(project.getPhase())) {
-            log.warn("startRun rejected: phase mismatch projectId={} phase={} runType={} expected={}",
-                    projectId, project.getPhase(), runType, expectedPhase);
-            return RunResult.rejected("phase '" + project.getPhase()
-                    + "' does not allow runType '" + runType
-                    + "' (expected phase '" + expectedPhase + "')");
+        // Environment-based 가드 — Pre-flight 8 체크가 frontend 1차 방어선이라
+        // backend 는 environment 기준만 검사. phase 가드는 cutover 만.
+        //   - cutover  : prod 환경 + phase='ready' 만
+        //   - test/rehearsal : non-prod 환경에서 모든 phase 허용 (pre-flight 가 막음)
+        Site site = siteRepo.findById(project.getSiteId()).orElse(null);
+        if (site == null) {
+            return RunResult.rejected("site not found: " + project.getSiteId());
         }
+        boolean isProd = PROD_ENV.equals(site.getEnvironment());
 
-        // Cutover は production 環境のみ
         if (runType == RunType.cutover) {
-            Site site = siteRepo.findById(project.getSiteId()).orElse(null);
-            if (site == null) {
-                return RunResult.rejected("site not found: " + project.getSiteId());
-            }
-            if (!PROD_ENV.equals(site.getEnvironment())) {
+            if (!isProd) {
                 log.warn("startRun rejected: cutover on non-prod environment={}", site.getEnvironment());
                 return RunResult.rejected("cutover only allowed in production environment");
+            }
+            if (!"ready".equals(project.getPhase())) {
+                log.warn("startRun rejected: cutover requires phase=ready projectId={} phase={}",
+                        projectId, project.getPhase());
+                return RunResult.rejected("cutover requires phase='ready' (current: " + project.getPhase() + ")");
+            }
+        } else {
+            if (isProd) {
+                log.warn("startRun rejected: runType={} on prod environment", runType);
+                return RunResult.rejected("runType '" + runType + "' not allowed in production environment");
             }
         }
 
@@ -158,6 +164,10 @@ public class RunService {
             log.error("WS dispatch failed for runId={}, rolling back", rh.getId(), e);
             throw new RuntimeException("Failed to dispatch run to Worker: " + e.getMessage(), e);
         }
+
+        // 7. Local stage 실행 trigger — transaction commit 후 별 thread 에서 7-stage 실행.
+        //    @TransactionalEventListener(AFTER_COMMIT) + @Async (RunExecutionListener).
+        eventPublisher.publishEvent(new RunStartedEvent(rh.getId(), projectId));
 
         log.info("startRun started runId={} projectId={} runType={} trigger={}",
                 rh.getId(), projectId, runType, triggerSource);
@@ -246,26 +256,20 @@ public class RunService {
      * cutover 終了後は phase が hypercare に遷移する想定.
      */
     /**
-     * RunType 별 trigger 가능한 phase. resolveRunTypeFromPhase 의 역방향.
-     *   - test       → phase=test
-     *   - rehearsal  → phase=rehearsal
-     *   - cutover    → phase=ready (CLAUDE.md: ready 에서 cutover 起動)
+     * Project phase 로부터 default runType 결정.
+     *   - rehearsal → RunType.rehearsal
+     *   - ready     → RunType.cutover (단 prod 환경 가드 통과 필요)
+     *   - 그 외 (planning/analysis/test/sign-off/cutover/hypercare/done) → RunType.test
+     *
+     * Env-based 정책: non-prod 모든 phase 에서 default=test runType 으로 trigger 가능.
+     * Pre-flight 가 frontend 에서 미준비 상태 막음.
      */
-    public static String expectedPhaseForRunType(RunType runType) {
-        return switch (runType) {
-            case test      -> "test";
-            case rehearsal -> "rehearsal";
-            case cutover   -> "ready";
-        };
-    }
-
     public static Optional<RunType> resolveRunTypeFromPhase(String phase) {
         if (phase == null) return Optional.empty();
         return switch (phase) {
-            case "test"      -> Optional.of(RunType.test);
             case "rehearsal" -> Optional.of(RunType.rehearsal);
             case "ready"     -> Optional.of(RunType.cutover);
-            default          -> Optional.empty();
+            default          -> Optional.of(RunType.test);
         };
     }
 
