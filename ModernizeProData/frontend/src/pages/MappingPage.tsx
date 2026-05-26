@@ -1775,6 +1775,7 @@ function validateRule(code: string): string | null {
 const _e    = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const _kw   = (s: string) => `<span style="color:#e8b86f">${_e(s)}</span>`;
 const _func = (s: string) => `<span style="color:#dcdcaa">${_e(s)}</span>`;
+const _udf  = (s: string) => `<span style="color:#c8a3ff">${_e(s)}</span>`;
 const _str  = (s: string) => `<span style="color:#9fd9b3">${_e(s)}</span>`;
 const _cmt  = (s: string) => `<span style="color:#7a8aa6">${_e(s)}</span>`;
 const _num  = (s: string) => `<span style="color:#79c0ff">${_e(s)}</span>`;
@@ -1815,6 +1816,27 @@ const SQL_FUNC_SIGS: Record<string, string> = {
 };
 const SQL_FUNCS = new Set(Object.keys(SQL_FUNC_SIGS));
 
+// 도구 내장 UDF — DuckDB connection 에 register 되는 Java 번들 함수.
+// 보라 (#c8a3ff, _udf) 로 표시해 PG 표준 빌트인과 시각적으로 구분.
+// 백엔드: backend/.../common/duckdb/udf/{UdfRegistry, *Udf}.java
+const UDF_FUNC_SIGS: Record<string, string> = {
+  // 숫자 / 소수점
+  APPLY_SCALE:         '(raw_hex, scale)',
+  UNPACK_ZONE_DECIMAL: '(zone_hex)',
+  // 날짜 / 시간
+  CONVERT_ERA:         '(era_text)',
+  // 채번
+  ASSIGN_SEQ:          '(partition_key)',
+  // 식별자 검증
+  VALIDATE_BIZNO:      '(bizno)',
+  // 마스킹 / 해시
+  MASK_PHONE:          '(phone)',
+  HASH_SHA256:         '(input)',
+  // 문자열 정규화
+  NORMALIZE_CORP:      '(corp_name)',
+};
+const UDF_FUNCS = new Set(Object.keys(UDF_FUNC_SIGS));
+
 /**
  * SQL 키워드/함수만 대문자화. 문자열 리터럴('...') 과 식별자(컬럼/별칭) 는 원본 그대로.
  * Transform 입력에서 사용자가 친 컬럼명/리터럴이 자동으로 대문자화되면 DB 데이터까지 망가지기 때문.
@@ -1823,7 +1845,7 @@ function upperSqlKeywords(s: string): string {
   return s.replace(/'(?:[^']|'')*'|[A-Za-z_][A-Za-z_0-9]*/g, (m) => {
     if (m.startsWith("'")) return m;
     const u = m.toUpperCase();
-    return (SQL_KW.has(u) || SQL_FUNCS.has(u)) ? u : m;
+    return (SQL_KW.has(u) || SQL_FUNCS.has(u) || UDF_FUNCS.has(u)) ? u : m;
   });
 }
 
@@ -1846,6 +1868,7 @@ function highlightSql(raw: string): string {
       const u = w.toUpperCase();
       if (SQL_KW.has(u)) out.push(_kw(w));
       else if (SQL_FUNCS.has(u)) out.push(_func(w));
+      else if (UDF_FUNCS.has(u)) out.push(_udf(w));
       else out.push(_def(w));
       i = j;
     } else if (/[0-9]/.test(raw[i])) {
@@ -1946,7 +1969,7 @@ function HighlightEditor({
     //   '(...)' (인자 있음) → '(' 삽입, 커서는 괄호 안쪽
     let inserted = item;
     let cursorOffset = item.length;
-    const sig = SQL_FUNC_SIGS[item];
+    const sig = SQL_FUNC_SIGS[item] ?? UDF_FUNC_SIGS[item];
     if (sig !== undefined) {
       if (sig === '()') {
         inserted = item + '()';
@@ -2015,7 +2038,7 @@ function HighlightEditor({
       {acItems.length > 0 && (
         <div style={styles.acDropdown}>
           {acItems.map((item, i) => {
-            const sig = SQL_FUNC_SIGS[item];
+            const sig = SQL_FUNC_SIGS[item] ?? UDF_FUNC_SIGS[item];
             return (
               <div
                 key={item}
@@ -2384,6 +2407,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
                   if (di > 0) set.add(s.slice(di + 1));
                 });
                 SQL_FUNCS.forEach((fn) => set.add(fn));
+                UDF_FUNCS.forEach((fn) => set.add(fn));
                 return Array.from(set);
               })();
               return (
