@@ -229,8 +229,6 @@ export function VersionsPage() {
         name,
         type: createType,
         description: newDesc.trim() || undefined,
-        tableCount: project.tableCount,
-        ruleCount: 0,
       });
 
       // 방금 만든 snapshot 을 자동 선택
@@ -755,16 +753,7 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
                     ...styles.pinToggleKnob,
                     ...(isPinned ? styles.pinToggleKnobOn : {}),
                   }}
-                >
-                  <span
-                    style={{
-                      ...styles.pinToggleKnobIcon,
-                      color: isPinned ? 'var(--navy)' : 'var(--text-4)',
-                    }}
-                  >
-                    <PinIconSvg size={9} />
-                  </span>
-                </span>
+                />
               </button>
             </div>
           </div>
