@@ -83,8 +83,14 @@ public class Launcher {
     /** GUI-only diagnostics: jpackage's WinExe drops stdout/stderr by default,
      *  so we redirect both to %LOCALAPPDATA%\ModernizeProData\launcher.log.
      *  Lets us see Spring boot errors and WebView events when the GUI seems
-     *  stuck. */
+     *  stuck.
+     *
+     *  콘솔에서 띄운 경우 (개발자가 mvnw spring-boot:run, java -jar 등) 에는
+     *  redirect 를 skip — stdout 이 사용자가 보는 콘솔로 흘러야 디버깅이 됨.
+     *  System.console() 은 jpackage 의 console-less WinExe 에선 null 이라
+     *  의도하는 GUI 진단 경로만 잘 발동된다. */
     private static void redirectStdoutToFile() {
+        if (System.console() != null) return;
         try {
             String localAppData = System.getenv("LOCALAPPDATA");
             if (localAppData == null || localAppData.isBlank()) return;
