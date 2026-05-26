@@ -229,8 +229,6 @@ export function VersionsPage() {
         name,
         type: createType,
         description: newDesc.trim() || undefined,
-        tableCount: project.tableCount,
-        ruleCount: 0,
       });
 
       // 방금 만든 snapshot 을 자동 선택

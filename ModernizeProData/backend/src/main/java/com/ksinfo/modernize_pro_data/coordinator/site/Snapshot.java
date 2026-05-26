@@ -1,5 +1,6 @@
 package com.ksinfo.modernize_pro_data.coordinator.site;
 
+import com.ksinfo.modernize_pro_data.coordinator.site.frozen.SnapshotData;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
@@ -8,6 +9,8 @@ import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.OffsetDateTime;
 import java.util.UUID;
@@ -68,8 +71,19 @@ public class Snapshot {
     @Column(name = "rule_count", nullable = false)
     private int ruleCount;
 
+    @Column(name = "code_map_count", nullable = false)
+    private int codeMapCount;
+
+    /**
+     * 생성 시점의 mapping working set (rules + codeMaps + bindings) 동결본.
+     * Immutable — 한 번 채워진 뒤 라이브 mapping 변경에 영향받지 않는다.
+     */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "snapshot_data", columnDefinition = "jsonb")
+    private SnapshotData snapshotData;
+
     public static Snapshot create(String projectId, String name, String description,
-                                  String type, String createdBy, int tableCount, int ruleCount, String nextVersion) {
+                                  String type, String createdBy, String nextVersion) {
         Snapshot s = new Snapshot();
         s.id = "ss-" + UUID.randomUUID().toString().substring(0, 8);
         s.projectId = projectId;
@@ -80,15 +94,8 @@ public class Snapshot {
         s.status = "draft";
         s.createdBy = createdBy;
         s.createdAt = OffsetDateTime.now();
-        s.tableCount = tableCount;
-        s.ruleCount = ruleCount;
+        // tableCount / ruleCount / codeMapCount 은 freeze 직후 실측치로 채운다.
         return s;
-    }
-
-    // 기존 create 메서드 오버로드 (하위 호환성)
-    public static Snapshot create(String projectId, String name, String description,
-                                  String type, String createdBy, int tableCount, int ruleCount) {
-        return create(projectId, name, description, type, createdBy, tableCount, ruleCount, "v1.0");
     }
 
     /**

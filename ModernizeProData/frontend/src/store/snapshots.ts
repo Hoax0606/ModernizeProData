@@ -5,6 +5,73 @@ import { snapshotApi } from '../api/workspace';
 export type SnapshotStatus = 'draft' | 'pending' | 'approved' | 'rejected';
 export type SnapshotType = 'mapping' | 'cutover';
 
+/**
+ * snapshot 생성 시점에 동결된 mapping payload.
+ * 백엔드 SnapshotData (record) 와 1:1 대응. snapshots.snapshot_data (jsonb) 에서 직렬화.
+ */
+export interface SnapshotData {
+  rules: FrozenRule[];
+  codeMaps: FrozenCodeMap[];
+  bindings: FrozenBinding[];
+}
+
+export interface FrozenRule {
+  id: string;
+  tobeSchema: string;
+  tobeTable: string;
+  tobeColumn: string;
+  asisSchema: string | null;
+  asisTable: string | null;
+  asisColumn: string[] | null;
+  asisType: string[] | null;
+  codeDomain: string | null;
+  strategy: 'expression' | 'null' | 'default' | 'skip';
+  transformRule: string | null;
+  transformSql: string | null;
+  defaultValue: string | null;
+  notNullOverride: boolean;
+  ruleOrigin: 'imported' | 'manual';
+  notes: string | null;
+  createdBy: string | null;
+  createdAt: string | null;
+  updatedBy: string | null;
+  updatedAt: string | null;
+}
+
+export interface FrozenCodeMap {
+  id: string;
+  domain: string;
+  sourceValue: string;
+  targetValue: string;
+  description: string | null;
+  ordinal: number;
+}
+
+export interface FrozenBinding {
+  id: string;
+  tobeSchema: string;
+  tobeTable: string;
+  compositionKind: 'single' | 'join' | 'union' | 'none';
+  whereFilter: string | null;
+  bindingOrigin: 'imported' | 'manual';
+  createdBy: string;
+  createdAt: string;
+  updatedBy: string | null;
+  updatedAt: string | null;
+  sources: FrozenBindingSource[];
+}
+
+export interface FrozenBindingSource {
+  id: string;
+  ordinal: number;
+  asisSchema: string | null;
+  asisTable: string;
+  alias: string;
+  role: 'primary' | 'join' | 'union';
+  joinType: string | null;
+  joinOn: string | null;
+}
+
 export interface MappingSnapshot {
   id: string;
   projectId: string;
@@ -22,6 +89,8 @@ export interface MappingSnapshot {
   rejectionReason?: string;
   tableCount: number;
   ruleCount: number;
+  codeMapCount: number;
+  snapshotData?: SnapshotData;
 }
 
 interface SnapshotsState {
@@ -29,7 +98,7 @@ interface SnapshotsState {
 
   fetchByProject: (projectId: string) => Promise<void>;
   fetchBySite: (siteId: string) => Promise<void>;
-  createSnapshot: (projectId: string, data: { name: string; description?: string; type?: string; tableCount: number; ruleCount: number }) => Promise<MappingSnapshot>;
+  createSnapshot: (projectId: string, data: { name: string; description?: string; type?: string }) => Promise<MappingSnapshot>;
   requestSnapshot: (id: string) => Promise<void>;
   approveSnapshot: (id: string) => Promise<void>;
   rejectSnapshot: (id: string, reason: string) => Promise<void>;

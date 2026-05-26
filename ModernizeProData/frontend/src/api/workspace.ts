@@ -1,6 +1,6 @@
 import { api, unwrap, type ApiResponse } from './client';
 import type { Site, Project } from '../store/workspace';
-import type { MappingSnapshot } from '../store/snapshots';
+import type { MappingSnapshot, SnapshotData } from '../store/snapshots';
 
 /* ── Site API ─────────────────────────────────────── */
 
@@ -49,7 +49,7 @@ export const snapshotApi = {
   listBySite: (siteId: string) =>
     unwrap(api.get<ApiResponse<MappingSnapshot[]>>(`/api/v1/sites/${siteId}/snapshots`)),
 
-  create: (projectId: string, data: { name: string; description?: string; type?: string; tableCount: number; ruleCount: number }) =>
+  create: (projectId: string, data: { name: string; description?: string; type?: string }) =>
     unwrap(api.post<ApiResponse<MappingSnapshot>>(`/api/v1/projects/${projectId}/snapshots`, data)),
 
   request: (id: string) =>
@@ -63,4 +63,8 @@ export const snapshotApi = {
 
   delete: (id: string) =>
     unwrap(api.delete<ApiResponse<void>>(`/api/v1/snapshots/${id}`)),
+
+  /** snapshot 생성 시점에 동결된 mapping payload (rules + codeMaps + bindings). */
+  getMapping: (id: string) =>
+    unwrap(api.get<ApiResponse<SnapshotData>>(`/api/v1/snapshots/${id}/mapping`)),
 };
