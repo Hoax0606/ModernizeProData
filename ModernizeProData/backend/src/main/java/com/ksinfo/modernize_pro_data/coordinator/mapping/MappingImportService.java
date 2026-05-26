@@ -180,21 +180,27 @@ public class MappingImportService {
                         row.transformSql = row.transformRule;
                         continue;
                     }
-                    if (row.asisColumn == null || row.asisTable == null) continue;
+                    if (row.asisColumn == null || row.asisColumn.length == 0 || row.asisTable == null) continue;
+                    // multi-source (combine) — 자동 transform_sql 생성 불가. 사용자가 row editor 에서
+                    // MAKE_DATE / CONCAT 같은 식을 직접 입력하는 것을 기대.
+                    if (row.asisColumn.length > 1) continue;
                     String tobeKey = (row.tobeSchema == null ? "" : row.tobeSchema) + "|" + row.tobeTable;
                     Map<String, String> aliasMap = aliasMaps.getOrDefault(tobeKey, Map.of());
                     String alias = aliasMap.get(row.asisTable);
                     if (alias == null) continue;
-                    String src = alias + "." + row.asisColumn;
+                    String onlyCol = row.asisColumn[0];
+                    String src = alias + "." + onlyCol;
+                    String asisTypeFirst = (row.asisType != null && row.asisType.length > 0)
+                            ? row.asisType[0] : null;
 
                     // code_domain 이 지정돼있고 해당 domain 의 entries 가 있으면 CASE 자동 생성
                     if (row.codeDomain != null && codeByDomain.containsKey(row.codeDomain)) {
                         row.transformSql = buildCaseFromCodeMap(src, codeByDomain.get(row.codeDomain));
-                    } else if (typeCategoriesMatch(row.asisType, row.tobeType)) {
+                    } else if (typeCategoriesMatch(asisTypeFirst, row.tobeType)) {
                         row.transformSql = src;
                     } else {
                         // CHAR(8) YYYYMMDD / CHAR(14) YYYYMMDDHH24MISS 같은 Oracle 컨벤션 패턴 우선
-                        String strDateSql = tryStringToDateSql(src, row.asisType, row.tobeType);
+                        String strDateSql = tryStringToDateSql(src, asisTypeFirst, row.tobeType);
                         row.transformSql = strDateSql != null ? strDateSql
                                 : "CAST(" + src + " AS " + (row.tobeType != null ? row.tobeType : "VARCHAR") + ")";
                     }
@@ -237,13 +243,23 @@ public class MappingImportService {
      * Parsing — DuckDB read_csv_auto
      * ────────────────────────────────────────────── */
 
+    /**
+     * column_mapping.csv 파싱. 다중 source (combine) 케이스 두 가지 입력 형식을 모두 받아
+     * 같은 (tobeSchema, tobeTable, tobeColumn) 의 source 들을 ';' 구분자 문자열로 정규화한다.
+     *
+     *   ① 한 row 안에 ';' 묶음        — asis_column = "BIRTH_YEAR;BIRTH_MONTH;BIRTH_DAY"
+     *   ② 연속 row 행분할              — tobeColumn 같은 row 들이 연이어 등장
+     *      (셀결합 흉내: 2번째 이후 row 의 tobe_table/tobe_column 빈칸이면 직전 row 상속)
+     *
+     * 두 경우 모두 결과는 동일 — DB asis_column = "BIRTH_YEAR;BIRTH_MONTH;BIRTH_DAY".
+     * 그룹의 변환 ロジック / default / code_domain / notes 등 메타는 **첫 row 의 값만** 사용한다.
+     */
     private ParsedRules parseColumnCsv(Path csv) {
         Map<String, Integer> headers = new HashMap<>();
-        List<RuleRow> out = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
+        // LinkedHashMap — 입력 순서 보존 (셀결합 흉내가 의미 있으려면 순서가 중요).
+        LinkedHashMap<String, RuleRow> grouped = new LinkedHashMap<>();
 
         // read_csv (not _auto) 으로 delimiter / quote / escape 모두 명시.
-        // _auto 의 dialect 추론이 작은 파일에서 실패하는 케이스 회피.
         String sql = "SELECT * FROM read_csv('" + escape(csv.toString())
                 + "', header=true, delim=',', all_varchar=true, null_padding=true)";
 
@@ -257,22 +273,55 @@ public class MappingImportService {
             }
             validateRequired("column_mapping.csv", REQUIRED_RULE_COLUMNS, headers.keySet());
 
+            String lastTobeTableRaw = null;
+            String lastTobeColumn   = null;
+
             while (rs.next()) {
-                RuleRow row = new RuleRow();
-                // tobe_table 은 'SCHEMA.TABLE' 형태도 허용 — '.' 으로 split
                 String tobeTableRaw = trimToNull(get(rs, headers, "tobe_table"));
-                row.tobeColumn  = trimToNull(get(rs, headers, "tobe_column"));
-                if (tobeTableRaw == null || row.tobeColumn == null) {
-                    continue; // skip incomplete row
+                String tobeColumn   = trimToNull(get(rs, headers, "tobe_column"));
+                // 셀결합 흉내 — tobe 칸 빈 row 는 직전 row 의 tobe 를 상속.
+                if (tobeTableRaw == null) tobeTableRaw = lastTobeTableRaw;
+                if (tobeColumn == null)   tobeColumn   = lastTobeColumn;
+                if (tobeTableRaw == null || tobeColumn == null) {
+                    continue; // skip — 초반부터 빈 row
                 }
+                lastTobeTableRaw = tobeTableRaw;
+                lastTobeColumn   = tobeColumn;
+
+                String tobeSchema;
+                String tobeTable;
                 int dot = tobeTableRaw.indexOf('.');
                 if (dot > 0) {
-                    row.tobeSchema = tobeTableRaw.substring(0, dot);
-                    row.tobeTable  = tobeTableRaw.substring(dot + 1);
+                    tobeSchema = tobeTableRaw.substring(0, dot);
+                    tobeTable  = tobeTableRaw.substring(dot + 1);
                 } else {
-                    row.tobeSchema = "";
-                    row.tobeTable  = tobeTableRaw;
+                    tobeSchema = "";
+                    tobeTable  = tobeTableRaw;
                 }
+
+                String dedupKey = tobeSchema + "|" + tobeTable + "|" + tobeColumn;
+                String asisColumnCell = trimToNull(get(rs, headers, "asis_column"));
+                String asisTypeCell   = trimToNull(get(rs, headers, "asis_type"));
+
+                RuleRow existing = grouped.get(dedupKey);
+                if (existing != null) {
+                    // 추가 source row — asis_column / asis_type 만 배열 끝에 append.
+                    // tobe_type / strategy / default / code_domain / notes 는 첫 row 값을 그대로.
+                    if (asisColumnCell != null) {
+                        existing.asisColumn = appendArray(existing.asisColumn, splitSemicolon(asisColumnCell));
+                    }
+                    if (asisTypeCell != null) {
+                        existing.asisType = appendArray(existing.asisType, splitSemicolon(asisTypeCell));
+                    }
+                    continue;
+                }
+
+                // 새 그룹의 첫 row.
+                RuleRow row = new RuleRow();
+                row.tobeSchema = tobeSchema;
+                row.tobeTable  = tobeTable;
+                row.tobeColumn = tobeColumn;
+
                 String asisTableRaw = trimToNull(get(rs, headers, "asis_table"));
                 if (asisTableRaw != null) {
                     int adot = asisTableRaw.indexOf('.');
@@ -283,8 +332,9 @@ public class MappingImportService {
                         row.asisTable = asisTableRaw;
                     }
                 }
-                row.asisColumn  = trimToNull(get(rs, headers, "asis_column"));
-                row.asisType    = trimToNull(get(rs, headers, "asis_type"));
+                // 셀 안에 ';' 가 이미 있을 수 있음 (한 줄에 묶어 입력한 경우) — split 해서 String[] 로.
+                row.asisColumn = asisColumnCell == null ? null : splitSemicolon(asisColumnCell).toArray(new String[0]);
+                row.asisType   = asisTypeCell   == null ? null : splitSemicolon(asisTypeCell).toArray(new String[0]);
                 row.tobeType    = trimToNull(get(rs, headers, "tobe_type"));
                 row.codeDomain  = trimToNull(get(rs, headers, "code_domain"));
 
@@ -296,18 +346,11 @@ public class MappingImportService {
 
                 applyStrategy(row, strat, rule, defVal);
 
-                // transform_sql 폴백 — CSV 에 명시 안 됐고 strategy=expression 이면
-                // rule_sql 값을 그대로 복사. 현재는 두 컬럼 다 SQL 이라 같은 값.
                 if (row.transformSql == null && "expression".equals(row.strategy)) {
                     row.transformSql = row.transformRule;
                 }
 
-                String dedupKey = row.tobeSchema + "|" + row.tobeTable + "|" + row.tobeColumn;
-                if (!seen.add(dedupKey)) {
-                    log.warn("Duplicate mapping target {} — keeping first occurrence", dedupKey);
-                    continue;
-                }
-                out.add(row);
+                grouped.put(dedupKey, row);
             }
         } catch (SQLException e) {
             throw new ApiException(
@@ -315,7 +358,7 @@ public class MappingImportService {
                     "column_mapping.csv 파싱 실패: " + e.getMessage(),
                     HttpStatus.BAD_REQUEST);
         }
-        return new ParsedRules(out);
+        return new ParsedRules(new ArrayList<>(grouped.values()));
     }
 
     private ParsedCodes parseCodeCsv(Path csv) {
@@ -393,7 +436,7 @@ public class MappingImportService {
         }
         // 3) 새 컨벤션 — 데이터 존재 기반 자동 추론.
         //    asis_column 있으면 expression / 없으면서 default_value 있으면 default / 둘 다 없으면 null
-        if (row.asisColumn != null && !row.asisColumn.isBlank()) {
+        if (row.asisColumn != null && row.asisColumn.length > 0) {
             row.strategy = "expression";
             row.transformRule = rule; // null 이면 나중에 transform_sql 자동 생성에서 채움
             row.defaultValue = defVal;
@@ -516,7 +559,7 @@ public class MappingImportService {
             String tobeColumn,
             String asisSchema,
             String asisTable,
-            String asisColumn,
+            String[] asisColumn,
             String strategy,
             String transformRule,
             String transformSql,
@@ -893,14 +936,20 @@ public class MappingImportService {
                 aliasToColumn.putIfAbsent(alias, column);
             }
         }
-        // alias 의 column 이 그룹 내 어느 row 의 asis_column 과 일치하는지 봐서 → 그 row 의 asis_table 로 묶음
+        // alias 의 column 이 그룹 내 어느 row 의 asis_column 과 일치하는지 봐서 → 그 row 의 asis_table 로 묶음.
+        // asis_column 은 List<String> — combine 시 여러 원소.
         Map<String, String> tableToAlias = new HashMap<>();
         for (var e : aliasToColumn.entrySet()) {
             String alias = e.getKey();
             String col = e.getValue();
             for (RuleRow r : rules) {
-                if (r.asisTable != null && validTables.contains(r.asisTable)
-                        && col.equalsIgnoreCase(r.asisColumn)) {
+                if (r.asisTable == null || !validTables.contains(r.asisTable)) continue;
+                if (r.asisColumn == null) continue;
+                boolean matched = false;
+                for (String c : r.asisColumn) {
+                    if (col.equalsIgnoreCase(c)) { matched = true; break; }
+                }
+                if (matched) {
                     tableToAlias.putIfAbsent(r.asisTable, alias);
                     break;
                 }
@@ -945,6 +994,26 @@ public class MappingImportService {
         if (s == null) return null;
         String t = s.trim();
         return t.isEmpty() ? null : t;
+    }
+
+    /** 한 셀 문자열을 ';' 로 split, 각 원소 trim 후 빈 원소 제거. */
+    private static List<String> splitSemicolon(String s) {
+        if (s == null) return List.of();
+        List<String> out = new ArrayList<>();
+        for (String token : s.split(";")) {
+            String t = token.trim();
+            if (!t.isEmpty()) out.add(t);
+        }
+        return out;
+    }
+
+    /** 기존 String[] 끝에 List<String> 의 원소들을 이어붙여 새 배열 반환. null/empty 안전. */
+    private static String[] appendArray(String[] existing, List<String> toAdd) {
+        if (toAdd == null || toAdd.isEmpty()) return existing == null ? new String[0] : existing;
+        if (existing == null || existing.length == 0) return toAdd.toArray(new String[0]);
+        String[] result = Arrays.copyOf(existing, existing.length + toAdd.size());
+        for (int i = 0; i < toAdd.size(); i++) result[existing.length + i] = toAdd.get(i);
+        return result;
     }
 
     private static String nz(String s) {
@@ -1014,13 +1083,13 @@ public class MappingImportService {
         String tobeColumn;
         String asisSchema;
         String asisTable;
-        String asisColumn;
+        String[] asisColumn;   // PG text[] 매핑. combine 이면 여러 원소.
         String strategy = "expression";
         String transformRule;
         String transformSql;
         String defaultValue;
         String notes;
-        String asisType;
+        String[] asisType;     // asisColumn 과 동일 길이 기대.
         String tobeType;
         String codeDomain;
     }

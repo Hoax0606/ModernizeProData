@@ -60,7 +60,8 @@ public class MappingReportService {
             String errorKind,        // EXPRESSION_FAILED | FROM_FAILED | NO_RULES | UNKNOWN | null
             String errorColumn,      // EXPRESSION_FAILED 일 때 컬럼명
             String errorExpression,  // EXPRESSION_FAILED 일 때 표현식
-            String errorType         // SYNTAX | BINDER | CATALOG | CONVERSION | IO | UNKNOWN | null
+            String errorType,        // SYNTAX | BINDER | CATALOG | CONVERSION | IO | UNKNOWN | null
+            String errorHint         // DuckDB raw 메시지의 첫 줄 (값/포맷/참조 등 결정적 힌트)
     ) {}
 
     @Transactional(readOnly = true)
@@ -104,7 +105,7 @@ public class MappingReportService {
         if (rules.isEmpty()) {
             return new ReportResult(schema, tobeTable, List.of(), List.of(), 0, false, null,
                     "이 TO-BE 테이블에 적용된 mapping_rules 가 없습니다. Mapping definition 임포트 후 다시 시도하세요.",
-                    "NO_RULES", null, null, null);
+                    "NO_RULES", null, null, null, null);
         }
 
         String sql = buildSql(binding, rules, baseDir, effLimit);
@@ -133,7 +134,7 @@ public class MappingReportService {
             return identifyFailingRule(schema, tobeTable, headers, sql, binding, rules, baseDir, e.getMessage());
         }
         return new ReportResult(schema, tobeTable, headers, outRows, outRows.size(), truncated, sql, null,
-                null, null, null, null);
+                null, null, null, null, null);
     }
 
     /**
@@ -150,13 +151,14 @@ public class MappingReportService {
                                              String sql, MappingTableBinding binding,
                                              List<MappingRule> rules, Path baseDir, String origMessage) {
         String origType = classifyDuckDbErrorCode(origMessage);
+        String origHint = extractHint(origMessage);
         if (binding == null || binding.getSources().isEmpty()) {
-            return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType,
+            return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType, origHint,
                     "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
         }
         String fromClause = buildFromClause(binding, rules, baseDir);
         if (fromClause.isEmpty()) {
-            return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType,
+            return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType, origHint,
                     "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
         }
         // 1. FROM 자체 검증
@@ -167,39 +169,59 @@ public class MappingReportService {
         } catch (SQLException e) {
             log.warn("Report FROM-clause probe failed: {}", e.getMessage());
             String t = classifyDuckDbErrorCode(e.getMessage());
-            return errorResult(schema, tobeTable, headers, sql, "FROM_FAILED", null, null, t,
+            return errorResult(schema, tobeTable, headers, sql, "FROM_FAILED", null, null, t, extractHint(e.getMessage()),
                     "AS-IS 데이터 로드 또는 JOIN/WHERE 절에서 오류가 발생했습니다.\n"
                             + "오류 종류: " + classifyDuckDbErrorMessage(e.getMessage()));
         }
-        // 2. expression 별 검증
+        // 2. expression 별 검증.
+        // LIMIT 0 은 parsing/binding 만 본다 — CAST/STRPTIME 같은 runtime conversion 실패는
+        // 데이터를 실제로 흘려야 잡힌다. PROBE_LIMIT rows 만큼 실제 변환을 시도하면
+        // "어느 컬럼" 까지 식별 가능. 컬럼 N 개 × PROBE_LIMIT rows 라 비용 미미.
+        final int PROBE_LIMIT = 20;
         for (MappingRule r : rules) {
             if ("skip".equals(r.getStrategy())) continue;
             String expr = exprForRule(r);
             if ("NULL".equals(expr)) continue;  // 상수 NULL 은 검증 의미 없음
-            String probe = "SELECT " + expr + " AS probe " + fromClause + " LIMIT 0";
+            String probe = "SELECT " + expr + " AS probe " + fromClause + " LIMIT " + PROBE_LIMIT;
             try (Statement st = duckDbService.statement();
                  ResultSet rs = st.executeQuery(probe)) {
-                // OK
+                // 데이터 실제로 끝까지 흘려서 row-level conversion 도 trigger.
+                while (rs.next()) { rs.getObject(1); }
             } catch (SQLException e) {
                 log.warn("Report expression probe failed for column {}: {}", r.getTobeColumn(), e.getMessage());
                 String t = classifyDuckDbErrorCode(e.getMessage());
                 return errorResult(schema, tobeTable, headers, sql,
-                        "EXPRESSION_FAILED", r.getTobeColumn(), expr, t,
+                        "EXPRESSION_FAILED", r.getTobeColumn(), expr, t, extractHint(e.getMessage()),
                         "컬럼 \"" + r.getTobeColumn() + "\" 의 변환식에서 오류가 발생했습니다.\n"
                                 + "표현식: " + expr + "\n"
                                 + "오류 종류: " + classifyDuckDbErrorMessage(e.getMessage()));
             }
         }
         // 식별 실패 — UNKNOWN
-        return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType,
+        return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType, origHint,
                 "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
     }
 
     private static ReportResult errorResult(String schema, String tobeTable, List<String> headers,
                                             String sql, String kind, String col, String expr,
-                                            String type, String legacy) {
+                                            String type, String hint, String legacy) {
         return new ReportResult(schema, tobeTable, headers, List.of(), 0, false, sql, legacy,
-                kind, col, expr, type);
+                kind, col, expr, type, hint);
+    }
+
+    /**
+     * DuckDB 의 raw 에러 메시지에서 결정적 힌트 한 줄만 추출.
+     *   예) "Conversion Error: Could not parse string \"2024/03/31\" according to format specifier \"%Y-%m-%d\""
+     *       → "Could not parse string \"2024/03/31\" according to format specifier \"%Y-%m-%d\""
+     * "{Type} Error:" prefix 제거, 첫 줄 + 길이 200 자 캡.
+     */
+    private static String extractHint(String msg) {
+        if (msg == null) return null;
+        String stripped = msg.replaceAll("(?i)^\\s*(parser|binder|catalog|conversion|io|runtime|invalid input|out of range)\\s+error:\\s*", "").trim();
+        int newline = stripped.indexOf('\n');
+        if (newline > 0) stripped = stripped.substring(0, newline).trim();
+        if (stripped.length() > 200) stripped = stripped.substring(0, 197) + "...";
+        return stripped.isEmpty() ? null : stripped;
     }
 
     /** DuckDB 메시지 → 구조화 type 코드 (프론트 i18n 키 매칭용). */
@@ -265,7 +287,7 @@ public class MappingReportService {
         StringBuilder from = new StringBuilder(" FROM ");
         for (int i = 0; i < sources.size(); i++) {
             var s = sources.get(i);
-            String csvPath = resolveCsvFile(baseDir, s.getAsisTable());
+            String csvPath = resolveCsvFile(baseDir, s.getAsisSchema(), s.getAsisTable());
             String escPath = csvPath.replace("'", "''");
             String aliasQ = quoteIdent(s.getAlias());
             String typesClause = buildTypesClause(s.getAsisTable(), rules);
@@ -318,16 +340,25 @@ public class MappingReportService {
 
     /**
      * 한 AS-IS 테이블의 컬럼별 타입을 모아서 read_csv 의 types= 구조체 만듦.
-     * 룰의 asis_type 이 채워진 컬럼만. asis_type 비어있으면 자동 추론에 맡김.
+     * asis_column / asis_type 은 PG TEXT[] 매핑 String[] — combine 시 여러 원소.
+     * 같은 index 끼리 짝지어 types 맵에 등록.
      */
     private static String buildTypesClause(String asisTable, List<MappingRule> rules) {
         if (asisTable == null) return "";
         Map<String, String> types = new LinkedHashMap<>();
         for (MappingRule r : rules) {
             if (!asisTable.equals(r.getAsisTable())) continue;
-            if (r.getAsisColumn() == null || r.getAsisType() == null) continue;
-            String duck = oracleToDuckDbType(r.getAsisType());
-            if (duck != null) types.putIfAbsent(r.getAsisColumn(), duck);
+            String[] cols = r.getAsisColumn();
+            if (cols == null || cols.length == 0) continue;
+            String[] typs = r.getAsisType() == null ? new String[0] : r.getAsisType();
+            for (int i = 0; i < cols.length; i++) {
+                String col = cols[i] == null ? "" : cols[i].trim();
+                if (col.isEmpty()) continue;
+                String typ = i < typs.length && typs[i] != null ? typs[i].trim() : "";
+                if (typ.isEmpty()) continue;  // 타입 미명시 — 자동 추론에 맡김
+                String duck = oracleToDuckDbType(typ);
+                if (duck != null) types.putIfAbsent(col, duck);
+            }
         }
         if (types.isEmpty()) return "";
         StringBuilder sb = new StringBuilder("types={");
@@ -376,19 +407,32 @@ public class MappingReportService {
         return "VARCHAR"; // safest fallback
     }
 
-    /** baseDir 에서 {asis_table}.csv 를 case-insensitive 검색. 못 찾으면 그래도 그 path 반환 (SQL 이 알아서 에러). */
-    private String resolveCsvFile(Path baseDir, String asisTable) {
+    /**
+     * baseDir 에서 CSV 파일을 case-insensitive 로 검색.
+     * 우선순위:
+     *   1) {schema}.{table}.csv  (예: RECRUIT.APPLICANTS.csv)
+     *   2) {table}.csv           (예: m_employee.csv)
+     * 못 찾으면 fallback path 반환 — SQL 이 알아서 IO Error 던지도록 둠.
+     */
+    private String resolveCsvFile(Path baseDir, String asisSchema, String asisTable) {
         if (asisTable == null) return baseDir.resolve("missing.csv").toString();
-        String want = (asisTable + ".csv").toLowerCase();
-        try (Stream<Path> stream = Files.list(baseDir)) {
-            return stream
-                    .filter(Files::isRegularFile)
-                    .filter(p -> p.getFileName().toString().toLowerCase().equals(want))
-                    .findFirst()
-                    .map(Path::toString)
-                    .orElseGet(() -> baseDir.resolve(asisTable + ".csv").toString());
-        } catch (IOException e) {
-            return baseDir.resolve(asisTable + ".csv").toString();
+        List<String> wants = new ArrayList<>();
+        if (asisSchema != null && !asisSchema.isBlank()) {
+            wants.add((asisSchema + "." + asisTable + ".csv").toLowerCase());
         }
+        wants.add((asisTable + ".csv").toLowerCase());
+        try (Stream<Path> stream = Files.list(baseDir)) {
+            List<Path> files = stream.filter(Files::isRegularFile).toList();
+            for (String want : wants) {
+                for (Path p : files) {
+                    if (p.getFileName().toString().toLowerCase().equals(want)) {
+                        return p.toString();
+                    }
+                }
+            }
+        } catch (IOException e) {
+            // fallthrough
+        }
+        return baseDir.resolve(asisTable + ".csv").toString();
     }
 }

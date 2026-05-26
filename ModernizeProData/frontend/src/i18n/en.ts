@@ -1180,6 +1180,7 @@ export const en: Record<TranslationKey, string> = {
   'logs.view.label':            'View',
   'logs.view.stream':           'Stream',
   'logs.view.quarantine':       'Quarantine',
+  'logs.view.history':          'Run history',
   'logs.quarantine.empty':      'Pick a group from the dropdown above to inspect it.',
   'logs.quarantine.count':      '{n} quarantined',
   'logs.quarantine.group':      '{stage} ({n})',
@@ -1257,4 +1258,6 @@ export const en: Record<TranslationKey, string> = {
   'mapping.report.error.type.CONVERSION':  'Type conversion failed',
   'mapping.report.error.type.IO':          'File read failed',
   'mapping.report.error.type.UNKNOWN':     'Runtime error',
+  'mapping.report.error.hintLabel':        'Hint',
+  'mapping.inspector.combineHint':         '-- combine: enter your own expression (e.g. MAKE_DATE / CONCAT)',
 };

@@ -8,6 +8,8 @@ import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.OffsetDateTime;
 
@@ -46,19 +48,30 @@ public class MappingRule {
     @Column(name = "tobe_column", nullable = false, length = 128)
     private String tobeColumn;
 
-    /* ── AS-IS 식별 (단일 source) ── */
+    /* ── AS-IS 식별 — combine 케이스를 위해 column/type 은 PG 배열 ── */
     @Column(name = "asis_schema", length = 128)
     private String asisSchema;
 
     @Column(name = "asis_table", length = 128)
     private String asisTable;
 
-    @Column(name = "asis_column", length = 128)
-    private String asisColumn;
+    /**
+     * AS-IS source 컬럼명 리스트. 단일 매핑이면 원소 1개, combine 이면 여러 개
+     * (예: ['BIRTH_YEAR','BIRTH_MONTH','BIRTH_DAY']). PG TEXT[] 로 영속.
+     * 자바 String[] 로 매핑 — Hibernate 6.6 PG dialect 가 List<String> 은 jsonb 으로,
+     * String[] 는 native ARRAY 로 처리한다. ARRAY 가 우리 의도이므로 배열 선택.
+     */
+    @JdbcTypeCode(SqlTypes.ARRAY)
+    @Column(name = "asis_column")
+    private String[] asisColumn;
 
-    /** AS-IS 원본 타입 (예: VARCHAR2(7), NUMBER(15)). read_csv 의 column_types 에 사용. */
-    @Column(name = "asis_type", length = 64)
-    private String asisType;
+    /**
+     * asisColumn 각 원소에 대응하는 AS-IS 원본 타입 (예: ['NUMBER(4)','NUMBER(2)','NUMBER(2)']).
+     * read_csv 의 column_types 에 사용. 길이는 asisColumn 과 일치하는 것을 기대.
+     */
+    @JdbcTypeCode(SqlTypes.ARRAY)
+    @Column(name = "asis_type")
+    private String[] asisType;
 
     /**
      * 이 컬럼이 사용하는 code_map domain 이름 (예: 'GENDER', 'YN_BOOL').

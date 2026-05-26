@@ -1186,6 +1186,7 @@ export const ja: Record<TranslationKey, string> = {
   'logs.view.label':            'View',
   'logs.view.stream':           'Stream',
   'logs.view.quarantine':       'Quarantine',
+  'logs.view.history':          'Run history',
   'logs.quarantine.empty':      '上のドロップダウンから項目を選ぶと詳細が表示されます。',
   'logs.quarantine.count':      '{n} 件隔離中',
   'logs.quarantine.group':      '{stage} ({n})',
@@ -1263,4 +1264,6 @@ export const ja: Record<TranslationKey, string> = {
   'mapping.report.error.type.CONVERSION':  '型変換に失敗しました',
   'mapping.report.error.type.IO':          'ファイル読み込み失敗',
   'mapping.report.error.type.UNKNOWN':     '実行エラー',
+  'mapping.report.error.hintLabel':        'ヒント',
+  'mapping.inspector.combineHint':         '-- combine: 変換式を直接入力してください (例: MAKE_DATE / CONCAT)',
 };

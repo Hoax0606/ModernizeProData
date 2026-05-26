@@ -1184,6 +1184,7 @@ export const ko = {
   'logs.view.label':            'View',
   'logs.view.stream':           'Stream',
   'logs.view.quarantine':       'Quarantine',
+  'logs.view.history':          'Run history',
   'logs.quarantine.empty':      '위 드롭다운에서 항목을 선택하면 상세가 표시됩니다.',
   'logs.quarantine.count':      '{n}건 격리됨',
   'logs.quarantine.group':      '{stage} ({n})',
@@ -1263,6 +1264,8 @@ export const ko = {
   'mapping.report.error.type.CONVERSION':  '타입 변환 실패',
   'mapping.report.error.type.IO':          '파일 읽기 실패',
   'mapping.report.error.type.UNKNOWN':     '실행 오류',
+  'mapping.report.error.hintLabel':        '힌트',
+  'mapping.inspector.combineHint':         '-- combine: 변환식을 직접 입력하세요 (예: MAKE_DATE / CONCAT)',
 } as const;
 
 export type TranslationKey = keyof typeof ko;
