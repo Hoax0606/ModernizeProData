@@ -19,6 +19,8 @@ import { LockIcon } from '../components/LockIcon';
 import { HourglassHalfIcon } from '../components/HourglassHalfIcon';
 import { useLicenseStore } from '../store/license';
 import { useWorkspaceStore } from '../store/workspace';
+import { useExecutionPreflightStore } from '../store/executionPreflight';
+import { TOTAL_RUN_MS, computeElapsedMs } from '../lib/pipelineStages';
 import { useUiStore } from '../store/ui';
 import { isProjectReadOnly } from '../store/readOnly';
 import { useSnapshotsStore } from '../store/snapshots';
@@ -76,6 +78,40 @@ export function AppShell() {
     const id = window.setTimeout(() => setSiteSettingsHighlight(null), 1000);
     return () => window.clearTimeout(id);
   }, [siteSettingsHighlight]);
+
+  /*
+   * Global active-run finisher. 元は ExecutionPage の useEffect 内にあったため, ユーザーが
+   * 他ページに居る間に elapsed が TOTAL_RUN_MS を越えても activeRun が 'running' のまま居残り,
+   * project.runStatus も更新されずサイドバーの phase chip が「実行中」色のままになっていた.
+   * AppShell でグローバルに監視し, どのページにいても RUN 終了で即 store + workspace を更新する.
+   */
+  const runningProjectKey = useExecutionPreflightStore((s) => {
+    const ids: string[] = [];
+    for (const [id, entry] of Object.entries(s.byProject)) {
+      const ar = entry.activeRun;
+      if (ar && ar.runStatus === 'running' && ar.pausedAt === null) ids.push(id);
+    }
+    return ids.sort().join(',');
+  });
+  useEffect(() => {
+    if (!runningProjectKey) return;
+    const tick = () => {
+      const state = useExecutionPreflightStore.getState();
+      for (const [projectId, entry] of Object.entries(state.byProject)) {
+        const ar = entry.activeRun;
+        if (!ar) continue;
+        if (ar.runStatus !== 'running') continue;
+        if (ar.pausedAt !== null) continue;
+        if (computeElapsedMs(ar) >= TOTAL_RUN_MS) {
+          state.finishActiveRun(projectId);
+          useWorkspaceStore.getState().setProjectRunStatus(projectId, 'completed').catch(() => { /* mock; ignore */ });
+        }
+      }
+    };
+    const id = window.setInterval(tick, 500);
+    return () => window.clearInterval(id);
+  }, [runningProjectKey]);
+
   useEffect(() => {
     if (!isDemo) return;
     /* 실 데이터 백업 — exit 시 정확히 복원하기 위함. demo 동안엔 sandbox 처럼 real 숨김. */

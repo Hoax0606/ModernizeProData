@@ -52,6 +52,7 @@ public class UserController {
             String id,
             String username,
             UserRole role,
+            String siteId,
             OffsetDateTime createdAt,
             OffsetDateTime lastSignInAt,
             boolean hasActiveSession
@@ -61,6 +62,7 @@ public class UserController {
                     && u.getCurrentSessionExpiresAt() != null
                     && u.getCurrentSessionExpiresAt().isAfter(OffsetDateTime.now());
             return new UserDto(u.getId(), u.getUsername(), u.getRole(),
+                    u.getSiteId(),
                     u.getCreatedAt(), u.getLastSignInAt(), active);
         }
     }
@@ -68,7 +70,10 @@ public class UserController {
     public record CreateUserRequest(
             @NotBlank @Size(min = 2, max = 64) String username,
             @NotBlank @Size(min = 4, max = 128) String password,
-            @NotNull UserRole role
+            @NotNull UserRole role,
+            /** Optional. Required (by app logic) when role=admin so worker_node
+             *  rows know which site this admin belongs to. */
+            String siteId
     ) {}
 
     public record UpdateRoleRequest(@NotNull UserRole role) {}
@@ -106,6 +111,9 @@ public class UserController {
                 passwordEncoder.encode(req.password()),
                 req.role()
         );
+        if (req.siteId() != null && !req.siteId().isBlank()) {
+            u.setSiteId(req.siteId());
+        }
         userRepository.save(u);
         log.info("User created: {} ({})", u.getUsername(), u.getRole());
         return ApiResponse.ok(UserDto.from(u));

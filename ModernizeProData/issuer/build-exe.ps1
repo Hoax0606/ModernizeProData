@@ -40,13 +40,22 @@ New-Item -ItemType Directory -Path $Staging | Out-Null
 Copy-Item -Force "target\$JarName" "$Staging\"
 
 # Preserve existing keypair across rebuilds. The license\ folder lives next to
-# LicenseIssuer.exe (portable layout) and would otherwise be wiped here.
+# LicenseIssuer.exe (portable layout) and would otherwise be wiped here. We
+# *Copy* (not Move) so a later cleanup-or-jpackage failure leaves the original
+# folder intact -- losing pem keys means re-issuing every license in the fleet.
 $LicenseSrcDir = Join-Path $Dest 'LicenseIssuer\license'
 $LicenseBackupDir = $null
 if (Test-Path $LicenseSrcDir) {
     $LicenseBackupDir = Join-Path $env:TEMP "modernize-license-backup-$([Guid]::NewGuid().ToString('N'))"
-    Move-Item -Path $LicenseSrcDir -Destination $LicenseBackupDir
-    Write-Host "  Preserved existing keypair to temp backup." -ForegroundColor Yellow
+    Copy-Item -Recurse -Path $LicenseSrcDir -Destination $LicenseBackupDir
+    Write-Host "  Preserved existing keypair to temp backup ($LicenseBackupDir)." -ForegroundColor Yellow
+}
+# Also mirror to a stable .keys-safe\ next to build-exe.ps1 so even temp
+# cleanup can't wipe the master copy.
+$KeysSafeDir = Join-Path $PSScriptRoot '.keys-safe'
+if (-not (Test-Path $KeysSafeDir)) { New-Item -ItemType Directory -Path $KeysSafeDir | Out-Null }
+if (Test-Path $LicenseSrcDir) {
+    Copy-Item -Force -Recurse (Join-Path $LicenseSrcDir '*') $KeysSafeDir -ErrorAction SilentlyContinue
 }
 
 if (Test-Path $Dest) { Remove-Item -Recurse -Force $Dest }

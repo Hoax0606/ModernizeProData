@@ -76,31 +76,15 @@ export function VersionsPage() {
     el.style.height = Math.min(el.scrollHeight, 160) + 'px';
   }, [newDesc, createOpen]);
 
-  // Description 입력 규칙: 같은 글자 10번 이상 연속 금지 + 첫째 줄만 20자 초과 시 자동 개행
+  // Description 입력 규칙: 같은 글자 10번 이상 연속 금지. 그 외 길이/줄바꿈 제한 없음 —
+  // 좌측 카드에 description 미리보기가 없어졌으므로 첫 줄을 강제로 끊을 이유도 없다.
   const handleDescChange = (raw: string) => {
     if (/(.)\1{9,}/.test(raw)) {
       setDescError(t('versions.descError.repeat'));
       return;
     }
     setDescError('');
-    const nlIdx = raw.indexOf('\n');
-    if (nlIdx === -1) {
-      // 아직 한 줄. 20자 넘으면 첫 20자로 끊고 나머지를 다음 줄로
-      if (raw.length > 20) {
-        setNewDesc(raw.slice(0, 20) + '\n' + raw.slice(20));
-      } else {
-        setNewDesc(raw);
-      }
-      return;
-    }
-    // 이미 줄바꿈이 있음 — 첫 줄만 20자 제한, 그 뒤는 자유
-    const firstLine = raw.slice(0, nlIdx);
-    const rest = raw.slice(nlIdx); // '\n' 포함
-    if (firstLine.length > 20) {
-      setNewDesc(firstLine.slice(0, 20) + '\n' + firstLine.slice(20) + rest);
-    } else {
-      setNewDesc(raw);
-    }
+    setNewDesc(raw);
   };
 
   // cutover snapshot 확인 다이얼로그
@@ -229,8 +213,6 @@ export function VersionsPage() {
         name,
         type: createType,
         description: newDesc.trim() || undefined,
-        tableCount: project.tableCount,
-        ruleCount: 0,
       });
 
       // 방금 만든 snapshot 을 자동 선택
@@ -428,11 +410,9 @@ export function VersionsPage() {
                     </div>
                     
                     <div style={styles.snapshotItemName}>{s.name}</div>
-                    
-                    {s.description && (
-                      <div style={styles.snapshotItemDesc}>{s.description.split('\n')[0]}</div>
-                    )}
-                    
+
+                    {/* description 은 우측 상세 패널에서만 보여줌 — 좌측 카드에는 표시 안 함 */}
+
                     <div style={styles.snapshotItemMeta}>
                       <span>{s.createdBy}</span>
                       <span>·</span>
@@ -504,7 +484,7 @@ function Th({ children }: { children: React.ReactNode }) {
   return <th style={styles.th}>{children}</th>;
 }
 
-function PinIconSvg({ size = 11 }: { size?: number }) {
+export function PinIconSvg({ size = 11 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
       <path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1 0 .707c-.48.48-1.072.588-1.503.588-.177 0-.335-.018-.46-.039l-3.134 3.134a5.927 5.927 0 0 1 .16 1.013c.046.702-.032 1.687-.72 2.375a.5.5 0 0 1-.707 0l-2.829-2.828-3.182 3.182c-.195.195-1.219.902-1.414.707-.195-.195.512-1.22.707-1.414l3.182-3.182-2.828-2.829a.5.5 0 0 1 0-.707c.688-.688 1.673-.767 2.375-.72a5.922 5.922 0 0 1 1.013.16l3.134-3.133a2.772 2.772 0 0 1-.04-.461c0-.43.108-1.022.589-1.503a.5.5 0 0 1 .353-.146z"/>
@@ -521,26 +501,173 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function ChangeRow({ kind, table, detail }: { kind: 'added' | 'modified'; table: string; detail: string }) {
-  const isAdded = kind === 'added';
+function ChangeRow({ kind, category, rawKey, detail, fieldChanges }: {
+  kind: 'added' | 'modified' | 'removed';
+  category: 'rule' | 'binding' | 'codeMap';
+  /** 백엔드 key 원본 (schema.table.column / schema.table / domain:sourceValue) */
+  rawKey: string;
+  detail: string;
+  fieldChanges?: Array<{ field: string; before: string; after: string }> | null;
+}) {
+  const t = useT();
+  // 헤더에 표시할 이름 — rule 은 schema.table.column 풀 경로 그대로.
+  const displayName = rawKey;
+
+  // 표시 대상은 asisColumn / transformSql 두 필드만.
+  // 옛 snapshot 의 changes JSON 이 4 필드(asisSchema/Table 포함) 로 박제돼 있을 수도 있어
+  // frontend 에서 필터링 — 옛/새 snapshot 무관하게 동일한 화면.
+  const fields = (fieldChanges ?? []).filter(
+    (fc) => fc.field === 'asisColumn' || fc.field === 'transformSql'
+  );
+
+  // "사실상 삭제" detect — mapping page 에서 초기화하면 row 는 남고 값만 비워짐.
+  // backend 는 MODIFIED 로 보내지만, 모든 after 가 (unassigned) 이면 UI 는 DELETED 로.
+  const isEffectivelyDeleted =
+    kind === 'modified'
+    && fields.length > 0
+    && fields.every((f) => f.after === '(unassigned)');
+  const effectiveKind: 'added' | 'modified' | 'removed' =
+    isEffectivelyDeleted ? 'removed' : kind;
+
+  const palette = effectiveKind === 'added'
+    ? { color: 'var(--green)', bg: 'var(--green-50)', symbol: '+', label: t('versions.changes.status.added') }
+    : effectiveKind === 'removed'
+      ? { color: 'var(--red)', bg: 'var(--red-50)', symbol: '−', label: t('versions.changes.status.deleted') }
+      : { color: 'var(--amber)', bg: 'var(--amber-50)', symbol: '~', label: t('versions.changes.status.modified') };
+
+  // ADDED, MODIFIED 만 토글 가능. DELETED 는 펼침 영역 없음 (헤더만).
+  const canExpand = fields.length > 0 && effectiveKind !== 'removed';
+
+  // backend 의 field 식별자 → 사용자에게 보여줄 라벨 (i18n)
+  const fieldLabel = (f: string): string => {
+    switch (f) {
+      case 'asisColumn':   return t('versions.changes.field.asisColumn');
+      case 'transformSql': return t('versions.changes.field.rule');
+      default:             return f;
+    }
+  };
+
+  // backend 의 sentinel "(unassigned)" 를 현재 언어로 치환
+  const valueLabel = (v: string): string =>
+    v === '(unassigned)' ? t('versions.changes.unassigned') : v;
+
+  // 헤더 우측 라벨 — backend detail 을 신뢰하지 않고 client-side 재계산.
+  // ADDED/DELETED 는 라벨 없음 (화살표만). MODIFIED 는 변경 항목에 따라.
+  const headerLabel = (() => {
+    if (effectiveKind === 'added' || effectiveKind === 'removed') return '';
+    if (effectiveKind === 'modified') {
+      const hasCol = fields.some((f) => f.field === 'asisColumn');
+      const hasSql = fields.some((f) => f.field === 'transformSql');
+      if (hasCol && hasSql) return t('versions.changes.label.both');
+      if (hasCol)           return t('versions.changes.label.column');
+      if (hasSql)           return t('versions.changes.label.rule');
+      return detail; // fallback
+    }
+    return detail;
+  })();
+
+  // 기본은 접힌 상태. 헤더 클릭 시 토글.
+  const [expanded, setExpanded] = useState(false);
+
   return (
     <div style={{
-      ...styles.changeRow,
-      borderLeft: `3px solid ${isAdded ? 'var(--green)' : 'var(--amber)'}`,
+      borderBottom: '1px solid var(--border)',
+      borderLeft: `3px solid ${palette.color}`,
+      background: 'var(--panel)',
+      fontFamily: 'var(--mono)',
     }}>
-      <span style={{ ...styles.changeSymbol, color: isAdded ? 'var(--green)' : 'var(--amber)' }}>
-        {isAdded ? '+' : '~'}
-      </span>
-      <span style={{
-        ...styles.changeBadgePill,
-        background: isAdded ? 'var(--green-50)' : 'var(--amber-50)',
-        color: isAdded ? 'var(--green)' : 'var(--amber)',
-        borderColor: isAdded ? 'var(--green)' : 'var(--amber)',
-      }}>
-        {isAdded ? 'ADDED' : 'MODIFIED'}
-      </span>
-      <span style={styles.changeTable}>{table}</span>
-      <span style={styles.changeDetailInline}>{detail}</span>
+      {/* 헤더 — 좌측: [symbol][BADGE][displayName], 우측: [detail][▶]. canExpand 면 클릭 토글. */}
+      <div
+        onClick={canExpand ? () => setExpanded((x) => !x) : undefined}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: '6px 12px 6px 10px',
+          cursor: canExpand ? 'pointer' : 'default',
+          userSelect: canExpand ? 'none' : 'auto',
+        }}
+      >
+        <span style={{ ...styles.changeSymbol, color: palette.color }}>
+          {palette.symbol}
+        </span>
+        <span style={{
+          ...styles.changeBadgePill,
+          background: palette.bg,
+          color: palette.color,
+          borderColor: palette.color,
+        }}>
+          {palette.label}
+        </span>
+        <span style={styles.changeTable}>{displayName}</span>
+        {/* 우측: detail (의미적 라벨) + 토글 화살표 */}
+        <span
+          style={{
+            marginLeft: 'auto',
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 8,
+            color: 'var(--text-3)',
+            fontSize: 11,
+          }}
+        >
+          {headerLabel && <span>{headerLabel}</span>}
+          {canExpand && (
+            <span
+              style={{
+                display: 'inline-block',
+                transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                transition: 'transform 0.15s ease',
+                fontSize: 10,
+              }}
+            >
+              ▶
+            </span>
+          )}
+        </span>
+      </div>
+
+      {/* 펼친 sub-row 영역 — 가로 스크롤 가능 */}
+      {canExpand && expanded && (
+        <div
+          style={{
+            borderTop: '1px dashed var(--border)',
+            background: 'var(--panel-2)',
+            overflowX: 'auto',  // 긴 텍스트는 좌우 스크롤로 확인
+          }}
+        >
+          {/*
+            단일 grid 컨테이너에 모든 행의 cell 을 펼침 — column 폭이 전체 max-content
+            기준으로 통일되어 화살표 / after 가 세로로 정확히 정렬됨.
+            (이전엔 각 행이 독립 grid 라 column 폭이 행마다 달라져 들쭉날쭉했음.)
+          */}
+          <div
+            style={{
+              padding: '6px 12px 8px 36px',
+              display: 'grid',
+              // col 3 이 'auto' 면 grid 가 남은 부모 폭을 그 col 에 몰아주어 화살표가
+              // 늘어나 보임 → after 가 우측 끝으로 밀려남. 4 col 모두 content 만큼만:
+              gridTemplateColumns: '130px max-content max-content max-content',
+              alignItems: 'center',
+              columnGap: 16,
+              rowGap: 4,
+              fontSize: 11,
+              lineHeight: 1.5,
+              whiteSpace: 'nowrap',
+              minWidth: 'max-content',
+            }}
+          >
+            {fields.map((fc, i) => [
+              <span key={`f-${i}`} style={{ color: 'var(--text-3)' }}>{fieldLabel(fc.field)}</span>,
+              // before: 우측 정렬 — 짧은 텍스트도 화살표 바로 옆까지 붙음
+              <span key={`b-${i}`} style={{ color: 'var(--text-3)', textAlign: 'right' }}>{valueLabel(fc.before)}</span>,
+              <span key={`a-${i}`} style={{ color: 'var(--text-4)' }}>→</span>,
+              // after: 좌측 정렬 (default) — 화살표 바로 옆에 붙음
+              <span key={`v-${i}`} style={{ color: 'var(--text)', fontWeight: 500 }}>{valueLabel(fc.after)}</span>,
+            ])}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -755,16 +882,7 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
                     ...styles.pinToggleKnob,
                     ...(isPinned ? styles.pinToggleKnobOn : {}),
                   }}
-                >
-                  <span
-                    style={{
-                      ...styles.pinToggleKnobIcon,
-                      color: isPinned ? 'var(--navy)' : 'var(--text-4)',
-                    }}
-                  >
-                    <PinIconSvg size={9} />
-                  </span>
-                </span>
+                />
               </button>
             </div>
           </div>
@@ -772,28 +890,78 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
       </div>
 
       {/* 변경사항 vs 이전 버전 */}
-      <div style={styles.detailSection}>
-        <div style={styles.changesSectionHeader}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <h3 style={{ ...styles.detailSectionTitle, margin: 0 }}>Changes (7)</h3>
-            <span style={styles.changeUiOnlyBadge}>UI only</span>
+      {(() => {
+        const ch = snapshot.changes;
+        // summary 를 items 기반으로 재계산 — "사실상 삭제" (modified 인데 모든 after 가
+        // (unassigned)) 가 ChangeRow 에서 DELETED 로 표시되므로 카운트도 같이 맞춤.
+        const itemsForSummary = ch?.items ?? [];
+        const summary = itemsForSummary.reduce(
+          (acc, it) => {
+            const filtered = (it.fieldChanges ?? []).filter(
+              (fc) => fc.field === 'asisColumn' || fc.field === 'transformSql'
+            );
+            const isEffectivelyDeleted =
+              it.kind === 'modified'
+              && filtered.length > 0
+              && filtered.every((f) => f.after === '(unassigned)');
+            const effKind = isEffectivelyDeleted ? 'removed' : it.kind;
+            if (effKind === 'added')    acc.added++;
+            if (effKind === 'modified') acc.modified++;
+            if (effKind === 'removed')  acc.removed++;
+            return acc;
+          },
+          { added: 0, modified: 0, removed: 0 },
+        );
+        const total = summary.added + summary.modified + summary.removed;
+        const compareLabel = ch?.previousVersion
+          ? t('versions.changes.compareLabel', { version: ch.previousVersion })
+          : t('versions.changes.firstSnapshot');
+        return (
+          <div style={styles.detailSection}>
+            <div style={styles.changesSectionHeader}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <h3 style={{ ...styles.detailSectionTitle, margin: 0 }}>{t('versions.changes.title')} ({total})</h3>
+                <span style={{ color: 'var(--text-3)', fontSize: 11 }}>{compareLabel}</span>
+              </div>
+              <div style={styles.changesSummary}>
+                {summary.added > 0 && (
+                  <span style={styles.summaryBadgeAdded}>{summary.added} {t('versions.changes.status.added')}</span>
+                )}
+                {summary.modified > 0 && (
+                  <span style={styles.summaryBadgeModified}>{summary.modified} {t('versions.changes.status.modified')}</span>
+                )}
+                {summary.removed > 0 && (
+                  <span style={{
+                    ...styles.summaryBadgeAdded,
+                    background: 'var(--red-50)',
+                    color: 'var(--red)',
+                    borderColor: 'var(--red)',
+                  }}>{summary.removed} {t('versions.changes.status.deleted')}</span>
+                )}
+              </div>
+            </div>
+
+            <div style={styles.changesContainer}>
+              {!ch || total === 0 ? (
+                <div style={{ padding: '12px 16px', color: 'var(--text-3)', fontStyle: 'italic' }}>
+                  {t('versions.changes.noChanges')}
+                </div>
+              ) : (
+                ch.items.map((it, i) => (
+                  <ChangeRow
+                    key={`${it.kind}-${it.category}-${it.key}-${i}`}
+                    kind={it.kind}
+                    category={it.category}
+                    rawKey={it.key}
+                    detail={it.detail}
+                    fieldChanges={it.fieldChanges}
+                  />
+                ))
+              )}
+            </div>
           </div>
-          <div style={styles.changesSummary}>
-            <span style={styles.summaryBadgeAdded}>4 ADDED</span>
-            <span style={styles.summaryBadgeModified}>3 MODIFIED</span>
-          </div>
-        </div>
-        
-        <div style={styles.changesContainer}>
-          <ChangeRow kind="added" table="public.transaction_all" detail="New UNION target (t23 ∪ t24)" />
-          <ChangeRow kind="modified" table="public.customer bindings" detail="cp CUST_PROFILE ⋈ cc CUST_CONTACT (was single-source)" />
-          <ChangeRow kind="modified" table="public.customer.phone_e164" detail="source: cp.TEL_NO → cc.TEL_NO" />
-          <ChangeRow kind="added" table="public.customer.email" detail="source: cc.EMAIL_ADDR, confidence 95%" />
-          <ChangeRow kind="added" table="public.customer.preferred_channel" detail="source: cc.PREF_CHANNEL, confidence 80%" />
-          <ChangeRow kind="added" table="public.customer.marketing_opt_in" detail="source: cc.OPT_IN_FLG" />
-          <ChangeRow kind="modified" table="public.transaction_2024.direction" detail="source confidence lowered 0.75 → 0.65" />
-        </div>
-      </div>
+        );
+      })()}
 
     </div>
   );
@@ -1274,8 +1442,13 @@ const styles: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     border: '1px solid var(--border)',
     borderRadius: 6,
-    overflow: 'hidden',
     background: 'var(--panel)',
+    // 약 10 행 (실측 한 행 ≒ 30px) 까지만 보이고, 나머지는 세로 스크롤.
+    // 가로 overflow 는 각 ChangeRow 의 sub-row 영역이 자체 스크롤로 처리하므로
+    // 부모는 세로만 잡아주면 됨.
+    maxHeight: 300,
+    overflowY: 'auto',
+    overflowX: 'hidden',
   },
   changeRow: {
     display: 'flex',

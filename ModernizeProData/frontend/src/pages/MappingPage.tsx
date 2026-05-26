@@ -6,9 +6,11 @@ import { useTobeDdlStore } from '../store/tobeDdl';
 import { useT, type TranslationKey } from '../i18n';
 import { useMappingEditsStore, type TableBindingEdit } from '../store/mappingEdits';
 import { useUiStore } from '../store/ui';
+import { useSnapshotsStore, usePinnedSnapshotsStore, type FrozenBinding, type FrozenRule } from '../store/snapshots';
+import { PinIconSvg } from './VersionsPage';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
 import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
-import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult } from '../api/mappingImport';
+import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult, type MappingRuleDto, type MappingTableBindingDto } from '../api/mappingImport';
 import { MappingOnboarding } from './DashboardPage';
 import { isDemoProjectId } from '../lib/demoFixtures';
 
@@ -297,9 +299,36 @@ export function MappingPage() {
 
   // Pre-flight Fix → 첫 unmapped row 찾아 scrollIntoView + 1초 teal pulse.
   // ExecutionPage 가 navigate('/mapping', { state: { fixTarget: { kind } } }) 로 진입.
+  // Dashboard 행 클릭 → state.focusTable.internalName 로 해당 TO-BE 테이블을 active 화.
   const location = useLocation();
+  const routerNavigate = useNavigate();
+  // 同じ focusTable を hydrationTick の度に再適用しないためのガード.
+  // window.history.replaceState だけだと React Router の location.state は更新されず, 結果として
+  // schema 再 fetch (= hydrationTick++) のたびに同じテーブルへ強制リセットされていた.
+  const consumedFocusKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    const state = location.state as { fixTarget?: { kind: 'unmapped-tobe' | 'unmapped-asis' | 'unbound-tobe' } } | null;
+    const state = location.state as {
+      fixTarget?: { kind: 'unmapped-tobe' | 'unmapped-asis' | 'unbound-tobe' };
+      focusTable?: { internalName: string };
+    } | null;
+
+    // Dashboard row → focus a specific TO-BE table.
+    if (state?.focusTable) {
+      const id = state.focusTable.internalName;
+      if (consumedFocusKeyRef.current === id) return;  // 既に処理済み
+      if (TOBE_TABLES.length === 0) return;            // hydrate 待ち
+      const target = TOBE_TABLES.find((t) => t.internalName === id);
+      if (target) {
+        setSelected({ side: 'tobe', name: target.name, internalName: target.internalName });
+        // 自動初期選択を抑止 — 既に欲しい行を選んだ.
+        didInitialSelectRef.current = true;
+        consumedFocusKeyRef.current = id;
+        // React Router の location.state を実際にクリア (history.replaceState だけでは不足).
+        routerNavigate(location.pathname, { replace: true });
+      }
+      return;
+    }
+
     const kind = state?.fixTarget?.kind;
     if (!kind) return;
     // unmapped-asis: AS-IS 사이드로 자동 전환해야 AsisTableDetail 이 mount 되고
@@ -354,6 +383,7 @@ export function MappingPage() {
   // 프로젝트 변경 시 selection lock 해제.
   useEffect(() => {
     didInitialSelectRef.current = false;
+    consumedFocusKeyRef.current = null;
     setSelected(null);
   }, [activeProjectId]);
   // hydrate 후 첫 TOBE 자동 선택 (프로젝트당 한 번).
@@ -797,6 +827,29 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
   const [activeIdx, setActiveIdx] = useState(0);
   const activeProjectIdForRow = useWorkspaceStore((s) => s.activeProjectId);
 
+  // 프로젝트의 고정핀(baseline) snapshot — context bar 의 table chip 옆에 version 표시.
+  // 진입 시 1 회 fetch (이미 다른 화면에서 불러와 있으면 store 가 채워둠).
+  // baselineSnapshot 검색은 usePinnedSnapshotsStore.pinnedIds 기준 — clearPin 호출 시
+  // 즉시 store 가 갱신돼 chip 도 자동으로 사라진다 (snapshots[].baseline 은 다음 fetch 까지 stale).
+  const snapshots = useSnapshotsStore((s) => s.snapshots);
+  const fetchSnapshotsByProject = useSnapshotsStore((s) => s.fetchByProject);
+  const pinnedIds = usePinnedSnapshotsStore((s) => s.pinnedIds);
+  const clearBaselinePin = usePinnedSnapshotsStore((s) => s.clearPin);
+  useEffect(() => {
+    if (activeProjectIdForRow) {
+      fetchSnapshotsByProject(activeProjectIdForRow).catch(() => { /* polling 에서 재시도 */ });
+    }
+  }, [activeProjectIdForRow, fetchSnapshotsByProject]);
+  const baselineSnapshot = useMemo(
+    () => snapshots.find((s) => s.projectId === activeProjectIdForRow && pinnedIds.includes(s.id)),
+    [snapshots, activeProjectIdForRow, pinnedIds],
+  );
+  // mapping rule 수정 시 baseline 핀 자동 해제 — snapshot 이 실제 룰과 어긋나면 안 됨.
+  // clearPin 이 backend + store 동시 갱신 → baselineSnapshot 자동 null → chip 사라짐.
+  const clearBaselineIfPinned = useCallback(() => {
+    if (baselineSnapshot) clearBaselinePin(baselineSnapshot.id);
+  }, [baselineSnapshot, clearBaselinePin]);
+
   /**
    * DB 의 mapping_table_bindings → zustand 의 tableBindingEdits 로 hydrate.
    * 임포트 직후 / 페이지 마운트 시 호출. 해당 project 의 binding edits 전부 교체.
@@ -955,10 +1008,13 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
       });
     // TobeMappingDetail 은 MappingPage 가 DDL 로드 완료 후에야 렌더되므로
     // TOBE_TABLES 는 마운트 시점에 이미 채워져 있음. 추가 trigger 불필요.
+    // Restore 모델: baseline 핀이 setBaseline 호출로 live mapping_* 를 snapshot 시점으로
+    // 복원함. 따라서 frontend 는 항상 backend 의 live 만 hydrate 하면 됨 (override 불필요).
+    // baselineSnapshot 변경 (set/clear) → main effect 가 fresh fetch.
     hydrateBindingsFromDb(activeProjectIdForRow);
     hydrateRowEditsFromDb(activeProjectIdForRow);
     return () => { cancelled = true; };
-  }, [activeProjectIdForRow, hydrateBindingsFromDb, hydrateRowEditsFromDb]);
+  }, [activeProjectIdForRow, baselineSnapshot?.id, hydrateBindingsFromDb, hydrateRowEditsFromDb]);
   const rowEdits = useMappingEditsStore(
     (s) => (activeProjectIdForRow ? s.rowEdits[activeProjectIdForRow]?.[table.internalName] : undefined) || EMPTY_ROW_EDITS,
   );
@@ -983,7 +1039,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
     }, 80);
     return () => window.clearInterval(id);
   }, [testStatus]);
-  const handleSaveEdit = useCallback((r: MappingRow, edit: RowEdit) => {
+  const handleSaveEdit = useCallback(async (r: MappingRow, edit: RowEdit) => {
     if (!activeProjectIdForRow) return;
     // 사용자가 row 편집기에서 저장한 것 = manual
     const editWithOrigin: RowEdit = { ...edit, ruleOrigin: 'manual' };
@@ -1017,18 +1073,27 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
       }
     }
     const strategy = edit.savedStrategy ?? 'expression';
-    mappingImportApi.upsertRule(activeProjectIdForRow, {
-      tobeSchema: tobeSplit.schema,
-      tobeTable: tobeSplit.table,
-      tobeColumn: r.tgt,
-      asisSchema, asisTable, asisColumn,
-      strategy,
-      transformRule: edit.savedRule ?? null,
-      transformSql: edit.savedRule ?? null,
-      defaultValue: edit.savedDefault ?? null,
-      notNullOverride: edit.savedNotNull ?? false,
-    }).catch((e) => console.warn('[mapping] upsertRule failed', e));
-  }, [activeProjectIdForRow, table.internalName, table.name, bindingEdit]);
+    try {
+      await mappingImportApi.upsertRule(activeProjectIdForRow, {
+        tobeSchema: tobeSplit.schema,
+        tobeTable: tobeSplit.table,
+        tobeColumn: r.tgt,
+        asisSchema, asisTable, asisColumn,
+        strategy,
+        transformRule: edit.savedRule ?? null,
+        transformSql: edit.savedRule ?? null,
+        defaultValue: edit.savedDefault ?? null,
+        notNullOverride: edit.savedNotNull ?? false,
+      });
+    } catch (e) {
+      console.warn('[mapping] upsertRule failed', e);
+    }
+    // baseline 고정 상태에서의 수정 — 핀 자동 해제. **upsertRule 완료 후** 호출하는 이유:
+    // clearPin 이 main hydrate effect 를 트리거 → 그 시점 backend 에 사용자 값이 들어가 있어야
+    // listRules 가 사용자 값을 받고 rowEdits 에 정상 반영. 먼저 clearPin 하면 hydrate 가
+    // 옛 live 데이터를 가져와 사용자 변경값을 덮어쓰는 race 가 발생.
+    clearBaselineIfPinned();
+  }, [activeProjectIdForRow, table.internalName, table.name, bindingEdit, clearBaselineIfPinned]);
   const [bindingSources, setBindingSources] = useState(bindingEdit?.sources ?? table.sources);
   const [bindingMode, setBindingMode] = useState<'join' | 'union'>(
     bindingEdit?.mode ?? (table.compositionKind === 'union' ? 'union' : 'join'),
@@ -1115,6 +1180,17 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
       <div style={{ ...styles.contextBar, display: reportOpen ? 'none' : 'flex' }}>
         <span style={{ ...styles.sidePill, color: 'var(--navy)', background: 'var(--navy-50)', borderColor: 'var(--navy)' }}>TO-BE</span>
         <div style={styles.tableChip}>{table.short}</div>
+        {baselineSnapshot && (
+          <button
+            type="button"
+            onClick={() => navigate('/versions', { state: { selectSnapshotId: baselineSnapshot.id } })}
+            style={styles.baselinePinChip}
+            title={`Pinned baseline: ${baselineSnapshot.name}  (click → Versions)`}
+          >
+            <PinIconSvg size={11} />
+            {baselineSnapshot.version}
+          </button>
+        )}
         <div style={{ flex: 1 }} />
         <div style={styles.statusCounts}>
           {(() => {
@@ -1301,7 +1377,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
                   <tr
                     key={`${r.src}>${r.tgt}-${i}`}
                     data-fix-row={r.rule === 'unmapped' ? 'tobe-unmapped' : undefined}
-                    onClick={() => setActiveIdx(realIdx)}
+                    onClick={() => { setActiveIdx(realIdx); setInspectorOpen(true); }}
                     style={{
                       background: isActive ? 'var(--navy-50)' : (i % 2 === 1 ? 'var(--zebra)' : 'var(--panel)'),
                       borderBottom: '1px solid var(--border)',
@@ -1810,6 +1886,7 @@ function validateRule(code: string): string | null {
 const _e    = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const _kw   = (s: string) => `<span style="color:#e8b86f">${_e(s)}</span>`;
 const _func = (s: string) => `<span style="color:#dcdcaa">${_e(s)}</span>`;
+const _udf  = (s: string) => `<span style="color:#c8a3ff">${_e(s)}</span>`;
 const _str  = (s: string) => `<span style="color:#9fd9b3">${_e(s)}</span>`;
 const _cmt  = (s: string) => `<span style="color:#7a8aa6">${_e(s)}</span>`;
 const _num  = (s: string) => `<span style="color:#79c0ff">${_e(s)}</span>`;
@@ -1850,6 +1927,27 @@ const SQL_FUNC_SIGS: Record<string, string> = {
 };
 const SQL_FUNCS = new Set(Object.keys(SQL_FUNC_SIGS));
 
+// 도구 내장 UDF — DuckDB connection 에 register 되는 Java 번들 함수.
+// 보라 (#c8a3ff, _udf) 로 표시해 PG 표준 빌트인과 시각적으로 구분.
+// 백엔드: backend/.../common/duckdb/udf/{UdfRegistry, *Udf}.java
+const UDF_FUNC_SIGS: Record<string, string> = {
+  // 숫자 / 소수점
+  APPLY_SCALE:         '(raw_hex, scale)',
+  UNPACK_ZONE_DECIMAL: '(zone_hex)',
+  // 날짜 / 시간
+  CONVERT_ERA:         '(era_text)',
+  // 채번
+  ASSIGN_SEQ:          '(partition_key)',
+  // 식별자 검증
+  VALIDATE_BIZNO:      '(bizno)',
+  // 마스킹 / 해시
+  MASK_PHONE:          '(phone)',
+  HASH_SHA256:         '(input)',
+  // 문자열 정규화
+  NORMALIZE_CORP:      '(corp_name)',
+};
+const UDF_FUNCS = new Set(Object.keys(UDF_FUNC_SIGS));
+
 /**
  * SQL 키워드/함수만 대문자화. 문자열 리터럴('...') 과 식별자(컬럼/별칭) 는 원본 그대로.
  * Transform 입력에서 사용자가 친 컬럼명/리터럴이 자동으로 대문자화되면 DB 데이터까지 망가지기 때문.
@@ -1858,7 +1956,7 @@ function upperSqlKeywords(s: string): string {
   return s.replace(/'(?:[^']|'')*'|[A-Za-z_][A-Za-z_0-9]*/g, (m) => {
     if (m.startsWith("'")) return m;
     const u = m.toUpperCase();
-    return (SQL_KW.has(u) || SQL_FUNCS.has(u)) ? u : m;
+    return (SQL_KW.has(u) || SQL_FUNCS.has(u) || UDF_FUNCS.has(u)) ? u : m;
   });
 }
 
@@ -1881,6 +1979,7 @@ function highlightSql(raw: string): string {
       const u = w.toUpperCase();
       if (SQL_KW.has(u)) out.push(_kw(w));
       else if (SQL_FUNCS.has(u)) out.push(_func(w));
+      else if (UDF_FUNCS.has(u)) out.push(_udf(w));
       else out.push(_def(w));
       i = j;
     } else if (/[0-9]/.test(raw[i])) {
@@ -1981,7 +2080,7 @@ function HighlightEditor({
     //   '(...)' (인자 있음) → '(' 삽입, 커서는 괄호 안쪽
     let inserted = item;
     let cursorOffset = item.length;
-    const sig = SQL_FUNC_SIGS[item];
+    const sig = SQL_FUNC_SIGS[item] ?? UDF_FUNC_SIGS[item];
     if (sig !== undefined) {
       if (sig === '()') {
         inserted = item + '()';
@@ -2050,7 +2149,7 @@ function HighlightEditor({
       {acItems.length > 0 && (
         <div style={styles.acDropdown}>
           {acItems.map((item, i) => {
-            const sig = SQL_FUNC_SIGS[item];
+            const sig = SQL_FUNC_SIGS[item] ?? UDF_FUNC_SIGS[item];
             return (
               <div
                 key={item}
@@ -2238,12 +2337,14 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
         <div style={styles.inspectorHeaderTopRow}>
           <span style={styles.inspectorEyebrow}>Mapping detail</span>
           <div style={{ flex: 1 }} />
-          <button
-            type="button"
-            onClick={handleClear}
-            title="이 컬럼의 매핑·룰 흔적을 모두 초기화합니다."
-            style={styles.inspectorHeaderIconBtn}
-          ><Ic.refresh /></button>
+          {editingRule && (
+            <button
+              type="button"
+              onClick={handleClear}
+              title="이 컬럼의 매핑·룰 흔적을 모두 초기화합니다."
+              style={styles.inspectorHeaderIconBtn}
+            ><Ic.refresh /></button>
+          )}
           <button
             type="button"
             onClick={onClose}
@@ -2419,6 +2520,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
                   if (di > 0) set.add(s.slice(di + 1));
                 });
                 SQL_FUNCS.forEach((fn) => set.add(fn));
+                UDF_FUNCS.forEach((fn) => set.add(fn));
                 return Array.from(set);
               })();
               return (
@@ -2660,6 +2762,69 @@ type SlotPending =
   | { kind: 'upload'; file: File }
   | { kind: 'delete' };
 
+/**
+ * Snapshot baseline 비교용 시그니처 helper.
+ * snapshot 의 frozen rules/bindings 와 apply 후 live mapping_rules/bindings 가 의미적으로 같은지 판단.
+ * id / timestamp / createdBy 같은 메타 필드는 무시하고, 사용자 의도가 담긴 필드만 비교.
+ */
+function ruleSignature(r: {
+  tobeSchema: string; tobeTable: string; tobeColumn: string;
+  asisSchema?: string | null; asisTable?: string | null;
+  asisColumn?: string[] | null; strategy: string;
+  transformRule?: string | null; transformSql?: string | null;
+  defaultValue?: string | null; notNullOverride: boolean;
+  notes?: string | null;
+}): string {
+  return JSON.stringify({
+    k: `${r.tobeSchema}|${r.tobeTable}|${r.tobeColumn}`,
+    aS: r.asisSchema ?? null,
+    aT: r.asisTable ?? null,
+    aC: r.asisColumn ?? null,
+    st: r.strategy,
+    tr: r.transformRule ?? null,
+    ts: r.transformSql ?? null,
+    dv: r.defaultValue ?? null,
+    nn: !!r.notNullOverride,
+    nt: r.notes ?? null,
+  });
+}
+
+function rulesEqual(a: FrozenRule[], b: MappingRuleDto[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = a.map(ruleSignature).sort();
+  const sb = b.map(ruleSignature).sort();
+  for (let i = 0; i < sa.length; i++) if (sa[i] !== sb[i]) return false;
+  return true;
+}
+
+function bindingSignature(b: {
+  tobeSchema: string; tobeTable: string;
+  compositionKind: string; whereFilter?: string | null;
+  sources: Array<{
+    ordinal: number; asisSchema?: string | null; asisTable: string;
+    alias: string; role: string; joinType?: string | null; joinOn?: string | null;
+  }>;
+}): string {
+  const srcs = [...b.sources].sort((x, y) => x.ordinal - y.ordinal).map((s) => ({
+    o: s.ordinal, aS: s.asisSchema ?? null, aT: s.asisTable,
+    al: s.alias, r: s.role, jt: s.joinType ?? null, jo: s.joinOn ?? null,
+  }));
+  return JSON.stringify({
+    k: `${b.tobeSchema}|${b.tobeTable}`,
+    ck: b.compositionKind,
+    wf: b.whereFilter ?? null,
+    srcs,
+  });
+}
+
+function bindingsEqual(a: FrozenBinding[], b: MappingTableBindingDto[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = a.map(bindingSignature).sort();
+  const sb = b.map(bindingSignature).sort();
+  for (let i = 0; i < sa.length; i++) if (sa[i] !== sb[i]) return false;
+  return true;
+}
+
 function MappingDefinitionImportModal({
   projectId, activeFiles, onClose, onChanged,
 }: {
@@ -2699,6 +2864,31 @@ function MappingDefinitionImportModal({
         await mappingImportApi.reapplyLatest(projectId);
       }
       await mappingImportApi.rebuildBindings(projectId);
+
+      // Snapshot baseline 자동 해제: apply 후 데이터가 frozen snapshotData 와 달라지면 핀 해제.
+      // - code CSV 변경 (codePending != 'none') → frozen codeMaps 와 다를 가능성 매우 큼.
+      //   (현재 listCodeMaps API 미존재 → pending 신호로 보조 판단.)
+      // - rules / bindings 는 fetch 후 시그니처 비교 — id/timestamp 제외한 의미상 동일성 확인.
+      // 같은 파일로 단순 reapply 라 결과가 동일하면 핀 유지.
+      const pinnedIds = usePinnedSnapshotsStore.getState().pinnedIds;
+      const baseline = useSnapshotsStore.getState().snapshots.find(
+        (s) => s.projectId === projectId && pinnedIds.includes(s.id),
+      );
+      if (baseline?.snapshotData) {
+        const sd = baseline.snapshotData;
+        let changed = codePending.kind !== 'none';
+        if (!changed) {
+          const [newRules, newBindings] = await Promise.all([
+            mappingImportApi.listRules(projectId),
+            mappingImportApi.listBindings(projectId),
+          ]);
+          changed = !rulesEqual(sd.rules, newRules) || !bindingsEqual(sd.bindings, newBindings);
+        }
+        if (changed) {
+          usePinnedSnapshotsStore.getState().clearPin(baseline.id);
+        }
+      }
+
       const unmatched = await onChanged();
       if (unmatched.length > 0) {
         const shown = unmatched.slice(0, 5).join(', ');
@@ -3942,6 +4132,16 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '3px 8px', borderRadius: 4,
     border: '1px solid var(--border)', background: 'var(--panel-2)',
     fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 500,
+  },
+  // 프로젝트의 고정핀 snapshot version 표시. green 강조 + 클릭 시 Versions 페이지로 이동.
+  baselinePinChip: {
+    display: 'inline-flex', alignItems: 'center', gap: 4,
+    padding: '3px 8px', borderRadius: 4,
+    border: '1px solid var(--green)', background: 'var(--green-50)',
+    color: 'var(--green)',
+    fontFamily: 'var(--mono)', fontSize: 11.5, fontWeight: 600,
+    whiteSpace: 'nowrap',
+    cursor: 'pointer',
   },
   statusCounts: {
     display: 'flex', alignItems: 'center', gap: 6,

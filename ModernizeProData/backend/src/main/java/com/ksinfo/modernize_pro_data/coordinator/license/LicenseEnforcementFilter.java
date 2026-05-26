@@ -43,7 +43,22 @@ public class LicenseEnforcementFilter extends OncePerRequestFilter {
             "/api/v1/health",
             "/api/v1/auth",
             "/api/v1/license",
-            "/ws/"
+            "/ws/",
+            // SPA shell + assets so the React app boots even when the server
+            // is in MISSING/INVALID/EXPIRED -- otherwise the JS bundle never
+            // loads and the user sees the raw 403 JSON instead of the
+            // /license-setup wizard.
+            "/assets/",
+            "/icons/"
+    );
+
+    private static final Set<String> ALWAYS_ALLOWED_EXACT = Set.of(
+            "/",
+            "/index.html",
+            "/favicon.svg",
+            "/favicon.ico",
+            "/mpd.png",
+            "/mpd_lic.png"
     );
 
     private static final long TOUCH_THROTTLE_MS = 5L * 60L * 1000L;
@@ -84,8 +99,17 @@ public class LicenseEnforcementFilter extends OncePerRequestFilter {
     }
 
     private boolean isAlwaysAllowed(String path) {
+        if (ALWAYS_ALLOWED_EXACT.contains(path)) return true;
         for (String prefix : ALWAYS_ALLOWED_PREFIXES) {
             if (path.startsWith(prefix)) return true;
+        }
+        // SPA client-side routes (e.g. /login, /license-setup, /dashboard).
+        // They contain no extension and aren't under /api or /ws --
+        // SpaFallbackController will forward them to /index.html, so the
+        // license-MISSING state must let them through, otherwise the React
+        // router can't even reach the /license-setup screen.
+        if (!path.startsWith("/api/") && !path.startsWith("/ws/") && !path.contains(".")) {
+            return true;
         }
         return false;
     }
