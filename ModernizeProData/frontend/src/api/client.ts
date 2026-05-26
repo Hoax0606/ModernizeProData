@@ -54,13 +54,43 @@ api.interceptors.request.use((config) => {
 
 // Response interceptor — 401 시 자동 로그아웃 + ApiError 변환
 // 로그인 요청은 401 이 정상 흐름이므로 자동 logout 에서 제외.
+// 라이선스 차단 (403 + LICENSE_MISSING/INVALID/EXPIRED) 도 자동 logout 으로
+// 처리: 차단 상태에서는 어차피 사용자 작업이 막히므로 LoginPage 로 보내서
+// master 가 새 .lic 를 import 하게 한다.
+const LICENSE_BLOCK_CODES = new Set([
+  'LICENSE_INVALID',
+  'LICENSE_EXPIRED',
+]);
+// Single-shot: 한 세션에 한 번만 license 차단으로 logout 한다. master 가
+// 다시 login 한 직후 dashboard 의 첫 API 호출에서 동일 차단을 또 logout
+// 으로 처리하면 무한 loop. flag 는 successful refresh 가 status를 ACTIVE
+// 류로 돌려놓을 때 리셋된다 (useLicenseStore 에서).
+export let licenseLogoutFired = false;
+export function resetLicenseLogoutFlag() { licenseLogoutFired = false; }
+
 api.interceptors.response.use(
   (response: AxiosResponse) => response,
   (error: AxiosError<ApiResponse<unknown>>) => {
     const status = error.response?.status;
     const url = error.config?.url ?? '';
+    const code = error.response?.data?.error?.code;
+    const isLicenseBlock = status === 403 && !!code && LICENSE_BLOCK_CODES.has(code);
+    const shouldLogoutForLicense = isLicenseBlock && !licenseLogoutFired;
     if (status === 401 && !url.includes('/auth/login')) {
       useAuthStore.getState().logout();
+    } else if (shouldLogoutForLicense) {
+      licenseLogoutFired = true;
+      useAuthStore.getState().logout();
+      // When the server has no license at all, jump straight to the
+      // first-boot wizard instead of /login so the master can re-import.
+      // JavaFX WebView doesn't reload on window.location.replace(), so we
+      // use History API + popstate so react-router re-renders without a
+      // full reload.
+      if (code === 'LICENSE_MISSING'
+          && window.location.pathname !== '/license-setup') {
+        window.history.replaceState(null, '', '/license-setup');
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      }
     }
     const body = error.response?.data;
     if (body?.error?.code) {

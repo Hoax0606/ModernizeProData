@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Modal } from './Modal';
 import { useUsersStore } from '../store/users';
 import { useWorkerNodesStore, type NodeStatus } from '../store/workerNodes';
+import { useWorkspaceStore } from '../store/workspace';
 import { useAuthStore, roleLabel, type UserRole } from '../store/auth';
 import { ApiError } from '../api/client';
 import { usersApi } from '../api/users';
@@ -73,9 +74,15 @@ function UsersTab() {
   const [newName, setNewName] = useState('');
   const [newRole, setNewRole] = useState<UserRole>('admin');
   const [newPw, setNewPw] = useState('');
+  const [newSiteId, setNewSiteId] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  // Sites for the admin-user site dropdown.
+  const sites = useWorkspaceStore((s) => s.sites);
+  const fetchSites = useWorkspaceStore((s) => s.fetchSites);
+  useEffect(() => { void fetchSites(); }, [fetchSites]);
 
   // Force logout (master 가 다른 user 의 활성 세션 강제 종료)
   const [forceLogoutId, setForceLogoutId] = useState<string | null>(null);
@@ -140,6 +147,7 @@ function UsersTab() {
     setNewName('');
     setNewPw('');
     setNewRole('admin');
+    setNewSiteId('');
     setError(null);
   };
 
@@ -162,7 +170,12 @@ function UsersTab() {
     }
     setSubmitting(true);
     try {
-      await addUser({ username: name, password: newPw, role: newRole });
+      await addUser({
+        username: name,
+        password: newPw,
+        role: newRole,
+        siteId: newRole === 'admin' ? (newSiteId || null) : null,
+      });
       resetAddForm();
       setAddOpen(false);
     } catch (err) {
@@ -232,6 +245,21 @@ function UsersTab() {
                 ))}
               </select>
             </div>
+            {newRole === 'admin' && (
+              <div style={styles.formRow}>
+                <label style={styles.formRowLabel}>{t('userMgmt.add.site')}</label>
+                <select
+                  value={newSiteId}
+                  onChange={(e) => setNewSiteId(e.target.value)}
+                  style={styles.input}
+                >
+                  <option value="">{t('userMgmt.add.site.none')}</option>
+                  {sites.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div style={styles.formRow}>
               <label style={styles.formRowLabel}>{t('userMgmt.add.password')}</label>
               <div style={styles.formRowControl}>
@@ -450,21 +478,44 @@ function nodeStatusTone(s: NodeStatus): React.CSSProperties {
 function NodesTab() {
   const t = useT();
   const nodes = useWorkerNodesStore((s) => s.nodes);
+  const refresh = useWorkerNodesStore((s) => s.refresh);
   const revokeNode = useWorkerNodesStore((s) => s.revokeNode);
 
-  const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
-  const [tokenView, setTokenView] = useState<string | null>(null);
-  const [tokenCopied, setTokenCopied] = useState(false);
+  const sites = useWorkspaceStore((s) => s.sites);
+  const fetchSites = useWorkspaceStore((s) => s.fetchSites);
 
-  const handleCopyToken = async (token: string) => {
-    try {
-      await navigator.clipboard.writeText(token);
-      setTokenCopied(true);
-      setTimeout(() => setTokenCopied(false), 1500);
-    } catch {
-      /* ignore */
-    }
+  const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
+
+  useEffect(() => {
+    void refresh();
+    void fetchSites();
+  }, [refresh, fetchSites]);
+
+  const siteNameOf = (siteId: string | null): string => {
+    if (!siteId) return '—';
+    return sites.find((s) => s.id === siteId)?.name ?? siteId;
   };
+
+  // Sites grouped: workers belonging to each, plus unassigned bucket.
+  const grouped = (() => {
+    const byKey = new Map<string, typeof nodes>();
+    for (const n of nodes) {
+      const key = n.siteId ?? '__none__';
+      const list = byKey.get(key) ?? [];
+      list.push(n);
+      byKey.set(key, list);
+    }
+    const result: { siteId: string | null; siteName: string; rows: typeof nodes }[] = [];
+    for (const s of sites) {
+      const rows = byKey.get(s.id) ?? [];
+      if (rows.length > 0) result.push({ siteId: s.id, siteName: s.name, rows });
+    }
+    const unassigned = byKey.get('__none__') ?? [];
+    if (unassigned.length > 0) {
+      result.push({ siteId: null, siteName: t('workerNode.unassigned'), rows: unassigned });
+    }
+    return result;
+  })();
 
   return (
     <>
@@ -475,9 +526,7 @@ function NodesTab() {
           <thead>
             <tr>
               <Th>{t('workerNode.col.name')}</Th>
-              <Th>{t('workerNode.col.address')}</Th>
               <Th>{t('workerNode.col.owner')}</Th>
-              <Th>{t('workerNode.col.specs')}</Th>
               <Th>{t('workerNode.col.status')}</Th>
               <Th>{t('workerNode.col.heartbeat')}</Th>
               <Th>{t('workerNode.col.actions')}</Th>
@@ -485,92 +534,75 @@ function NodesTab() {
           </thead>
           <tbody>
             {nodes.length === 0 ? (
-              <tr><td colSpan={7} style={styles.emptyRow}>{t('workerNode.empty')}</td></tr>
+              <tr><td colSpan={5} style={styles.emptyRow}>{t('workerNode.empty')}</td></tr>
             ) : (
-              nodes.map((n, i) => {
-                const rowBg = i % 2 ? 'var(--zebra)' : 'transparent';
-
-                if (confirmRevokeId === n.id) {
-                  return (
-                    <tr key={n.id} style={{ background: 'var(--red-50)', borderBottom: '1px solid var(--border)' }}>
-                      <td colSpan={7} style={styles.confirmCell}>
-                        <div style={styles.confirmBar}>
-                          <span style={styles.confirmText}>
-                            {t('workerNode.confirmRevokePre')}<b>{n.name}</b>{t('workerNode.confirmRevokePost')}
-                          </span>
-                          <div style={{ flex: 1 }} />
-                          <button onClick={() => setConfirmRevokeId(null)} style={styles.miniBtn}>
-                            {t('common.cancel')}
-                          </button>
-                          <button onClick={() => { revokeNode(n.id); setConfirmRevokeId(null); }} style={styles.miniBtnDanger}>
-                            {t('workerNode.confirmRevoke')}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                }
-
-                return (
-                  <tr key={n.id} style={{ background: rowBg, borderBottom: '1px solid var(--border)' }}>
-                    <td style={styles.td}>
-                      <span style={styles.userMono}>{n.name}</span>
-                    </td>
-                    <td style={{ ...styles.td, fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-2)' }}>
-                      {n.ipAddress}
-                    </td>
-                    <td style={{ ...styles.td, fontFamily: 'var(--mono)', fontSize: 11.5, color: n.assignedTo ? 'var(--text)' : 'var(--text-4)' }}>
-                      {n.assignedTo ?? t('workerNode.unassigned')}
-                    </td>
-                    <td style={{ ...styles.td, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-2)', whiteSpace: 'nowrap' }}>
-                      {n.cpuCores && n.ramGb
-                        ? t('workerNode.cpuRam', { cpu: n.cpuCores, ram: n.ramGb })
-                        : '—'}
-                    </td>
-                    <td style={styles.td}>
-                      <span style={{ ...styles.statusBadge, ...nodeStatusTone(n.status) }}>
-                        <span style={{ ...styles.statusDot, background: nodeStatusTone(n.status).color }} />
-                        {t(NODE_STATUS_KEY[n.status])}
-                      </span>
-                    </td>
-                    <td style={{ ...styles.td, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-3)', whiteSpace: 'nowrap' }}>
-                      {relativeTime(n.lastHeartbeatAt, t)}
-                    </td>
-                    <td style={styles.td}>
-                      <div style={{ display: 'flex', gap: 4 }}>
-                        <button onClick={() => { setTokenView(n.token); setTokenCopied(false); }} style={styles.miniBtn}>
-                          {t('workerNode.viewToken')}
-                        </button>
-                        <button onClick={() => setConfirmRevokeId(n.id)} style={styles.miniBtnDanger}>
-                          {t('workerNode.revoke')}
-                        </button>
-                      </div>
+              grouped.map((group) => (
+                <React.Fragment key={group.siteId ?? '__none__'}>
+                  <tr>
+                    <td colSpan={5} style={styles.groupHeader}>
+                      {group.siteName} <span style={{ color: 'var(--text-4)', fontWeight: 400 }}>({group.rows.length})</span>
                     </td>
                   </tr>
-                );
-              })
+                  {group.rows.map((n, i) => {
+                    const rowBg = i % 2 ? 'var(--zebra)' : 'transparent';
+
+                    if (confirmRevokeId === n.id) {
+                      return (
+                        <tr key={n.id} style={{ background: 'var(--red-50)', borderBottom: '1px solid var(--border)' }}>
+                          <td colSpan={5} style={styles.confirmCell}>
+                            <div style={styles.confirmBar}>
+                              <span style={styles.confirmText}>
+                                {t('workerNode.confirmRevokePre')}<b>{n.name}</b>{t('workerNode.confirmRevokePost')}
+                              </span>
+                              <div style={{ flex: 1 }} />
+                              <button onClick={() => setConfirmRevokeId(null)} style={styles.miniBtn}>
+                                {t('common.cancel')}
+                              </button>
+                              <button onClick={() => { void revokeNode(n.id); setConfirmRevokeId(null); }} style={styles.miniBtnDanger}>
+                                {t('workerNode.confirmRevoke')}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    return (
+                      <tr key={n.id} style={{ background: rowBg, borderBottom: '1px solid var(--border)' }}>
+                        <td style={styles.td}>
+                          <span style={styles.userMono}>{n.name}</span>
+                          <div style={{ fontSize: 10.5, color: 'var(--text-3)' }}>{n.createdBy}</div>
+                        </td>
+                        <td style={{ ...styles.td, fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-2)' }}>
+                          {siteNameOf(n.siteId)}
+                        </td>
+                        <td style={styles.td}>
+                          <span style={{ ...styles.statusBadge, ...nodeStatusTone(n.status) }}>
+                            <span style={{ ...styles.statusDot, background: nodeStatusTone(n.status).color }} />
+                            {t(NODE_STATUS_KEY[n.status])}
+                          </span>
+                        </td>
+                        <td style={{ ...styles.td, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-3)', whiteSpace: 'nowrap' }}>
+                          {relativeTime(n.lastHeartbeatAt ?? undefined, t)}
+                        </td>
+                        <td style={styles.td}>
+                          {n.status !== 'revoked' && (
+                            <div style={{ display: 'flex', gap: 4 }}>
+                              <button onClick={() => setConfirmRevokeId(n.id)} style={styles.miniBtnDanger}>
+                                {t('workerNode.revoke')}
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </React.Fragment>
+              ))
             )}
           </tbody>
         </table>
       </div>
-
-      {/* Token view popup */}
-      {tokenView && (
-        <div style={styles.tokenOverlay} onClick={() => setTokenView(null)}>
-          <div style={styles.tokenCard} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.tokenTitle}>{t('workerNode.col.token')}</div>
-            <code style={styles.tokenValue}>{tokenView}</code>
-            <div style={styles.tokenActions}>
-              <button onClick={() => handleCopyToken(tokenView)} style={styles.btnPrimary}>
-                {tokenCopied ? t('workerNode.tokenCopied') : t('workerNode.copyToken')}
-              </button>
-              <button onClick={() => setTokenView(null)} style={styles.btnGhost}>
-                {t('common.close')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </>
   );
 }
@@ -648,6 +680,15 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 5,
     marginBottom: 12,
     overflow: 'hidden',
+  },
+  groupHeader: {
+    fontSize: 11,
+    fontFamily: 'var(--mono)',
+    color: 'var(--text-3)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    padding: '8px 0 4px 0',
+    background: 'transparent',
   },
   addCardHeader: {
     padding: '10px 16px',

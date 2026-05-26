@@ -94,14 +94,17 @@
       <ComponentRef Id="ModernizeProDataLanguagePref"/>
     </Feature>
 
-    <!-- Persist the chosen UI language (passed via APP_LANG=ko|ja|en from
-         launcher.exe or msiexec command line) into HKCU. The installed
-         Launcher.java reads this on startup and forwards it to the React UI. -->
+    <!-- Persist installer-time choices into HKCU. Launcher.java reads these
+         on startup and forwards them as system properties so application.yml
+         placeholders (${MPD_MODE}, mpd.default-lang) resolve to the values
+         the user picked in Launcher.exe. -->
     <Property Id="APP_LANG" Value="en" />
+    <Property Id="APP_MODE" Value="coordinator" />
     <DirectoryRef Id="TARGETDIR">
       <Component Id="ModernizeProDataLanguagePref" Guid="*">
         <RegistryKey Root="HKCU" Key="Software\ModernizeProData">
           <RegistryValue Name="Language" Type="string" Value="[APP_LANG]" KeyPath="yes" />
+          <RegistryValue Name="Mode"     Type="string" Value="[APP_MODE]" />
         </RegistryKey>
       </Component>
     </DirectoryRef>

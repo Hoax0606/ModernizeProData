@@ -5,6 +5,7 @@ export interface ManagedUserDto {
   id: string;
   username: string;
   role: UserRole;
+  siteId?: string | null;
   createdAt: string;
   lastSignInAt?: string;
   hasActiveSession?: boolean;
@@ -14,6 +15,7 @@ export interface CreateUserRequest {
   username: string;
   password: string;
   role: UserRole;
+  siteId?: string | null;
 }
 
 export interface UpdateRoleRequest {

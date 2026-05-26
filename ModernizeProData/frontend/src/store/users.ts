@@ -6,6 +6,7 @@ export interface ManagedUser {
   id: string;
   username: string;
   role: UserRole;
+  siteId?: string | null;
   createdAt: string;
   lastSignInAt?: string;
 }
@@ -16,7 +17,7 @@ interface UsersState {
   error: string | null;
 
   loadUsers: () => Promise<void>;
-  addUser: (data: { username: string; password: string; role: UserRole }) => Promise<ManagedUser>;
+  addUser: (data: { username: string; password: string; role: UserRole; siteId?: string | null }) => Promise<ManagedUser>;
   updateUserRole: (id: string, role: UserRole) => Promise<void>;
   deleteUser: (id: string) => Promise<void>;
   reset: () => void;
@@ -26,6 +27,7 @@ const toManaged = (dto: ManagedUserDto): ManagedUser => ({
   id: dto.id,
   username: dto.username,
   role: dto.role,
+  siteId: dto.siteId ?? null,
   createdAt: dto.createdAt,
   lastSignInAt: dto.lastSignInAt,
 });

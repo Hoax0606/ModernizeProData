@@ -69,8 +69,9 @@ server:
 
 # ── ModernizeProData 자체 설정 ──────────────────────────────────────────
 modernize:
-  # 도구 동작 모드: coordinator | worker
-  mode: coordinator
+  # 도구 동작 모드: coordinator | worker | standalone
+  # 인스톨러가 사용자 선택을 MPD_MODE env 로 전달하면 그 값이 우선.
+  mode: ${MPD_MODE:coordinator}
 
   # JWT
   # PoC secret. Production 직전 rotate. 환경 변수 JWT_SECRET 로 override 가능.

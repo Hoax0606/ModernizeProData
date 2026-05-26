@@ -55,6 +55,10 @@ public class License {
     @Column(name = "public_key_fp", nullable = false, length = 64)
     private String publicKeyFp;
 
+    /** Nullable: null/empty means v=1 (machine-agnostic) license. */
+    @Column(name = "hardware_id", length = 128)
+    private String hardwareId;
+
     @Column(name = "raw_jws", columnDefinition = "TEXT", nullable = false)
     private String rawJws;
 
@@ -79,6 +83,7 @@ public class License {
         lic.expiresAt = p.expiresAt();
         lic.graceDays = p.graceDays();
         lic.publicKeyFp = p.publicKeyFp();
+        lic.hardwareId = p.hardwareId();
         lic.rawJws = rawJws;
         lic.importedAt = OffsetDateTime.now();
         lic.importedBy = importedBy;
