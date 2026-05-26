@@ -9,10 +9,12 @@ import com.ksinfo.modernize_pro_data.coordinator.site.AuditLogService;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.Snapshot;
+import com.ksinfo.modernize_pro_data.coordinator.site.SnapshotDiffService;
 import com.ksinfo.modernize_pro_data.coordinator.site.SnapshotRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenBinding;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenCodeMap;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenRule;
+import com.ksinfo.modernize_pro_data.coordinator.site.frozen.SnapshotChanges;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.SnapshotData;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -53,6 +55,7 @@ public class SnapshotController {
     private final MappingRuleRepository mappingRuleRepository;
     private final MappingCodeMapRepository mappingCodeMapRepository;
     private final MappingTableBindingRepository mappingTableBindingRepository;
+    private final SnapshotDiffService snapshotDiffService;
 
     /* ── DTOs ──────────────────────────────────── */
 
@@ -105,15 +108,34 @@ public class SnapshotController {
 
         Snapshot s = Snapshot.create(projectId, req.name(), req.description(),
                 req.type(), auth.getName(), nextVersion);
-        s.setSnapshotData(new SnapshotData(rules, codeMaps, bindings));
+        SnapshotData currentData = new SnapshotData(rules, codeMaps, bindings);
+        s.setSnapshotData(currentData);
         s.setRuleCount(rules.size());
         s.setTableCount(bindings.size());
         s.setCodeMapCount(codeMaps.size());
+
+        // 비교 기준 결정: baseline 우선 → 없으면 시간순 직전 → 둘 다 없으면 첫 snapshot.
+        // s.id 가 unique 하므로 "본인 제외" 는 baseline 의 의미와 무관 (현재 새 s 는 아직 baseline 일 수 없음).
+        Snapshot previous = snapshotRepository.findByProjectIdAndBaselineTrue(projectId)
+                .or(() -> snapshotRepository.findPreviousByProjectIdExcluding(projectId, s.getId()))
+                .orElse(null);
+        SnapshotChanges changes = snapshotDiffService.diff(
+                previous == null ? null : previous.getSnapshotData(),
+                currentData,
+                previous == null ? null : previous.getId(),
+                previous == null ? null : previous.getVersion()
+        );
+        s.setChanges(changes);
+        s.setPreviousVersionId(previous == null ? null : previous.getId());
+
         snapshotRepository.save(s);
 
-        log.info("Snapshot created: {} ({}) v{} in project {} — frozen rules={}, tables={}, codeMaps={}",
+        log.info("Snapshot created: {} ({}) v{} in project {} — frozen rules={}, tables={}, codeMaps={}; "
+                        + "changes vs {} → +{} ~{} -{}",
                 s.getName(), s.getType(), s.getVersion(), projectId,
-                rules.size(), bindings.size(), codeMaps.size());
+                rules.size(), bindings.size(), codeMaps.size(),
+                previous == null ? "(none)" : previous.getVersion(),
+                changes.summary().added(), changes.summary().modified(), changes.summary().removed());
 
         String action = "cutover".equalsIgnoreCase(req.type()) ? "cutover snapshot created" : "snapshot created";
         auditLogService.record(project, auth.getName(), action)
