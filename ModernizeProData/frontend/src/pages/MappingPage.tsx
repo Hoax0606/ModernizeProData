@@ -1301,7 +1301,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
                   <tr
                     key={`${r.src}>${r.tgt}-${i}`}
                     data-fix-row={r.rule === 'unmapped' ? 'tobe-unmapped' : undefined}
-                    onClick={() => setActiveIdx(realIdx)}
+                    onClick={() => { setActiveIdx(realIdx); setInspectorOpen(true); }}
                     style={{
                       background: isActive ? 'var(--navy-50)' : (i % 2 === 1 ? 'var(--zebra)' : 'var(--panel)'),
                       borderBottom: '1px solid var(--border)',

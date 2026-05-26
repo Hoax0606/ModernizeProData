@@ -1318,6 +1318,14 @@ export function ArtifactsPage() {
   const [selectedTableByCat, setSelectedTableByCat] =
     useState<Partial<Record<CategoryKey, string>>>({});
 
+  /* 자식 산출물 목록은 프로젝트명에 의존 (DDL Scripts 의 child 이름이 projectSlug).
+     project null 일 때도 hook 자체는 호출되어야 — early return 위로 끌어올려야
+     "Rendered more hooks than during the previous render" 가 안 남. */
+  const childTables = useMemo(
+    () => childTablesFor(project?.name ?? ''),
+    [project?.name],
+  );
+
   if (!project) {
     return (
       <div>
@@ -1333,9 +1341,6 @@ export function ArtifactsPage() {
     activeSheetByCat[activeCategory.key] ?? SHEETS[activeCategory.key][0].name;
   const handleSelectSheet = (name: string) =>
     setActiveSheetByCat((prev) => ({ ...prev, [activeCategory.key]: name }));
-
-  /* 자식 산출물 목록은 프로젝트명에 의존 (DDL Scripts 의 child 이름이 projectSlug). */
-  const childTables = useMemo(() => childTablesFor(project.name), [project.name]);
 
   /* 사용자가 명시적으로 자식을 안 골라도 첫 번째 자식이 default 로 활성.
      Dashboard / DDL 은 단일 산출물이라 항상 그 single child, 다른 카테고리면 MOCK_TABLES[0]. */

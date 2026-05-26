@@ -361,6 +361,37 @@ On top of the existing `site` / `project` (V4–V6):
 - **Must be isolated from TO-BE PG**: even on the same server, use a different port, different data directory, and different OS account.
 - The installer itself: jpackage or WiX/NSIS (TBD).
 
+### 11.3 Building the installer (current state)
+
+Lives under `ModernizeProData/installer/`. Three-step pipeline produces a single `setup.exe` (7-Zip SFX) that bundles a C# language dispatcher and three per-language .msi payloads. End users run `setup.exe`; the dispatcher reads their language pick and invokes the matching .msi via `msiexec /i`.
+
+**Prerequisites on the build host**: JDK 21+ on PATH (ships `jpackage`), WiX Toolset 3.14 under `C:\Program Files (x86)\WiX Toolset v3.14\bin\`, Node 18+ with npm, PowerShell 5.1+.
+
+```powershell
+cd ModernizeProData\installer
+.\build.ps1 -Language all       # dist\ModernizeProData-{en,ko,ja}-1.0.0.msi (~274 MB each)
+.\launcher\build-launcher.ps1   # dist\Launcher.exe (~200 KB)
+.\package-sfx.ps1               # dist\ModernizeProData-1.0.0-setup.exe (~818 MB)
+```
+
+Each .msi is jpackage-produced with `--win-per-user-install` so the install goes into `%LOCALAPPDATA%\ModernizeProData\` with no UAC prompt. The three .msi files differ only in `JpProductLanguage` / bundled `MsiInstallerStrings_<lang>.wxl`; runtime image, fat jar and React bundle are identical across them.
+
+**What the installer asks**: Role (Coordinator / Worker / Standalone), Language, and a read-only display of the Hardware ID. Coordinator URL, license file and admin credentials are entered in-app on first boot, not by the installer.
+
+**First-boot flow**:
+- **Coordinator / Standalone**: WebView opens the React UI. If no license is loaded, `App.tsx`'s `/api/v1/health/info` probe sees `licenseStatus=MISSING` and routes to `/license-setup`. Master picks the .lic file through a JavaFX FileChooser bridge (see 11.4), the file is uploaded, then the master signs in.
+- **Worker**: A JavaFX form takes the Coordinator URL, runs an anonymous `/api/v1/health` reachability probe, then asks username + password. On successful login the JWT is handed to the WebView via `bootstrap_token` / `bootstrap_user` URL params (read by `frontend/src/bootstrap-from-url.ts`) so the user is not asked to sign in a second time inside the WebView.
+
+### 11.4 JavaFX 21 WebView quirks (worked around in code)
+
+JavaFX 21's bundled WebKit has three quirks that surface only inside the packaged app (Chromium under `npm run dev` does not exhibit any of them). All three have stable workarounds; if you add a new endpoint or screen, reuse the same patterns.
+
+- **`window.location.replace()` and `window.location.href = …` change the URL but do NOT reload the page.** React stays mounted on the previous route forever, so the user is silently stuck. *Fix*: never call them from React — use `useNavigate()` from react-router. The 403/`LICENSE_MISSING` interceptor in `api/client.ts` uses `history.replaceState` + a manual `popstate` event.
+- **`<input type="file">` renders, but clicking it never opens a native picker.** *Fix*: a sentinel-prompt bridge — React calls `window.prompt('OPEN_LICENSE_FILE')`, the JavaFX prompt handler in `Launcher.wireJsDialogs` intercepts that exact string, shows a real `FileChooser`, and returns the chosen file's contents as the prompt return value. Reuse this pattern for any future file-upload UI.
+- **`multipart/form-data` POST NPEs inside `HTTP2Loader.<init>`.** *Fix*: add a `text/plain` (or `application/octet-stream` / `application/json`) body variant on the same endpoint. `LicenseController.initial-setup` ships both — the React UI uses the raw-body path; the multipart path is kept for callers outside the WebView.
+
+If you add a new file-upload endpoint, either reuse the raw-body pattern or explicitly test the multipart path *inside the packaged WebView*, not just in `npm run dev`.
+
 ---
 
 ## 12. Test Strategy (Backend-mandatory)
