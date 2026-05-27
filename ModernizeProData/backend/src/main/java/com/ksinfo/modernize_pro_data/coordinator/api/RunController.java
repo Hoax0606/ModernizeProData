@@ -61,7 +61,8 @@ public class RunController {
     public record StartRunRequest(
             @NotBlank String projectId,
             RunType runType,
-            List<String> tables   // 선택한 TO-BE 테이블명. null/empty = 전체 실행.
+            List<String> tables,   // 선택한 TO-BE 테이블명. null/empty = 전체 실행.
+            boolean useCache       // true 면 직전 성공 run 의 CP2 재사용 시도 (stage-cache). 기본 false.
     ) {}
 
     public record RunResultDto(
@@ -160,7 +161,8 @@ public class RunController {
                 source,
                 requestedBy,
                 credentialId,
-                req.tables());
+                req.tables(),
+                req.useCache());
         log.info("startRun via {} projectId={} runType={} by={} → status={}",
                 source, req.projectId(), runType, requestedBy, r.status());
         String projectName = project.getName();

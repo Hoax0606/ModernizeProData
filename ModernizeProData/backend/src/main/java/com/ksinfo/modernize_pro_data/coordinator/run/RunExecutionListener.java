@@ -5,6 +5,7 @@ import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
+import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
 import com.ksinfo.modernize_pro_data.coordinator.runlog.RunLogIngestService;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
@@ -21,7 +22,9 @@ import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
 
 import java.nio.file.Path;
+import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -54,6 +57,7 @@ public class RunExecutionListener {
     private final RunService runService;
     private final DuckDbService duckDbService;
     private final RunControlRegistry runControlRegistry;
+    private final RunStageCacheService stageCacheService;
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     @Async
@@ -110,8 +114,32 @@ public class RunExecutionListener {
                     .collect(Collectors.toSet());
             duckDbService.sweepRunSchemas(activeSchemas);
 
+            // stage-cache (재실행 캐시) — opt-in & non-cutover 일 때 직전 CP2(parquet2) 재사용 시도.
+            boolean cutover = ctx.getRunHistory().getRunType() == RunType.cutover;
+            boolean useCache = ctx.getRunHistory().getMetadata() != null
+                    && Boolean.TRUE.equals(ctx.getRunHistory().getMetadata().get("useCache"));
+            String fingerprint = null;
+            Path effectiveParquet2Dir = ctx.parquet2Dir();
+            if (useCache && !cutover) {
+                fingerprint = stageCacheService.computeFingerprint(ctx);
+                Optional<Path> hit = stageCacheService.findUsableCache(ctx, fingerprint);
+                if (hit.isPresent()) {
+                    stageCacheService.loadCacheIntoDuckDb(ctx, hit.get());
+                    markCachedStagesDone(ctx);
+                    effectiveParquet2Dir = hit.get();
+                    log.info("stage-cache HIT runId={} dir={} — extract/reconcile/transform skipped",
+                            runId, hit.get());
+                }
+            }
+
             workerExecutor.execute(ctx);
             runService.completeRun(runId, null, null);
+
+            // 성공 → 다음 run 재사용용 fingerprint + parquet2Dir 기록 (non-cutover).
+            if (!cutover) {
+                if (fingerprint == null) fingerprint = stageCacheService.computeFingerprint(ctx);
+                runService.recordCacheMeta(runId, fingerprint, effectiveParquet2Dir.toString());
+            }
         } catch (Exception e) {
             log.error("Run execution failed runId={}", runId, e);
             safeFail(runId, e.getMessage());
@@ -131,6 +159,22 @@ public class RunExecutionListener {
             runService.failRun(runId, null, null, message);
         } catch (Exception e) {
             log.error("Failed to mark run as failed runId={}", runId, e);
+        }
+    }
+
+    /** stage-cache HIT 시 extract/reconcile/transform StageInstance 를 success(skipped) 마킹 → executor 가 skip. */
+    private void markCachedStagesDone(StageContext ctx) {
+        Set<String> cached = Set.of("extract", "reconcile", "transform");
+        OffsetDateTime now = OffsetDateTime.now();
+        for (StageInstance si : ctx.getStages()) {
+            if (cached.contains(si.getStageKey())) {
+                si.setStatus(StageStatus.success);
+                si.setStartedAt(now);
+                si.setFinishedAt(now);
+                si.setDurationMs(0L);
+                si.setErrorSummary("stage-cache hit (skipped)");
+                stageRepo.save(si);
+            }
         }
     }
 }

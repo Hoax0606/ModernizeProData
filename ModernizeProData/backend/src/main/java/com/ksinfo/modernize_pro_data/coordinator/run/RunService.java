@@ -23,6 +23,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -82,13 +83,9 @@ public class RunService {
                               TriggerSource triggerSource,
                               String requestedBy,
                               String credentialId) {
-        return startRun(projectId, runType, triggerSource, requestedBy, credentialId, null);
+        return startRun(projectId, runType, triggerSource, requestedBy, credentialId, null, false);
     }
 
-    /**
-     * 부분 실행 지원 — tables(선택 TO-BE 테이블명) 가 주어지면 그 테이블만 처리, null/empty 면 전체.
-     * 선택 목록은 RunHistory.metadata.selectedTables 에 저장 → RunExecutionListener 가 binding 필터.
-     */
     @Transactional
     public RunResult startRun(String projectId,
                               RunType runType,
@@ -96,6 +93,21 @@ public class RunService {
                               String requestedBy,
                               String credentialId,
                               List<String> tables) {
+        return startRun(projectId, runType, triggerSource, requestedBy, credentialId, tables, false);
+    }
+
+    /**
+     * 부분 실행(tables) + stage-cache(useCache) 지원. tables=null/empty 면 전체, useCache=true 면 직전 CP2 재사용 시도.
+     * 두 플래그는 RunHistory.metadata 에 저장 → RunExecutionListener 가 사용.
+     */
+    @Transactional
+    public RunResult startRun(String projectId,
+                              RunType runType,
+                              TriggerSource triggerSource,
+                              String requestedBy,
+                              String credentialId,
+                              List<String> tables,
+                              boolean useCache) {
 
         // 1. Validate — project 存在 (FOR UPDATE で同時にロック取得)
         Project project = projectRepo.findByIdForUpdate(projectId).orElse(null);
@@ -155,9 +167,10 @@ public class RunService {
         RunHistory rh = RunHistory.create(projectId, runType, triggerSource,
                 requestedBy, credentialId, snapshotId);
         rh.setStatus(RunStatus.running);
-        if (selectedTables != null) {
-            rh.setMetadata(Map.of("selectedTables", selectedTables));
-        }
+        Map<String, Object> meta = new HashMap<>();
+        if (selectedTables != null) meta.put("selectedTables", selectedTables);
+        if (useCache) meta.put("useCache", true);
+        if (!meta.isEmpty()) rh.setMetadata(meta);
         // worker = 이 project 의 실행 담당 (admin user = ROLE_WORKER 의 username).
         // executionAssignee 가 미할당이면 일반 assignee 를 fallback, 둘 다 없으면 null.
         // (실제 분산 실행은 아직 미구현이지만, audit 로서 "이 run 의 책임자" 를 기록.)
@@ -364,6 +377,18 @@ public class RunService {
         if (project.getExecutionAssignee() != null) return project.getExecutionAssignee();
         if (project.getAssignee() != null) return project.getAssignee();
         return null;
+    }
+
+    /** stage-cache — run 성공 후 fingerprint + parquet2Dir 을 metadata 에 기록 (다음 run 재사용 판정용). */
+    @Transactional
+    public void recordCacheMeta(String runId, String fingerprint, String parquet2Dir) {
+        RunHistory rh = runHistoryRepo.findById(runId).orElse(null);
+        if (rh == null) return;
+        Map<String, Object> md = new HashMap<>(rh.getMetadata() == null ? Map.of() : rh.getMetadata());
+        md.put("cacheFingerprint", fingerprint);
+        md.put("parquet2Dir", parquet2Dir);
+        rh.setMetadata(md);
+        runHistoryRepo.save(rh);
     }
 
     private static boolean isTerminal(RunStatus s) {

@@ -52,6 +52,11 @@ public class LocalWorkerExecutor implements WorkerExecutor {
 
         String gateReason = null;
         for (StageInstance stage : ctx.getStages()) {
+            // stage-cache 로 이미 완료 처리된 stage(extract/reconcile/transform) 는 skip.
+            if (stage.getStatus() == StageStatus.success) {
+                log.info("Stage '{}' already done (stage-cache) — skip runId={}", stage.getStageKey(), runId);
+                continue;
+            }
             // 일시정지 대기 (stage 경계). abort/timeout 으로 cancel 되면 이후 stage 중단.
             runControlRegistry.awaitWhilePaused(runId);
             if (runControlRegistry.isCancelled(runId)) {
