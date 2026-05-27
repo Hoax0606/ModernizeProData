@@ -110,12 +110,17 @@ public class LoadStage implements StageRunner {
                     st.execute("COPY " + fqTobeDuck + " TO '" + escapedCsv + "' (FORMAT CSV, HEADER false)");
                 }
 
-                // 2. PostgreSQL Connection + TRUNCATE + COPY
+                // 2. PostgreSQL Connection + (FK off) + TRUNCATE + COPY + (FK 복귀)
                 String pgQualified = pgTableName(tobeSchema, tobeTable);
                 long rows;
                 try (Connection conn = pgCopyManager.openConnection(dbConfig)) {
-                    pgCopyManager.truncate(conn, pgQualified);
-                    rows = pgCopyManager.copyInFromCsv(conn, pgQualified, tempCsv);
+                    boolean fkDisabled = pgCopyManager.tryDisableConstraints(conn);
+                    try {
+                        pgCopyManager.truncate(conn, pgQualified);
+                        rows = pgCopyManager.copyInFromCsv(conn, pgQualified, tempCsv);
+                    } finally {
+                        if (fkDisabled) pgCopyManager.restoreConstraints(conn);
+                    }
                 }
 
                 // 3. cleanup

@@ -58,6 +58,31 @@ public class PgCopyManager {
     }
 
     /**
+     * FK/trigger 비활성화 시도 — session_replication_role=replica (대량 적재 시 FK 순서·속도 문제 회피).
+     * superuser 권한이 필요하므로 권한 없으면 경고만 남기고 skip (false 반환) → FK 켠 채 정상 적재.
+     * 성공(true) 시 caller 가 적재 후 {@link #restoreConstraints} 호출.
+     * 주의: replica 모드여도 NOT NULL / CHECK 는 그대로 강제됨 (FK·user trigger 만 off).
+     */
+    public boolean tryDisableConstraints(Connection conn) {
+        try (var st = conn.createStatement()) {
+            st.execute("SET session_replication_role = replica");
+            return true;
+        } catch (Exception e) {
+            log.warn("FK 비활성화 skip — session_replication_role 설정 실패 (권한 없음?): {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /** session_replication_role 을 origin 으로 복귀 (tryDisableConstraints 가 true 였을 때만 호출). */
+    public void restoreConstraints(Connection conn) {
+        try (var st = conn.createStatement()) {
+            st.execute("SET session_replication_role = origin");
+        } catch (Exception e) {
+            log.warn("session_replication_role 복귀 실패: {}", e.getMessage());
+        }
+    }
+
+    /**
      * CSV 파일 → PostgreSQL COPY FROM stdin.
      * returns: 적재한 row 수.
      */
