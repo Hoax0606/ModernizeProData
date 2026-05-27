@@ -28,6 +28,7 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -40,6 +41,7 @@ import java.util.Map;
  *   - length   : LENGTH(col) > col.length                          (validate.length)
  *   - type     : TRY_CAST(col AS {숫자/날짜/타임스탬프}) 실패        (validate.type)
  *   - range    : 숫자지만 DECIMAL(precision,scale) 자릿수 초과       (validate.range)
+ *   - PK unique: TO-BE PK 컬럼 조합이 2회 이상 (중복 키)             (validate.pk_unique, 테이블 단위)
  *
  * 위반 검출 시 검사별로 Quarantine 기록 (severity=error, sample 5 row).
  * char/varchar 는 type/range skip. continue-on-error: binding 단위 try/catch.
@@ -114,12 +116,14 @@ public class AuditStage implements StageRunner {
                 for (DdlColumn col : cols) {
                     violations += auditColumn(ctx, stage, binding, fqTobe, tobeTable, pkCol, col);
                 }
+                // PK 중복(uniqueness) — 테이블 단위 검사
+                violations += checkPkUniqueness(ctx, stage, binding, fqTobe, tobeTable, cols);
 
                 OffsetDateTime tableEnd = OffsetDateTime.now();
                 if (violations > 0) {
                     result.setStatus(StageTableStatus.failed);
                     Map<String, Object> detail = new HashMap<>();
-                    detail.put("message", violations + " NOT NULL violations");
+                    detail.put("message", violations + " validation violation(s)");
                     result.setErrorDetail(detail);
                     failedCount++;
                 } else {
@@ -269,6 +273,65 @@ public class AuditStage implements StageRunner {
         data.put("columnRoles", roles);
         data.put("sampleRows", samples);
         return data;
+    }
+
+    /**
+     * PK 중복(uniqueness) 검사 — tobe_ 데이터에서 TO-BE PK 컬럼 조합이 2회 이상 나오는지.
+     * 위반 시 Quarantine(validate.pk_unique) + 1 반환. PK 컬럼 없으면 skip.
+     */
+    private int checkPkUniqueness(StageContext ctx, StageInstance stage, MappingTableBinding binding,
+                                  String fqTobe, String tobeTable, List<DdlColumn> cols) throws Exception {
+        List<String> pkCols = cols.stream()
+                .filter(c -> c.getPkOrder() != null)
+                .sorted(Comparator.comparing(DdlColumn::getPkOrder))
+                .map(DdlColumn::getPhysicalName)
+                .toList();
+        if (pkCols.isEmpty()) return 0;
+
+        String pkList = String.join(", ", pkCols.stream().map(AuditStage::quoteIdent).toList());
+        long dupGroups;
+        try (Statement st = duckDbService.statement();
+             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM (SELECT 1 FROM " + fqTobe
+                     + " GROUP BY " + pkList + " HAVING COUNT(*) > 1) t")) {
+            rs.next();
+            dupGroups = rs.getLong(1);
+        }
+        if (dupGroups <= 0) return 0;
+
+        List<List<Object>> samples = new ArrayList<>();
+        try (Statement st = duckDbService.statement();
+             ResultSet rs = st.executeQuery("SELECT " + pkList + ", COUNT(*) AS cnt FROM " + fqTobe
+                     + " GROUP BY " + pkList + " HAVING COUNT(*) > 1 LIMIT " + SAMPLE_LIMIT)) {
+            ResultSetMetaData md = rs.getMetaData();
+            int cc = md.getColumnCount();
+            while (rs.next()) {
+                List<Object> row = new ArrayList<>(cc);
+                for (int i = 1; i <= cc; i++) row.add(rs.getObject(i));
+                samples.add(row);
+            }
+        }
+
+        String pkNames = String.join(",", pkCols);
+        Map<String, Object> data = new HashMap<>();
+        data.put("reason", "PK duplicate");
+        data.put("detail", tobeTable + " — duplicate PK (" + pkNames + ")");
+        data.put("severity", "error");
+        data.put("stageLabel", "validate.pk_unique");
+        data.put("table", tobeTable);
+        List<String> columns = new ArrayList<>(pkCols);
+        columns.add("cnt");
+        List<String> roles = new ArrayList<>();
+        for (int i = 0; i < pkCols.size(); i++) roles.add("pk");
+        roles.add("violated");
+        data.put("columns", columns);
+        data.put("columnRoles", roles);
+        data.put("sampleRows", samples);
+
+        quarantineService.record(ctx.getRunHistory().getId(), stage.getId(), binding.getId(), null,
+                "PK duplicate — " + tobeTable, QuarantineSeverity.error, data, dupGroups,
+                ctx.getLogLineSeqCursor());
+        ingest(ctx, "Audit PK duplicate in " + tobeTable + " (" + dupGroups + " key group(s))", false);
+        return 1;
     }
 
     /** dataType → DuckDB TRY_CAST 타입. char/varchar/text 등은 null (type 검사 skip). */

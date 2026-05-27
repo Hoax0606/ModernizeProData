@@ -244,6 +244,24 @@ public class RunController {
         return ApiResponse.ok(toViewDtos(List.of(rh)).get(0));
     }
 
+    /** 進行中 run 一時停止 (running → paused). stage 경계에서 멈춤. */
+    @PostMapping("/api/v1/runs/{runId}/pause")
+    @PreAuthorize("hasAnyRole('MASTER', 'ADMIN')")
+    public ApiResponse<RunHistoryViewDto> pauseRun(@PathVariable String runId) {
+        RunHistory rh = runService.pauseRun(runId);
+        log.info("pauseRun via UI runId={} → status={}", runId, rh.getStatus());
+        return ApiResponse.ok(toViewDtos(List.of(rh)).get(0));
+    }
+
+    /** 一時停止 run 再開 (paused → running). */
+    @PostMapping("/api/v1/runs/{runId}/resume")
+    @PreAuthorize("hasAnyRole('MASTER', 'ADMIN')")
+    public ApiResponse<RunHistoryViewDto> resumeRun(@PathVariable String runId) {
+        RunHistory rh = runService.resumeRun(runId);
+        log.info("resumeRun via UI runId={} → status={}", runId, rh.getStatus());
+        return ApiResponse.ok(toViewDtos(List.of(rh)).get(0));
+    }
+
     /** Run の現在 status 取得. user session 認証. */
     @GetMapping("/api/v1/runs/{runId}")
     public ApiResponse<RunHistoryViewDto> get(@PathVariable String runId) {

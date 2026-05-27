@@ -8,6 +8,7 @@ package com.ksinfo.modernize_pro_data.coordinator.run;
 public enum RunStatus {
     pending,
     running,
+    paused,
     success,
     failed,
     aborted,

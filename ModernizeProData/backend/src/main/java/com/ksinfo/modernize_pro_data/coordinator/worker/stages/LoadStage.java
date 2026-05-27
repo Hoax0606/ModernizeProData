@@ -103,6 +103,21 @@ public class LoadStage implements StageRunner {
 
             Path tempCsv = tempDir.resolve(tobeTable + ".csv");
             try {
+                // 검증/이전 단계가 이 테이블을 실패로 표시했으면 적재 skip (bad data → Postgres 방지).
+                if (upstreamFailed(ctx, stage, binding.getId())) {
+                    OffsetDateTime tableEnd = OffsetDateTime.now();
+                    result.setStatus(StageTableStatus.failed);
+                    Map<String, Object> detail = new HashMap<>();
+                    detail.put("message", "not loaded — upstream stage failed for this table");
+                    result.setErrorDetail(detail);
+                    result.setFinishedAt(tableEnd);
+                    result.setDurationMs(Duration.between(tableStart, tableEnd).toMillis());
+                    stageTableResultRepo.save(result);
+                    ingest(ctx, "Load skipped " + tobeTable + " — upstream stage failed (not loaded)", false);
+                    failedCount++;
+                    continue;
+                }
+
                 // 1. DuckDB → temp CSV
                 String fqTobeDuck = quoteIdent(schema) + "." + quoteIdent("tobe_" + tobeTable);
                 String escapedCsv = tempCsv.toString().replace("\\", "/").replace("'", "''");
@@ -176,6 +191,24 @@ public class LoadStage implements StageRunner {
         stage.setTablesFailed(failedCount);
         stage.setErrorSummary(errorSummary);
         stageInstanceRepo.save(stage);
+    }
+
+    /**
+     * 이 binding 이 load 이전 단계(check/extract/reconcile/transform/audit)에서 failed 로 표시됐는지.
+     * 하나라도 failed 면 적재하지 않는다 (검증 실패 테이블이 TO-BE DB 로 가는 것 방지).
+     */
+    private boolean upstreamFailed(StageContext ctx, StageInstance loadStage, String bindingId) {
+        int loadSeq = loadStage.getSeq() == null ? -1 : loadStage.getSeq().intValue();
+        if (loadSeq < 0) return false;
+        for (StageInstance s : ctx.getStages()) {
+            if (s.getSeq() == null || s.getSeq().intValue() >= loadSeq) continue;
+            boolean failed = stageTableResultRepo
+                    .findByStageInstanceIdAndBindingId(s.getId(), bindingId)
+                    .map(r -> r.getStatus() == StageTableStatus.failed)
+                    .orElse(false);
+            if (failed) return true;
+        }
+        return false;
     }
 
     /** PostgreSQL 의 qualified table 명. schema 가 비면 unquoted (default search_path). */

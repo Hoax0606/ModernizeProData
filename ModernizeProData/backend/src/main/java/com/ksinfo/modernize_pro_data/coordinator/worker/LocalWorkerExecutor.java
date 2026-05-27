@@ -1,6 +1,9 @@
 package com.ksinfo.modernize_pro_data.coordinator.worker;
 
+import com.ksinfo.modernize_pro_data.coordinator.run.RunControlRegistry;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunType;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
+import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -16,8 +19,11 @@ import java.util.stream.Collectors;
  * Spring 이 모든 StageRunner @Service bean 을 autowire 하고, stageKey() 로 registry 구성.
  * RunService.startRun 끝에 호출.
  *
- * Continue-on-error: 한 stage 가 throw 해도 다음 stage 진행. 단 stage 자체가
- * tables_failed>0 으로 fail 마킹되면 cutover 단계에선 후속 stage skip (추후 확장).
+ * 에러 모델 = 하이브리드:
+ *   - 단계 안에서는 continue-on-error (각 stage 가 테이블별 try/catch 로 일부 실패해도 나머지 처리).
+ *   - 단계 사이엔 게이트: stage 가 throw(구조적 실패) 하면 항상 downstream skip;
+ *     cutover 면 stage 실패(tables_failed>0)도 downstream skip (본운영에 깨진 데이터 방지).
+ *   - 게이트 발동 시 IllegalStateException 으로 run 을 failed 처리 (RunExecutionListener catch).
  */
 @Service
 @RequiredArgsConstructor
@@ -25,6 +31,7 @@ import java.util.stream.Collectors;
 public class LocalWorkerExecutor implements WorkerExecutor {
 
     private final List<StageRunner> stageRunners;
+    private final RunControlRegistry runControlRegistry;
 
     private Map<String, StageRunner> registry;
 
@@ -37,24 +44,46 @@ public class LocalWorkerExecutor implements WorkerExecutor {
 
     @Override
     public void execute(StageContext ctx) {
-        log.info("Run execution started runId={} stages={}",
-                ctx.getRunHistory().getId(),
+        String runId = ctx.getRunHistory().getId();
+        boolean isCutover = ctx.getRunHistory().getRunType() == RunType.cutover;
+        log.info("Run execution started runId={} cutover={} stages={}",
+                runId, isCutover,
                 ctx.getStages().stream().map(StageInstance::getStageKey).toList());
 
+        String gateReason = null;
         for (StageInstance stage : ctx.getStages()) {
+            // 일시정지 대기 (stage 경계). abort/timeout 으로 cancel 되면 이후 stage 중단.
+            runControlRegistry.awaitWhilePaused(runId);
+            if (runControlRegistry.isCancelled(runId)) {
+                log.warn("Run cancelled — stopping before stage '{}' runId={}", stage.getStageKey(), runId);
+                break;
+            }
             StageRunner runner = registry.get(stage.getStageKey());
             if (runner == null) {
                 log.warn("No StageRunner registered for stageKey={}, skipping", stage.getStageKey());
                 continue;
             }
+            boolean threw = false;
             try {
                 runner.run(ctx, stage);
             } catch (Exception e) {
-                log.error("StageRunner {} threw unexpectedly — continuing to next stage",
-                        stage.getStageKey(), e);
+                threw = true;
+                log.error("StageRunner {} threw", stage.getStageKey(), e);
+            }
+            // 하이브리드 게이트 (단계 사이): 구조적 실패(throw)면 항상, cutover 면 stage 실패도 downstream 중단.
+            boolean stageFailed = threw || stage.getStatus() == StageStatus.failed;
+            if (threw || (isCutover && stageFailed)) {
+                gateReason = "gated at stage '" + stage.getStageKey() + "' ("
+                        + (threw ? "threw" : "failed") + ") — downstream stages skipped";
+                log.warn("Run gate triggered runId={}: {}", runId, gateReason);
+                break;
             }
         }
 
-        log.info("Run execution finished runId={}", ctx.getRunHistory().getId());
+        log.info("Run execution finished runId={} gated={}", runId, gateReason != null);
+        if (gateReason != null) {
+            // 게이트 → run 을 failed 로 (listener 의 catch 가 failRun). 남은 stage 는 pending 유지(미실행).
+            throw new IllegalStateException(gateReason);
+        }
     }
 }

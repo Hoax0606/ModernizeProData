@@ -53,6 +53,7 @@ public class RunExecutionListener {
     private final RunOutputPathResolver outputResolver;
     private final RunService runService;
     private final DuckDbService duckDbService;
+    private final RunControlRegistry runControlRegistry;
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     @Async
@@ -100,6 +101,7 @@ public class RunExecutionListener {
         }
 
         runLogIngest.openRun(runId, projectId);
+        runControlRegistry.register(runId);   // pause/resume/cancel 제어 등록
         try {
             // 이전/크래시 run 의 DuckDB 작업 schema 정리 (실행 중 run = pending/running 은 보존).
             Set<String> activeSchemas = runRepo
@@ -114,6 +116,7 @@ public class RunExecutionListener {
             log.error("Run execution failed runId={}", runId, e);
             safeFail(runId, e.getMessage());
         } finally {
+            runControlRegistry.remove(runId);
             try {
                 runLogIngest.closeRun(runId);
             } catch (Exception e) {
