@@ -35,7 +35,8 @@ services:
       - ../db/tobe/dev/04_trade.sql:/docker-entrypoint-initdb.d/04_trade.sql:ro
       - ../db/tobe/dev/05_market.sql:/docker-entrypoint-initdb.d/05_market.sql:ro
       - ../db/tobe/dev/06_settlement.sql:/docker-entrypoint-initdb.d/06_settlement.sql:ro
-      - ../db/sample_data/tobe/dev/load.sql:/docker-entrypoint-initdb.d/07_load_sample.sql:ro
+      - ../db/tobe/dev/07_code.sql:/docker-entrypoint-initdb.d/07_code.sql:ro
+      - ../db/sample_data/tobe/dev/load.sql:/docker-entrypoint-initdb.d/08_load_sample.sql:ro
       - ../db/sample_data/tobe/dev:/sample:ro
       - mpd_tobe_dev:/var/lib/postgresql/data
     healthcheck:
@@ -62,7 +63,8 @@ services:
       - ../db/tobe/test/04_trade.sql:/docker-entrypoint-initdb.d/04_trade.sql:ro
       - ../db/tobe/test/05_market.sql:/docker-entrypoint-initdb.d/05_market.sql:ro
       - ../db/tobe/test/06_settlement.sql:/docker-entrypoint-initdb.d/06_settlement.sql:ro
-      - ../db/sample_data/tobe/test/load.sql:/docker-entrypoint-initdb.d/07_load_sample.sql:ro
+      - ../db/tobe/test/07_code.sql:/docker-entrypoint-initdb.d/07_code.sql:ro
+      - ../db/sample_data/tobe/test/load.sql:/docker-entrypoint-initdb.d/08_load_sample.sql:ro
       - ../db/sample_data/tobe/test:/sample:ro
       - mpd_tobe_test:/var/lib/postgresql/data
     healthcheck:
@@ -89,7 +91,8 @@ services:
       - ../db/tobe/staging/04_trade.sql:/docker-entrypoint-initdb.d/04_trade.sql:ro
       - ../db/tobe/staging/05_market.sql:/docker-entrypoint-initdb.d/05_market.sql:ro
       - ../db/tobe/staging/06_settlement.sql:/docker-entrypoint-initdb.d/06_settlement.sql:ro
-      - ../db/sample_data/tobe/staging/load.sql:/docker-entrypoint-initdb.d/07_load_sample.sql:ro
+      - ../db/tobe/staging/07_code.sql:/docker-entrypoint-initdb.d/07_code.sql:ro
+      - ../db/sample_data/tobe/staging/load.sql:/docker-entrypoint-initdb.d/08_load_sample.sql:ro
       - ../db/sample_data/tobe/staging:/sample:ro
       - mpd_tobe_staging:/var/lib/postgresql/data
     healthcheck:
@@ -116,7 +119,8 @@ services:
       - ../db/tobe/prod/04_trade.sql:/docker-entrypoint-initdb.d/04_trade.sql:ro
       - ../db/tobe/prod/05_market.sql:/docker-entrypoint-initdb.d/05_market.sql:ro
       - ../db/tobe/prod/06_settlement.sql:/docker-entrypoint-initdb.d/06_settlement.sql:ro
-      - ../db/sample_data/tobe/prod/load.sql:/docker-entrypoint-initdb.d/07_load_sample.sql:ro
+      - ../db/tobe/prod/07_code.sql:/docker-entrypoint-initdb.d/07_code.sql:ro
+      - ../db/sample_data/tobe/prod/load.sql:/docker-entrypoint-initdb.d/08_load_sample.sql:ro
       - ../db/sample_data/tobe/prod:/sample:ro
       - mpd_tobe_prod:/var/lib/postgresql/data
     healthcheck:

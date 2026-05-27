@@ -2,17 +2,24 @@ package com.ksinfo.modernize_pro_data.coordinator.api;
 
 import com.ksinfo.modernize_pro_data.common.dto.ApiResponse;
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingCodeMap;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingCodeMapRepository;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRule;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRuleRepository;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingRepository;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingSource;
+import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenBindingSource;
 import com.ksinfo.modernize_pro_data.coordinator.site.AuditLogService;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.Snapshot;
+import com.ksinfo.modernize_pro_data.coordinator.site.SnapshotDiffService;
 import com.ksinfo.modernize_pro_data.coordinator.site.SnapshotRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenBinding;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenCodeMap;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenRule;
+import com.ksinfo.modernize_pro_data.coordinator.site.frozen.SnapshotChanges;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.SnapshotData;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -27,6 +34,7 @@ import org.springframework.web.bind.annotation.*;
 
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.UUID;
 
 /**
  * Snapshot CRUD + 상태 전환 API.
@@ -53,6 +61,7 @@ public class SnapshotController {
     private final MappingRuleRepository mappingRuleRepository;
     private final MappingCodeMapRepository mappingCodeMapRepository;
     private final MappingTableBindingRepository mappingTableBindingRepository;
+    private final SnapshotDiffService snapshotDiffService;
 
     /* ── DTOs ──────────────────────────────────── */
 
@@ -105,15 +114,34 @@ public class SnapshotController {
 
         Snapshot s = Snapshot.create(projectId, req.name(), req.description(),
                 req.type(), auth.getName(), nextVersion);
-        s.setSnapshotData(new SnapshotData(rules, codeMaps, bindings));
+        SnapshotData currentData = new SnapshotData(rules, codeMaps, bindings);
+        s.setSnapshotData(currentData);
         s.setRuleCount(rules.size());
         s.setTableCount(bindings.size());
         s.setCodeMapCount(codeMaps.size());
+
+        // 비교 기준 결정: baseline 우선 → 없으면 시간순 직전 → 둘 다 없으면 첫 snapshot.
+        // s.id 가 unique 하므로 "본인 제외" 는 baseline 의 의미와 무관 (현재 새 s 는 아직 baseline 일 수 없음).
+        Snapshot previous = snapshotRepository.findByProjectIdAndBaselineTrue(projectId)
+                .or(() -> snapshotRepository.findPreviousByProjectIdExcluding(projectId, s.getId()))
+                .orElse(null);
+        SnapshotChanges changes = snapshotDiffService.diff(
+                previous == null ? null : previous.getSnapshotData(),
+                currentData,
+                previous == null ? null : previous.getId(),
+                previous == null ? null : previous.getVersion()
+        );
+        s.setChanges(changes);
+        s.setPreviousVersionId(previous == null ? null : previous.getId());
+
         snapshotRepository.save(s);
 
-        log.info("Snapshot created: {} ({}) v{} in project {} — frozen rules={}, tables={}, codeMaps={}",
+        log.info("Snapshot created: {} ({}) v{} in project {} — frozen rules={}, tables={}, codeMaps={}; "
+                        + "changes vs {} → +{} ~{} -{}",
                 s.getName(), s.getType(), s.getVersion(), projectId,
-                rules.size(), bindings.size(), codeMaps.size());
+                rules.size(), bindings.size(), codeMaps.size(),
+                previous == null ? "(none)" : previous.getVersion(),
+                changes.summary().added(), changes.summary().modified(), changes.summary().removed());
 
         String action = "cutover".equalsIgnoreCase(req.type()) ? "cutover snapshot created" : "snapshot created";
         auditLogService.record(project, auth.getName(), action)
@@ -199,8 +227,15 @@ public class SnapshotController {
     }
 
     /**
-     * 프로젝트의 "고정핀" 을 이 snapshot 으로 설정. 단일 트랜잭션 안에서 기존 baseline 을 false 로
-     * 내리고 본인을 true 로 올린다. partial unique index 가 동시성 race 도 안전망으로 잡아준다.
+     * 프로젝트의 "고정핀" 을 이 snapshot 으로 설정 + **live mapping_* 를 snapshot 시점으로 restore**.
+     *
+     * Restore 모델: 핀을 누른다는 것은 "이 snapshot 으로 돌아가서 작업한다" 라는 의미.
+     * mapping_rules / mapping_code_maps / mapping_table_bindings 가 모두 snapshot.snapshotData
+     * 시점 데이터로 wipe + replace 된다. 사용자가 단순 보기만 하려고 핀을 눌렀어도 live 가
+     * 교체되는 destructive 액션이다 (모델 결정 — UX option A).
+     *
+     * 단일 트랜잭션 안에서 기존 baseline 을 false 로 내리고 본인을 true 로 올린다 +
+     * mapping_* 데이터를 restore. partial unique index 가 동시성 race 도 안전망으로 잡아준다.
      */
     @PostMapping("/api/v1/snapshots/{id}/baseline")
     @Transactional
@@ -216,13 +251,125 @@ public class SnapshotController {
         snapshotRepository.flush(); // partial unique index 충돌 방지: prev false 가 새 true 보다 먼저 DB 에 도달
         s.setBaseline(true);
         snapshotRepository.save(s);
-        log.info("Snapshot baseline set: {} ({}) by {}", s.getName(), s.getId(), auth.getName());
+
+        // mapping_* 를 snapshot 시점으로 restore.
+        restoreMappingFromSnapshot(s, auth.getName());
+
+        log.info("Snapshot baseline set + mapping restored: {} ({}) by {}", s.getName(), s.getId(), auth.getName());
 
         projectRepository.findById(s.getProjectId()).ifPresent(p ->
-                auditLogService.record(p, auth.getName(), "baseline set")
+                auditLogService.record(p, auth.getName(), "baseline set (mapping restored)")
                         .snapshot(s.getId(), s.getName())
                         .save());
         return ApiResponse.ok(s);
+    }
+
+    /**
+     * snapshot.snapshotData 의 frozen rules / codeMaps / bindings 를
+     * 활성 mapping_rules / mapping_code_maps / mapping_table_bindings 로 복원한다.
+     *
+     * 절차:
+     *  1) 해당 project 의 기존 mapping_* row 전부 삭제 (bindings 는 sources cascade 위해 entity-level deleteAll).
+     *  2) flush 로 DB 반영 → 이후 insert 가 1차 캐시 충돌 없이 진행.
+     *  3) snapshotData 의 각 frozen 을 새 entity 로 변환해 insert. ID 는 새 UUID 발급
+     *     (snapshot 의 frozen id 를 그대로 쓰면 다음 snapshot 이 같은 id 를 동결하게 됨).
+     */
+    private void restoreMappingFromSnapshot(Snapshot snapshot, String userId) {
+        SnapshotData data = snapshot.getSnapshotData();
+        if (data == null) {
+            log.warn("Snapshot {} has no snapshotData — restore skipped", snapshot.getId());
+            return;
+        }
+        String projectId = snapshot.getProjectId();
+        OffsetDateTime now = OffsetDateTime.now();
+
+        // 1) wipe — bindings 는 sources cascade 가 필요해 entity-level deleteAll.
+        mappingTableBindingRepository.deleteAll(
+                mappingTableBindingRepository.findByProjectIdWithSources(projectId));
+        mappingRuleRepository.deleteAllByProjectId(projectId);
+        mappingCodeMapRepository.deleteAllByProjectId(projectId);
+        // 2) DELETE 반영 — 같은 트랜잭션 안 새 insert 가 1차 캐시 충돌하지 않도록.
+        snapshotRepository.flush();
+
+        // 3) rules
+        if (data.rules() != null) {
+            for (FrozenRule r : data.rules()) {
+                MappingRule e = new MappingRule();
+                e.setId(UUID.randomUUID().toString());
+                e.setProjectId(projectId);
+                e.setImportId(null);
+                e.setTobeSchema(r.tobeSchema());
+                e.setTobeTable(r.tobeTable());
+                e.setTobeColumn(r.tobeColumn());
+                e.setAsisSchema(r.asisSchema());
+                e.setAsisTable(r.asisTable());
+                e.setAsisColumn(r.asisColumn());
+                e.setAsisType(r.asisType());
+                e.setCodeDomain(r.codeDomain());
+                e.setStrategy(r.strategy());
+                e.setTransformRule(r.transformRule());
+                e.setTransformSql(r.transformSql());
+                e.setDefaultValue(r.defaultValue());
+                e.setNotNullOverride(r.notNullOverride());
+                e.setRuleOrigin(r.ruleOrigin());
+                e.setNotes(r.notes());
+                e.setCreatedBy(r.createdBy() != null ? r.createdBy() : userId);
+                e.setCreatedAt(r.createdAt() != null ? r.createdAt() : now);
+                e.setUpdatedBy(userId);
+                e.setUpdatedAt(now);
+                mappingRuleRepository.save(e);
+            }
+        }
+
+        // codeMaps
+        if (data.codeMaps() != null) {
+            for (FrozenCodeMap m : data.codeMaps()) {
+                MappingCodeMap e = new MappingCodeMap();
+                e.setId(UUID.randomUUID().toString());
+                e.setProjectId(projectId);
+                e.setImportId(null);
+                e.setDomain(m.domain());
+                e.setSourceValue(m.sourceValue());
+                e.setTargetValue(m.targetValue());
+                e.setDescription(m.description());
+                e.setOrdinal(m.ordinal());
+                mappingCodeMapRepository.save(e);
+            }
+        }
+
+        // bindings (+ sources cascade)
+        if (data.bindings() != null) {
+            for (FrozenBinding b : data.bindings()) {
+                MappingTableBinding e = new MappingTableBinding();
+                e.setId(UUID.randomUUID().toString());
+                e.setProjectId(projectId);
+                e.setImportId(null);
+                e.setTobeSchema(b.tobeSchema());
+                e.setTobeTable(b.tobeTable());
+                e.setCompositionKind(b.compositionKind());
+                e.setWhereFilter(b.whereFilter());
+                e.setBindingOrigin(b.bindingOrigin());
+                e.setCreatedBy(b.createdBy() != null ? b.createdBy() : userId);
+                e.setCreatedAt(b.createdAt() != null ? b.createdAt() : now);
+                e.setUpdatedBy(userId);
+                e.setUpdatedAt(now);
+                if (b.sources() != null) {
+                    for (FrozenBindingSource s : b.sources()) {
+                        MappingTableBindingSource src = new MappingTableBindingSource();
+                        src.setId(UUID.randomUUID().toString());
+                        src.setOrdinal(s.ordinal());
+                        src.setAsisSchema(s.asisSchema());
+                        src.setAsisTable(s.asisTable());
+                        src.setAlias(s.alias());
+                        src.setRole(s.role());
+                        src.setJoinType(s.joinType());
+                        src.setJoinOn(s.joinOn());
+                        e.addSource(src);
+                    }
+                }
+                mappingTableBindingRepository.save(e);
+            }
+        }
     }
 
     /** baseline 해제 — 현재 baseline 이 아니더라도 idempotent. */

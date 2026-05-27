@@ -433,6 +433,21 @@ export const ja: Record<TranslationKey, string> = {
   'versions.preflight.blocked':      'Execution 画面でこのスナップショットを pin して preflight を全 pass させると Request Review が有効になります',
   'versions.preflight.notRun':       'Execution 画面でこのスナップショットを pin して preflight を実行してください',
 
+  // CHANGES section (versions detail panel)
+  'versions.changes.title':           'Changes',
+  'versions.changes.status.added':    'ADDED',
+  'versions.changes.status.modified': 'MODIFIED',
+  'versions.changes.status.deleted':  'DELETED',
+  'versions.changes.field.asisColumn':'Asis Column',
+  'versions.changes.field.rule':      'Rule',
+  'versions.changes.compareLabel':    '{version} と比較',
+  'versions.changes.firstSnapshot':   '最初のスナップショット — すべての項目が追加',
+  'versions.changes.noChanges':       '記録された変更はありません。',
+  'versions.changes.unassigned':      '(未割当)',
+  'versions.changes.label.column':    'カラム変更',
+  'versions.changes.label.rule':      'ルール変更',
+  'versions.changes.label.both':      'カラム / ルール変更',
+
   'approvals.title':           'Approvals',
   'approvals.subtitle':        'サイト全体のスナップショット承認 / 却下と履歴',
   'approvals.empty':           'No snapshots yet',

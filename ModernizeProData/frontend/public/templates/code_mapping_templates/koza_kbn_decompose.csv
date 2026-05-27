@@ -1,0 +1,12 @@
+domain,source_value,target_value,description
+KOZA_TYPE,01,GENERAL,一般口座 / General account — KOZA_KBN 1-2桁 '01' → account_type 'GENERAL'
+KOZA_TYPE,02,SPECIFIC,特定口座 / Specific account — KOZA_KBN 1-2桁 '02' → account_type 'SPECIFIC'
+KOZA_TYPE,03,NISA,NISA口座 / NISA — KOZA_KBN 1-2桁 '03' → account_type 'NISA'
+KOZA_TYPE,04,JUNIOR_NISA,ジュニアNISA / Junior NISA — KOZA_KBN 1-2桁 '04' → account_type 'JUNIOR_NISA'
+KOZA_TIER,1,BRONZE,ブロンズ等級 / Bronze — KOZA_KBN 3桁 '1' → member_tier 'BRONZE'
+KOZA_TIER,2,SILVER,シルバー等級 / Silver — KOZA_KBN 3桁 '2' → member_tier 'SILVER'
+KOZA_TIER,3,GOLD,ゴールド等級 / Gold — KOZA_KBN 3桁 '3' → member_tier 'GOLD'
+KOZA_TIER,9,VIP,VIP等級 / VIP — KOZA_KBN 3桁 '9' → member_tier 'VIP'
+KOZA_PERMISSION,0,R,閲覧のみ / Read-only — KOZA_KBN 4桁 '0' → permission_flag 'R'
+KOZA_PERMISSION,1,W,通常 / Read-write — KOZA_KBN 4桁 '1' → permission_flag 'W'
+KOZA_PERMISSION,X,A,管理者 / Admin — KOZA_KBN 4桁 'X' → permission_flag 'A'

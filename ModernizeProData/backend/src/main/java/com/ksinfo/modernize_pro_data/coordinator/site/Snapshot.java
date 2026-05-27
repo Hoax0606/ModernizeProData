@@ -1,5 +1,6 @@
 package com.ksinfo.modernize_pro_data.coordinator.site;
 
+import com.ksinfo.modernize_pro_data.coordinator.site.frozen.SnapshotChanges;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.SnapshotData;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -88,6 +89,15 @@ public class Snapshot {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "snapshot_data", columnDefinition = "jsonb")
     private SnapshotData snapshotData;
+
+    /** 비교 기준 (baseline 우선, 없으면 시간순 직전). 첫 snapshot 이면 null. */
+    @Column(name = "previous_version_id", length = 40)
+    private String previousVersionId;
+
+    /** 생성 시점에 박제된 이전 버전 대비 changes. immutable. */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "changes", columnDefinition = "jsonb")
+    private SnapshotChanges changes;
 
     public static Snapshot create(String projectId, String name, String description,
                                   String type, String createdBy, String nextVersion) {

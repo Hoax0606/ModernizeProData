@@ -125,3 +125,10 @@ compose.override.yaml
 compose.override.yml
 docker-compose.override.yaml
 docker-compose.override.yml
+
+# ── Local-only DDL + sample CSV ────────────────────────────────────
+# AS-IS / TO-BE schema (db/asis, db/tobe) 와 sample CSV 는 git 에 올리지
+# 않는다. 용량 (수백 MB ~ 1.5 GB) + 재생성 가능 + 팀원 PC 는 .msi 설치본의
+# 외부 PG (5433 메타 DB) 만 쓰므로 굳이 공유할 필요가 없음.
+# Coordinator (docker tobe-stages 띄우는 사람) 만 local 에 보관.
+db/
