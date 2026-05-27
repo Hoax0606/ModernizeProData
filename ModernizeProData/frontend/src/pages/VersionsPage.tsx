@@ -828,13 +828,18 @@ function SnapshotDetailView({
               } : {}),
             }}>
               <div style={styles.statusContent}>
-                <div style={styles.statusDesc}>
-                  {confirmingRequest
-                    ? <>{t('versions.confirmRequestPre')}<b>{snapshot.name}</b>{t('versions.confirmRequestPost')}</>
-                    : t('versions.statusDesc.draftReady')}
-                </div>
-                {!confirmingRequest && requestBlockedReason && (
-                  <div style={{ fontSize: 11, color: 'var(--amber)', marginTop: 4, fontFamily: 'var(--mono)' }}>
+                {/* 確認中はそのまま confirm prompt. 通常時は canRequest で
+                    「準備完了 (緑)」と「ブロック理由 (amber)」を排他表示. */}
+                {confirmingRequest ? (
+                  <div style={styles.statusDesc}>
+                    {t('versions.confirmRequestPre')}<b>{snapshot.name}</b>{t('versions.confirmRequestPost')}
+                  </div>
+                ) : canRequest ? (
+                  <div style={styles.statusDesc}>
+                    {t('versions.statusDesc.draftReady')}
+                  </div>
+                ) : (
+                  <div style={{ ...styles.statusDesc, color: 'var(--amber)' }}>
                     ⚠ {requestBlockedReason}
                   </div>
                 )}
@@ -1439,7 +1444,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   statusCard: {
     display: 'flex',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: 10,
     padding: '11px 12px',
     background: 'var(--panel-2)',
