@@ -1,0 +1,4 @@
+domain,source_value,target_value,description
+TRADE_TYPE,1,BUY,買付 / Buy — AS-IS T_TRADE.TORIHIKI_KBN '1' → TO-BE trade.trade_type 'BUY'
+TRADE_TYPE,2,SELL,売付 / Sell — AS-IS T_TRADE.TORIHIKI_KBN '2' → TO-BE trade.trade_type 'SELL'
+TRADE_TYPE,3,TRANSFER,振替 / Transfer — AS-IS T_TRADE.TORIHIKI_KBN '3' → TO-BE trade.trade_type 'TRANSFER'

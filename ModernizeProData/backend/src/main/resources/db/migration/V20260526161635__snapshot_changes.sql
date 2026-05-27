@@ -18,8 +18,13 @@
 --     ]
 --   }
 --
--- NOTE: previous_version_id 와 changes 컬럼은 옛 마이그레이션에서 이미 추가되어 있음.
---       이 마이그레이션은 idempotent 하게 (a) FK 가 없으면 추가 (b) 새 인덱스 추가 만 수행.
+-- NOTE: previous_version_id 와 changes 컬럼은 옛 마이그레이션에서 이미 추가되어 있을
+--       *수도* 있다 (별도 column-add migration 이 commit 누락 / 분기 따라 없을 수 있음).
+--       이 마이그레이션은 idempotent 하게 (0) 컬럼이 없으면 추가 (a) FK 가 없으면 추가 (b) 새 인덱스 추가.
+
+-- (0) 컬럼이 없으면 먼저 추가. FK / 인덱스 ALTER 들이 컬럼 존재를 전제로 함.
+ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS previous_version_id VARCHAR(40);
+ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS changes JSONB;
 
 -- (a) previous_version_id 의 FK constraint 가 없으면 추가.
 DO $$

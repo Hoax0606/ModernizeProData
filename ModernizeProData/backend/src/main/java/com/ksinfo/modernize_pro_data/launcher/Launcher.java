@@ -519,16 +519,22 @@ public class Launcher {
             showUrlStep(coordUrl, null);
         }
 
-        // ---- Brand palette (mirrors React's CSS variables for visual parity). ----
-        private static final String C_BG     = "#f9fafb";
-        private static final String C_PANEL  = "#ffffff";
-        private static final String C_NAVY   = "#1c3d5a";
-        private static final String C_BORDER = "#d8dee0";
-        private static final String C_BORDER_STRONG = "#b8c0c6";
-        private static final String C_TEXT   = "#0c1f1b";
-        private static final String C_MUTED  = "#6e757a";
-        private static final String C_RED    = "#c42f2f";
-        private static final String C_RED_BG = "#fdecec";
+        // ---- Brand palette (mirrors React's CSS variables in index.css). ----
+        // Keep these in sync with frontend/src/index.css :root --bg / --panel /
+        // --navy / --green / --text-* / --border* / --red* if those values
+        // change.  The React light theme uses --navy = #0e7268 (teal navy);
+        // the previous WorkerApp value (#1c3d5a deep blue) was off-brand.
+        private static final String C_BG            = "#f9fafb";
+        private static final String C_PANEL         = "#ffffff";
+        private static final String C_NAVY          = "#0e7268";
+        private static final String C_NAVY_HOVER    = "#0a5850";
+        private static final String C_GREEN         = "#0c9e6a";
+        private static final String C_BORDER        = "#dae3e0";
+        private static final String C_BORDER_STRONG = "#b8cec9";
+        private static final String C_TEXT          = "#0c1f1b";
+        private static final String C_MUTED         = "#678b86";
+        private static final String C_RED           = "#c42f2f";
+        private static final String C_RED_BG        = "#fce6e6";
 
         /** Build the LoginPage-style outer column (logo + brand text + card +
          *  footer). The card body is whatever the caller hands in. */
@@ -543,8 +549,14 @@ public class Launcher {
                     brandBlock.getChildren().add(iv);
                 }
             } catch (Exception ignored) {}
-            Label brand = new Label("ModernizeProData");
-            brand.setStyle("-fx-font-size: 24px; -fx-font-weight: 700; -fx-text-fill: " + C_TEXT + ";");
+            // "ModernizePro" + green "Data" — mirrors React BrandName component.
+            javafx.scene.text.Text brandFirst = new javafx.scene.text.Text("ModernizePro");
+            brandFirst.setStyle("-fx-fill: " + C_TEXT + "; -fx-font-size: 24px; -fx-font-weight: 700;");
+            javafx.scene.text.Text brandAccent = new javafx.scene.text.Text("Data");
+            brandAccent.setStyle("-fx-fill: " + C_GREEN + "; -fx-font-size: 24px; -fx-font-weight: 700;");
+            javafx.scene.text.TextFlow brand = new javafx.scene.text.TextFlow(brandFirst, brandAccent);
+            brand.setStyle("-fx-text-alignment: center;");
+            brand.setTextAlignment(javafx.scene.text.TextAlignment.CENTER);
             brandBlock.getChildren().add(brand);
 
             Label footer = new Label("© KS Info System Co., Ltd.   v0.1.0-dev");
@@ -602,14 +614,16 @@ public class Launcher {
         private Button primaryButton(String text) {
             Button b = new Button(text);
             b.setMaxWidth(Double.MAX_VALUE);
-            b.setStyle(
-                "-fx-background-color: " + C_NAVY + ";" +
+            final String baseStyle =
                 "-fx-text-fill: white;" +
                 "-fx-font-size: 14px;" +
                 "-fx-font-weight: 700;" +
                 "-fx-padding: 11 12;" +
                 "-fx-background-radius: 4;" +
-                "-fx-cursor: hand;");
+                "-fx-cursor: hand;";
+            b.setStyle("-fx-background-color: " + C_NAVY + ";" + baseStyle);
+            b.setOnMouseEntered(e -> b.setStyle("-fx-background-color: " + C_NAVY_HOVER + ";" + baseStyle));
+            b.setOnMouseExited(e ->  b.setStyle("-fx-background-color: " + C_NAVY + ";" + baseStyle));
             return b;
         }
 

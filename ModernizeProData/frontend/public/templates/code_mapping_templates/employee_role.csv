@@ -1,0 +1,4 @@
+domain,source_value,target_value,description
+EMPLOYEE_ROLE,10,SALES,営業 / Sales — AS-IS M_EMPLOYEE.ROLE_CD '10' → TO-BE employee.role_code 'SALES'
+EMPLOYEE_ROLE,20,ADMIN,管理 / Admin — AS-IS M_EMPLOYEE.ROLE_CD '20' → TO-BE employee.role_code 'ADMIN'
+EMPLOYEE_ROLE,30,OPS,オペレーション / Operations — AS-IS M_EMPLOYEE.ROLE_CD '30' → TO-BE employee.role_code 'OPS'
