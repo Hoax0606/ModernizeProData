@@ -190,7 +190,10 @@ export function ExecutionPage() {
       runId: run.id,
       selectedTables: [],            // BE は run 単位で記録しない (tables[] は per-stage 配下)
       startedAt: startedAtMs,
-      pausedAt: null,                 // BE pause 未対応
+      /* paused 中は pausedAt≠null → isPaused=true (status chip=paused / 버튼=Resume).
+         demo の様な正確な pause 時刻/pauseAccumMs は FE で追跡しないため Date.now() で近似
+         (elapsed ラベルは wall-clock; 実 progress は stageViews=BE 真値が描く). */
+      pausedAt: run.status === 'paused' ? Date.now() : null,
       pauseAccumMs: 0,
       runStatus: mapBeRunStatus(run.status),
       failedStageIndex: failedIdx,
@@ -414,17 +417,27 @@ export function ExecutionPage() {
     }
   };
 
-  const handlePauseToggle = () => {
-    /* Real モードでは pause/resume は BE 未対応のためボタン自体を非表示にする
-       (下の RunHeader で isDemo フラグ見て描画分岐). ここに来るのは demo のみ. */
-    if (!isDemo) return;
-    if (!storeActiveRun) return;
-    if (storeActiveRun.pausedAt === null) {
-      useExecutionPreflightStore.getState().pauseActiveRun(project.id);
-      useWorkspaceStore.getState().setProjectRunStatus(project.id, 'paused').catch(() => { /* mock */ });
-    } else {
-      useExecutionPreflightStore.getState().resumeActiveRun(project.id);
-      useWorkspaceStore.getState().setProjectRunStatus(project.id, 'running').catch(() => { /* mock */ });
+  const handlePauseToggle = async () => {
+    if (isDemo) {
+      if (!storeActiveRun) return;
+      if (storeActiveRun.pausedAt === null) {
+        useExecutionPreflightStore.getState().pauseActiveRun(project.id);
+        useWorkspaceStore.getState().setProjectRunStatus(project.id, 'paused').catch(() => { /* mock */ });
+      } else {
+        useExecutionPreflightStore.getState().resumeActiveRun(project.id);
+        useWorkspaceStore.getState().setProjectRunStatus(project.id, 'running').catch(() => { /* mock */ });
+      }
+      return;
+    }
+    /* Real モード: BE pause/resume endpoint へ. 状態遷移は usePipelineProgress polling が
+       次の tick で picking up するため、ここで手動更新は不要 (paused は非 terminal → polling 継続). */
+    if (!activeRunId || !run) return;
+    try {
+      if (run.status === 'running')     await runsApi.pause(activeRunId);
+      else if (run.status === 'paused') await runsApi.resume(activeRunId);
+    } catch (e) {
+      console.error('[execution] pause/resume failed:', e);
+      alert(`Pause/Resume failed: ${e instanceof Error ? e.message : 'unknown error'}`);
     }
   };
 
@@ -698,12 +711,11 @@ function RunHeader({
         )}
         {!isHalted && (
           <>
-            {/* Pause/Resume は BE 未対応のため demo モードのみ表示. Real モードでは隠す. */}
-            {isDemo && (
-              <button type="button" onClick={onPauseToggle} style={styles.btnSecondary}>
-                {running ? `⏸ ${t('execution.run.pause')}` : `▶ ${t('execution.run.resume')}`}
-              </button>
-            )}
+            {/* Pause/Resume — real/demo 両対応. real は BE pause/resume endpoint へ
+               (同期実行のため停止は次 stage 境界で反応). */}
+            <button type="button" onClick={onPauseToggle} style={styles.btnSecondary}>
+              {running ? `⏸ ${t('execution.run.pause')}` : `▶ ${t('execution.run.resume')}`}
+            </button>
             <button type="button" onClick={onStop} style={styles.btnDanger}>
               ⏹ {t('execution.run.stop')}
             </button>
@@ -1130,6 +1142,7 @@ function mapBeRunStatus(s: RunHistoryDto['status']): ActiveRunState['runStatus']
     case 'failed':    return 'failed';
     case 'aborted':   return 'aborted';
     case 'timed_out': return 'failed';   // UX 上は failed 扱い
+    case 'paused':                        // paused は runStatus='running' + pausedAt≠null で表現
     case 'pending':                       // queued state → 視覚的には running 扱い
     case 'running':
     default:          return 'running';
