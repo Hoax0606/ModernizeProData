@@ -5,14 +5,15 @@ import { useWorkspaceStore } from '../store/workspace';
 import { useT } from '../i18n';
 import {
   levelName,
+  runLogApi,
   type RunLogLevel,
   type RunLogLine,
 } from '../api/runLogs';
 import { runsApi, type RunHistoryDto } from '../api/runs';
+import { quarantineApi } from '../api/quarantine';
 import { formatTimestamp, formatDuration } from '../lib/formatters';
-import { buildMockLines, stageColor } from './logViewerMock';
+import { stageColor } from './logViewerMock';
 import {
-  buildQuarantineGroups,
   humanizeQuarantineDetail,
   quarantineRowAsIs,
   quarantineRowToBe,
@@ -23,14 +24,12 @@ import {
 /**
  * Log viewer — 프로젝트 실행 로그 조회.
  *
- *  데모 모드: USE_MOCK=true 면 결정적 합성 로그 240줄을 화면에 채운다.
- *  BE ingest 가 실데이터로 들어오면 useLogsHistory / useLogsStream 으로 swap.
- *  (swap 포인트: 아래 allLines 계산부)
+ *  activeProjectId 의 최근 run 의 runId 를 listByProject 로 자동 결정.
+ *  runLogApi.list 로 line stream, quarantineApi.byRun 로 group 데이터 fetch.
  */
 
-const USE_MOCK = true;
-const MOCK_COUNT = 240;
 const ROW_ESTIMATE = 22;
+const LOG_FETCH_LIMIT = 1000;
 
 export function LogViewerPage() {
   const t = useT();
@@ -41,7 +40,14 @@ export function LogViewerPage() {
     () => projects.find((p) => p.id === activeProjectId) ?? null,
     [projects, activeProjectId],
   );
-  const runId = activeProjectId ?? 'demo';
+  /** project 의 최근 run 의 runId. listByProject 의 첫 row (started_at desc). */
+  const [runId, setRunId] = useState<string>('');
+  useEffect(() => {
+    if (!activeProjectId) { setRunId(''); return; }
+    runsApi.listByProject(activeProjectId)
+      .then((rs) => setRunId(rs[0]?.id ?? ''))
+      .catch(() => setRunId(''));
+  }, [activeProjectId]);
 
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -66,10 +72,14 @@ export function LogViewerPage() {
   }, [search]);
 
   /* ── 데이터 ─────────────────────────────────────── */
-  const allLines = useMemo<RunLogLine[]>(
-    () => (USE_MOCK ? buildMockLines(runId, MOCK_COUNT) : []),
-    [runId],
-  );
+  /** runId 의 모든 RunLog line (최대 LOG_FETCH_LIMIT). runId 변경 시 자동 refetch. */
+  const [allLines, setAllLines] = useState<RunLogLine[]>([]);
+  useEffect(() => {
+    if (!runId) { setAllLines([]); return; }
+    runLogApi.list(runId, { limit: LOG_FETCH_LIMIT })
+      .then((p) => setAllLines(p.lines))
+      .catch((e) => { console.error('runLog fetch failed', e); setAllLines([]); });
+  }, [runId]);
 
   /** Stream 모드 라인 — 검색/level/step 필터 적용. Quarantine 모드는 별도 데이터 소스(아래 groups)로 동작. */
   const lines = useMemo(() => {
@@ -83,11 +93,14 @@ export function LogViewerPage() {
     });
   }, [allLines, debouncedSearch, levelFilter, stepFilter]);
 
-  /** Quarantine groups — rule-violation 묶음. mock 결정적. BE 들어오면 fetch 로 swap. */
-  const allGroups = useMemo<QuarantineGroup[]>(
-    () => buildQuarantineGroups(runId),
-    [runId],
-  );
+  /** Quarantine groups — runId 의 위반 row 묶음. quarantineApi.byRun 으로 fetch. */
+  const [allGroups, setAllGroups] = useState<QuarantineGroup[]>([]);
+  useEffect(() => {
+    if (!runId) { setAllGroups([]); return; }
+    quarantineApi.byRun(runId)
+      .then(setAllGroups)
+      .catch((e) => { console.error('quarantine fetch failed', e); setAllGroups([]); });
+  }, [runId]);
   const groupStats = useMemo(() => {
     let errRows = 0, warnRows = 0;
     for (const g of allGroups) {

@@ -3,13 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import { useWorkspaceStore } from '../store/workspace';
 import { useT } from '../i18n';
 import {
-  buildSiteQuarantineGroups,
   humanizeQuarantineDetail,
   quarantineRowAsIs,
   quarantineRowToBe,
   type SiteQuarantineGroup,
   type QuarantineSeverity,
 } from './quarantineMock';
+import { quarantineApi } from '../api/quarantine';
 
 /**
  * Site Quarantine — site 전체의 모든 프로젝트에서 모인 quarantine group 을 한 화면에 표시.
@@ -29,10 +29,14 @@ export function SiteQuarantinePage() {
     () => allProjects.filter((p) => p.siteId === activeSiteId),
     [allProjects, activeSiteId],
   );
-  const allGroups = useMemo<SiteQuarantineGroup[]>(
-    () => buildSiteQuarantineGroups(siteProjects.map((p) => ({ id: p.id, name: p.name }))),
-    [siteProjects],
-  );
+  /** activeSiteId 의 site 전체 quarantine. quarantineApi.bySite 로 fetch. */
+  const [allGroups, setAllGroups] = useState<SiteQuarantineGroup[]>([]);
+  useEffect(() => {
+    if (!activeSiteId) { setAllGroups([]); return; }
+    quarantineApi.bySite(activeSiteId)
+      .then(setAllGroups)
+      .catch((e) => { console.error('site quarantine fetch failed', e); setAllGroups([]); });
+  }, [activeSiteId]);
 
   const [severityFilter, setSeverityFilter] = useState<'all' | QuarantineSeverity>('all');
   const [projectFilter,  setProjectFilter]  = useState<string | null>(null);   // null = 모든 프로젝트

@@ -6,8 +6,8 @@ import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
 @SpringBootApplication
-@EnableScheduling
-@EnableAsync   // RunExecutionListener 의 stage 실행이 startRun transaction commit 후 별 thread 에서 동작.
+@EnableAsync         // RunExecutionListener 의 stage 실행이 startRun transaction commit 후 별 thread 에서 동작.
+@EnableScheduling    // Quartz / Nightly scheduler (dev 통합).
 public class ModernizeProDataApplication {
 
 	public static void main(String[] args) {
