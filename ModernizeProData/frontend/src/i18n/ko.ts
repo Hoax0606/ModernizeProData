@@ -575,8 +575,10 @@ export const ko = {
 
   /* Pre-flight — per-table 化 new keys */
   'execution.preflight.check.csvArrived.failNoPath':       'CSV 경로가 Site 설정에 등록되어 있지 않습니다',
-  'execution.preflight.check.connTobe.passConfigured':     '{env} 환경 TO-BE DB 설정 완료',
+  'execution.preflight.check.connTobe.passConfigured':     '{env} 환경 TO-BE DB 연결 OK',
   'execution.preflight.check.connTobe.failMissing':        '{env} 환경 TO-BE DB host/database/username 미설정',
+  'execution.preflight.check.connTobe.failUnreachable':    '{env} 환경 TO-BE DB 연결 실패: {msg}',
+  'execution.preflight.check.connTobe.failUntested':       '{env} 환경 TO-BE DB 연결 미테스트',
   'execution.preflight.check.tobeBindings.passOne':        '바인딩 OK',
   'execution.preflight.check.tobeBindings.failOne':        'AS-IS 소스에 바인딩되지 않음',
   'execution.preflight.check.unmappedCols.passOne':        '전체 {n}개 컬럼 매핑됨',

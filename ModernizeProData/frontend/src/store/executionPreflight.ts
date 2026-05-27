@@ -38,21 +38,20 @@ export interface PreflightSnapshotResult {
 
 interface PreflightEntry {
   selectedTables: string[];
+  /** running animation 用. results 自体は bySnapshot[currentPinId] に保存される. */
   preflightPhase: PreflightPhase;
-  preflightResults: PreflightCheck[];
-  /* selection / snapshot 이 변경됐을 때 옛 done 결과를 재검증 필요로 표시. */
+  /* selection 이 변경됐을 때 옛 done 결과를 재검증 필요로 표시. */
   isStale: boolean;
   /* Project 별 누적 run count. Discard → Start over 마다 +1. Retry 는 같은 run 이라 증가 X. */
   runCounter: number;
   activeRun: ActiveRunState | null;
-  /** snapshot id → cached preflight result. Versions 화면이 같은 cache 를 참조. */
+  /** snapshot id → cached preflight result. Execution / Versions 両画面の唯一の真実. */
   bySnapshot: Record<string, PreflightSnapshotResult>;
 }
 
 const EMPTY_ENTRY: PreflightEntry = Object.freeze({
   selectedTables: [],
   preflightPhase: 'idle',
-  preflightResults: [],
   isStale: false,
   runCounter: 0,
   activeRun: null,
@@ -80,11 +79,12 @@ interface ExecutionPreflightState {
   getEntry: (projectId: string | null | undefined) => PreflightEntry;
   setSelected: (projectId: string, tables: string[]) => void;
   setPhase: (projectId: string, phase: PreflightPhase) => void;
-  setResults: (projectId: string, results: PreflightCheck[] | ((prev: PreflightCheck[]) => PreflightCheck[])) => void;
   resetForProject: (projectId: string) => void;
 
   /** Versions 화면 / Execution 화면 공통 cache. snapshotId 별로 결과 보존. */
   setSnapshotResult: (projectId: string, snapshotId: string, result: PreflightSnapshotResult) => void;
+  /** 진행 중인 preflight 의 결과 1 件을 bySnapshot[snapshotId].results 끝に追加. */
+  appendSnapshotResultCheck: (projectId: string, snapshotId: string, check: PreflightCheck) => void;
   clearSnapshotResult: (projectId: string, snapshotId: string) => void;
 
   /* Active run (frontend mock simulation) — 백엔드 run engine 미연결 시점의 시각 흐름 데모. */
@@ -150,19 +150,6 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
         });
       },
 
-      setResults: (projectId, results) => {
-        set((s) => {
-          const prev = s.byProject[projectId] ?? EMPTY_ENTRY;
-          const next = typeof results === 'function' ? results(prev.preflightResults) : results;
-          return {
-            byProject: {
-              ...s.byProject,
-              [projectId]: { ...prev, preflightResults: next, isStale: false },
-            },
-          };
-        });
-      },
-
       resetForProject: (projectId) => {
         set((s) => {
           const { [projectId]: _drop, ...rest } = s.byProject;
@@ -178,7 +165,33 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
               ...s.byProject,
               [projectId]: {
                 ...prev,
+                isStale: false,
                 bySnapshot: { ...prev.bySnapshot, [snapshotId]: result },
+              },
+            },
+          };
+        });
+      },
+
+      appendSnapshotResultCheck: (projectId, snapshotId, check) => {
+        set((s) => {
+          const prev = s.byProject[projectId] ?? EMPTY_ENTRY;
+          const existing = prev.bySnapshot[snapshotId];
+          /* setSnapshotResult で必ず init される前提だが、念のため defensive. */
+          const base: PreflightSnapshotResult = existing ?? {
+            runAt: Date.now(),
+            selectedTables: prev.selectedTables,
+            results: [],
+          };
+          return {
+            byProject: {
+              ...s.byProject,
+              [projectId]: {
+                ...prev,
+                bySnapshot: {
+                  ...prev.bySnapshot,
+                  [snapshotId]: { ...base, results: [...base.results, check] },
+                },
               },
             },
           };
@@ -367,12 +380,13 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
       // v0 → v1 (2026-05-24): approved-snapshot 체크 항목 제거.
       // v1 → v2 (2026-05-25): runId 형식 변경 (reh-{timestamp} → {projectId} - {runIndex}).
       // v2 → v3 (2026-05-25): ActiveRunState 에 haltedAt 추가.
-      // v3 → v4 (2026-05-26): PreflightCheck 가 per-table 化. 旧 results / selectedSnapshotId 撤去 ──
-      // 互換不能なので preflightResults を捨てて preflightPhase を 'idle' に戻す.
-      version: 4,
+      // v3 → v4 (2026-05-26): PreflightCheck 가 per-table 化, selectedSnapshotId 撤去.
+      // v4 → v5 (2026-05-26): preflightResults (project 全体の直近 1 回バッファ) 撤去.
+      // 結果は bySnapshot[snapshotId] が唯一の真実に. 旧 entry の preflightResults は破棄.
+      version: 5,
       migrate: (persistedState: unknown, version: number) => {
         if (!persistedState || typeof persistedState !== 'object') return persistedState;
-        const state = persistedState as { byProject?: Record<string, PreflightEntry & { selectedSnapshotId?: string | null }> };
+        const state = persistedState as { byProject?: Record<string, PreflightEntry & { selectedSnapshotId?: string | null; preflightResults?: PreflightCheck[] }> };
         if (!state.byProject) return persistedState;
         const fixed: Record<string, PreflightEntry> = {};
         for (const id in state.byProject) {
@@ -385,24 +399,15 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
             activeRun = { ...activeRun, haltedAt: null };
           }
           const baseRunCounter = version < 2 && entry.activeRun?.runId?.startsWith('reh-') ? 0 : entry.runCounter;
-          if (version < 4) {
-            fixed[id] = {
-              selectedTables: entry.selectedTables ?? [],
-              preflightPhase: 'idle',
-              preflightResults: [],
-              isStale: false,
-              runCounter: baseRunCounter ?? 0,
-              activeRun,
-              bySnapshot: {},
-            };
-          } else {
-            fixed[id] = {
-              ...entry,
-              activeRun,
-              runCounter: baseRunCounter ?? 0,
-              bySnapshot: entry.bySnapshot ?? {},
-            };
-          }
+          /* v4 以下からの移行: bySnapshot / 一新. preflightResults は破棄 (ユーザ가 다시 run). */
+          fixed[id] = {
+            selectedTables: entry.selectedTables ?? [],
+            preflightPhase: 'idle',
+            isStale: false,
+            runCounter: baseRunCounter ?? 0,
+            activeRun,
+            bySnapshot: entry.bySnapshot ?? {},
+          };
         }
         return { ...state, byProject: fixed };
       },

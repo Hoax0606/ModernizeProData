@@ -577,8 +577,10 @@ export const ja: Record<TranslationKey, string> = {
 
   /* Pre-flight — per-table 化 new keys */
   'execution.preflight.check.csvArrived.failNoPath':       'CSV パスが Site 設定に登録されていません',
-  'execution.preflight.check.connTobe.passConfigured':     '{env} 環境の TO-BE DB 設定済み',
+  'execution.preflight.check.connTobe.passConfigured':     '{env} 環境の TO-BE DB 接続 OK',
   'execution.preflight.check.connTobe.failMissing':        '{env} 環境の TO-BE DB host/database/username が未設定',
+  'execution.preflight.check.connTobe.failUnreachable':    '{env} 環境の TO-BE DB 接続失敗: {msg}',
+  'execution.preflight.check.connTobe.failUntested':       '{env} 環境の TO-BE DB 接続テスト未実施',
   'execution.preflight.check.tobeBindings.passOne':        'バインディング OK',
   'execution.preflight.check.tobeBindings.failOne':        'AS-IS ソースにバインディングされていません',
   'execution.preflight.check.unmappedCols.passOne':        '全 {n} カラムマッピング済み',

@@ -13,6 +13,7 @@ import {
   type ActiveRunState,
 } from '../store/executionPreflight';
 import { runPreflight, isAllPass, type TableCheckResult } from '../lib/preflightValidation';
+import { tobeDbApi } from '../api/tobeDb';
 import { PreflightResultPanel } from '../components/PreflightResultPanel';
 import { useDemoMode, type DemoMode } from '../lib/useDemoMode';
 import {
@@ -140,11 +141,11 @@ export function ExecutionPage() {
 
   const entrySelected = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.selectedTables : undefined);
   const entryPhase    = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.preflightPhase : undefined);
-  const entryResults  = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.preflightResults : undefined);
   const entryStale    = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.isStale : undefined);
+  /* pin 단위 결과 캐시. pin 이 바뀌면 표시도 자동으로 그 pin 의 結果로 切替. */
+  const entryBySnapshot = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.bySnapshot : undefined);
   const selectedTables = useMemo(() => new Set(entrySelected ?? []), [entrySelected]);
   const preflightPhase: PreflightPhase = entryPhase ?? 'idle';
-  const preflightResults: PreflightCheck[] = entryResults ?? [];
   const isStale: boolean = entryStale ?? false;
 
   const setSelectedTables = (next: Set<string>) => {
@@ -162,7 +163,6 @@ export function ExecutionPage() {
     const cur = useExecutionPreflightStore.getState();
     if (cur.byProject[projectIdForReset]?.preflightPhase === 'checking') {
       cur.setPhase(projectIdForReset, 'idle');
-      cur.setResults(projectIdForReset, []);
     }
   }, [projectIdForReset]);
 
@@ -189,48 +189,84 @@ export function ExecutionPage() {
 
     const store = useExecutionPreflightStore.getState();
     store.setPhase(project.id, 'checking');
-    store.setResults(project.id, []);
+    /* 이 pin 에 대한 cache 를 初期化 (선택 테이블 / 빈 results) — 演出 중 incremental
+       append 가 이 base 에 上書きされる. */
+    const tablesList = [...selectedTables];
+    store.setSnapshotResult(project.id, pinnedSnapshot.id, {
+      runAt: Date.now(),
+      selectedTables: tablesList,
+      results: [],
+    });
 
     try {
       const snapshotData = await useSnapshotsStore.getState().ensureSnapshotData(pinnedSnapshot.id);
-      const tablesList = [...selectedTables];
+
+      /* TO-BE DB 接続テストを live で実行. host/username 等が空なら test 自体スキップ —
+         runPreflight 側 (checkConnTobe) が「設定不足」として fail を出す. */
+      const env = site.environment;
+      const conn = site.tobeDbByEnv?.[env];
+      let tobeDbReachable: { success: boolean; message: string } | null = null;
+      if (conn && conn.host?.trim() && conn.database?.trim() && conn.username?.trim()) {
+        try {
+          const r = await tobeDbApi.testConnection(site.id, {
+            dbType: conn.type, host: conn.host, port: conn.port,
+            database: conn.database, username: conn.username, password: conn.password,
+          });
+          tobeDbReachable = { success: r.success, message: r.message };
+        } catch (e) {
+          tobeDbReachable = {
+            success: false,
+            message: e instanceof Error ? e.message : 'request failed',
+          };
+        }
+      }
+
       const results = runPreflight({
         project, site, tobeSchema, asisSchema, snapshotData,
         selectedTables: tablesList,
         t,
+        tobeDbReachable,
       });
-      /* 결과를 400ms 간격 演出 — UX 演出のみ, 同期判定済.
+      /* 결과를 400ms 간격으로 bySnapshot[pinnedId].results 에 incremental append.
          setTimeout は이미 종료된 mount 후에도 발화하지만 store 가 살아있어 무해. */
       results.forEach((check, i) => {
         window.setTimeout(() => {
           const cur = useExecutionPreflightStore.getState();
-          cur.setResults(project.id, (prev) => [...prev, check]);
+          cur.appendSnapshotResultCheck(project.id, pinnedSnapshot.id, check);
           if (i === results.length - 1) {
             cur.setPhase(project.id, 'done');
-            cur.setSnapshotResult(project.id, pinnedSnapshot.id, {
-              runAt: Date.now(),
-              selectedTables: tablesList,
-              results,
-            });
           }
         }, (i + 1) * 400);
       });
     } catch (e) {
       /* ensureSnapshotData / runPreflight 가 throw 했을 때 phase 가 'checking' 에 영구
-         lock 되지 않도록 idle 로 강제 reset. console 에 reason 남겨 디버깅 단서. */
+         lock 되지 않도록 idle 로 강제 reset. cache 도 비워둠. console 에 reason 남김. */
       console.error('[execution] preflight failed:', e);
       store.setPhase(project.id, 'idle');
-      store.setResults(project.id, []);
+      store.clearSnapshotResult(project.id, pinnedSnapshot.id);
     }
   };
+
+  /* 현재 pin 된 snapshot 의 cached 결과를 표시 source 로 사용.
+     - pin 切替 → 表示も自動的に切替 (그 snapshot 用 cache がなければ empty)
+     - 동일 snapshot 으로 다시 돌리면 results が逐次 append 되어 演出 진행 */
+  const pinnedResult = (pinnedSnapshot && entryBySnapshot) ? entryBySnapshot[pinnedSnapshot.id] : undefined;
+  const cachedResults: PreflightCheck[] = pinnedResult?.results ?? [];
 
   /* Demo 모드: trigger 없이 즉시 결과 표시. 8 fail / 8 pass 분기. */
   const displayedResults = demoMode === 'run-fail'
     ? buildDemoPreflightPassChecks(t)
     : demoMode === 'preflight'
       ? buildDemoPreflightChecks(t)
-      : preflightResults;
-  const displayedPhase: PreflightPhase = isDemo ? 'done' : preflightPhase;
+      : cachedResults;
+  /* phase 派生: checking 中なら checking、cache に結果 있으면 done、그 외 idle */
+  const displayedPhase: PreflightPhase = isDemo
+    ? 'done'
+    : preflightPhase === 'checking'
+      ? 'checking'
+      : cachedResults.length > 0
+        ? 'done'
+        : 'idle';
   const displayedStale = isDemo ? demoStale : isStale;
   const preflightPassed = displayedPhase === 'done'
     && !displayedStale
@@ -255,13 +291,17 @@ export function ExecutionPage() {
     }
     const tables = Array.from(selectedTables);
     useExecutionPreflightStore.getState().startActiveRun(project.id, tables);
-    /* phase 와 runStatus 갱신 */
+    /* phase / runStatus 갱신.
+       run 起動による phase 自動進行は forward-only — 既に test 以降の phase に
+       いる時に planning 측 'test' run を起동해도 phase を巻き戻さない. */
     if (runMode === 'cutover') {
       useWorkspaceStore.getState().startCutover(project.id, pinnedSnapshot.id, user?.username ?? 'Admin')
         .catch(() => { /* mock; ignore */ });
     } else {
       const targetPhase: ProjectPhase = runMode === 'rehearsal' ? 'rehearsal' : 'test';
-      useWorkspaceStore.getState().setProjectPhase(project.id, targetPhase).catch(() => { /* mock */ });
+      if (phaseOrder(project.phase) < phaseOrder(targetPhase)) {
+        useWorkspaceStore.getState().setProjectPhase(project.id, targetPhase).catch(() => { /* mock */ });
+      }
       useWorkspaceStore.getState().setProjectRunStatus(project.id, 'running').catch(() => { /* mock */ });
     }
   };
@@ -944,13 +984,32 @@ function formatTimeOfDay(ts: number): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+/** phase の lifecycle 순서. forward-only な phase 自動進行 비교에 사용. */
+const PHASE_ORDER: ProjectPhase[] = [
+  'planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done',
+];
+function phaseOrder(phase: ProjectPhase): number {
+  const i = PHASE_ORDER.indexOf(phase);
+  return i < 0 ? 0 : i;
+}
+
+/**
+ * phase × site.environment から起動可能な run mode を導出.
+ * BE 側 `RunService.resolveRunTypeFromPhase` と一致させる:
+ *   - production + ready             → cutover (本番移行)
+ *   - production + その他            → null   (本番では ready のみ実行可)
+ *   - non-prod   + rehearsal         → rehearsal (リハーサル run)
+ *   - non-prod   + cutover/hypercare/done → null (既に走っている / 終了済)
+ *   - non-prod   + その他            → test (planning / analysis / test / sign-off / ready
+ *                                            すべて test run 扱い — preflight 通れば起動可)
+ */
 function deriveRunMode(phase: ProjectPhase, env: ProjectEnvironment): RunMode | null {
   if (env === 'production') {
     return phase === 'ready' ? 'cutover' : null;
   }
-  if (phase === 'test') return 'test';
   if (phase === 'rehearsal') return 'rehearsal';
-  return null;
+  if (phase === 'cutover' || phase === 'hypercare' || phase === 'done') return null;
+  return 'test';
 }
 
 function countResults(checks: PreflightCheck[]): { pass: number; fail: number; skip: number } {

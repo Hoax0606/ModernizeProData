@@ -40,6 +40,12 @@ export interface PreflightInput {
   snapshotData: SnapshotData;
   selectedTables: string[];
   t: T;
+  /**
+   * TO-BE DB 接続テストの live 결과.
+   * 呼び元 (startPreflight) が runPreflight 前に `tobeDbApi.testConnection` を叩いて
+   * 結果を渡す. null = テスト未実施 (e.g. 設定不足で skip).
+   */
+  tobeDbReachable: { success: boolean; message: string } | null;
 }
 
 const ORDER: PreflightCheckId[] = [
@@ -189,21 +195,51 @@ function checkConnTobe(ctx: Context): PreflightCheckResult {
   const t = ctx.t;
   const env = ctx.site.environment;
   const conn = ctx.site.tobeDbByEnv?.[env];
-  const ok = !!conn
+  const fieldsFilled = !!conn
     && !!conn.host && conn.host.trim() !== ''
     && !!conn.database && conn.database.trim() !== ''
     && !!conn.username && conn.username.trim() !== '';
+
+  /* 設定不足 → 接続テスト走らせる前に fail. */
+  if (!fieldsFilled) {
+    return {
+      id: 'conn-tobe',
+      title: t('execution.preflight.check.connTobe.title'),
+      scope: 'project',
+      aggregate: 'fail',
+      perTable: [{
+        table: '*', status: 'fail',
+        detail: t('execution.preflight.check.connTobe.failMissing', { env }),
+      }],
+    };
+  }
+
+  /* 設定 OK → 呼び元が事前に走らせた接続テストの結果を見る. */
+  const r = ctx.tobeDbReachable;
+  if (!r) {
+    /* 何らかの理由でテスト未実行 (呼び元の事故). 安全側に fail. */
+    return {
+      id: 'conn-tobe',
+      title: t('execution.preflight.check.connTobe.title'),
+      scope: 'project',
+      aggregate: 'fail',
+      perTable: [{
+        table: '*', status: 'fail',
+        detail: t('execution.preflight.check.connTobe.failUntested', { env }),
+      }],
+    };
+  }
   return {
     id: 'conn-tobe',
     title: t('execution.preflight.check.connTobe.title'),
     scope: 'project',
-    aggregate: ok ? 'pass' : 'fail',
+    aggregate: r.success ? 'pass' : 'fail',
     perTable: [{
       table: '*',
-      status: ok ? 'pass' : 'fail',
-      detail: ok
+      status: r.success ? 'pass' : 'fail',
+      detail: r.success
         ? t('execution.preflight.check.connTobe.passConfigured', { env })
-        : t('execution.preflight.check.connTobe.failMissing', { env }),
+        : t('execution.preflight.check.connTobe.failUnreachable', { env, msg: r.message }),
     }],
   };
 }

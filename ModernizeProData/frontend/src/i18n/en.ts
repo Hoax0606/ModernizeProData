@@ -571,8 +571,10 @@ export const en: Record<TranslationKey, string> = {
 
   /* Pre-flight — per-table new keys */
   'execution.preflight.check.csvArrived.failNoPath':       'CSV path is not configured in Site settings',
-  'execution.preflight.check.connTobe.passConfigured':     'TO-BE DB configured for {env} environment',
+  'execution.preflight.check.connTobe.passConfigured':     'TO-BE DB reachable in {env} environment',
   'execution.preflight.check.connTobe.failMissing':        '{env} TO-BE DB host / database / username missing',
+  'execution.preflight.check.connTobe.failUnreachable':    '{env} TO-BE DB unreachable: {msg}',
+  'execution.preflight.check.connTobe.failUntested':       '{env} TO-BE DB connection not tested',
   'execution.preflight.check.tobeBindings.passOne':        'binding OK',
   'execution.preflight.check.tobeBindings.failOne':        'no binding to an AS-IS source',
   'execution.preflight.check.unmappedCols.passOne':        'all {n} columns mapped',
