@@ -16,6 +16,7 @@ import com.ksinfo.modernize_pro_data.coordinator.worker.StageHelpers;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageRunner;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.nio.file.Files;
@@ -24,9 +25,14 @@ import java.sql.Connection;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Load stage — DuckDB 의 tobe_{table} → TO-BE PostgreSQL COPY.
@@ -49,6 +55,10 @@ import java.util.Map;
 public class LoadStage implements StageRunner {
 
     private static final String STAGE_KEY = "load";
+
+    /** Load 병렬도. 1 = 순차(기본). >1 이면 테이블(binding) 단위로 동시 적재. */
+    @Value("${modernize.run.load-parallelism:1}")
+    private int loadParallelism;
 
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
@@ -88,83 +98,40 @@ public class LoadStage implements StageRunner {
             return;
         }
 
-        int successCount = 0;
-        int failedCount = 0;
+        List<MappingTableBinding> bindings = ctx.getBindings();
+        AtomicInteger success = new AtomicInteger();
+        AtomicInteger failed = new AtomicInteger();
+        int parallelism = Math.max(1, loadParallelism);
 
-        for (MappingTableBinding binding : ctx.getBindings()) {
-            OffsetDateTime tableStart = OffsetDateTime.now();
-            String tobeSchema = binding.getTobeSchema() == null ? "" : binding.getTobeSchema();
-            String tobeTable  = binding.getTobeTable();
-
-            StageTableResult result = stageTableResultRepo
-                    .findByStageInstanceIdAndBindingId(stage.getId(), binding.getId())
-                    .orElseGet(() -> StageTableResult.create(stage.getId(), binding.getId(), tobeSchema, tobeTable));
-            result.setStartedAt(tableStart);
-
-            Path tempCsv = tempDir.resolve(tobeTable + ".csv");
+        if (parallelism <= 1 || bindings.size() <= 1) {
+            // 순차 (기본)
+            for (MappingTableBinding b : bindings) {
+                if (loadBinding(ctx, stage, b, dbConfig, tempDir)) success.incrementAndGet();
+                else failed.incrementAndGet();
+            }
+        } else {
+            // 테이블(binding) 단위 병렬 적재. 각 task 가 자기 DuckDB/PG connection 사용.
+            int poolSize = Math.min(parallelism, bindings.size());
+            ingest(ctx, "Load parallel — " + poolSize + " threads", true);
+            ExecutorService pool = Executors.newFixedThreadPool(poolSize);
             try {
-                // 검증/이전 단계가 이 테이블을 실패로 표시했으면 적재 skip (bad data → Postgres 방지).
-                if (upstreamFailed(ctx, stage, binding.getId())) {
-                    OffsetDateTime tableEnd = OffsetDateTime.now();
-                    result.setStatus(StageTableStatus.failed);
-                    Map<String, Object> detail = new HashMap<>();
-                    detail.put("message", "not loaded — upstream stage failed for this table");
-                    result.setErrorDetail(detail);
-                    result.setFinishedAt(tableEnd);
-                    result.setDurationMs(Duration.between(tableStart, tableEnd).toMillis());
-                    stageTableResultRepo.save(result);
-                    ingest(ctx, "Load skipped " + tobeTable + " — upstream stage failed (not loaded)", false);
-                    failedCount++;
-                    continue;
+                List<Future<?>> futures = new ArrayList<>();
+                for (MappingTableBinding b : bindings) {
+                    futures.add(pool.submit(() -> {
+                        if (loadBinding(ctx, stage, b, dbConfig, tempDir)) success.incrementAndGet();
+                        else failed.incrementAndGet();
+                    }));
                 }
-
-                // 1. DuckDB → temp CSV
-                String fqTobeDuck = quoteIdent(schema) + "." + quoteIdent("tobe_" + tobeTable);
-                String escapedCsv = tempCsv.toString().replace("\\", "/").replace("'", "''");
-                try (Statement st = duckDbService.statement()) {
-                    st.execute("COPY " + fqTobeDuck + " TO '" + escapedCsv + "' (FORMAT CSV, HEADER false)");
+                for (Future<?> f : futures) {
+                    try { f.get(); } catch (Exception e) { log.warn("Load task error: {}", e.getMessage()); }
                 }
-
-                // 2. PostgreSQL Connection + (FK off) + TRUNCATE + COPY + (FK 복귀)
-                String pgQualified = pgTableName(tobeSchema, tobeTable);
-                long rows;
-                try (Connection conn = pgCopyManager.openConnection(dbConfig)) {
-                    boolean fkDisabled = pgCopyManager.tryDisableConstraints(conn);
-                    try {
-                        pgCopyManager.truncate(conn, pgQualified);
-                        rows = pgCopyManager.copyInFromCsv(conn, pgQualified, tempCsv);
-                    } finally {
-                        if (fkDisabled) pgCopyManager.restoreConstraints(conn);
-                    }
-                }
-
-                // 3. cleanup
-                try { Files.deleteIfExists(tempCsv); } catch (Exception ignore) {}
-
-                OffsetDateTime tableEnd = OffsetDateTime.now();
-                result.setStatus(StageTableStatus.success);
-                result.setRowCount(rows);
-                result.setFinishedAt(tableEnd);
-                result.setDurationMs(Duration.between(tableStart, tableEnd).toMillis());
-                stageTableResultRepo.save(result);
-
-                ingest(ctx, "Loaded " + tobeTable + ": " + rows + " rows", true);
-                successCount++;
-            } catch (Exception e) {
-                OffsetDateTime tableEnd = OffsetDateTime.now();
-                result.setStatus(StageTableStatus.failed);
-                Map<String, Object> detail = new HashMap<>();
-                detail.put("message", e.getMessage());
-                result.setErrorDetail(detail);
-                result.setFinishedAt(tableEnd);
-                result.setDurationMs(Duration.between(tableStart, tableEnd).toMillis());
-                stageTableResultRepo.save(result);
-
-                log.warn("LoadStage failed for {}: {}", tobeTable, e.getMessage());
-                ingest(ctx, "Load failed for " + tobeTable + ": " + e.getMessage(), false);
-                failedCount++;
+            } finally {
+                pool.shutdown();
             }
         }
+
+        int successCount = success.get();
+        int failedCount = failed.get();
 
         OffsetDateTime finishedAt = OffsetDateTime.now();
         stage.setFinishedAt(finishedAt);
@@ -191,6 +158,84 @@ public class LoadStage implements StageRunner {
         stage.setTablesFailed(failedCount);
         stage.setErrorSummary(errorSummary);
         stageInstanceRepo.save(stage);
+    }
+
+    /**
+     * 한 binding 적재. 성공=true / 실패·skip=false. 병렬 task 로도 호출되므로 task-local 자원만 사용:
+     * DuckDB 는 duplicateConnection(공유 connection 동시 사용 회피), PG 는 per-binding openConnection.
+     */
+    private boolean loadBinding(StageContext ctx, StageInstance stage, MappingTableBinding binding,
+                                Map<String, Object> dbConfig, Path tempDir) {
+        String schema = ctx.getDuckdbSchema();
+        OffsetDateTime tableStart = OffsetDateTime.now();
+        String tobeSchema = binding.getTobeSchema() == null ? "" : binding.getTobeSchema();
+        String tobeTable  = binding.getTobeTable();
+
+        StageTableResult result = stageTableResultRepo
+                .findByStageInstanceIdAndBindingId(stage.getId(), binding.getId())
+                .orElseGet(() -> StageTableResult.create(stage.getId(), binding.getId(), tobeSchema, tobeTable));
+        result.setStartedAt(tableStart);
+
+        Path tempCsv = tempDir.resolve(tobeTable + ".csv");
+        try {
+            // 검증/이전 단계가 이 테이블을 실패로 표시했으면 적재 skip (bad data → Postgres 방지).
+            if (upstreamFailed(ctx, stage, binding.getId())) {
+                result.setStatus(StageTableStatus.failed);
+                Map<String, Object> detail = new HashMap<>();
+                detail.put("message", "not loaded — upstream stage failed for this table");
+                result.setErrorDetail(detail);
+                finish(result, tableStart);
+                stageTableResultRepo.save(result);
+                ingest(ctx, "Load skipped " + tobeTable + " — upstream stage failed (not loaded)", false);
+                return false;
+            }
+
+            // 1. DuckDB → temp CSV (task 별 connection — 병렬 안전)
+            String fqTobeDuck = quoteIdent(schema) + "." + quoteIdent("tobe_" + tobeTable);
+            String escapedCsv = tempCsv.toString().replace("\\", "/").replace("'", "''");
+            try (Connection duck = duckDbService.duplicateConnection();
+                 Statement st = duck.createStatement()) {
+                st.execute("COPY " + fqTobeDuck + " TO '" + escapedCsv + "' (FORMAT CSV, HEADER false)");
+            }
+
+            // 2. PostgreSQL Connection + (FK off) + TRUNCATE + COPY + (FK 복귀)
+            String pgQualified = pgTableName(tobeSchema, tobeTable);
+            long rows;
+            try (Connection conn = pgCopyManager.openConnection(dbConfig)) {
+                boolean fkDisabled = pgCopyManager.tryDisableConstraints(conn);
+                try {
+                    pgCopyManager.truncate(conn, pgQualified);
+                    rows = pgCopyManager.copyInFromCsv(conn, pgQualified, tempCsv);
+                } finally {
+                    if (fkDisabled) pgCopyManager.restoreConstraints(conn);
+                }
+            }
+
+            try { Files.deleteIfExists(tempCsv); } catch (Exception ignore) {}
+
+            result.setStatus(StageTableStatus.success);
+            result.setRowCount(rows);
+            finish(result, tableStart);
+            stageTableResultRepo.save(result);
+            ingest(ctx, "Loaded " + tobeTable + ": " + rows + " rows", true);
+            return true;
+        } catch (Exception e) {
+            result.setStatus(StageTableStatus.failed);
+            Map<String, Object> detail = new HashMap<>();
+            detail.put("message", e.getMessage());
+            result.setErrorDetail(detail);
+            finish(result, tableStart);
+            stageTableResultRepo.save(result);
+            log.warn("LoadStage failed for {}: {}", tobeTable, e.getMessage());
+            ingest(ctx, "Load failed for " + tobeTable + ": " + e.getMessage(), false);
+            return false;
+        }
+    }
+
+    private static void finish(StageTableResult result, OffsetDateTime start) {
+        OffsetDateTime end = OffsetDateTime.now();
+        result.setFinishedAt(end);
+        result.setDurationMs(Duration.between(start, end).toMillis());
     }
 
     /**

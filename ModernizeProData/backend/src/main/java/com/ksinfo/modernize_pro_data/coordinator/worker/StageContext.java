@@ -50,5 +50,6 @@ public class StageContext {
     public Path parquet2Dir()  { return outputDir.resolve("parquet2"); }
     public Path quarantineDir(){ return outputDir.resolve("quarantine"); }
 
-    public long nextLogSeq() { return ++logLineSeqCursor; }
+    /** 병렬 적재(Load) 에서 여러 thread 가 동시에 호출 → synchronized 로 seq race 방지. */
+    public synchronized long nextLogSeq() { return ++logLineSeqCursor; }
 }

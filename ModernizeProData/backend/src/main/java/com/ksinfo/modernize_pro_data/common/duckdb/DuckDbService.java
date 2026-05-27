@@ -138,6 +138,16 @@ public class DuckDbService {
     }
 
     /**
+     * 같은 DuckDB 인스턴스를 공유하는 별도 connection. 병렬 작업(Load 병렬 적재)에서
+     * 단일 공유 connection 동시 사용을 피하기 위해 thread 마다 하나씩 쓰고 닫는다.
+     * DuckDBConnection.duplicate() 는 같은 in-memory/file db 를 바라보는 새 connection.
+     * caller 가 close() 책임. (UDF 는 미등록 — Load 의 read-only COPY 엔 불필요.)
+     */
+    public synchronized Connection duplicateConnection() throws SQLException {
+        return ((org.duckdb.DuckDBConnection) getConnection()).duplicate();
+    }
+
+    /**
      * 도구 기동 시점에 호출되는 smoke test.
      * DuckDB 가 정상적으로 임베디드 구동되는지 검증한다.
      */
