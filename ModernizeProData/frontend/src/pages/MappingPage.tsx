@@ -1932,19 +1932,23 @@ const SQL_FUNCS = new Set(Object.keys(SQL_FUNC_SIGS));
 // 백엔드: backend/.../common/duckdb/udf/{UdfRegistry, *Udf}.java
 const UDF_FUNC_SIGS: Record<string, string> = {
   // 숫자 / 소수점
-  APPLY_SCALE:         '(raw_hex, scale)',
-  UNPACK_ZONE_DECIMAL: '(zone_hex)',
+  APPLY_SCALE:            '(raw_hex, scale)',
+  UNPACK_ZONE_DECIMAL:    '(zone_hex)',
+  UNPACK_COMP:            '(raw_hex, scale)',
+  UNPACK_COMP_FLOAT:      '(raw_hex)',
+  UNPACK_SIGNED_SEPARATE: '(raw)',
+  UNPACK_OVERPUNCH:       '(raw)',
   // 날짜 / 시간
-  CONVERT_ERA:         '(era_text)',
+  CONVERT_ERA:            '(era_text)',
   // 채번
-  ASSIGN_SEQ:          '(partition_key)',
+  ASSIGN_SEQ:             '(partition_key)',
   // 식별자 검증
-  VALIDATE_BIZNO:      '(bizno)',
+  VALIDATE_BIZNO:         '(bizno)',
   // 마스킹 / 해시
-  MASK_PHONE:          '(phone)',
-  HASH_SHA256:         '(input)',
+  MASK_PHONE:             '(phone)',
+  HASH_SHA256:            '(input)',
   // 문자열 정규화
-  NORMALIZE_CORP:      '(corp_name)',
+  NORMALIZE_CORP:         '(corp_name)',
 };
 const UDF_FUNCS = new Set(Object.keys(UDF_FUNC_SIGS));
 
