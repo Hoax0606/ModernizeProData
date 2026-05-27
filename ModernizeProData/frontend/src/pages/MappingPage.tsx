@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useWorkspaceStore } from '../store/workspace';
+import { useWorkspaceStore, type ProjectPhase } from '../store/workspace';
 import { useAsisDdlStore } from '../store/asisDdl';
 import { useTobeDdlStore } from '../store/tobeDdl';
 import { useT, type TranslationKey } from '../i18n';
 import { useMappingEditsStore, type TableBindingEdit } from '../store/mappingEdits';
 import { useUiStore } from '../store/ui';
+import { useActiveProjectReadOnly } from '../store/readOnly';
 import { useSnapshotsStore, usePinnedSnapshotsStore, type FrozenBinding, type FrozenRule } from '../store/snapshots';
 import { PinIconSvg } from './VersionsPage';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
@@ -13,6 +14,8 @@ import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
 import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult, type MappingRuleDto, type MappingTableBindingDto } from '../api/mappingImport';
 import { MappingOnboarding } from './DashboardPage';
 import { isDemoProjectId } from '../lib/demoFixtures';
+import { copyText } from '../lib/clipboard';
+import { Checkbox } from '../components/Checkbox';
 
 /* ============================================================
  * Mapping page — UI scaffold ported from Prototype/src/mapping.jsx.
@@ -219,6 +222,20 @@ function translateTypeToTobe(asisType: string, tobeDialect: string): string {
  * reference 를 fallback 으로 쓰면 변경 없음을 감지할 수 있다.
  */
 const EMPTY_BINDING_EDITS: Record<string, TableBindingEdit> = Object.freeze({}) as Record<string, TableBindingEdit>;
+
+const PHASE_ORDER: ProjectPhase[] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
+/**
+ * mapping 을 편집(rule/binding/skip 저장)하면 phase 가 analysis 보다 진행된 상태일 때
+ * analysis 로 되돌린다. 매핑이 바뀌면 이후 단계(test 등)의 검증/스냅샷이 무효가 되므로.
+ */
+function demoteToAnalysisOnEdit(projectId: string | null) {
+  if (!projectId) return;
+  const proj = useWorkspaceStore.getState().projects.find((p) => p.id === projectId);
+  if (!proj) return;
+  if (PHASE_ORDER.indexOf(proj.phase) > PHASE_ORDER.indexOf('analysis')) {
+    void useWorkspaceStore.getState().setProjectPhase(projectId, 'analysis');
+  }
+}
 const EMPTY_SKIP_COLS: Record<string, Record<string, boolean>> = Object.freeze({}) as Record<string, Record<string, boolean>>;
 const EMPTY_ROW_EDITS: Record<string, RowEdit> = Object.freeze({}) as Record<string, RowEdit>;
 
@@ -409,6 +426,18 @@ export function MappingPage() {
 
   const [search, setSearch] = useState('');
   const [showUnrouted, setShowUnrouted] = useState(false);
+  // 활성 프로젝트가 read-only (worker 가 미할당/타인 할당 프로젝트를 볼 때 등) 면 모든 편집 commit 을 막는다.
+  const readOnly = useActiveProjectReadOnly();
+
+  // 좌측 전체 import 버튼 + 전체(프로젝트 단위) 매핑 정의서 모달용 상태.
+  const [projMapStatus, setProjMapStatus] = useState<MappingStatusDto>({ columnFilename: null, codeFilename: null, ruleCount: 0, codeMapCount: 0 });
+  const [fullImportOpen, setFullImportOpen] = useState(false);
+  const refreshProjMapStatus = useCallback(async () => {
+    if (!activeProjectId) return;
+    try { setProjMapStatus(await mappingImportApi.status(activeProjectId)); } catch { /* ignore */ }
+  }, [activeProjectId]);
+  useEffect(() => { void refreshProjMapStatus(); }, [refreshProjMapStatus, hydrationTick]);
+  const projMappingImported = projMapStatus.columnFilename !== null || projMapStatus.codeFilename !== null;
 
   const tableBindingEdits = useMappingEditsStore(
     (s) => (activeProjectId ? s.tableBindingEdits[activeProjectId] : undefined) || EMPTY_BINDING_EDITS,
@@ -418,7 +447,7 @@ export function MappingPage() {
   );
 
   const handleBindingChange = useCallback((internalName: string, edit: TableBindingEdit) => {
-    if (!activeProjectId) return;
+    if (!activeProjectId || readOnly) return;
     useMappingEditsStore.getState().setBindingEdit(activeProjectId, internalName, edit);
 
     // DB 영속화 — TO-BE table name 으로 schema/table 분리, AS-IS source 도 동일하게.
@@ -453,12 +482,14 @@ export function MappingPage() {
       whereFilter: edit.whereFilter ?? null,
       sources,
     }).catch((e) => console.warn('[mapping] upsertBinding failed', e));
-  }, [activeProjectId]);
+    demoteToAnalysisOnEdit(activeProjectId);
+  }, [activeProjectId, readOnly]);
 
   const handleToggleAsisSkip = useCallback((tableName: string, colName: string, nextSkip: boolean) => {
-    if (!activeProjectId) return;
+    if (!activeProjectId || readOnly) return;
     useMappingEditsStore.getState().setAsisSkip(activeProjectId, tableName, colName, nextSkip);
-  }, [activeProjectId]);
+    demoteToAnalysisOnEdit(activeProjectId);
+  }, [activeProjectId, readOnly]);
 
   const effectiveTobe = useMemo(() =>
     TOBE_TABLES.map((t) => {
@@ -526,6 +557,8 @@ export function MappingPage() {
         setSearch={setSearch}
         showUnrouted={showUnrouted}
         setShowUnrouted={setShowUnrouted}
+        mappingImported={projMappingImported}
+        onOpenFullImport={readOnly ? undefined : () => setFullImportOpen(true)}
       />
       <Workspace
         selected={selected}
@@ -535,7 +568,17 @@ export function MappingPage() {
         effectiveTobe={effectiveTobe}
         asisSkippedCols={asisSkippedCols}
         onToggleAsisSkip={handleToggleAsisSkip}
+        hydrationTick={hydrationTick}
       />
+      {fullImportOpen && (
+        <MappingDefinitionImportModal
+          projectId={activeProjectId ?? ''}
+          activeFiles={{ column: projMapStatus.columnFilename, code: projMapStatus.codeFilename }}
+          onClose={() => setFullImportOpen(false)}
+          onChanged={async () => { await refreshProjMapStatus(); setHydrationTick((n) => n + 1); return []; }}
+          tableFilter={null}
+        />
+      )}
     </div>
   );
 }
@@ -545,12 +588,15 @@ export function MappingPage() {
 function DualInventory({
   asis, tobe, selected, onSelect,
   search, setSearch, showUnrouted, setShowUnrouted,
+  mappingImported, onOpenFullImport,
 }: {
   asis: AsisTable[]; tobe: TobeTable[];
   selected: Selection;
   onSelect: (s: Selection) => void;
   search: string; setSearch: (v: string) => void;
   showUnrouted: boolean; setShowUnrouted: (v: boolean) => void;
+  mappingImported: boolean;
+  onOpenFullImport?: () => void;
 }) {
   const [activeTab, setActiveTab] = useState<Side>(selected?.side ?? 'tobe');
   useEffect(() => {
@@ -615,13 +661,8 @@ function DualInventory({
             style={styles.searchInput}
           />
         </div>
-        <label style={styles.unroutedToggle}>
-          <input
-            type="checkbox"
-            checked={showUnrouted}
-            onChange={(e) => setShowUnrouted(e.target.checked)}
-            style={{ margin: 0 }}
-          />
+        <label style={styles.unroutedToggle} onClick={() => setShowUnrouted(!showUnrouted)}>
+          <Checkbox checked={showUnrouted} onChange={setShowUnrouted} />
           unrouted only
         </label>
       </div>
@@ -638,6 +679,8 @@ function DualInventory({
               selected={selected}
               onSelect={onSelect}
               alwaysOpen
+              mappingImported={mappingImported}
+              onOpenFullImport={onOpenFullImport}
             />
           ) : null
         )}
@@ -648,6 +691,7 @@ function DualInventory({
 
 function InventoryTree({
   label, side, tables, allTables, selected, onSelect, alwaysOpen,
+  mappingImported, onOpenFullImport,
 }: {
   label: string; side: Side;
   tables: (AsisTable | TobeTable)[];
@@ -655,6 +699,8 @@ function InventoryTree({
   selected: Selection;
   onSelect: (s: Selection) => void;
   alwaysOpen?: boolean;
+  mappingImported?: boolean;
+  onOpenFullImport?: () => void;
 }) {
   const [open, setOpen] = useState(true);
   const isOpen = alwaysOpen ?? open;
@@ -675,9 +721,26 @@ function InventoryTree({
 
       {isOpen && (
         <>
-          <div style={styles.ddlPath} title="imported 2026-05-19 14:02">
-            ↳ {side === 'asis' ? 'asis_schema_v2.ddl' : 'tobe_schema_v1.sql'}
-          </div>
+          {onOpenFullImport && (
+            <button
+              onClick={onOpenFullImport}
+              title="프로젝트 전체 매핑 정의서를 import / 재적용 (모든 테이블)"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                margin: '4px 10px 8px', padding: '6px 10px',
+                width: 'calc(100% - 20px)',
+                background: 'var(--panel)',
+                border: '1px solid var(--border-strong)',
+                borderRadius: 4,
+                color: mappingImported ? 'var(--text-3)' : 'var(--text-2)',
+                fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+              }}
+            >
+              {mappingImported
+                ? <><Ic.check /> Mapping Imported</>
+                : <><i className="fa-solid fa-download" style={{ fontSize: 11 }} /> Import Mapping</>}
+            </button>
+          )}
           {tables.length === 0 && <div style={styles.treeEmpty}>no tables match</div>}
           {tables.map((t) => (
             <InventoryItem
@@ -756,7 +819,7 @@ function InventoryItem({
 
 // ── Right: workspace ─────────────────────────────────────────
 
-function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, effectiveTobe, asisSkippedCols, onToggleAsisSkip }: {
+function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, effectiveTobe, asisSkippedCols, onToggleAsisSkip, hydrationTick }: {
   selected: Selection;
   onSelect: (s: Selection) => void;
   tableBindingEdits: Record<string, TableBindingEdit>;
@@ -764,6 +827,7 @@ function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, eff
   effectiveTobe: TobeTable[];
   asisSkippedCols: Record<string, Record<string, boolean>>;
   onToggleAsisSkip: (tableName: string, colName: string, nextSkip: boolean) => void;
+  hydrationTick: number;
 }) {
   if (!selected) return <GuidePanel />;
   if (selected.side === 'tobe') {
@@ -778,6 +842,7 @@ function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, eff
         rows={rows}
         bindingEdit={bindingEdit}
         onBindingChange={(edit) => onBindingChange(table.internalName, edit)}
+        hydrationTick={hydrationTick}
       />
     );
   }
@@ -797,15 +862,17 @@ function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, eff
 
 // ── TO-BE mapping detail ─────────────────────────────────────
 
-function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
+function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydrationTick }: {
   table: TobeTable;
   rows: MappingRow[];
   bindingEdit?: TableBindingEdit;
   onBindingChange: (edit: TableBindingEdit) => void;
+  hydrationTick: number;
 }) {
   const navigate = useNavigate();
   const [bindingOpen, setBindingOpen] = useState((bindingEdit?.sources ?? table.sources).length === 0);
   const [bindingPulse, setBindingPulse] = useState(false);
+  const readOnly = useActiveProjectReadOnly();
   const triggerBindingHighlight = () => {
     setBindingOpen(true);
     setBindingPulse(true);
@@ -1014,7 +1081,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
     hydrateBindingsFromDb(activeProjectIdForRow);
     hydrateRowEditsFromDb(activeProjectIdForRow);
     return () => { cancelled = true; };
-  }, [activeProjectIdForRow, baselineSnapshot?.id, hydrateBindingsFromDb, hydrateRowEditsFromDb]);
+    // hydrationTick: 전체(프로젝트) import 후 status/룰/바인딩을 다시 읽어 toolbar·그리드 갱신.
+  }, [activeProjectIdForRow, baselineSnapshot?.id, hydrateBindingsFromDb, hydrateRowEditsFromDb, hydrationTick]);
   const rowEdits = useMappingEditsStore(
     (s) => (activeProjectIdForRow ? s.rowEdits[activeProjectIdForRow]?.[table.internalName] : undefined) || EMPTY_ROW_EDITS,
   );
@@ -1040,7 +1108,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
     return () => window.clearInterval(id);
   }, [testStatus]);
   const handleSaveEdit = useCallback(async (r: MappingRow, edit: RowEdit) => {
-    if (!activeProjectIdForRow) return;
+    if (!activeProjectIdForRow || readOnly) return;
     // 사용자가 row 편집기에서 저장한 것 = manual
     const editWithOrigin: RowEdit = { ...edit, ruleOrigin: 'manual' };
     useMappingEditsStore.getState().setRowEdit(activeProjectIdForRow, table.internalName, r.tgt, editWithOrigin);
@@ -1093,7 +1161,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
     // listRules 가 사용자 값을 받고 rowEdits 에 정상 반영. 먼저 clearPin 하면 hydrate 가
     // 옛 live 데이터를 가져와 사용자 변경값을 덮어쓰는 race 가 발생.
     clearBaselineIfPinned();
-  }, [activeProjectIdForRow, table.internalName, table.name, bindingEdit, clearBaselineIfPinned]);
+    demoteToAnalysisOnEdit(activeProjectIdForRow);
+  }, [activeProjectIdForRow, table.internalName, table.name, bindingEdit, clearBaselineIfPinned, readOnly]);
   const [bindingSources, setBindingSources] = useState(bindingEdit?.sources ?? table.sources);
   const [bindingMode, setBindingMode] = useState<'join' | 'union'>(
     bindingEdit?.mode ?? (table.compositionKind === 'union' ? 'union' : 'join'),
@@ -1288,9 +1357,10 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
             ? { ...styles.btnSecondary, color: 'var(--text-3)' }
             : styles.btnSecondary}
           onClick={() => setImportMappingOpen(true)}
+          title="이 TO-BE 테이블만 매핑 정의서로 재매칭"
         >{mappingImported
-            ? <><Ic.check /> Mapping Imported</>
-            : <><i className="fa-solid fa-download" style={{ fontSize: 11 }} /> Import Mapping</>}</button>
+            ? <><Ic.check /> Table mapped</>
+            : <><i className="fa-solid fa-table" style={{ fontSize: 11 }} /> Re-map table</>}</button>
       </div>
       {importMappingOpen && (
         <MappingDefinitionImportModal
@@ -1298,6 +1368,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
           activeFiles={{ column: mappingStatus.columnFilename, code: mappingStatus.codeFilename }}
           onClose={() => setImportMappingOpen(false)}
           onChanged={refreshMappingStatus}
+          tableFilter={table.name.split('.').pop() || table.name}
         />
       )}
       {importYamlOpen && (
@@ -1377,7 +1448,15 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange }: {
                   <tr
                     key={`${r.src}>${r.tgt}-${i}`}
                     data-fix-row={r.rule === 'unmapped' ? 'tobe-unmapped' : undefined}
-                    onClick={() => { setActiveIdx(realIdx); setInspectorOpen(true); }}
+                    onClick={() => {
+                      // 같은 행을 다시 누르면 inspector 를 닫는다 (토글). 다른 행이면 그 행으로 열기.
+                      if (inspectorOpen && activeIdx === realIdx) {
+                        setInspectorOpen(false);
+                      } else {
+                        setActiveIdx(realIdx);
+                        setInspectorOpen(true);
+                      }
+                    }}
                     style={{
                       background: isActive ? 'var(--navy-50)' : (i % 2 === 1 ? 'var(--zebra)' : 'var(--panel)'),
                       borderBottom: '1px solid var(--border)',
@@ -1497,13 +1576,14 @@ function StatusFor({ row }: { row: MappingRow }) {
  * Tab/Enter 로 선택, Esc 로 닫음, ↑↓ 로 이동.
  */
 function AutocompleteInput({
-  value, onChange, completions, placeholder, style,
+  value, onChange, completions, placeholder, style, disabled,
 }: {
   value: string;
   onChange: (v: string) => void;
   completions: string[];
   placeholder?: string;
   style?: React.CSSProperties;
+  disabled?: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [focused, setFocused] = useState(false);
@@ -1557,6 +1637,7 @@ function AutocompleteInput({
       <input
         ref={inputRef}
         value={value}
+        disabled={disabled}
         onChange={(e) => {
           savedCursor.current = e.target.selectionStart;
           onChange(e.target.value);
@@ -1595,6 +1676,14 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
   whereFilter: string; onWhereChange: (v: string) => void;
 }) {
   const t = useT();
+  const readOnly = useActiveProjectReadOnly();
+  // "AS-IS source not bound →" 배지 클릭 시 pulse 가 켜지면 이 패널로 스크롤 + 강조.
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (pulse && wrapRef.current) {
+      wrapRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [pulse]);
   const [addingSource, setAddingSource] = useState(false);
   const [pickTable, setPickTable] = useState('');
   const [pickAlias, setPickAlias] = useState('');
@@ -1615,6 +1704,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
   }, [sources, table.internalName]);
 
   const startAdd = () => {
+    if (readOnly) return;
     const first = availableTables[0];
     setPickTable(first?.name ?? '');
     setPickAlias(first ? first.short.slice(0, 2).toLowerCase() : '');
@@ -1622,6 +1712,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
   };
 
   const confirmAdd = () => {
+    if (readOnly) return;
     const asisTable = ASIS_TABLES.find((t) => t.name === pickTable);
     if (!asisTable || !pickAlias.trim()) return;
     const role = sources.length === 0 ? 'primary' : (compositionMode === 'union' ? 'union' : 'join');
@@ -1638,11 +1729,21 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
     setAddingSource(false);
   };
 
-  const updateSource = (alias: string, patch: Partial<typeof sources[0]>) =>
+  const updateSource = (alias: string, patch: Partial<typeof sources[0]>) => {
+    if (readOnly) return;
     onSourcesChange(sources.map((s) => s.alias === alias ? { ...s, ...patch } : s));
+  };
 
   return (
-    <div style={styles.bindingWrap} data-fix-block="tobe-binding">
+    <div
+      ref={wrapRef}
+      style={{
+        ...styles.bindingWrap,
+        transition: 'box-shadow 0.3s ease',
+        ...(pulse ? { boxShadow: 'inset 0 0 0 2px #0E7C7B, 0 0 0 4px rgba(14,124,123,0.22)' } : {}),
+      }}
+      data-fix-block="tobe-binding"
+    >
       <div onClick={onToggle} style={styles.bindingHeader}>
         <span style={{ color: 'var(--text-4)', fontSize: 10, width: 10 }}>{open ? '▾' : '▸'}</span>
         <span style={styles.bindingLabel}>Table binding</span>
@@ -1691,11 +1792,13 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
             {sources.length >= 2 && (
               <div style={styles.modeToggle}>
                 <button
-                  onClick={(e) => { e.stopPropagation(); onCompositionModeChange('join'); }}
+                  onClick={(e) => { e.stopPropagation(); if (!readOnly) onCompositionModeChange('join'); }}
+                  disabled={readOnly}
                   style={{ ...styles.modeBtn, ...(compositionMode !== 'union' ? styles.modeBtnActive : {}) }}
                 >⋈ JOIN</button>
                 <button
-                  onClick={(e) => { e.stopPropagation(); onCompositionModeChange('union'); }}
+                  onClick={(e) => { e.stopPropagation(); if (!readOnly) onCompositionModeChange('union'); }}
+                  disabled={readOnly}
                   style={{ ...styles.modeBtn, ...(compositionMode === 'union' ? styles.modeBtnActive : {}) }}
                 >∪ UNION</button>
               </div>
@@ -1704,7 +1807,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
             <button
               style={styles.btnGhost}
               onClick={(e) => { e.stopPropagation(); startAdd(); }}
-              disabled={availableTables.length === 0 || addingSource}
+              disabled={availableTables.length === 0 || addingSource || readOnly}
             >
               <Ic.plus /> Add source
             </button>
@@ -1739,17 +1842,20 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
                       <select
                         value={s.joinType ?? 'LEFT JOIN'}
                         onChange={(e) => updateSource(s.alias, { joinType: e.target.value })}
+                        disabled={readOnly}
                         style={styles.joinSelect}
                       >
                         <option>LEFT JOIN</option><option>INNER JOIN</option><option>RIGHT JOIN</option><option>FULL JOIN</option>
                       </select>
                     )}
                     <div style={{ flex: 1 }} />
-                    <button
-                      onClick={() => onSourcesChange(sources.filter((s2) => s2.alias !== s.alias))}
-                      title="Remove source"
-                      style={styles.srcRemoveBtn}
-                    >×</button>
+                    {!readOnly && (
+                      <button
+                        onClick={() => onSourcesChange(sources.filter((s2) => s2.alias !== s.alias))}
+                        title="Remove source"
+                        style={styles.srcRemoveBtn}
+                      >×</button>
+                    )}
                   </div>
                   {s.role === 'join' && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1760,6 +1866,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
                         onChange={(v) => updateSource(s.alias, { joinOn: v })}
                         placeholder={`${s.alias}.id = primary.id`}
                         style={styles.joinOnInput}
+                        disabled={readOnly}
                       />
                     </div>
                   )}
@@ -1807,6 +1914,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
                 onChange={onWhereChange}
                 placeholder={`예: ${sources[0].alias}.party_type = 'P'`}
                 style={styles.whereInput}
+                disabled={readOnly}
               />
             </div>
           )}
@@ -2185,6 +2293,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   onClose: () => void;
 }) {
   const t = useT();
+  const readOnly = useActiveProjectReadOnly();
   const [editingRule, setEditingRule] = useState(false);
   const [editValue, setEditValue] = useState('');
   const [savedRule, setSavedRule] = useState<string | null>(null);
@@ -2195,6 +2304,8 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   const [savedSrcType, setSavedSrcType] = useState<string[] | null>(null);
   const [editStrategy, setEditStrategy] = useState<'expression' | 'null' | 'default'>('expression');
   const [savedStrategy, setSavedStrategy] = useState<'expression' | 'null' | 'default' | null>(null);
+  const [savedDefault, setSavedDefault] = useState<string | null>(null);
+  const [editDefault, setEditDefault] = useState('');
   const [userFnOpen, setUserFnOpen] = useState(false);
   const [javaCode, setJavaCode] = useState('');
   const [notesOpen, setNotesOpen] = useState(false);
@@ -2206,6 +2317,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     const re = rowEdit;
     setSavedRule(re?.savedRule ?? null);
     setSavedStrategy(re?.savedStrategy ?? null);
+    setSavedDefault(re?.savedDefault ?? null);
     const src = re?.savedSrc ?? null;
     setSavedSrc(src);
     setSavedSrcType(src ? src.map((s) => resolveSrcType(s, sources)) : null);
@@ -2231,8 +2343,11 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   };
 
   const handleEdit = () => {
+    if (readOnly) return;
     const inferredStrategy = savedStrategy ?? (active.rule === 'null' ? 'null' : active.rule === 'default' ? 'default' : 'expression');
     setEditStrategy(inferredStrategy);
+    // default 값은 사용자가 저장한 값 우선, 없으면 매핑 정의서/DDL 의 default 를 초기값으로.
+    setEditDefault(savedDefault ?? active.ddlDefault ?? '');
     // Filter out stale alias references no longer present in current binding
     const rawSrc = savedSrc ?? initSrc;
     const cleanedSrc = rawSrc.filter((s) => {
@@ -2279,10 +2394,13 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     const newSrc = filledSrcs.length > 0 ? filledSrcs : null;
     setSavedSrc(newSrc);
     setSavedSrcType(newSrc ? newSrc.map(resolveType) : null);
+    const defaultToSave = editStrategy === 'default' ? (editDefault.trim() || null) : null;
+    setSavedDefault(defaultToSave);
     onSave({
       savedRule: ruleToSave ?? undefined,
       savedSrc: newSrc ?? [],
       savedStrategy: editStrategy,
+      savedDefault: defaultToSave ?? undefined,
     });
     setEditingRule(false);
   };
@@ -2544,29 +2662,15 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
                 <span style={{ color: '#7a8aa6' }}>{' '}-- 이 컬럼은 항상 NULL 로 출력됩니다</span>
               </div>
             )}
-            {editStrategy === 'default' && (() => {
-              const dv = (active.ddlDefault || 'NULL').trim();
-              const t = active.tgtType.toUpperCase();
-              const isText = t.includes('CHAR') || t.includes('TEXT') || t.includes('VARCHAR') || t.includes('JSONB') || t.includes('UUID');
-              const isNumber = /^-?\d+(\.\d+)?$/.test(dv);
-              const isKeyword = ['NULL', 'TRUE', 'FALSE', 'CURRENT_TIMESTAMP', 'NOW()'].includes(dv.toUpperCase());
-              const literal = isKeyword ? dv.toUpperCase()
-                : isNumber ? dv
-                : isText ? `'${dv.replace(/'/g, "''")}'`
-                : dv;
-              return (
-                <div style={styles.codeBlock}>
-                  <div>
-                    <span style={{ color: '#7a8aa6' }}>-- 모든 행에 대해 이 값으로 채움</span>
-                  </div>
-                  <div>
-                    <span style={{ color: '#9fd9b3' }}>{literal}</span>
-                    <span style={{ color: '#7a8aa6' }}>::{active.tgtType}</span>
-                    <span style={{ color: '#7a8aa6' }}>{' '}<span style={{ color: '#e8b86f' }}>AS</span> {active.tgt}</span>
-                  </div>
-                </div>
-              );
-            })()}
+            {editStrategy === 'default' && (
+              <HighlightEditor
+                value={editDefault}
+                onChange={setEditDefault}
+                language="sql"
+                placeholder={`예: 0  /  'N'  /  CURRENT_TIMESTAMP  (비우면 NULL — 모든 행에 이 값으로 채움)`}
+                minHeight={48}
+              />
+            )}
           </>
         ) : (() => {
           const effectiveStrategy = savedStrategy ?? (active.rule === 'null' ? 'null' : active.rule === 'default' ? 'default' : 'expression');
@@ -2579,7 +2683,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
             );
           }
           if (effectiveStrategy === 'default') {
-            const dv = (active.ddlDefault || '').trim();
+            const dv = (savedDefault ?? active.ddlDefault ?? '').trim();
             if (!dv) {
               return (
                 <div style={styles.codeBlock}>
@@ -2588,19 +2692,10 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
                 </div>
               );
             }
-            const t = active.tgtType.toUpperCase();
-            const isText = t.includes('CHAR') || t.includes('TEXT') || t.includes('VARCHAR') || t.includes('JSONB') || t.includes('UUID');
-            const isNumber = /^-?\d+(\.\d+)?$/.test(dv);
-            const isKeyword = ['NULL', 'TRUE', 'FALSE', 'CURRENT_TIMESTAMP', 'NOW()'].includes(dv.toUpperCase());
-            const literal = isKeyword ? dv.toUpperCase()
-              : isNumber ? dv
-              : isText ? `'${dv.replace(/'/g, "''")}'`
-              : dv;
             return (
               <div style={styles.codeBlock}>
                 <div>
-                  <span style={{ color: '#9fd9b3' }}>{literal}</span>
-                  <span style={{ color: '#7a8aa6' }}>::{active.tgtType}</span>
+                  <span style={{ color: '#9fd9b3' }}>{dv}</span>
                   <span style={{ color: '#7a8aa6' }}>{' '}<span style={{ color: '#e8b86f' }}>AS</span> {active.tgt}</span>
                 </div>
               </div>
@@ -2644,6 +2739,8 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
             <button onClick={handleSave} style={styles.btnPrimarySm}>Save</button>
             <button onClick={() => setEditingRule(false)} style={styles.btnSecondary}>Cancel</button>
           </>
+        ) : readOnly ? (
+          <span style={{ fontSize: 11, color: 'var(--text-3)', fontStyle: 'italic' }}>Read-only</span>
         ) : (
           <>
             <button onClick={handleEdit} style={styles.btnPrimarySm}>Edit rule</button>
@@ -2715,8 +2812,11 @@ function ImportFileModal({
               style={{ display: 'none' }}
             />
             {file ? (
-              <div style={{ textAlign: 'center' }}>
-                <div style={{ fontFamily: 'var(--mono)', fontWeight: 600, fontSize: 13 }}>{file.name}</div>
+              <div style={{ textAlign: 'center', maxWidth: '100%', minWidth: 0 }}>
+                <div
+                  style={{ fontFamily: 'var(--mono)', fontWeight: 600, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }}
+                  title={file.name}
+                >{file.name}</div>
                 <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 4 }}>
                   {(file.size / 1024).toFixed(1)} KB · 다른 파일을 선택하려면 다시 클릭
                 </div>
@@ -2826,13 +2926,15 @@ function bindingsEqual(a: FrozenBinding[], b: MappingTableBindingDto[]): boolean
 }
 
 function MappingDefinitionImportModal({
-  projectId, activeFiles, onClose, onChanged,
+  projectId, activeFiles, onClose, onChanged, tableFilter,
 }: {
   projectId: string;
   activeFiles: { column: string | null; code: string | null };
   onClose: () => void;
   /** Returns the list of TO-BE qualified names from DB bindings that didn't match TOBE_TABLES. */
   onChanged: () => Promise<string[]>;
+  /** null/undefined = 프로젝트 전체. 값이 있으면 그 TO-BE 테이블만 적용 (스키마 제외 테이블명). */
+  tableFilter?: string | null;
 }) {
   const t = useT();
   const [columnPending, setColumnPending] = useState<SlotPending>({ kind: 'none' });
@@ -2857,11 +2959,11 @@ function MappingDefinitionImportModal({
       const codFile = codePending.kind   === 'upload' ? codePending.file   : null;
       const anyPending = columnPending.kind !== 'none' || codePending.kind !== 'none';
       if (colFile || codFile) {
-        await mappingImportApi.importCsv(projectId, colFile, codFile);
+        await mappingImportApi.importCsv(projectId, colFile, codFile, tableFilter ?? null);
       } else if (!anyPending && (activeFiles.column || activeFiles.code)) {
         // 사용자가 파일 다시 안 고르고 Apply 만 누름 → 마지막 임포트 CSV 로 재적용
-        // (수동 수정된 룰 reset)
-        await mappingImportApi.reapplyLatest(projectId);
+        // (수동 수정된 룰 reset). tableFilter 있으면 그 테이블만.
+        await mappingImportApi.reapplyLatest(projectId, tableFilter ?? null);
       }
       await mappingImportApi.rebuildBindings(projectId);
 
@@ -2920,7 +3022,7 @@ function MappingDefinitionImportModal({
     <div style={styles.modalBackdrop} onClick={saving ? undefined : onClose}>
       <div style={{ ...styles.modalCard, width: 520 }} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
-          <div style={styles.modalTitle}>Mapping Definition</div>
+          <div style={styles.modalTitle}>Mapping Definition{tableFilter ? ` · ${tableFilter}` : ''}</div>
           <div style={{ flex: 1 }} />
           <a
             href="/templates/mapping_definition_template.csv"
@@ -2944,7 +3046,7 @@ function MappingDefinitionImportModal({
             displayMode={colDisp.mode}
             onPick={(f) => setColumnPending({ kind: 'upload', file: f })}
             onDelete={() => setColumnPending({ kind: 'delete' })}
-            canDelete={activeFiles.column !== null && columnPending.kind !== 'delete'}
+            canDelete={!tableFilter && activeFiles.column !== null && columnPending.kind !== 'delete'}
           />
           <MappingFileRow
             label="Code mapping"
@@ -2952,7 +3054,7 @@ function MappingDefinitionImportModal({
             displayMode={codDisp.mode}
             onPick={(f) => setCodePending({ kind: 'upload', file: f })}
             onDelete={() => setCodePending({ kind: 'delete' })}
-            canDelete={activeFiles.code !== null && codePending.kind !== 'delete'}
+            canDelete={!tableFilter && activeFiles.code !== null && codePending.kind !== 'delete'}
           />
           {warning && (
             <div style={{ ...styles.modalHint, background: 'var(--amber-50)', borderColor: 'var(--amber)', color: 'var(--amber)' }}>
@@ -2999,6 +3101,7 @@ function MappingFileRow({
 
   const nameStyle: React.CSSProperties = {
     flex: 1,
+    minWidth: 0, // flex item 기본 min-width:auto 면 ellipsis 가 작동 안 해 긴 파일명이 박스를 뚫는다.
     fontFamily: 'var(--mono)',
     fontSize: 12,
     color: displayName == null ? 'var(--text-4)' : 'var(--text)',
@@ -3020,6 +3123,7 @@ function MappingFileRow({
         {/* 흰 박스 — 파일명과 아이콘 모두 감싼다 */}
         <div style={{
           flex: 1,
+          minWidth: 0,
           display: 'flex', alignItems: 'center', gap: 4,
           padding: '6px 10px',
           background: 'var(--panel)',
@@ -3265,8 +3369,16 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
           <span style={styles.dbvTitleText}>{shortName} - Report</span>
         </div>
         <div style={styles.dbvTitlebarRight}>
-          <span style={styles.dbvTitleBtn}>─</span>
-          <span style={styles.dbvTitleBtn}>▢</span>
+          <span style={styles.dbvTitleBtn} aria-hidden="true">
+            <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round">
+              <line x1="2" y1="8" x2="8" y2="8" />
+            </svg>
+          </span>
+          <span style={styles.dbvTitleBtn} aria-hidden="true">
+            <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.3">
+              <rect x="1.3" y="1.3" width="7.4" height="7.4" rx="1" />
+            </svg>
+          </span>
           <button
             type="button"
             onClick={onClose}
@@ -3379,7 +3491,7 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
                 >
                   <button
                     type="button"
-                    onClick={() => { void navigator.clipboard.writeText(buildReportErrorMessage(report, t)); }}
+                    onClick={() => { void copyText(buildReportErrorMessage(report, t)); }}
                     title="에러 메시지를 클립보드에 복사"
                     style={{
                       position: 'absolute', top: 8, right: 10,
@@ -3614,6 +3726,7 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
   onToggleSkip: (colName: string, nextSkip: boolean) => void;
   onJumpTobe: (internalName: string, name: string) => void;
 }) {
+  const readOnly = useActiveProjectReadOnly();
   const cols = ASIS_COLUMNS[table.name] || [];
   const [colFilter, setColFilter] = useState<AsisColFilter>('all');
   const routedTobe = effectiveTobe.filter((t) => t.sources.some((s) => s.table === table.name));
@@ -3760,11 +3873,11 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
                         {status === 'mapped' ? (
                           <span style={{ color: 'var(--text-4)', fontSize: 10 }}>—</span>
                         ) : status === 'skip' ? (
-                          <button style={styles.skipBtnOn} onClick={() => onToggleSkip(c.name, false)}>
+                          <button style={styles.skipBtnOn} disabled={readOnly} onClick={() => onToggleSkip(c.name, false)}>
                             ✓ Skipped
                           </button>
                         ) : (
-                          <button style={styles.skipBtnOff} onClick={() => onToggleSkip(c.name, true)}>
+                          <button style={styles.skipBtnOff} disabled={readOnly} onClick={() => onToggleSkip(c.name, true)}>
                             Skip
                           </button>
                         )}
@@ -4089,12 +4202,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 9.5, fontFamily: 'var(--mono)',
   },
   statChip: { padding: '0 5px', borderRadius: 2, border: '1px solid' },
-  ddlPath: {
-    margin: '2px 10px 4px', padding: '4px 8px',
-    background: 'var(--panel-2)', borderRadius: 2,
-    fontSize: 9.5, fontFamily: 'var(--mono)', color: 'var(--text-3)',
-    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-  },
   treeEmpty: { padding: '8px 14px', fontSize: 10.5, color: 'var(--text-3)' },
 
   invItem: { padding: '4px 12px', cursor: 'pointer' },

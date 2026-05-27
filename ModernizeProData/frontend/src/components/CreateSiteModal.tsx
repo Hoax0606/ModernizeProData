@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Modal } from './Modal';
 import {
   useWorkspaceStore,
@@ -116,6 +116,12 @@ export function CreateSiteModal({ open, onClose }: Props) {
     setTestStatus('idle');
     setTestMessage(null);
   };
+
+  // 모달을 열 때마다 폼을 초기화한다 (닫았다 다시 열어도 이전 입력값이 남지 않게).
+  useEffect(() => {
+    if (open) reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const blockedByProd = stage === 'production' && !isMaster;
 

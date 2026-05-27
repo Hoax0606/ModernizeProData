@@ -99,10 +99,12 @@ export const mappingImportApi = {
     projectId: string,
     columnMapping?: File | null,
     codeMapping?: File | null,
+    tobeTable?: string | null,
   ): Promise<MappingImport> => {
     const fd = new FormData();
     if (columnMapping) fd.append('columnMapping', columnMapping);
     if (codeMapping) fd.append('codeMapping', codeMapping);
+    if (tobeTable) fd.append('tobeTable', tobeTable);
     return unwrap(api.post<ApiResponse<MappingImport>>(
       `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/import`,
       fd,
@@ -172,10 +174,11 @@ export const mappingImportApi = {
       `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/rebuild-bindings`,
     )),
 
-  /** Re-apply the latest stored CSV content — resets manual rule edits. */
-  reapplyLatest: (projectId: string): Promise<MappingImport> =>
+  /** Re-apply the latest stored CSV content — resets manual rule edits.
+   *  tobeTable 지정 시 그 테이블만 재적용. */
+  reapplyLatest: (projectId: string, tobeTable?: string | null): Promise<MappingImport> =>
     unwrap(api.post<ApiResponse<MappingImport>>(
-      `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/reapply`,
+      `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/reapply${tobeTable ? `?tobeTable=${encodeURIComponent(tobeTable)}` : ''}`,
     )),
 
   /**

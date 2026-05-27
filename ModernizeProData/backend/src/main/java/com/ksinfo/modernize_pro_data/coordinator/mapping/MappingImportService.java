@@ -83,6 +83,24 @@ public class MappingImportService {
             String codeFilename,
             String userName
     ) {
+        return importFromCsv(projectId, columnCsv, columnFilename, codeCsv, codeFilename, userName, null);
+    }
+
+    /**
+     * tobeTableFilter null = 프로젝트 전체 (기존 동작). 값이 있으면 그 TO-BE 테이블의
+     * rule/binding 만 갱신하고(다른 테이블·수동 수정 보존), code 는 그 테이블이 참조하는
+     * domain 만 갱신한다.
+     */
+    @Transactional
+    public MappingImport importFromCsv(
+            String projectId,
+            byte[] columnCsv,
+            String columnFilename,
+            byte[] codeCsv,
+            String codeFilename,
+            String userName,
+            String tobeTableFilter
+    ) {
         if ((columnCsv == null || columnCsv.length == 0) && (codeCsv == null || codeCsv.length == 0)) {
             throw new ApiException(
                     "MAPPING_IMPORT_EMPTY",
@@ -100,6 +118,14 @@ public class MappingImportService {
             if (hasColumn) {
                 columnTmp = writeTemp(columnCsv, "column_mapping");
                 parsed = parseColumnCsv(columnTmp);
+                // 테이블 단위 적용이면 그 TO-BE 테이블의 룰만 남긴다.
+                if (tobeTableFilter != null) {
+                    List<RuleRow> only = new ArrayList<>();
+                    for (RuleRow r : parsed.rules) {
+                        if (tobeTableFilter.equals(r.tobeTable)) only.add(r);
+                    }
+                    parsed = new ParsedRules(only);
+                }
             }
 
             ParsedCodes codes = new ParsedCodes(List.of());
@@ -131,10 +157,24 @@ public class MappingImportService {
 
             // (a) code map 부터 처리 — column 의 transform_sql 자동 생성 (CASE) 시 lookup 필요
             if (hasCode) {
-                codeRepo.deleteAllByProjectId(projectId);
-                codeRepo.flush();
+                // 테이블 단위면 그 테이블의 룰이 참조하는 domain 만 갱신 (parsed 는 위에서 필터됨).
+                Set<String> codeDomains = null;
+                if (tobeTableFilter != null) {
+                    codeDomains = new HashSet<>();
+                    for (RuleRow r : parsed.rules) {
+                        if (r.codeDomain != null && !r.codeDomain.isBlank()) codeDomains.add(r.codeDomain);
+                    }
+                }
+                if (tobeTableFilter == null) {
+                    codeRepo.deleteAllByProjectId(projectId);
+                    codeRepo.flush();
+                } else if (!codeDomains.isEmpty()) {
+                    codeRepo.deleteByProjectIdAndDomainIn(projectId, codeDomains);
+                    codeRepo.flush();
+                }
                 List<MappingCodeMap> codeEntities = new ArrayList<>(codes.codes.size());
                 for (CodeRow row : codes.codes) {
+                    if (codeDomains != null && !codeDomains.contains(row.domain)) continue;
                     MappingCodeMap e = new MappingCodeMap();
                     e.setId("mc-" + UUID.randomUUID().toString().substring(0, 8));
                     e.setProjectId(projectId);
@@ -207,7 +247,8 @@ public class MappingImportService {
                     row.transformRule = row.transformSql;
                 }
 
-                ruleRepo.deleteAllByProjectId(projectId);
+                if (tobeTableFilter == null) ruleRepo.deleteAllByProjectId(projectId);
+                else ruleRepo.deleteByProjectIdAndTobeTable(projectId, tobeTableFilter);
                 ruleRepo.flush();
                 List<MappingRule> ruleEntities = new ArrayList<>(parsed.rules.size());
                 for (RuleRow row : parsed.rules) {
@@ -216,7 +257,8 @@ public class MappingImportService {
                 ruleRepo.saveAll(ruleEntities);
 
                 // 룰에서 테이블 바인딩 자동 derive
-                bindingRepo.deleteAllByProjectId(projectId);
+                if (tobeTableFilter == null) bindingRepo.deleteAllByProjectId(projectId);
+                else bindingRepo.deleteByProjectIdAndTobeTable(projectId, tobeTableFilter);
                 bindingRepo.flush();
                 List<MappingTableBinding> bindings = deriveBindings(parsed.rules, projectId, mi.getId(), userName, now);
                 bindingRepo.saveAll(bindings);
@@ -485,6 +527,11 @@ public class MappingImportService {
 
     @Transactional
     public MappingImport reapplyLatest(String projectId, String userName) {
+        return reapplyLatest(projectId, userName, null);
+    }
+
+    @Transactional
+    public MappingImport reapplyLatest(String projectId, String userName, String tobeTableFilter) {
         // 가장 최근의 column_csv_content 가 있는 row + code_csv_content 가 있는 row 각각
         var history = importRepo.findByProjectIdOrderByImportedAtDesc(projectId);
         String columnCsv = null, columnFilename = null;
@@ -508,7 +555,7 @@ public class MappingImportService {
                 ? columnCsv.getBytes(java.nio.charset.StandardCharsets.UTF_8) : null;
         byte[] codeBytes = codeCsv != null
                 ? codeCsv.getBytes(java.nio.charset.StandardCharsets.UTF_8) : null;
-        return importFromCsv(projectId, columnBytes, columnFilename, codeBytes, codeFilename, userName);
+        return importFromCsv(projectId, columnBytes, columnFilename, codeBytes, codeFilename, userName, tobeTableFilter);
     }
 
     /* ──────────────────────────────────────────────

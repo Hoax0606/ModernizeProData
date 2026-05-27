@@ -27,4 +27,8 @@ public interface MappingTableBindingRepository extends JpaRepository<MappingTabl
     @Modifying
     @Query("DELETE FROM MappingTableBinding b WHERE b.projectId = :projectId")
     int deleteAllByProjectId(@Param("projectId") String projectId);
+
+    @Modifying
+    @Query("DELETE FROM MappingTableBinding b WHERE b.projectId = :projectId AND b.tobeTable = :tobeTable")
+    int deleteByProjectIdAndTobeTable(@Param("projectId") String projectId, @Param("tobeTable") String tobeTable);
 }

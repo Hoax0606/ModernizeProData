@@ -1,6 +1,0 @@
-domain,source_value,target_value,description
-FEE_KIND,BROKER,BROKER_FEE,委託手数料 / Broker Fee — AS-IS T_TRADE.FEE_AMT 列 → TO-BE trade_fee.fee_kind 'BROKER_FEE'
-FEE_KIND,TAX,TAX,税金 / Tax — AS-IS T_TRADE.TAX_AMT 列 → TO-BE trade_fee.fee_kind 'TAX'
-FEE_KIND,DIVIDEND,DIVIDEND,配当金 / Dividend — AS-IS T_TRADE_DETAIL.DETAIL_KBN 'D' → TO-BE trade_fee.fee_kind 'DIVIDEND'
-FEE_KIND,INTEREST,INTEREST,利息 / Interest — AS-IS T_TRADE_DETAIL.DETAIL_KBN 'I' → TO-BE trade_fee.fee_kind 'INTEREST'
-FEE_KIND,OTHER,OTHER,その他 / Other — AS-IS T_TRADE_DETAIL.DETAIL_KBN 'X' → TO-BE trade_fee.fee_kind 'OTHER'

@@ -179,7 +179,6 @@ export const ja: Record<TranslationKey, string> = {
   'solution.external.tokenCopied': 'Copied!',
   'solution.external.triggerExamples.title': 'Trigger commands',
   'solution.external.triggerExamples.desc':  '外部スケジューラから本ツールを trigger する curl コマンド。URL と token は上で入力した値、project ID は本ツール内で作成済みの各 project の ID が埋め込まれています。そのままコピペで実行可能。',
-  'solution.savedToast': '設定を保存しました。',
 
   'solution.license':            'License',
   'solution.license.desc':       '本サイト Coordinator のライセンス状態。期限前に更新が必要。',
@@ -663,7 +662,6 @@ export const ja: Record<TranslationKey, string> = {
   'asisDdl.button.import':    '+ Import AS-IS DDL',
   'asisDdl.button.loading':   'インポート中…',
   'asisDdl.error.prefix':     'エラー',
-  'asisDdl.toast.success':    'AS-IS DDL をインポートしました',
   'asisDdl.modal.title':              'AS-IS schema',
   'asisDdl.modal.loading':            '読み込み中…',
   'asisDdl.modal.empty':              'AS-IS DDL がまだインポートされていません',
@@ -732,6 +730,7 @@ export const ja: Record<TranslationKey, string> = {
   'siteSettings.csvPathHint': 'このパスの CSV をツールが自動的に Parquet へ変換します。別途 import は不要。',
   'siteSettings.csvPathPlaceholder': 'D:\\migration\\csv または \\\\server\\share\\csv',
   'siteSettings.csvPathBrowse': 'Browse',
+  'siteSettings.csvPathDialogTitle': 'AS-IS CSV フォルダ内のファイルを1つ選択してください (そのフォルダがパスとして指定されます)',
   'siteSettings.notes': 'Notes',
   'siteSettings.notesHint': '契約番号・サイトリーダー・メモ (任意)',
   'siteSettings.tobeDb': 'TO-BE Target DB',
@@ -799,8 +798,6 @@ export const ja: Record<TranslationKey, string> = {
   'encoding.utf8': 'UTF-8',
   'encoding.ebcdic': 'EBCDIC',
 
-  'dashboard.toast.siteCreated': 'サイトを作成しました。',
-  'dashboard.toast.projectCreated': 'プロジェクトを作成しました。',
   'dashboard.empty.title': 'No mapping targets yet',
   'dashboard.empty.hint': 'TO-BE DDL をインポートすると、テーブル一覧とマッピング状態がここに表示されます。',
   'dashboard.devCard.title': 'Tool info (dev only)',
@@ -939,7 +936,6 @@ export const ja: Record<TranslationKey, string> = {
   'projectSettings.action.save':                'Save',
   'projectSettings.action.saving':              'Saving…',
   'projectSettings.action.saveChanges':         'Save changes',
-  'projectSettings.action.savedToast':          '設定を保存しました。',
   'projectSettings.action.testConnection':      'Test connection',
   'projectSettings.action.testing':             'Testing connection…',
 
