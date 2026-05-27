@@ -36,7 +36,7 @@ import java.util.Map;
  *
  * PoC 1차 단순화:
  *   - composition_kind = 'single' 만 (다중 source join/union 은 추후)
- *   - asis_column[0] 만 사용 (combine 은 추후)
+ *   - asis_column 다중 = NULL-safe CONCAT combine (날짜 조립 등 복잡 결합은 transform_rule 로)
  *   - transform_sql multiline 은 skip (transform_rule 짧은 expression 만)
  *   - strategy='expression' + transform_rule + code_domain 만
  *   - where_filter 있으면 WHERE clause 추가
@@ -250,8 +250,22 @@ public class TransformStage implements StageRunner {
             return rule.getTransformRule();
         }
 
-        if (firstAsisCol != null) {
-            return alias + "." + quoteIdent(firstAsisCol);
+        // 기본: AS-IS 컬럼 참조. asisColumn 이 여러 개면 NULL-safe CONCAT 으로 combine
+        // (날짜 조립 등 구조적 결합은 transform_rule 로 — 위에서 이미 처리됨).
+        if (asisCols != null) {
+            java.util.List<String> valid = new java.util.ArrayList<>();
+            for (String c : asisCols) {
+                if (c != null && !c.isBlank()) valid.add(c.trim());
+            }
+            if (valid.size() == 1) {
+                return alias + "." + quoteIdent(valid.get(0));
+            }
+            if (valid.size() > 1) {
+                String joined = valid.stream()
+                        .map(c -> alias + "." + quoteIdent(c))
+                        .collect(java.util.stream.Collectors.joining(", "));
+                return "CONCAT(" + joined + ")";
+            }
         }
         return "NULL";
     }
