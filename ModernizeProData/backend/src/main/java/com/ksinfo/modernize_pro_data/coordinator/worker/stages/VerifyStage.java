@@ -42,8 +42,8 @@ import java.util.stream.Collectors;
  * 2 단계:
  *   1. row_count 비교 — DuckDB tobe_{table} (Transform 결과) vs PostgreSQL {tobe_table} (Load 결과).
  *      다르면 quarantine(verify.checksum) + fail, PK 비교 skip.
- *   2. row_count 가 같으면 PK 정렬 비교 — 양쪽 첫 N row 를 PK 로 정렬해 PK 값 비교.
- *      불일치 → quarantine(verify.sample) + fail. (행 정체성·누락 검출)
+ *   2. row_count 가 같으면 PK 정렬 전수 비교 — 양쪽 전체 row 를 PK 로 정렬해 모든 PK 값을 대조.
+ *      불일치 → quarantine(verify.rowmatch) + fail. (행 정체성·누락 검출)
  *
  * 값 정확성은 AuditStage 가 Load 전 전수로 책임지고, Verify 는 적재 정합성만 본다.
  * (Load 는 DuckDB 텍스트 → PG 단순 COPY 라 값 비교는 포맷 차이로 오탐만 늘림 → 제외.)
@@ -54,7 +54,6 @@ import java.util.stream.Collectors;
 public class VerifyStage implements StageRunner {
 
     private static final String STAGE_KEY = "verify";
-    private static final int SAMPLE_LIMIT = 100;
 
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
@@ -157,15 +156,15 @@ public class VerifyStage implements StageRunner {
                     ingest(ctx, "Verify mismatch " + tobeTable + ": DuckDB=" + duckCount + " vs PG=" + pgCount, false);
                     failedCount++;
                 } else {
-                    // row count 일치 → PK 정렬 비교 (행 정체성·누락 검출)
+                    // row count 일치 → PK 정렬 전수 비교 (행 정체성·누락 검출)
                     List<String> pkCols = pkColumns(columnsByTable.get(tobeTable));
-                    String pkMismatch = comparePkSamples(fqDuck, pgQualified, pkCols, dbConfig);
+                    String pkMismatch = compareAllPkRows(fqDuck, pgQualified, pkCols, dbConfig);
                     if (pkMismatch != null) {
                         Map<String, Object> sampleData = new HashMap<>();
-                        sampleData.put("reason", "PK sample mismatch");
+                        sampleData.put("reason", "PK row mismatch");
                         sampleData.put("detail", tobeTable + ": " + pkMismatch);
                         sampleData.put("severity", "error");
-                        sampleData.put("stageLabel", "verify.sample");
+                        sampleData.put("stageLabel", "verify.rowmatch");
                         sampleData.put("table", tobeTable);
                         sampleData.put("columns", List.of("pk", "detail"));
                         sampleData.put("columnRoles", List.of("pk", "violated"));
@@ -175,7 +174,7 @@ public class VerifyStage implements StageRunner {
                                 stage.getId(),
                                 binding.getId(),
                                 null,
-                                "PK sample mismatch — " + tobeTable,
+                                "PK row mismatch — " + tobeTable,
                                 QuarantineSeverity.error,
                                 sampleData,
                                 1,
@@ -189,7 +188,7 @@ public class VerifyStage implements StageRunner {
                     } else {
                         result.setStatus(StageTableStatus.success);
                         result.setRowCount(pgCount);
-                        ingest(ctx, "Verified " + tobeTable + ": " + pgCount + " rows (PK sample OK)", true);
+                        ingest(ctx, "Verified " + tobeTable + ": " + pgCount + " rows (all PK rows OK)", true);
                         successCount++;
                     }
                 }
@@ -250,54 +249,58 @@ public class VerifyStage implements StageRunner {
         return pks;
     }
 
-    /** 양쪽 첫 N row 를 PK 정렬해 PK 값 비교. 일치=null, 불일치=사유 메시지. PK 없으면 skip(null). */
-    private String comparePkSamples(String fqDuck, String pgQualified,
-                                    List<String> pkCols, Map<String, Object> dbConfig) throws Exception {
+    /**
+     * 양쪽 전체 row 를 PK 정렬해 모든 PK 값을 전수 비교. 일치=null, 불일치=사유 메시지. PK 없으면 skip(null).
+     *
+     * 대용량 대비 — 양쪽 ResultSet 을 PK 순서로 동시에 streaming 하며 row 단위 lockstep 비교한다.
+     * (전체 키를 메모리에 materialize 하지 않음. 첫 불일치에서 즉시 멈춘다.)
+     * row_count 는 호출 전에 이미 같음을 확인했지만, 한쪽이 먼저 소진되면 안전망으로 보고한다.
+     *
+     * (가시성 package-private — VerifyStageFullCompareTest 가 전수 비교 동작을 직접 검증.)
+     */
+    String compareAllPkRows(String fqDuck, String pgQualified,
+                            List<String> pkCols, Map<String, Object> dbConfig) throws Exception {
         if (pkCols.isEmpty()) return null;
         String selCols = pkCols.stream().map(VerifyStage::quoteIdent).collect(Collectors.joining(", "));
-        String duckSql = "SELECT " + selCols + " FROM " + fqDuck
-                + " ORDER BY " + selCols + " LIMIT " + SAMPLE_LIMIT;
-        String pgSql = "SELECT " + selCols + " FROM " + pgQualified
-                + " ORDER BY " + selCols + " LIMIT " + SAMPLE_LIMIT;
+        String duckSql = "SELECT " + selCols + " FROM " + fqDuck + " ORDER BY " + selCols;
+        String pgSql   = "SELECT " + selCols + " FROM " + pgQualified + " ORDER BY " + selCols;
 
-        List<String> duckKeys;
-        try (Statement st = duckDbService.statement();
-             ResultSet rs = st.executeQuery(duckSql)) {
-            duckKeys = readKeys(rs, pkCols.size());
-        }
-        List<String> pgKeys;
-        try (Connection conn = pgCopyManager.openConnection(dbConfig);
-             Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery(pgSql)) {
-            pgKeys = readKeys(rs, pkCols.size());
-        }
-
-        int n = Math.min(duckKeys.size(), pgKeys.size());
-        for (int i = 0; i < n; i++) {
-            if (!duckKeys.get(i).equals(pgKeys.get(i))) {
-                return "PK mismatch at row " + (i + 1)
-                        + ": DuckDB=" + duckKeys.get(i) + " vs PG=" + pgKeys.get(i);
+        int colCount = pkCols.size();
+        long row = 0;
+        try (Statement duckSt = duckDbService.statement();
+             ResultSet duckRs = duckSt.executeQuery(duckSql);
+             Connection conn = pgCopyManager.openConnection(dbConfig);
+             Statement pgSt = conn.createStatement();
+             ResultSet pgRs = pgSt.executeQuery(pgSql)) {
+            while (true) {
+                boolean duckHas = duckRs.next();
+                boolean pgHas = pgRs.next();
+                if (!duckHas && !pgHas) break;   // 둘 다 끝 → 전수 일치
+                row++;
+                if (duckHas != pgHas) {
+                    return "PK row count mismatch near row " + row + ": "
+                            + (duckHas ? "DuckDB has more rows" : "DuckDB exhausted")
+                            + " / " + (pgHas ? "PG has more rows" : "PG exhausted");
+                }
+                String duckKey = readKey(duckRs, colCount);
+                String pgKey = readKey(pgRs, colCount);
+                if (!duckKey.equals(pgKey)) {
+                    return "PK mismatch at row " + row + ": DuckDB=" + duckKey + " vs PG=" + pgKey;
+                }
             }
-        }
-        if (duckKeys.size() != pgKeys.size()) {
-            return "PK sample size mismatch: DuckDB=" + duckKeys.size() + " vs PG=" + pgKeys.size();
         }
         return null;
     }
 
-    /** ResultSet 의 각 row PK 컬럼들을 '|' 로 이은 텍스트 키 목록으로. NULL 은 \\N. */
-    private static List<String> readKeys(ResultSet rs, int colCount) throws Exception {
-        List<String> keys = new ArrayList<>();
-        while (rs.next()) {
-            StringBuilder sb = new StringBuilder();
-            for (int i = 1; i <= colCount; i++) {
-                if (i > 1) sb.append("|");
-                Object v = rs.getObject(i);
-                sb.append(v == null ? "\\N" : v.toString());
-            }
-            keys.add(sb.toString());
+    /** 현재 ResultSet row 의 PK 컬럼들을 '|' 로 이은 텍스트 키로. NULL 은 \\N. */
+    private static String readKey(ResultSet rs, int colCount) throws Exception {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 1; i <= colCount; i++) {
+            if (i > 1) sb.append("|");
+            Object v = rs.getObject(i);
+            sb.append(v == null ? "\\N" : v.toString());
         }
-        return keys;
+        return sb.toString();
     }
 
     private static String pgTableName(String tobeSchema, String tobeTable) {
