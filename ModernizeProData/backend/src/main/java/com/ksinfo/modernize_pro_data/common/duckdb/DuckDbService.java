@@ -6,11 +6,16 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
 
 /**
  * DuckDB 임베디드 서비스.
@@ -39,6 +44,9 @@ public class DuckDbService {
     @Value("${modernize.duckdb.file-path:./data/duckdb.db}")
     private String filePath;
 
+    @Value("${modernize.duckdb.temp-directory:./data/duckdb-tmp}")
+    private String tempDirectory;
+
     private Connection connection;
 
     public synchronized Connection getConnection() throws SQLException {
@@ -50,8 +58,62 @@ public class DuckDbService {
             UdfRegistry.registerAll(connection);
             // encodings 확장 — Shift-JIS/EUC-JP 등 비 UTF-8 CSV 적재용 (ExtractStage encoding=).
             loadEncodingsExtension(connection);
+            // 대용량 spill — operator(JOIN/sort/aggregation) + 파일모드 테이블 RAM 초과분 디스크로.
+            configureSpill(connection);
         }
         return connection;
+    }
+
+    /**
+     * 대용량 OOM 내성 — temp_directory 지정 (RAM 초과분 디스크 spill 위치).
+     * memory_limit 은 미설정 → DuckDB 기본(= RAM 80% 자동)에 위임 (현장 RAM 불명).
+     * 파일 모드(prod)면 테이블도, in-memory(dev)면 연산자 중간결과가 여기로 spill.
+     */
+    private void configureSpill(Connection conn) {
+        try {
+            Files.createDirectories(Path.of(tempDirectory));
+        } catch (Exception e) {
+            log.warn("DuckDB temp_directory 생성 실패 {} : {}", tempDirectory, e.getMessage());
+        }
+        String escaped = tempDirectory.replace("\\", "/").replace("'", "''");
+        try (Statement st = conn.createStatement()) {
+            st.execute("SET temp_directory = '" + escaped + "'");
+            log.info("DuckDB temp_directory set: {} (memory_limit=default ~80% RAM)", tempDirectory);
+        } catch (SQLException e) {
+            log.warn("DuckDB temp_directory 설정 실패: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * run 시작 시 호출 — 남아있는 run_* 작업 schema 를 정리 (이전/크래시 찌꺼기 + clean slate).
+     * keepSchemas (현재 running/pending 인 run 의 schema) 는 보존 → 동시 run 안전.
+     * 지우는 건 DuckDB 내부 임시 작업 테이블뿐 — 메타DB·TO-BE DB·Parquet 산출물 무관.
+     */
+    public synchronized void sweepRunSchemas(Set<String> keepSchemas) {
+        List<String> toDrop = new ArrayList<>();
+        try (Statement st = statement();
+             ResultSet rs = st.executeQuery(
+                     "SELECT schema_name FROM information_schema.schemata "
+                   + "WHERE schema_name LIKE 'run\\_%' ESCAPE '\\'")) {
+            while (rs.next()) {
+                String s = rs.getString(1);
+                if (keepSchemas == null || !keepSchemas.contains(s)) toDrop.add(s);
+            }
+        } catch (SQLException e) {
+            log.warn("DuckDB run schema sweep 조회 실패: {}", e.getMessage());
+            return;
+        }
+        for (String s : toDrop) {
+            try (Statement st = statement()) {
+                st.execute("DROP SCHEMA IF EXISTS \"" + s.replace("\"", "\"\"") + "\" CASCADE");
+            } catch (SQLException e) {
+                log.warn("DuckDB run schema drop 실패 {} : {}", s, e.getMessage());
+            }
+        }
+        if (!toDrop.isEmpty()) {
+            log.info("DuckDB run schema swept — {} dropped, {} kept (active)",
+                    toDrop.size(), keepSchemas == null ? 0 : keepSchemas.size());
+        }
     }
 
     /**
