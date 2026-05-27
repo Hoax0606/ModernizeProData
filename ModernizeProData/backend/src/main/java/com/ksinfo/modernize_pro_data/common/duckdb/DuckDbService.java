@@ -48,8 +48,27 @@ public class DuckDbService {
             log.info("DuckDB connection opened: {}", url);
             // DuckDB 의 UDF 는 connection 별로 등록 — 새 connection 마다 일괄 register.
             UdfRegistry.registerAll(connection);
+            // encodings 확장 — Shift-JIS/EUC-JP 등 비 UTF-8 CSV 적재용 (ExtractStage encoding=).
+            loadEncodingsExtension(connection);
         }
         return connection;
+    }
+
+    /**
+     * DuckDB encodings 확장 로드 — read_csv 의 encoding='shift_jis' 등을 가능하게 함.
+     * UTF-8/UTF-16/Latin-1 은 native 라 확장 없이도 동작하므로, 로드 실패해도 DuckDB 자체는 막지 않는다.
+     * 폐쇄망(air-gapped)에서는 INSTALL 이 인터넷 다운로드를 못 하므로, 인스톨러에 확장 바이너리를
+     * 동봉하고 로컬 경로 INSTALL 로 교체해야 한다 (패키징 후속 작업).
+     */
+    private void loadEncodingsExtension(Connection conn) {
+        try (Statement st = conn.createStatement()) {
+            st.execute("INSTALL encodings");
+            st.execute("LOAD encodings");
+            log.info("DuckDB encodings extension loaded");
+        } catch (SQLException e) {
+            log.warn("DuckDB encodings extension 로드 실패 — 비 UTF-8 CSV 적재 불가 "
+                    + "(폐쇄망이면 확장 바이너리 동봉 필요): {}", e.getMessage());
+        }
     }
 
     public Statement statement() throws SQLException {
