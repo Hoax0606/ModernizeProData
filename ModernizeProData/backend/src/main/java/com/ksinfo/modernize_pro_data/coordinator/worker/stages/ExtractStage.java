@@ -110,6 +110,8 @@ public class ExtractStage implements StageRunner {
                     }
                 }
 
+                String encodingClause = encodingClause(site.getAsisEncoding());
+
                 long totalRows = 0;
                 for (String asisTable : asisTables) {
                     Path csv = StageHelpers.resolveCsvFile(baseDir, asisTable);
@@ -122,7 +124,7 @@ public class ExtractStage implements StageRunner {
                     try (Statement st = duckDbService.statement()) {
                         st.execute("CREATE OR REPLACE TABLE " + fqTable
                                 + " AS SELECT * FROM read_csv_auto('" + escapedPath
-                                + "', header=true, sample_size=-1, all_varchar=true)");
+                                + "', header=true, sample_size=-1, all_varchar=true" + encodingClause + ")");
 
                         try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + fqTable)) {
                             rs.next();
@@ -200,5 +202,35 @@ public class ExtractStage implements StageRunner {
     /** DuckDB identifier (schema / table) double-quote escape. */
     private static String quoteIdent(String name) {
         return "\"" + name.replace("\"", "\"\"") + "\"";
+    }
+
+    /**
+     * site.asisEncoding → read_csv 의 encoding 절 (앞에 ", " 포함, 없으면 빈 문자열).
+     *   - utf-8 / blank → "" (DuckDB native, 확장 불필요)
+     *   - shift_jis → ", encoding='shift_jis'" (encodings 확장)
+     *   - euc-jp    → ", encoding='EUC_JP'"   (encodings 확장 — 이름 형식 주의: 대문자+언더스코어)
+     *   - ebcdic    → 미지원 (UI 안내대로 Java 전처리는 추후 Source Reader) → 예외
+     *   - 그 외      → 그대로 시도 (확장이 인식하면 동작)
+     */
+    private static String encodingClause(String asisEncoding) {
+        if (asisEncoding == null || asisEncoding.isBlank()) return "";
+        switch (asisEncoding.trim().toLowerCase()) {
+            case "utf-8":
+            case "utf8":
+                return "";
+            case "shift_jis":
+            case "shift-jis":
+            case "sjis":
+                return ", encoding='shift_jis'";
+            case "euc-jp":
+            case "euc_jp":
+            case "eucjp":
+                return ", encoding='EUC_JP'";
+            case "ebcdic":
+                throw new IllegalStateException(
+                        "EBCDIC 는 DuckDB extract 경로 미지원 — Java 전처리(추후 Source Reader) 필요");
+            default:
+                return ", encoding='" + asisEncoding.trim().replace("'", "''") + "'";
+        }
     }
 }

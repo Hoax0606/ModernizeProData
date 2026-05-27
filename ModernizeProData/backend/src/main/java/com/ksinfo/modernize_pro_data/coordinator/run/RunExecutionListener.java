@@ -1,5 +1,6 @@
 package com.ksinfo.modernize_pro_data.coordinator.run;
 
+import com.ksinfo.modernize_pro_data.common.duckdb.DuckDbService;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
@@ -21,6 +22,8 @@ import org.springframework.transaction.event.TransactionalEventListener;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * RunService.startRun 의 transaction commit 직후, 별 thread 에서 stage 실행을 trigger.
@@ -49,6 +52,7 @@ public class RunExecutionListener {
     private final RunLogIngestService runLogIngest;
     private final RunOutputPathResolver outputResolver;
     private final RunService runService;
+    private final DuckDbService duckDbService;
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     @Async
@@ -89,6 +93,13 @@ public class RunExecutionListener {
 
         runLogIngest.openRun(runId, projectId);
         try {
+            // 이전/크래시 run 의 DuckDB 작업 schema 정리 (실행 중 run = pending/running 은 보존).
+            Set<String> activeSchemas = runRepo
+                    .findByStatusIn(List.of(RunStatus.pending, RunStatus.running)).stream()
+                    .map(r -> "run_" + r.getId().replace("-", "_"))
+                    .collect(Collectors.toSet());
+            duckDbService.sweepRunSchemas(activeSchemas);
+
             workerExecutor.execute(ctx);
             runService.completeRun(runId, null, null);
         } catch (Exception e) {

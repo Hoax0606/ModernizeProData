@@ -2,12 +2,16 @@ package com.ksinfo.modernize_pro_data.coordinator.run;
 
 import org.springframework.data.jpa.repository.JpaRepository;
 
+import java.util.Collection;
 import java.util.List;
 
 public interface RunHistoryRepository extends JpaRepository<RunHistory, String> {
 
     /** Project の run 履歴 (新しい順). */
     List<RunHistory> findByProjectIdOrderByStartedAtDesc(String projectId);
+
+    /** 指定 status 群의 run (DuckDB schema sweep 시 실행 중 run 보존용). */
+    List<RunHistory> findByStatusIn(Collection<RunStatus> statuses);
 
     /** Coordinator 起動時 Misfire 判定用 — project の最後の run. */
     RunHistory findFirstByProjectIdOrderByStartedAtDesc(String projectId);

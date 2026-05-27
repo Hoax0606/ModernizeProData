@@ -90,8 +90,9 @@ modernize:
 
   # DuckDB
   duckdb:
-    memory-mode: true # false 면 파일 모드
+    memory-mode: true # false 면 파일 모드 (사이트=prod 는 application-prod.yml 에서 false)
     file-path: ./data/duckdb.db
+    temp-directory: ./data/duckdb-tmp # 대용량 spill 위치 (operator/파일모드 테이블 RAM 초과분)
 
 # ── 로깅 ────────────────────────────────────────────────────────────────
 logging:
