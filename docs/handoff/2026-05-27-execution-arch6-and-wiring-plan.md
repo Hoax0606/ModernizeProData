@@ -19,6 +19,16 @@ architecture 다이어그램 대비 미구현 6항목 + 대용량 대비:
   - **S2 Run 라이프사이클** `RunService`/`RunController`/`RunExecutionListener`/`LocalWorkerExecutor` — 부분실행/pause/abort/stage-gate/timeout (RunStatus enum 은 S2 만)
   - **S3** Reconcile PK중복 · **S4** Verify 전수 · **S5** Transform 컬럼 combine · **S6** Load(conn pool, multi-env) · **S7** multi-worker(`worker_nodes` 마이그레이션 1개) · **S8** Overview 페이지(별도 controller)
 
+## 에러 모델 = 하이브리드 (사용자 결정 2026-05-27, 전 스트림 공통)
+**단계 안에서는 continue-on-error**(행 오류는 다 수집 → quarantine) **+ 단계 사이엔 게이트**(앞 단계가 구조적으로 실패하거나 cutover 면 downstream 중단). 기존 FE mock 은 **fail-fast** 가정(실패 단계 이후 회색=미실행)이라, 실 연결 시 화면 흐름 수정 필요.
+스트림별 영향:
+- **S1 (화면)**: ① 끝까지 돈 run = 모든 단계 + 단계별 성공/실패 수 표시 / ② 게이트로 중단된 run = 이후 단계 "미실행"(pending) 구분. `GET /runs/{id}/stages` 의 단계별 status 로 구분. Retry=전체 재실행.
+- **S2 (엔진)**: stage-fail 게이트가 하이브리드 구현 지점 (이번 스트림 4번).
+- **S3 (Reconcile)**: PK 중복 등 검증 결과 severity 정의 — 무엇이 "단계 실패(게이트 발동)" vs "경고(계속)".
+- **S6 (Load)**: (결정 필요) 검증 실패한 테이블을 적재에서 제외할지 — 추천: 제외.
+- **S8 (개요)**: 에러(단계 실패) / 경고(행 quarantine) 카운트 의미 통일.
+- S4(마지막 단계라 게이트 무관)·S5·S7: 영향 적음.
+
 ## 함정 / 결정
 - ⚠️ **폐쇄망 encoding**: `INSTALL encodings` 는 인터넷 다운로드 → 현장 air-gapped 배포 시 확장 바이너리(`.duckdb_extension`, DuckDB 버전+win64 종속)를 **인스톨러 동봉 필요** (jpackage 패키징 후속, 미완).
 - **버튼·진행률은 현재 mock 시뮬레이션**(`executionPreflight` store + `STAGE_MS` 타이머). 실 backend 는 준비됨: start=`POST /runs`, 진행률=`GET /runs/{id}/stages`(2s 폴링 의도), abort=`RunService.abortRun`(단 실행 thread 강제중단은 아직 X).

@@ -70,6 +70,14 @@ public class RunExecutionListener {
             Site site = siteRepo.findById(project.getSiteId())
                     .orElseThrow(() -> new IllegalStateException("site not found: " + project.getSiteId()));
             List<MappingTableBinding> bindings = bindingRepo.findByProjectId(projectId);
+            // 부분 실행 — metadata.selectedTables 있으면 그 TO-BE 테이블만 처리 (없으면 전체).
+            Object sel = rh.getMetadata() == null ? null : rh.getMetadata().get("selectedTables");
+            if (sel instanceof List<?> selList && !selList.isEmpty()) {
+                Set<String> selSet = selList.stream().map(String::valueOf).collect(Collectors.toSet());
+                bindings = bindings.stream()
+                        .filter(b -> selSet.contains(b.getTobeTable()))
+                        .toList();
+            }
             List<StageInstance> stages = stageRepo.findByRunIdOrderBySeqAsc(runId);
 
             long runIndex = runRepo.countByProjectId(projectId);   // 이 run 까지 포함 = 1..N
