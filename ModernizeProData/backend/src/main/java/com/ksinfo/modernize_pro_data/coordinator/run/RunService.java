@@ -64,6 +64,7 @@ public class RunService {
     private final StageTableResultRepository stageTableResultRepo;
     private final MappingTableBindingRepository bindingRepo;
     private final ApplicationEventPublisher eventPublisher;
+    private final RunControlRegistry runControlRegistry;
 
     /**
      * Run を起動する. 3 系統 (Nightly Quartz / CLI / REST) のすべてがこの入口を通る.
@@ -224,7 +225,58 @@ public class RunService {
      */
     @Transactional
     public RunHistory abortRun(String runId, String reason) {
+        runControlRegistry.cancel(runId);   // paused 로 대기 중인 executor 깨워서 중단
         return finishRun(runId, RunStatus.aborted, null, null, reason);
+    }
+
+    /**
+     * 타임아웃 — 너무 오래 running 인 run 을 timed_out 으로 종료 (RunTimeoutSweeper 가 호출).
+     * abort 와 구별: 시스템이 임계 초과로 자동 종료한 것.
+     */
+    @Transactional
+    public RunHistory timeoutRun(String runId, String reason) {
+        runControlRegistry.cancel(runId);
+        return finishRun(runId, RunStatus.timed_out, null, null, reason);
+    }
+
+    /** 실행 중 run 일시정지 — running 일 때만. projects.run_status='paused' 로 잠금 유지. */
+    @Transactional
+    public RunHistory pauseRun(String runId) {
+        RunHistory rh = runHistoryRepo.findById(runId)
+                .orElseThrow(() -> new IllegalArgumentException("run not found: " + runId));
+        if (rh.getStatus() != RunStatus.running) {
+            log.info("pauseRun ignored — runId={} status={}", runId, rh.getStatus());
+            return rh;
+        }
+        rh.setStatus(RunStatus.paused);
+        runHistoryRepo.save(rh);
+        Project project = projectRepo.findByIdForUpdate(rh.getProjectId())
+                .orElseThrow(() -> new IllegalStateException("project disappeared: " + rh.getProjectId()));
+        project.setRunStatus("paused");
+        projectRepo.save(project);
+        runControlRegistry.pause(runId);
+        log.info("pauseRun runId={}", runId);
+        return rh;
+    }
+
+    /** 일시정지된 run 재개 — paused 일 때만. */
+    @Transactional
+    public RunHistory resumeRun(String runId) {
+        RunHistory rh = runHistoryRepo.findById(runId)
+                .orElseThrow(() -> new IllegalArgumentException("run not found: " + runId));
+        if (rh.getStatus() != RunStatus.paused) {
+            log.info("resumeRun ignored — runId={} status={}", runId, rh.getStatus());
+            return rh;
+        }
+        rh.setStatus(RunStatus.running);
+        runHistoryRepo.save(rh);
+        Project project = projectRepo.findByIdForUpdate(rh.getProjectId())
+                .orElseThrow(() -> new IllegalStateException("project disappeared: " + rh.getProjectId()));
+        project.setRunStatus(STATUS_RUNNING);
+        projectRepo.save(project);
+        runControlRegistry.resume(runId);
+        log.info("resumeRun runId={}", runId);
+        return rh;
     }
 
     private RunHistory finishRun(String runId,
@@ -234,6 +286,13 @@ public class RunService {
                                  String errorMessage) {
         RunHistory rh = runHistoryRepo.findById(runId)
                 .orElseThrow(() -> new IllegalArgumentException("run not found: " + runId));
+
+        // 이미 종료된 run 은 재종료 skip — abort/timeout/완료 경합 안전
+        // (executor 가 cancel 후 정상 return → listener 가 completeRun 불러도 기존 상태 보존).
+        if (isTerminal(rh.getStatus())) {
+            log.info("finishRun skip — runId={} already terminal status={}", runId, rh.getStatus());
+            return rh;
+        }
 
         OffsetDateTime finishedAt = OffsetDateTime.now();
         rh.setStatus(finalStatus);
@@ -305,6 +364,11 @@ public class RunService {
         if (project.getExecutionAssignee() != null) return project.getExecutionAssignee();
         if (project.getAssignee() != null) return project.getAssignee();
         return null;
+    }
+
+    private static boolean isTerminal(RunStatus s) {
+        return s == RunStatus.success || s == RunStatus.failed
+                || s == RunStatus.aborted || s == RunStatus.timed_out;
     }
 
     private String resolveSnapshotId(String projectId, RunType runType) {
