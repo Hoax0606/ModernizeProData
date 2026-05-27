@@ -6,6 +6,7 @@ import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingCodeMapRepositor
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRule;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRuleRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunType;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
@@ -120,9 +121,13 @@ public class TransformStage implements StageRunner {
                         rowCount = rs.getLong(1);
                     }
 
-                    Path parquet = ctx.parquet2Dir().resolve(tobeTable + ".parquet");
-                    String escapedParquet = parquet.toString().replace("\\", "/").replace("'", "''");
-                    st.execute("COPY " + fqTobe + " TO '" + escapedParquet + "' (FORMAT PARQUET)");
+                    // CP2 체크포인트 parquet2 — test/rehearsal 만 생성 (반복 실행 재사용).
+                    // cutover 는 1회성이라 skip — Load/Verify 가 DuckDB tobe_ 테이블을 직접 읽으므로 안전.
+                    if (ctx.getRunHistory().getRunType() != RunType.cutover) {
+                        Path parquet = ctx.parquet2Dir().resolve(tobeTable + ".parquet");
+                        String escapedParquet = parquet.toString().replace("\\", "/").replace("'", "''");
+                        st.execute("COPY " + fqTobe + " TO '" + escapedParquet + "' (FORMAT PARQUET)");
+                    }
                 }
 
                 OffsetDateTime tableEnd = OffsetDateTime.now();
