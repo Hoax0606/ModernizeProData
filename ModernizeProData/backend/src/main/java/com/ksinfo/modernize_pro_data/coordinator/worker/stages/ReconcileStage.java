@@ -71,12 +71,21 @@ public class ReconcileStage implements StageRunner {
             result.setStartedAt(tableStart);
 
             try {
-                String fqAsis = quoteIdent(schema) + "." + quoteIdent("asis_" + tobeTable);
-                long rowCount;
-                try (Statement st = duckDbService.statement();
-                     ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + fqAsis)) {
-                    rs.next();
-                    rowCount = rs.getLong(1);
+                // binding 의 각 distinct AS-IS source 테이블 row count 합산.
+                java.util.Set<String> asisTables = new java.util.LinkedHashSet<>();
+                for (var src : binding.getSources()) {
+                    if (src.getAsisTable() != null && !src.getAsisTable().isBlank()) {
+                        asisTables.add(src.getAsisTable());
+                    }
+                }
+                long rowCount = 0;
+                for (String asisTable : asisTables) {
+                    String fqAsis = quoteIdent(schema) + "." + quoteIdent("asis_" + asisTable);
+                    try (Statement st = duckDbService.statement();
+                         ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + fqAsis)) {
+                        rs.next();
+                        rowCount += rs.getLong(1);
+                    }
                 }
 
                 result.setStatus(StageTableStatus.success);

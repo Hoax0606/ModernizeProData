@@ -94,7 +94,7 @@ public class CheckStage implements StageRunner {
 
             String error = projectError;
             if (error == null) {
-                error = validateBindingCsv(site, tobeTable);
+                error = validateBindingCsv(site, binding);
             }
 
             OffsetDateTime tableEnd = OffsetDateTime.now();
@@ -151,15 +151,19 @@ public class CheckStage implements StageRunner {
         return null;
     }
 
-    /** binding 단위 검증 — CSV 파일 존재. */
-    private String validateBindingCsv(Site site, String tobeTable) {
+    /** binding 단위 검증 — 각 AS-IS source 의 CSV 파일 존재 ({asis_table}.csv). */
+    private String validateBindingCsv(Site site, MappingTableBinding binding) {
         if (site.getCsvPath() == null || site.getCsvPath().isBlank()) {
             return "site.csv_path not set";
         }
         Path baseDir = Paths.get(site.getCsvPath()).toAbsolutePath().normalize();
-        Path csv = StageHelpers.resolveCsvFile(baseDir, tobeTable);
-        if (csv == null) {
-            return "CSV not found: " + tobeTable + ".csv in " + baseDir;
+        for (var src : binding.getSources()) {
+            String asisTable = src.getAsisTable();
+            if (asisTable == null || asisTable.isBlank()) continue;
+            Path csv = StageHelpers.resolveCsvFile(baseDir, asisTable);
+            if (csv == null) {
+                return "CSV not found: " + asisTable + ".csv in " + baseDir;
+            }
         }
         return null;
     }

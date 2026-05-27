@@ -13,6 +13,7 @@ import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableResult;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableResultRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableStatus;
 import com.ksinfo.modernize_pro_data.coordinator.runlog.RunLogIngestService;
+import com.ksinfo.modernize_pro_data.coordinator.worker.SqlComposer;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageContext;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageHelpers;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageRunner;
@@ -165,13 +166,13 @@ public class TransformStage implements StageRunner {
     }
 
     /**
-     * Mapping rules → CREATE OR REPLACE TABLE schema.tobe_xxx AS SELECT ... FROM schema.asis_xxx AS asis
+     * Mapping rules → CREATE OR REPLACE TABLE schema.tobe_xxx AS SELECT ... FROM {composition}
+     * FROM 절은 SqlComposer 가 composition_kind (single/join/union) 별로 생성.
      */
     private String buildTransformSql(String schema, String tobeTable, List<MappingRule> rules,
                                      MappingTableBinding binding,
                                      Map<String, List<MappingCodeMap>> codeMapsByDomain) {
         String fqTobe = quoteIdent(schema) + "." + quoteIdent("tobe_" + tobeTable);
-        String fqAsis = quoteIdent(schema) + "." + quoteIdent("asis_" + tobeTable);
 
         StringBuilder sb = new StringBuilder();
         sb.append("CREATE OR REPLACE TABLE ").append(fqTobe).append(" AS SELECT ");
@@ -180,7 +181,7 @@ public class TransformStage implements StageRunner {
         for (MappingRule rule : rules) {
             if ("skip".equals(rule.getStrategy())) continue;
 
-            String expr = buildColumnExpr(rule, codeMapsByDomain);
+            String expr = buildColumnExpr(rule, binding, codeMapsByDomain);
             if (!first) sb.append(", ");
             sb.append(expr).append(" AS ").append(quoteIdent(rule.getTobeColumn()));
             first = false;
@@ -191,7 +192,11 @@ public class TransformStage implements StageRunner {
             throw new IllegalStateException("all rules are 'skip' for " + tobeTable);
         }
 
-        sb.append(" FROM ").append(fqAsis).append(" AS asis");
+        // composition_kind 별 FROM 절. sources 없으면 (none) FROM 생략 — DuckDB FROM-less SELECT (1 row).
+        String fromClause = SqlComposer.fromClause(schema, binding);
+        if (fromClause != null) {
+            sb.append(" FROM ").append(fromClause);
+        }
         if (binding.getWhereFilter() != null && !binding.getWhereFilter().isBlank()) {
             sb.append(" WHERE ").append(binding.getWhereFilter());
         }
@@ -199,15 +204,17 @@ public class TransformStage implements StageRunner {
     }
 
     /**
-     * 한 mapping rule → SELECT expression.
+     * 한 mapping rule → SELECT expression. AS-IS 컬럼 참조 alias 는 SqlComposer.aliasFor
+     * (single="asis", join=source 매칭, union="u").
      * 우선순위:
      *   1. strategy='null'    → NULL
      *   2. strategy='default' → '<default_value>'
-     *   3. code_domain 있으면 → CASE asis.col WHEN 'src' THEN 'tgt' ... END
+     *   3. code_domain 있으면 → CASE {alias}.col WHEN 'src' THEN 'tgt' ... END
      *   4. transform_rule 있으면 → transform_rule (raw SQL expression, 사용자 입력)
-     *   5. default → asis."<asis_column[0]>"
+     *   5. default → {alias}."<asis_column[0]>"
      */
-    private String buildColumnExpr(MappingRule rule, Map<String, List<MappingCodeMap>> codeMapsByDomain) {
+    private String buildColumnExpr(MappingRule rule, MappingTableBinding binding,
+                                   Map<String, List<MappingCodeMap>> codeMapsByDomain) {
         if ("null".equals(rule.getStrategy())) {
             return "NULL";
         }
@@ -216,13 +223,15 @@ public class TransformStage implements StageRunner {
             return dv == null ? "NULL" : "'" + sqlEscape(dv) + "'";
         }
 
+        String alias = SqlComposer.aliasFor(rule, binding);
         String[] asisCols = rule.getAsisColumn();
         String firstAsisCol = (asisCols != null && asisCols.length > 0) ? asisCols[0] : null;
 
         if (rule.getCodeDomain() != null && !rule.getCodeDomain().isBlank()) {
             List<MappingCodeMap> codes = codeMapsByDomain.get(rule.getCodeDomain());
             if (codes != null && !codes.isEmpty() && firstAsisCol != null) {
-                StringBuilder cb = new StringBuilder("CASE asis.").append(quoteIdent(firstAsisCol));
+                StringBuilder cb = new StringBuilder("CASE ")
+                        .append(alias).append(".").append(quoteIdent(firstAsisCol));
                 for (MappingCodeMap m : codes) {
                     cb.append(" WHEN '").append(sqlEscape(m.getSourceValue()))
                       .append("' THEN '").append(sqlEscape(m.getTargetValue())).append("'");
@@ -237,7 +246,7 @@ public class TransformStage implements StageRunner {
         }
 
         if (firstAsisCol != null) {
-            return "asis." + quoteIdent(firstAsisCol);
+            return alias + "." + quoteIdent(firstAsisCol);
         }
         return "NULL";
     }

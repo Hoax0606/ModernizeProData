@@ -2,6 +2,7 @@ package com.ksinfo.modernize_pro_data.coordinator.worker.stages;
 
 import com.ksinfo.modernize_pro_data.common.duckdb.DuckDbService;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingSource;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
@@ -24,20 +25,24 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Extract stage — AS-IS CSV → DuckDB load + parquet1 dump.
  *
  * 흐름:
  *   1. CREATE SCHEMA IF NOT EXISTS "{ctx.duckdbSchema}"
- *   2. 각 binding 별:
- *      - CSV path resolve (사용자 site.csv_path + tobe_table.csv)
- *      - CREATE OR REPLACE TABLE schema.asis_{tobe_table} AS SELECT * FROM read_csv_auto(...)
- *      - row_count = SELECT COUNT(*)
- *      - parquet1 dump = COPY ... TO 'parquet1/{tobe_table}.parquet' (FORMAT PARQUET)
+ *   2. 각 binding 별 — binding.getSources() 의 각 AS-IS source 테이블을 load:
+ *      - CSV path resolve (site.csv_path + {asis_table}.csv)
+ *      - CREATE OR REPLACE TABLE schema.asis_{asis_table} AS SELECT * FROM read_csv_auto(...)
+ *      - row_count 합산, parquet1 dump = 'parquet1/{asis_table}.parquet'
+ *   3. 같은 asis_table 이 여러 source/binding 에 나오면 한 번만 load (LinkedHashSet 중복 제거)
  *
+ * JOIN/UNION 은 TransformStage 가 asis_{asis_table} 들을 결합. 여기선 source 테이블만 적재.
+ * composition_kind=none (sources 없음) 은 load 없이 success.
  * continue-on-error: binding 별 try/catch, 하나 실패해도 다음 진행.
  */
 @Service
@@ -96,38 +101,50 @@ public class ExtractStage implements StageRunner {
 
             try {
                 Path baseDir = Paths.get(site.getCsvPath()).toAbsolutePath().normalize();
-                Path csv = StageHelpers.resolveCsvFile(baseDir, tobeTable);
-                if (csv == null) {
-                    throw new IllegalStateException("CSV not found: " + tobeTable + ".csv");
-                }
-                String escapedPath = csv.toString().replace("'", "''");
-                String tableName = "asis_" + tobeTable;
-                String fqTable = quoteIdent(schema) + "." + quoteIdent(tableName);
 
-                long rowCount;
-                try (Statement st = duckDbService.statement()) {
-                    st.execute("CREATE OR REPLACE TABLE " + fqTable
-                            + " AS SELECT * FROM read_csv_auto('" + escapedPath
-                            + "', header=true, sample_size=-1, all_varchar=true)");
-
-                    try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + fqTable)) {
-                        rs.next();
-                        rowCount = rs.getLong(1);
+                // binding 의 distinct AS-IS source 테이블 (ordinal 순). composition_kind=none 이면 빈 list.
+                Set<String> asisTables = new LinkedHashSet<>();
+                for (MappingTableBindingSource src : binding.getSources()) {
+                    if (src.getAsisTable() != null && !src.getAsisTable().isBlank()) {
+                        asisTables.add(src.getAsisTable());
                     }
+                }
 
-                    Path parquet = ctx.parquet1Dir().resolve(tobeTable + ".parquet");
-                    String escapedParquet = parquet.toString().replace("\\", "/").replace("'", "''");
-                    st.execute("COPY " + fqTable + " TO '" + escapedParquet + "' (FORMAT PARQUET)");
+                long totalRows = 0;
+                for (String asisTable : asisTables) {
+                    Path csv = StageHelpers.resolveCsvFile(baseDir, asisTable);
+                    if (csv == null) {
+                        throw new IllegalStateException("CSV not found: " + asisTable + ".csv");
+                    }
+                    String escapedPath = csv.toString().replace("'", "''");
+                    String fqTable = quoteIdent(schema) + "." + quoteIdent("asis_" + asisTable);
+
+                    try (Statement st = duckDbService.statement()) {
+                        st.execute("CREATE OR REPLACE TABLE " + fqTable
+                                + " AS SELECT * FROM read_csv_auto('" + escapedPath
+                                + "', header=true, sample_size=-1, all_varchar=true)");
+
+                        try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + fqTable)) {
+                            rs.next();
+                            totalRows += rs.getLong(1);
+                        }
+
+                        Path parquet = ctx.parquet1Dir().resolve(asisTable + ".parquet");
+                        String escapedParquet = parquet.toString().replace("\\", "/").replace("'", "''");
+                        st.execute("COPY " + fqTable + " TO '" + escapedParquet + "' (FORMAT PARQUET)");
+                    }
+                    ingest(ctx, "Extracted source " + asisTable + " (binding " + tobeTable + ")", true);
                 }
 
                 OffsetDateTime tableEnd = OffsetDateTime.now();
                 result.setStatus(StageTableStatus.success);
-                result.setRowCount(rowCount);
+                result.setRowCount(totalRows);
                 result.setFinishedAt(tableEnd);
                 result.setDurationMs(Duration.between(tableStart, tableEnd).toMillis());
                 stageTableResultRepo.save(result);
 
-                ingest(ctx, "Extracted " + tobeTable + ": " + rowCount + " rows", true);
+                ingest(ctx, "Extracted " + tobeTable + ": " + asisTables.size()
+                        + " source(s), " + totalRows + " rows total", true);
                 successCount++;
             } catch (Exception e) {
                 OffsetDateTime tableEnd = OffsetDateTime.now();
