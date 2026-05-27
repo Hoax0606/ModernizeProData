@@ -33,14 +33,16 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Audit stage — TO-BE DDL 의 제약 평가 (PoC: NOT NULL 만).
+ * Audit stage — TO-BE DDL 의 제약 평가 (전수 검사, Load 전).
  *
- * 각 binding 별:
- *   - TO-BE DDL columns 중 nullable=false 컬럼 찾기
- *   - SELECT COUNT(*) FROM tobe_{table} WHERE col IS NULL
- *   - count > 0 → Quarantine 기록 (severity=error, sample 5 row)
+ * 각 binding 의 각 TO-BE 컬럼에 대해 4종 검사:
+ *   - NOT NULL : nullable=false 인데 IS NULL                       (validate.notnull)
+ *   - length   : LENGTH(col) > col.length                          (validate.length)
+ *   - type     : TRY_CAST(col AS {숫자/날짜/타임스탬프}) 실패        (validate.type)
+ *   - range    : 숫자지만 DECIMAL(precision,scale) 자릿수 초과       (validate.range)
  *
- * 추후: length / type / range 검사. PoC 1차는 NOT NULL 만.
+ * 위반 검출 시 검사별로 Quarantine 기록 (severity=error, sample 5 row).
+ * char/varchar 는 type/range skip. continue-on-error: binding 단위 try/catch.
  */
 @Service
 @RequiredArgsConstructor
@@ -110,27 +112,7 @@ public class AuditStage implements StageRunner {
 
                 int violations = 0;
                 for (DdlColumn col : cols) {
-                    if (col.isNullable()) continue;
-                    String colName = col.getPhysicalName();
-                    long nullCount = countNulls(fqTobe, colName);
-                    if (nullCount > 0) {
-                        List<List<Object>> samples = fetchNullSamples(fqTobe, pkCol, colName);
-                        Map<String, Object> sampleData = buildSampleData(
-                                tobeTable, colName, pkCol, samples);
-                        quarantineService.record(
-                                ctx.getRunHistory().getId(),
-                                stage.getId(),
-                                binding.getId(),
-                                null,
-                                "NOT NULL violation — " + colName,
-                                QuarantineSeverity.error,
-                                sampleData,
-                                nullCount,
-                                ctx.getLogLineSeqCursor());
-                        ingest(ctx, "Audit NOT NULL violation in " + tobeTable + "." + colName
-                                + " (" + nullCount + " rows)", false);
-                        violations++;
-                    }
+                    violations += auditColumn(ctx, stage, binding, fqTobe, tobeTable, pkCol, col);
                 }
 
                 OffsetDateTime tableEnd = OffsetDateTime.now();
@@ -174,22 +156,89 @@ public class AuditStage implements StageRunner {
         log.info("AuditStage success={} failed={}", successCount, failedCount);
     }
 
-    private long countNulls(String fqTable, String colName) throws Exception {
+    /**
+     * 한 컬럼에 적용 가능한 검사(NOT NULL / length / type / range)를 모두 수행.
+     * 위반된 검사 종류 수를 반환 (각 위반은 Quarantine 1 row).
+     */
+    private int auditColumn(StageContext ctx, StageInstance stage, MappingTableBinding binding,
+                            String fqTobe, String tobeTable, String pkCol, DdlColumn col) throws Exception {
+        int violations = 0;
+        String colName = col.getPhysicalName();
+        String q = quoteIdent(colName);
+
+        // 1. NOT NULL
+        if (!col.isNullable()) {
+            violations += runCheck(ctx, stage, binding, fqTobe, tobeTable, pkCol, colName,
+                    q + " IS NULL",
+                    "NOT NULL violation", "validate.notnull");
+        }
+        // 2. length — 문자수 기준 (PG VARCHAR(n) = n 문자)
+        Integer len = col.getLength();
+        if (len != null && len > 0) {
+            violations += runCheck(ctx, stage, binding, fqTobe, tobeTable, pkCol, colName,
+                    "LENGTH(CAST(" + q + " AS VARCHAR)) > " + len + " AND " + q + " IS NOT NULL",
+                    "Length > " + len, "validate.length");
+        }
+        // 3. type — 숫자/날짜/타임스탬프 컬럼인데 cast 실패 (빈 문자열 제외). char/varchar 는 skip.
+        String castType = duckCastType(col);
+        if (castType != null) {
+            violations += runCheck(ctx, stage, binding, fqTobe, tobeTable, pkCol, colName,
+                    "TRY_CAST(" + q + " AS " + castType + ") IS NULL AND " + q + " IS NOT NULL"
+                            + " AND TRIM(CAST(" + q + " AS VARCHAR)) <> ''",
+                    "Type cast failed (" + castType + ")", "validate.type");
+        }
+        // 4. range — 숫자지만 DECIMAL(p,s) 자릿수 초과 (정수부 overflow).
+        if (isNumeric(col) && col.getPrecision() != null) {
+            int p = col.getPrecision();
+            int s = col.getScale() == null ? 0 : col.getScale();
+            if (p > 0 && p <= 38 && s >= 0 && s <= p) {
+                violations += runCheck(ctx, stage, binding, fqTobe, tobeTable, pkCol, colName,
+                        "TRY_CAST(" + q + " AS DECIMAL(" + p + "," + s + ")) IS NULL"
+                                + " AND TRY_CAST(" + q + " AS DOUBLE) IS NOT NULL",
+                        "Numeric out of range DECIMAL(" + p + "," + s + ")", "validate.range");
+            }
+        }
+        return violations;
+    }
+
+    /** 단일 검사 수행 — count > 0 이면 sample 추출 + Quarantine 기록 + 로그, 위반 시 1 반환. */
+    private int runCheck(StageContext ctx, StageInstance stage, MappingTableBinding binding,
+                         String fqTobe, String tobeTable, String pkCol, String colName,
+                         String whereCond, String reason, String stageLabel) throws Exception {
+        long count = countWhere(fqTobe, whereCond);
+        if (count <= 0) return 0;
+        List<List<Object>> samples = fetchSamples(fqTobe, pkCol, colName, whereCond);
+        Map<String, Object> sampleData = buildSampleData(tobeTable, colName, pkCol, samples, reason, stageLabel);
+        quarantineService.record(
+                ctx.getRunHistory().getId(),
+                stage.getId(),
+                binding.getId(),
+                null,
+                reason + " — " + colName,
+                QuarantineSeverity.error,
+                sampleData,
+                count,
+                ctx.getLogLineSeqCursor());
+        ingest(ctx, "Audit " + reason + " in " + tobeTable + "." + colName + " (" + count + " rows)", false);
+        return 1;
+    }
+
+    private long countWhere(String fqTable, String whereCond) throws Exception {
         try (Statement st = duckDbService.statement();
-             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + fqTable
-                     + " WHERE " + quoteIdent(colName) + " IS NULL")) {
+             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + fqTable + " WHERE " + whereCond)) {
             rs.next();
             return rs.getLong(1);
         }
     }
 
-    private List<List<Object>> fetchNullSamples(String fqTable, String pkCol, String violatedCol) throws Exception {
+    private List<List<Object>> fetchSamples(String fqTable, String pkCol, String violatedCol,
+                                            String whereCond) throws Exception {
         List<List<Object>> samples = new ArrayList<>();
         StringBuilder cols = new StringBuilder();
         if (pkCol != null) cols.append(quoteIdent(pkCol)).append(", ");
         cols.append(quoteIdent(violatedCol));
         String sql = "SELECT " + cols + " FROM " + fqTable
-                + " WHERE " + quoteIdent(violatedCol) + " IS NULL LIMIT " + SAMPLE_LIMIT;
+                + " WHERE " + whereCond + " LIMIT " + SAMPLE_LIMIT;
         try (Statement st = duckDbService.statement();
              ResultSet rs = st.executeQuery(sql)) {
             ResultSetMetaData md = rs.getMetaData();
@@ -203,13 +252,13 @@ public class AuditStage implements StageRunner {
         return samples;
     }
 
-    private Map<String, Object> buildSampleData(String tobeTable, String violatedCol,
-                                                String pkCol, List<List<Object>> samples) {
+    private Map<String, Object> buildSampleData(String tobeTable, String violatedCol, String pkCol,
+                                                List<List<Object>> samples, String reason, String stageLabel) {
         Map<String, Object> data = new HashMap<>();
-        data.put("reason", "NOT NULL violation");
-        data.put("detail", tobeTable + "." + violatedCol + " is NULL");
+        data.put("reason", reason);
+        data.put("detail", tobeTable + "." + violatedCol + " — " + reason);
         data.put("severity", "error");
-        data.put("stageLabel", "validate.notnull");
+        data.put("stageLabel", stageLabel);
         data.put("table", tobeTable);
         List<String> columns = new ArrayList<>();
         List<String> roles = new ArrayList<>();
@@ -220,6 +269,25 @@ public class AuditStage implements StageRunner {
         data.put("columnRoles", roles);
         data.put("sampleRows", samples);
         return data;
+    }
+
+    /** dataType → DuckDB TRY_CAST 타입. char/varchar/text 등은 null (type 검사 skip). */
+    private static String duckCastType(DdlColumn col) {
+        String dt = col.getDataType() == null ? "" : col.getDataType().toLowerCase();
+        if (dt.contains("int")) return "BIGINT";                       // tinyint/smallint/int/integer/bigint
+        if (isNumericType(dt) || dt.contains("double")
+                || dt.contains("real") || dt.contains("float")) return "DOUBLE";
+        if (dt.contains("timestamp") || dt.contains("datetime")) return "TIMESTAMP";
+        if (dt.contains("date")) return "DATE";
+        return null;
+    }
+
+    private static boolean isNumeric(DdlColumn col) {
+        return isNumericType(col.getDataType() == null ? "" : col.getDataType().toLowerCase());
+    }
+
+    private static boolean isNumericType(String dt) {
+        return dt.contains("numeric") || dt.contains("decimal") || dt.contains("number");
     }
 
     private void ingest(StageContext ctx, String message, boolean info) {
