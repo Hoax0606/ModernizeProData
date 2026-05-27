@@ -472,7 +472,10 @@ def generate_stage(stage: str) -> dict[str, int]:
         status_a = rnd.choices(["A", "A", "A", "C", "F", "P"], k=1)[0]
         opened = random_date(rnd, date(2019, 1, 1), date(2025, 12, 31))
         closed = random_date(rnd, opened, date(2026, 4, 30)) if status_a == "C" else None
-        acct_no = f"{br:03d}-{koza[:2]}-{rnd.randint(1000000, 9999999)}"
+        # Use sequential i (not random) — random 7-digit space (10M) is too
+        # small for prod's 800k accounts; collisions happen → load.sql aborts
+        # on UNIQUE violation of account_account_number_key.
+        acct_no = f"{br:03d}-{koza[:2]}-{i:07d}"
         entry = datetime.combine(opened, datetime.min.time())
         k_type = koza[0:2]; k_tier = koza[2]; k_perm = koza[3]
         w_ac_asis.write([i, acct_no, cust, br, koza, cur, status_a,
