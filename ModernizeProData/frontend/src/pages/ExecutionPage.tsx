@@ -330,16 +330,19 @@ export function ExecutionPage() {
     useExecutionPreflightStore.getState().startActiveRun(project.id, tables);
     /* phase / runStatus 갱신.
        run 起動による phase 自動進行は forward-only — 既に test 以降の phase に
-       いる時に planning 측 'test' run を起동해도 phase を巻き戻さない. */
+       いる時に planning 측 'test' run を起동해도 phase を巻き戻さない.
+       phase + runStatus は単一 atomic 갱신 — 분리하면 BE 呼び出しと set のレースで
+       sidebar chip が一瞬色なし(test + 非 running)に見える bug が出るため. */
     if (runMode === 'cutover') {
       useWorkspaceStore.getState().startCutover(project.id, pinnedSnapshot.id, user?.username ?? 'Admin')
         .catch(() => { /* mock; ignore */ });
     } else {
-      const targetPhase: ProjectPhase = runMode === 'rehearsal' ? 'rehearsal' : 'test';
-      if (phaseOrder(project.phase) < phaseOrder(targetPhase)) {
-        useWorkspaceStore.getState().setProjectPhase(project.id, targetPhase).catch(() => { /* mock */ });
-      }
-      useWorkspaceStore.getState().setProjectRunStatus(project.id, 'running').catch(() => { /* mock */ });
+      const desiredPhase: ProjectPhase = runMode === 'rehearsal' ? 'rehearsal' : 'test';
+      const nextPhase: ProjectPhase =
+        phaseOrder(project.phase) < phaseOrder(desiredPhase) ? desiredPhase : project.phase;
+      useWorkspaceStore.getState()
+        .setProjectPhaseAndRunStatus(project.id, nextPhase, 'running')
+        .catch(() => { /* mock */ });
     }
   };
 
@@ -1044,8 +1047,10 @@ function deriveRunMode(phase: ProjectPhase, env: ProjectEnvironment): RunMode | 
   if (env === 'production') {
     return phase === 'ready' ? 'cutover' : null;
   }
+  /* non-prod: ready 以降は全部 block. ready の cutover は production 専用仕様, それより
+     先 (cutover/hypercare/done) は実行できる phase ではない. */
   if (phase === 'rehearsal') return 'rehearsal';
-  if (phase === 'cutover' || phase === 'hypercare' || phase === 'done') return null;
+  if (phase === 'ready' || phase === 'cutover' || phase === 'hypercare' || phase === 'done') return null;
   return 'test';
 }
 

@@ -965,7 +965,15 @@ export function AppShell() {
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
       <AccountProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
       <SolutionSettingsModal open={solutionOpen} onClose={() => setSolutionOpen(false)} />
-      <SiteSettingsModal open={siteSettingsOpen} onClose={() => setSiteSettingsOpen(false)} highlight={siteSettingsHighlight} />
+      <SiteSettingsModal
+        open={siteSettingsOpen}
+        onClose={() => setSiteSettingsOpen(false)}
+        focus={
+          siteSettingsHighlight === 'csv' ? 'asis-csv'
+          : siteSettingsHighlight === 'tobe-db' ? 'tobe-db'
+          : siteSettingsFocus
+        }
+      />
       <ClusterAdminModal open={clusterAdminOpen} onClose={() => setClusterAdminOpen(false)} />
       <CreateSiteModal open={createSiteOpen} onClose={() => setCreateSiteOpen(false)} />
       <CreateProjectModal open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} />

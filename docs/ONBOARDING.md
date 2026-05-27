@@ -928,8 +928,8 @@ Mirrors BE `RunService.resolveRunTypeFromPhase`:
 | production | ready | cutover |
 | production | other | null (blocked) |
 | non-prod | rehearsal | rehearsal |
-| non-prod | cutover / hypercare / done | null (blocked) |
-| non-prod | any other | test |
+| non-prod | ready / cutover / hypercare / done | null (blocked — ready run は production 限定) |
+| non-prod | planning / analysis / test / sign-off | test |
 
 Phase auto-advance on Start is **forward-only** (e.g., starting a test run
 from `planning` advances to `test`; starting a test from `sign-off` does
