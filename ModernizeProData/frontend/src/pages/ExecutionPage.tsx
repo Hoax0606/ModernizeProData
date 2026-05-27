@@ -15,6 +15,8 @@ import {
 import { runPreflight, isAllPass, type TableCheckResult } from '../lib/preflightValidation';
 import { tobeDbApi } from '../api/tobeDb';
 import { csvPreviewApi } from '../api/csvPreview';
+import { runsApi, type RunHistoryDto, type StageView } from '../api/runs';
+import { usePipelineProgress, isTerminal } from '../hooks/usePipelineProgress';
 import { PreflightResultPanel } from '../components/PreflightResultPanel';
 import { useDemoMode, type DemoMode } from '../lib/useDemoMode';
 import {
@@ -24,10 +26,12 @@ import {
   BASE_STAGES,
   buildStages,
   buildStagesFromActiveRun,
+  buildStagesFromStageViews,
   computeElapsedMs,
   type Stage,
   type StageTone,
 } from '../lib/pipelineStages';
+import { useQuery } from '@tanstack/react-query';
 import { useT, type TranslationKey } from '../i18n';
 
 type T = (key: TranslationKey, vars?: Record<string, string | number>) => string;
@@ -71,11 +75,16 @@ export function ExecutionPage() {
   const { isDemo, demoMode, exitDemo } = useDemoMode();
   const user = useAuthStore((s) => s.user);
 
-  /* activeRun (frontend mock simulation) */
+  /* Demo モードの mock activeRun. real モードでは触らない. */
   const storeActiveRun: ActiveRunState | null = useExecutionPreflightStore(
     (s) => (project ? s.byProject[project.id]?.activeRun : null) ?? null,
   );
   const [tick, setTick] = useState(0);
+
+  /* real モードの活性 run id. start に成功したら BE 返却値を保存 → usePipelineProgress
+     が自動 polling. setActiveRunId(null) で polling 停止 + 表示クリア. */
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const { run, stages: stageViews } = usePipelineProgress(isDemo ? null : activeRunId);
 
   useEffect(() => {
     if (!storeActiveRun) return;
@@ -166,6 +175,41 @@ export function ExecutionPage() {
       cur.setPhase(projectIdForReset, 'idle');
     }
   }, [projectIdForReset]);
+
+  /* === Hooks: 必ず early return より前 ===
+     project/site が未確定でも hook 数を一定に保つため、ここに集約する.
+     使用は早期 return 後に分岐. */
+
+  /* BE polling 結果 (RunHistoryDto + StageView[]) を ActiveRunState 形に合成. real モードのみ. */
+  const realActiveRun: ActiveRunState | null = useMemo(() => {
+    if (isDemo || !run) return null;
+    const startedAtMs = run.startedAt ? new Date(run.startedAt).getTime() : Date.now();
+    const haltedAtMs = run.finishedAt && isTerminal(run.status) ? new Date(run.finishedAt).getTime() : null;
+    const failedIdx = stageViews ? findFailedStageIndex(stageViews) : null;
+    return {
+      runId: run.id,
+      selectedTables: [],            // BE は run 単位で記録しない (tables[] は per-stage 配下)
+      startedAt: startedAtMs,
+      pausedAt: null,                 // BE pause 未対応
+      pauseAccumMs: 0,
+      runStatus: mapBeRunStatus(run.status),
+      failedStageIndex: failedIdx,
+      failureReason: run.errorMessage ?? null,
+      haltedAt: haltedAtMs,
+    };
+  }, [isDemo, run, stageViews]);
+
+  const displayedActiveRun: ActiveRunState | null = isDemo ? storeActiveRun : realActiveRun;
+
+  /* 実行履歴: real は BE fetch、demo は既存 mock. project が未確定なら disabled. */
+  const runHistoryQuery = useQuery<RunHistoryDto[]>({
+    queryKey: ['run-history', projectIdForReset],
+    enabled: !isDemo && !!projectIdForReset,
+    queryFn: () => runsApi.listByProject(projectIdForReset!),
+    staleTime: 5_000,
+    refetchInterval: activeRunId ? 5_000 : false,
+  });
+  const runHistoryData = runHistoryQuery.data;
 
   if (!project || !site) {
     return (
@@ -309,44 +353,71 @@ export function ExecutionPage() {
     && !displayedStale
     && isAllPass(displayedResults);
 
-  const stages = storeActiveRun
-    ? buildStagesFromActiveRun(storeActiveRun, TOTAL_RUN_MS)
-    : buildStages(project.phase);
-  const runs = buildRuns(project);
+  /* stages 表示: demo は mock タイマー派生、real は BE polling 派生.
+     どちらも null なら project.phase ベースの静的 fallback. */
+  const stages = isDemo
+    ? (storeActiveRun ? buildStagesFromActiveRun(storeActiveRun, TOTAL_RUN_MS) : buildStages(project.phase))
+    : (stageViews ? buildStagesFromStageViews(stageViews) : buildStages(project.phase));
 
-  const controlsLocked = storeActiveRun !== null || !hasPinnedSnapshot;
+  const runs = isDemo
+    ? buildRuns(project)
+    : (runHistoryData ?? []).map(beRunToRunCard);
 
-  const handleStartRun = () => {
+  const controlsLocked = displayedActiveRun !== null || !hasPinnedSnapshot;
+
+  const handleStartRun = async () => {
     if (!preflightPassed || selectedTables.size === 0) return;
     if (!hasPinnedSnapshot || !pinnedSnapshot) return;
     if (!runMode) return;
-    const current = useExecutionPreflightStore.getState().byProject[project.id]?.activeRun;
-    if (current && current.runStatus !== 'running') {
-      useExecutionPreflightStore.getState().clearActiveRun(project.id);
-    } else if (current && current.runStatus === 'running') {
+
+    const tables = Array.from(selectedTables);
+
+    /* Demo モード: 既存の mock 起動 (BE 呼ばない). */
+    if (isDemo) {
+      const current = useExecutionPreflightStore.getState().byProject[project.id]?.activeRun;
+      if (current && current.runStatus !== 'running') {
+        useExecutionPreflightStore.getState().clearActiveRun(project.id);
+      } else if (current && current.runStatus === 'running') {
+        return;
+      }
+      useExecutionPreflightStore.getState().startActiveRun(project.id, tables);
+      if (runMode === 'cutover') {
+        useWorkspaceStore.getState().startCutover(project.id, pinnedSnapshot.id, user?.username ?? 'Admin')
+          .catch(() => { /* mock; ignore */ });
+      } else {
+        const desiredPhase: ProjectPhase = runMode === 'rehearsal' ? 'rehearsal' : 'test';
+        const nextPhase: ProjectPhase =
+          phaseOrder(project.phase) < phaseOrder(desiredPhase) ? desiredPhase : project.phase;
+        useWorkspaceStore.getState()
+          .setProjectPhaseAndRunStatus(project.id, nextPhase, 'running')
+          .catch(() => { /* mock */ });
+      }
       return;
     }
-    const tables = Array.from(selectedTables);
-    useExecutionPreflightStore.getState().startActiveRun(project.id, tables);
-    /* phase / runStatus 갱신.
-       run 起動による phase 自動進行は forward-only — 既に test 以降の phase に
-       いる時に planning 측 'test' run を起동해도 phase を巻き戻さない.
-       phase + runStatus は単一 atomic 갱신 — 분리하면 BE 呼び出しと set のレースで
-       sidebar chip が一瞬色なし(test + 非 running)に見える bug が出るため. */
-    if (runMode === 'cutover') {
-      useWorkspaceStore.getState().startCutover(project.id, pinnedSnapshot.id, user?.username ?? 'Admin')
-        .catch(() => { /* mock; ignore */ });
-    } else {
-      const desiredPhase: ProjectPhase = runMode === 'rehearsal' ? 'rehearsal' : 'test';
-      const nextPhase: ProjectPhase =
-        phaseOrder(project.phase) < phaseOrder(desiredPhase) ? desiredPhase : project.phase;
-      useWorkspaceStore.getState()
-        .setProjectPhaseAndRunStatus(project.id, nextPhase, 'running')
-        .catch(() => { /* mock */ });
+
+    /* Real モード: BE に start を投げて返却 runId を保存. polling は usePipelineProgress
+       が自動で開始. project.runStatus / phase は BE 側の RunService が更新 →
+       AppShell の 10s polling で sidebar に反映 (FE 側 自前 update 不要). */
+    if (activeRunId) return;  // 既に走ってる、二重起動防止
+    try {
+      const result = await runsApi.start(project.id, runMode, tables);
+      if (result.status === 'STARTED' && result.runId) {
+        setActiveRunId(result.runId);
+      } else {
+        /* REJECTED / LOCKED — alert 暫定. toast 化は別件. */
+        console.warn('[execution] startRun rejected:', result.status, result.reason);
+        alert(`Start rejected: ${result.status}\n${result.reason ?? ''}`);
+      }
+    } catch (e) {
+      console.error('[execution] startRun failed:', e);
+      alert(`Start failed: ${e instanceof Error ? e.message : 'unknown error'}`);
     }
   };
 
   const handlePauseToggle = () => {
+    /* Real モードでは pause/resume は BE 未対応のためボタン自体を非表示にする
+       (下の RunHeader で isDemo フラグ見て描画分岐). ここに来るのは demo のみ. */
+    if (!isDemo) return;
     if (!storeActiveRun) return;
     if (storeActiveRun.pausedAt === null) {
       useExecutionPreflightStore.getState().pauseActiveRun(project.id);
@@ -367,23 +438,48 @@ export function ExecutionPage() {
     useWorkspaceStore.getState().setProjectRunStatus(project.id, 'failed').catch(() => { /* mock */ });
   };
 
-  const handleRetry = () => {
-    useExecutionPreflightStore.getState().retryActiveRun(project.id, STAGE_MS);
-    useWorkspaceStore.getState().setProjectRunStatus(project.id, 'running').catch(() => { /* mock */ });
+  const handleRetry = async () => {
+    if (isDemo) {
+      useExecutionPreflightStore.getState().retryActiveRun(project.id, STAGE_MS);
+      useWorkspaceStore.getState().setProjectRunStatus(project.id, 'running').catch(() => { /* mock */ });
+      return;
+    }
+    /* Real モードの retry = 失敗した run を捨てて新しい run を起こす. handleStartRun と同じ流れ. */
+    setActiveRunId(null);
+    await handleStartRun();
   };
 
   const handleDiscard = () => {
-    useExecutionPreflightStore.getState().clearActiveRun(project.id);
-    useWorkspaceStore.getState().setProjectRunStatus(project.id, 'idle').catch(() => { /* mock */ });
+    if (isDemo) {
+      useExecutionPreflightStore.getState().clearActiveRun(project.id);
+      useWorkspaceStore.getState().setProjectRunStatus(project.id, 'idle').catch(() => { /* mock */ });
+      return;
+    }
+    /* Real モード: polling 停止 + UI から「現在の run」を外す.
+       BE の run 自体は履歴に残るが、ExecutionPage 上の active 表示は消える. */
+    setActiveRunId(null);
   };
 
-  const handleStopRun = () => {
-    if (!storeActiveRun || storeActiveRun.runStatus !== 'running') return;
-    const elapsed = computeElapsedMs(storeActiveRun);
-    const stageIndex = Math.min(Math.floor(elapsed / STAGE_MS), TOTAL_STAGES - 1);
-    const reason = t('execution.run.abortReason');
-    useExecutionPreflightStore.getState().abortActiveRun(project.id, stageIndex, reason);
-    useWorkspaceStore.getState().setProjectRunStatus(project.id, 'aborted').catch(() => { /* mock */ });
+  const handleStopRun = async () => {
+    if (isDemo) {
+      if (!storeActiveRun || storeActiveRun.runStatus !== 'running') return;
+      const elapsed = computeElapsedMs(storeActiveRun);
+      const stageIndex = Math.min(Math.floor(elapsed / STAGE_MS), TOTAL_STAGES - 1);
+      const reason = t('execution.run.abortReason');
+      useExecutionPreflightStore.getState().abortActiveRun(project.id, stageIndex, reason);
+      useWorkspaceStore.getState().setProjectRunStatus(project.id, 'aborted').catch(() => { /* mock */ });
+      return;
+    }
+    /* Real モード: BE に abort 送信. polling が即次の tick で aborted を拾って UI 更新. */
+    if (!activeRunId) return;
+    if (run && isTerminal(run.status)) return; // 既に terminal なら何もしない
+    try {
+      await runsApi.abort(activeRunId, t('execution.run.abortReason'));
+    } catch (e) {
+      /* BE が abort endpoint 未対応 (S2 まだ push 前) なら 404/400. console に出して終わり. */
+      console.warn('[execution] abort failed (BE not ready or other error):', e);
+      alert(`Abort failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+    }
   };
 
   const handleExitDemo = () => {
@@ -398,7 +494,7 @@ export function ExecutionPage() {
         project={project}
         site={site}
         runMode={runMode}
-        activeRun={storeActiveRun}
+        activeRun={displayedActiveRun}
         runs={runs}
         preflightPassed={preflightPassed}
         hasPinnedSnapshot={hasPinnedSnapshot}
@@ -602,9 +698,12 @@ function RunHeader({
         )}
         {!isHalted && (
           <>
-            <button type="button" onClick={onPauseToggle} style={styles.btnSecondary}>
-              {running ? `⏸ ${t('execution.run.pause')}` : `▶ ${t('execution.run.resume')}`}
-            </button>
+            {/* Pause/Resume は BE 未対応のため demo モードのみ表示. Real モードでは隠す. */}
+            {isDemo && (
+              <button type="button" onClick={onPauseToggle} style={styles.btnSecondary}>
+                {running ? `⏸ ${t('execution.run.pause')}` : `▶ ${t('execution.run.resume')}`}
+              </button>
+            )}
             <button type="button" onClick={onStop} style={styles.btnDanger}>
               ⏹ {t('execution.run.stop')}
             </button>
@@ -1022,6 +1121,59 @@ function formatDuration(ms: number): string {
 function formatTimeOfDay(ts: number): string {
   const d = new Date(ts);
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/** BE 의 RunStatus enum 을 FE ActiveRunState.runStatus 에 매핑. */
+function mapBeRunStatus(s: RunHistoryDto['status']): ActiveRunState['runStatus'] {
+  switch (s) {
+    case 'success':   return 'completed';
+    case 'failed':    return 'failed';
+    case 'aborted':   return 'aborted';
+    case 'timed_out': return 'failed';   // UX 上は failed 扱い
+    case 'pending':                       // queued state → 視覚的には running 扱い
+    case 'running':
+    default:          return 'running';
+  }
+}
+
+/** stages から最初に failed になった stage の index を求める. 全 success / 全 pending なら null. */
+function findFailedStageIndex(stageViews: StageView[]): number | null {
+  /* stageKey と BASE_STAGES.id の対応で index を確定. BE が seq 順で返す保証は無いので明示マッチ. */
+  for (let i = 0; i < BASE_STAGES.length; i++) {
+    const sv = stageViews.find((s) => s.stageKey === BASE_STAGES[i].id);
+    if (sv?.status === 'failed') return i;
+  }
+  return null;
+}
+
+/** BE RunHistoryDto → 既存 Run カード形 (履歴表示用). */
+function beRunToRunCard(r: RunHistoryDto): Run {
+  const startedAt = r.startedAt ? new Date(r.startedAt) : null;
+  const durationMs = r.durationMs ?? 0;
+  const result: RunResult =
+    r.status === 'success'   ? 'ok'
+    : r.status === 'failed'   ? 'failed'
+    : r.status === 'aborted'  ? 'aborted'
+    : r.status === 'timed_out'? 'failed'
+    : 'running';
+  return {
+    id: r.id,
+    mode: r.runType === 'cutover' ? 'cutover' : 'rehearsal',
+    scope: 'all',
+    startedAt: startedAt ? formatRunStartedAt(startedAt) : '—',
+    elapsed: formatDuration(durationMs),
+    result,
+    triggeredBy: { actor: r.requestedBy ?? 'system', source: r.triggerSource ?? undefined },
+  };
+}
+
+function formatRunStartedAt(d: Date): string {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const HH = String(d.getHours()).padStart(2, '0');
+  const MM = String(d.getMinutes()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd} ${HH}:${MM}`;
 }
 
 /** phase の lifecycle 순서. forward-only な phase 自動進行 비교에 사용. */

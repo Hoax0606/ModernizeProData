@@ -1,5 +1,6 @@
 import type { ActiveRunState } from '../store/executionPreflight';
 import type { ProjectPhase } from '../store/workspace';
+import type { StageView } from '../api/runs';
 
 export type StageTone = 'idle' | 'running' | 'ok' | 'err';
 
@@ -87,4 +88,58 @@ export function buildStagesFromActiveRun(activeRun: ActiveRunState, totalMs: num
 /** 完了した stage の数 (tone === 'ok'). 分数表示用. */
 export function countDoneStages(stages: Stage[]): number {
   return stages.filter((s) => s.tone === 'ok').length;
+}
+
+/**
+ * BE polling 結果 (StageView[]) を UI モデル (Stage[]) に変換.
+ * Demo / mock 用の buildStagesFromActiveRun と並存. 実モードはこちら.
+ *
+ * - stageKey は BE 側で 'check'/'extract'/'reconcile'/'transform'/'audit'/'load'/'verify' の
+ *   いずれか. BASE_STAGES の id と一致させる前提.
+ * - status='pending' は tone='idle' (まだ実行されてない / ゲート中断後).
+ * - status='running' は tone='running'.
+ * - status='success' は tone='ok'.
+ * - status='failed' は tone='err'.
+ * - pct は BE 計算値 (tablesSuccess/tablesTotal 割合) をそのまま使う.
+ * - rate は tablesSuccess + tablesFailed の進捗カウント表記 (例: "12/24 tables").
+ * - eta は durationMs / finishedAt が分かれば算出、無ければ '—'.
+ *
+ * BE response に含まれない stage は BASE_STAGES の defaultPct/defaultTone で埋める
+ * (=未実行 idle 状態. ハイブリッド表示の「pending」 = グレー).
+ */
+export function buildStagesFromStageViews(stageViews: StageView[]): Stage[] {
+  const byKey = new Map<string, StageView>();
+  for (const sv of stageViews) byKey.set(sv.stageKey, sv);
+
+  return BASE_STAGES.map((base) => {
+    const sv = byKey.get(base.id);
+    if (!sv) {
+      // BE response に該当 stage が無い = 未実行 / pending.
+      return { ...base, pct: base.defaultPct, tone: base.defaultTone };
+    }
+    const tone: StageTone =
+      sv.status === 'success' ? 'ok'
+      : sv.status === 'failed' ? 'err'
+      : sv.status === 'running' ? 'running'
+      : 'idle';
+    const pct = Math.max(0, Math.min(100, sv.pct ?? 0));
+    const done = (sv.tablesSuccess ?? 0) + (sv.tablesFailed ?? 0);
+    const rate = sv.tablesTotal > 0 ? `${done}/${sv.tablesTotal} tables` : '—';
+    /* eta: 大雑把に未完了テーブル数 * 平均処理時間. ここでは BE が値を返さない限り '—'. */
+    let eta = '—';
+    if (sv.status === 'success') eta = 'done';
+    else if (sv.status === 'failed') eta = 'failed';
+    else if (sv.status === 'pending') eta = '—';
+    else if (sv.status === 'running' && sv.startedAt && sv.tablesTotal > 0) {
+      const elapsed = Date.now() - new Date(sv.startedAt).getTime();
+      const doneCount = (sv.tablesSuccess ?? 0) + (sv.tablesFailed ?? 0);
+      if (doneCount > 0 && elapsed > 0) {
+        const perTable = elapsed / doneCount;
+        const remain = (sv.tablesTotal - doneCount) * perTable;
+        const remSec = Math.max(0, Math.ceil(remain / 1000));
+        eta = `00:${String(Math.min(remSec, 99)).padStart(2, '0')}`;
+      }
+    }
+    return { ...base, pct, tone, rate, eta };
+  });
 }

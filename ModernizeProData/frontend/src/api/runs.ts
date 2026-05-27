@@ -40,6 +40,33 @@ export interface BulkRunResultDto {
   results: RunResultDto[];
 }
 
+/** 1 stage 中の 1 テーブル処理結果 (BE: StageTableResult). */
+export interface TableResultView {
+  tobeTable: string;
+  tobeSchema?: string;
+  status: 'running' | 'success' | 'failed';
+  rowCount?: number;
+  durationMs?: number;
+  errorDetail?: string;
+}
+
+/** 1 run の 1 stage の進捗 (BE: StageView, GET /api/v1/runs/{id}/stages の戻り値要素). */
+export interface StageView {
+  stageKey: string;
+  seq: number;
+  status: 'pending' | 'running' | 'success' | 'failed';
+  /** 0-100. BE が tables_success/tables_total から算出 (or 単純 100/0). */
+  pct: number;
+  tablesTotal: number;
+  tablesSuccess: number;
+  tablesFailed: number;
+  startedAt?: string;
+  finishedAt?: string;
+  durationMs?: number;
+  errorSummary?: string;
+  tables: TableResultView[];
+}
+
 export interface RunHistoryDto {
   id: string;
   projectId: string;
@@ -73,14 +100,40 @@ export const runsApi = {
   /**
    * 単一 project 起動. runType 省略時은 BE 가 project.phase 로부터 자동 결정
    * (test / rehearsal / cutover; 그 외 phase 면 REJECTED).
+   *
+   * tables: 部分実行用. TO-BE 物理名の配列を渡すと、その binding だけが処理される.
+   * 未指定 (undefined / 空配列) なら BE は全 binding を処理. BE が tables を未対応の
+   * 期間でも互換性あり (フィールド無視されるだけ).
    */
-  start: (projectId: string, runType?: RunTypeStr) =>
+  start: (projectId: string, runType?: RunTypeStr, tables?: string[]) =>
     unwrap(
       api.post<ApiResponse<RunResultDto>>(
         '/api/v1/runs',
-        runType ? { projectId, runType } : { projectId },
+        {
+          projectId,
+          ...(runType ? { runType } : {}),
+          ...(tables && tables.length > 0 ? { tables } : {}),
+        },
       ),
     ),
+
+  /**
+   * 進行中 / 終了済 run の stage 単位の進捗を取得. 2 秒 polling 想定.
+   * Terminal 状態 (run.status が success/failed/aborted/timed_out) になったら呼び元が
+   * polling を止める.
+   */
+  stages: (runId: string) =>
+    unwrap(api.get<ApiResponse<StageView[]>>(`/api/v1/runs/${runId}/stages`)),
+
+  /**
+   * run の中断. status を 'aborted' に遷移させる (実行中 thread の強制中断は PoC 2 次).
+   * BE 側 abort endpoint が public で着くまでは 4xx になり得るので、呼び元は失敗を許容.
+   */
+  abort: (runId: string, reason?: string) =>
+    unwrap(api.post<ApiResponse<RunHistoryDto>>(
+      `/api/v1/runs/${runId}/abort`,
+      reason ? { reason } : {},
+    )),
 
   startAll: () =>
     unwrap(api.post<ApiResponse<BulkRunResultDto>>('/api/v1/runs/all')),
