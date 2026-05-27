@@ -100,19 +100,22 @@ function CheckRow({
         }}
         onClick={isPerTable ? onToggle : undefined}
       >
+        {/* 5 列構成 (dot / title / detail / chev / fix) を全行で固定する.
+            project 行でも chev セルを空 span として描画しないと、grid が 4 アイテムで
+            列が前詰めになり Fix の X 位置が per-table 行とずれる. */}
         <StatusDot status={check.aggregate} />
         <span style={styles.title}>{check.title}</span>
-        {!isPerTable && (
-          <span style={styles.detailInline}>{projectDetail}</span>
-        )}
-        {isPerTable && (
-          <span style={{ ...styles.detailInline, color: aggregateColor }}>
-            {aggregateLabel}
-          </span>
-        )}
-        {isPerTable && (
-          <span style={styles.chev}>{expanded ? '▾' : '▸'}</span>
-        )}
+        <span
+          style={{
+            ...styles.detailInline,
+            ...(isPerTable ? { color: aggregateColor } : {}),
+          }}
+        >
+          {isPerTable ? aggregateLabel : projectDetail}
+        </span>
+        <span style={styles.chev} aria-hidden={!isPerTable}>
+          {isPerTable ? (expanded ? '▾' : '▸') : ''}
+        </span>
         {check.aggregate === 'fail' && showFix && onFix ? (
           <button
             type="button"
@@ -138,7 +141,9 @@ function CheckRow({
                 <StatusDot status={row.status} small />
                 <span style={styles.expandTable}>{row.table}</span>
                 <span style={{ ...styles.expandDetail, color: detailColor(row.status) }}>{row.detail}</span>
-                {row.status === 'fail' && showFix && onFix ? (
+                {/* fixIsProjectWide なチェック (例: csv-arrived) は per-table Fix を出さない —
+                    全 fail 行が同じ project-wide 設定画面に飛ぶので冗長. aggregate Fix だけ残す. */}
+                {row.status === 'fail' && showFix && onFix && !check.fixIsProjectWide ? (
                   <button
                     type="button"
                     style={styles.fixBtnSmall}
@@ -211,6 +216,7 @@ const styles: Record<string, React.CSSProperties> = {
   fixBtn: {
     padding: '3px 8px', border: '1px solid var(--border)', background: 'transparent',
     color: 'var(--text-2)', borderRadius: 3, fontSize: 11, fontWeight: 500, cursor: 'pointer',
+    whiteSpace: 'nowrap',
   },
   fixBtnPlaceholder: { width: 1, height: 1 },
   expandWrap: { padding: '6px 0 6px 0', background: 'var(--panel-2)' },
@@ -226,6 +232,7 @@ const styles: Record<string, React.CSSProperties> = {
   fixBtnSmall: {
     padding: '2px 7px', border: '1px solid var(--border)', background: 'var(--panel)',
     color: 'var(--text-2)', borderRadius: 3, fontSize: 10, fontWeight: 500, cursor: 'pointer',
+    whiteSpace: 'nowrap',
   },
   fixBtnSmallPlaceholder: { width: 1, height: 1 },
 };

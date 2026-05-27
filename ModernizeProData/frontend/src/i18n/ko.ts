@@ -428,8 +428,9 @@ export const ko = {
   'versions.pin.toggleTitleIneligible': '현재 phase 에서는 pin 불가',
   'versions.pin.iconAria':           'Pinned to top',
 
-  'versions.preflight.blocked':      'Execution 화면에서 이 스냅샷을 pin 하고 preflight 를 모두 pass 시켜야 Request Review 가 가능합니다',
-  'versions.preflight.notRun':       'Execution 화면에서 이 스냅샷을 pin 한 후 preflight 를 실행해주세요',
+  'versions.preflight.blocked':           'Execution 화면에서 이 스냅샷을 pin 하고 preflight 를 모두 pass 시켜야 Request Review 가 가능합니다',
+  'versions.preflight.notRun':            'Execution 화면에서 이 스냅샷을 pin 한 후 preflight 를 실행해주세요',
+  'versions.preflight.partialSelection':  'Execution 화면에서 전체 테이블을 선택해 preflight 를 실행해야 합니다',
 
   // CHANGES section (versions detail panel)
   'versions.changes.title':           'Changes',                          // *.title — 영문 통일
@@ -590,6 +591,9 @@ export const ko = {
 
   /* Pre-flight — per-table 化 new keys */
   'execution.preflight.check.csvArrived.failNoPath':       'CSV 경로가 Site 설정에 등록되어 있지 않습니다',
+  'execution.preflight.check.csvArrived.passOne':          'OK: {tables}',
+  'execution.preflight.check.csvArrived.failOne':          '미도착 {n} 건: {tables}',
+  'execution.preflight.check.csvArrived.skipNoBinding':    '바인딩이 없어 검증 대상이 없음',
   'execution.preflight.check.connTobe.passConfigured':     '{env} 환경 TO-BE DB 연결 OK',
   'execution.preflight.check.connTobe.failMissing':        '{env} 환경 TO-BE DB host/database/username 미설정',
   'execution.preflight.check.connTobe.failUnreachable':    '{env} 환경 TO-BE DB 연결 실패: {msg}',

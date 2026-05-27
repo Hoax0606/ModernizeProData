@@ -424,8 +424,9 @@ export const en: Record<TranslationKey, string> = {
   'versions.pin.toggleTitleIneligible': 'Cannot pin in the current phase',
   'versions.pin.iconAria':           'Pinned to top',
 
-  'versions.preflight.blocked':      'Pin this snapshot on the Execution page and pass preflight to enable Request Review',
-  'versions.preflight.notRun':       'Pin this snapshot on the Execution page and run preflight first',
+  'versions.preflight.blocked':           'Pin this snapshot on the Execution page and pass preflight to enable Request Review',
+  'versions.preflight.notRun':            'Pin this snapshot on the Execution page and run preflight first',
+  'versions.preflight.partialSelection':  'Run preflight on all tables on the Execution page first',
 
   // CHANGES section (versions detail panel)
   'versions.changes.title':           'Changes',
@@ -586,6 +587,9 @@ export const en: Record<TranslationKey, string> = {
 
   /* Pre-flight — per-table new keys */
   'execution.preflight.check.csvArrived.failNoPath':       'CSV path is not configured in Site settings',
+  'execution.preflight.check.csvArrived.passOne':          'OK: {tables}',
+  'execution.preflight.check.csvArrived.failOne':          '{n} missing: {tables}',
+  'execution.preflight.check.csvArrived.skipNoBinding':    'no binding — nothing to check',
   'execution.preflight.check.connTobe.passConfigured':     'TO-BE DB reachable in {env} environment',
   'execution.preflight.check.connTobe.failMissing':        '{env} TO-BE DB host / database / username missing',
   'execution.preflight.check.connTobe.failUnreachable':    '{env} TO-BE DB unreachable: {msg}',

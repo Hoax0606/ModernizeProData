@@ -430,8 +430,9 @@ export const ja: Record<TranslationKey, string> = {
   'versions.pin.toggleTitleIneligible': '現在の phase ではピン留め不可',
   'versions.pin.iconAria':           'Pinned to top',
 
-  'versions.preflight.blocked':      'Execution 画面でこのスナップショットを pin して preflight を全 pass させると Request Review が有効になります',
-  'versions.preflight.notRun':       'Execution 画面でこのスナップショットを pin して preflight を実行してください',
+  'versions.preflight.blocked':           'Execution 画面でこのスナップショットを pin して preflight を全 pass させると Request Review が有効になります',
+  'versions.preflight.notRun':            'Execution 画面でこのスナップショットを pin して preflight を実行してください',
+  'versions.preflight.partialSelection':  'Execution 画面で全テーブルを選択して preflight を実行してください',
 
   // CHANGES section (versions detail panel)
   'versions.changes.title':           'Changes',
@@ -592,6 +593,9 @@ export const ja: Record<TranslationKey, string> = {
 
   /* Pre-flight — per-table 化 new keys */
   'execution.preflight.check.csvArrived.failNoPath':       'CSV パスが Site 設定に登録されていません',
+  'execution.preflight.check.csvArrived.passOne':          'OK: {tables}',
+  'execution.preflight.check.csvArrived.failOne':          '未到着 {n} 件: {tables}',
+  'execution.preflight.check.csvArrived.skipNoBinding':    'バインディングがなく検証対象なし',
   'execution.preflight.check.connTobe.passConfigured':     '{env} 環境の TO-BE DB 接続 OK',
   'execution.preflight.check.connTobe.failMissing':        '{env} 環境の TO-BE DB host/database/username が未設定',
   'execution.preflight.check.connTobe.failUnreachable':    '{env} 環境の TO-BE DB 接続失敗: {msg}',

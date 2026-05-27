@@ -6,6 +6,7 @@ import { useAuthStore } from '../store/auth';
 import { useActiveProjectReadOnly } from '../store/readOnly';
 import { useAuditLogStore } from '../store/auditLog';
 import { useExecutionPreflightStore, type PreflightSnapshotResult } from '../store/executionPreflight';
+import { useTobeDdlStore } from '../store/tobeDdl';
 import { isAllPass } from '../lib/preflightValidation';
 import { useT, type TranslationKey } from '../i18n';
 
@@ -33,6 +34,19 @@ export function VersionsPage() {
   const preflightBySnapshot = useExecutionPreflightStore(
     (s) => activeProjectId ? s.byProject[activeProjectId]?.bySnapshot : undefined,
   ) as Record<string, PreflightSnapshotResult> | undefined;
+
+  /* TO-BE DDL — Request Review ゲートで「cache が全テーブル覆ってるか」を判定するのに必要.
+     Execution 側でも同じ store を使っているのでキャッシュヒットが期待できる. */
+  const tobeSchema = useTobeDdlStore((s) => activeProjectId ? s.schemasByProject[activeProjectId] : undefined);
+  const fetchTobeDdl = useTobeDdlStore((s) => s.fetch);
+  useEffect(() => {
+    if (!activeProjectId) return;
+    if (!tobeSchema) fetchTobeDdl(activeProjectId).catch(() => { /* DDL 미등록 — 게이트가 잠긴 채로 표시 */ });
+  }, [activeProjectId, tobeSchema, fetchTobeDdl]);
+  const allTobeTableNames = useMemo(
+    () => (tobeSchema?.tables ?? []).map((t) => t.table.physicalName),
+    [tobeSchema],
+  );
 
   const allSnapshots = useSnapshotsStore((s) => s.snapshots);
   const fetchByProject = useSnapshotsStore((s) => s.fetchByProject);
@@ -105,6 +119,22 @@ export function VersionsPage() {
     () => snapshots.find((s) => s.id === selectedSnapshotId) ?? null,
     [snapshots, selectedSnapshotId],
   );
+
+  /* Request Review ゲート用に 3 つの flag を計算:
+     - exists: その snapshot に対して preflight cache がある
+     - passed: cache の全 check が pass
+     - coversAll: cache の selectedTables が DDL の全 TO-BE テーブルを覆っている
+     仕様: 3 つ全部 true でないと Request Review 不可. */
+  const requestReviewGate = useMemo(() => {
+    if (!selectedSnapshot) return { exists: false, passed: false, coversAll: false };
+    const cached = preflightBySnapshot?.[selectedSnapshot.id];
+    const exists = !!cached;
+    const passed = !!cached && isAllPass(cached.results);
+    const coversAll = !!cached
+      && allTobeTableNames.length > 0
+      && allTobeTableNames.every((name) => cached.selectedTables.includes(name));
+    return { exists, passed, coversAll };
+  }, [selectedSnapshot, preflightBySnapshot, allTobeTableNames]);
 
   // 페이지 첫 진입 시 한 번만 최신 snapshot 자동 선택.
   // polling / 외부 변경으로 snapshots 가 갱신돼도 사용자가 보고 있던 화면을 강제 전환하지 않음
@@ -444,9 +474,9 @@ export function VersionsPage() {
               isPinned={pinnedIds.includes(selectedSnapshot.id)}
               pinEligible={isPinEligible(selectedSnapshot, project.phase)}
               onTogglePin={() => togglePin(selectedSnapshot.id)}
-              preflightResultExists={!!preflightBySnapshot?.[selectedSnapshot.id]}
-              preflightPassed={!!preflightBySnapshot?.[selectedSnapshot.id]?.results
-                && isAllPass(preflightBySnapshot[selectedSnapshot.id].results)}
+              preflightResultExists={requestReviewGate.exists}
+              preflightPassed={requestReviewGate.passed}
+              preflightCoversAllTables={requestReviewGate.coversAll}
             />
           ) : (
             <div style={styles.noSelectionMessage}>
@@ -686,7 +716,7 @@ function ChangeRow({ kind, category, rawKey, detail, fieldChanges }: {
 
 function SnapshotDetailView({
   snapshot, onRequest, readOnly, isPinned, pinEligible, onTogglePin,
-  preflightResultExists, preflightPassed,
+  preflightResultExists, preflightPassed, preflightCoversAllTables,
 }: {
   snapshot: {
     id: string;
@@ -714,18 +744,23 @@ function SnapshotDetailView({
   preflightResultExists: boolean;
   /** その結果が all-pass か. */
   preflightPassed: boolean;
+  /** cache の selectedTables が DDL の全 TO-BE テーブルを覆っているか. */
+  preflightCoversAllTables: boolean;
 }) {
   const t = useT();
   const user = useAuthStore((s) => s.user);
   const [confirmingRequest, setConfirmingRequest] = useState(false);
 
-  /* Request Review ゲート: Execution 画面側で preflight all-pass の cache が必要. */
+  /* Request Review ゲート: Execution 画面側で「全テーブル × 全 preflight pass」cache 必須.
+     優先度: cache 不在 > 部分選択 > 失敗あり. */
   const requestBlockedReason = !preflightResultExists
     ? t('versions.preflight.notRun')
-    : !preflightPassed
-      ? t('versions.preflight.blocked')
-      : '';
-  const canRequest = !readOnly && preflightPassed;
+    : !preflightCoversAllTables
+      ? t('versions.preflight.partialSelection')
+      : !preflightPassed
+        ? t('versions.preflight.blocked')
+        : '';
+  const canRequest = !readOnly && preflightPassed && preflightCoversAllTables;
 
   return (
     <div style={styles.detailContent}>

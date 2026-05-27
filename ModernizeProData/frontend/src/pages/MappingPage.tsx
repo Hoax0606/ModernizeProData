@@ -334,17 +334,23 @@ export function MappingPage() {
     if (!kind) return;
     // unmapped-asis: AS-IS 사이드로 자동 전환해야 AsisTableDetail 이 mount 되고
     // [data-fix-row="asis-unmapped"] 마커가 DOM 에 등장. table 명시 시 그 AS-IS table, 없으면 첫번째.
+    // matcher: qualified name (`schema.physical`) / physical name (`short`) 둘 다 받기.
     if (kind === 'unmapped-asis' && ASIS_TABLES.length > 0) {
       const target = targetTable
-        ? ASIS_TABLES.find((tt) => tt.name === targetTable || tt.internalName === targetTable)
+        ? ASIS_TABLES.find((tt) => tt.name === targetTable || tt.short === targetTable)
         : null;
       const pick = target ?? ASIS_TABLES[0];
       setSelected({ side: 'asis', name: pick.name });
     }
     // unbound-tobe / unmapped-tobe: table 指定 → その TO-BE を選択. なければ最初の該当を選択.
+    // matcher: qualified name / internalName(uuid) / physical name 全部 OK.
     if (kind === 'unbound-tobe' || kind === 'unmapped-tobe') {
       let chosen = targetTable
-        ? effectiveTobe.find((tt) => tt.name === targetTable || tt.internalName === targetTable)
+        ? effectiveTobe.find((tt) =>
+            tt.name === targetTable
+            || tt.internalName === targetTable
+            || tt.short === targetTable,
+          )
         : null;
       if (!chosen && kind === 'unbound-tobe') {
         chosen = effectiveTobe.find((tt) => tt.sources.length === 0);

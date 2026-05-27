@@ -879,86 +879,119 @@ download trigger) does **not** need to change.
 
 ---
 
-## 18. Pre-flight Gate — Execution Readiness Checks (added 2026-05-22)
+## 18. Pre-flight Gate — Execution Readiness Checks (rewritten 2026-05-27)
 
-The check panel that guards Start run on the Execution page. A run can only be
-started when every applicable check is in pass state.
+Readiness gate before Execution Start run AND before Versions Request Review.
+The two gates share the same check engine but apply different thresholds.
 
-### 18.1 Check status model
+### 18.1 Two gate contexts
 
-- `pass | fail | skip` — three-state. `skip` ("n/a") means the check is not
-  applicable to the current table selection (today: only `approved-snapshot`).
-- `fail` blocks Start run; the hint switches to "resolve the failing items
-  above first."
-- `RunHeader`'s `canStart` AND-gates `preflightPassed` on top of the existing
-  mapping-complete and phase gates.
-
-### 18.2 The eight checks
-
-| id | Title | Status when |
+| Gate | Where | Threshold |
 |---|---|---|
-| `csv-arrived` | AS-IS extract data arrived | pass: customer's CSV received |
-| `ddl-asis` | AS-IS DDL import | pass: N tables registered / fail: not yet |
-| `ddl-tobe` | TO-BE DDL import | pass: N tables registered / fail: not yet |
-| `conn-tobe` | TO-BE DB reachable | pass: latency ok / fail: slow / fail: unreachable |
-| `tobe-bindings` | All TO-BE tables source-bound | pass: every TO-BE column has a source / fail: N unbound |
-| `asis-unmapped` | Selected AS-IS columns unmapped check | pass: all selected AS-IS columns mapped / fail: N unmapped |
-| `unmapped-cols` | All TO-BE columns unmapped check | pass: all TO-BE columns have a source / fail: N unmapped |
-| `approved-snapshot` | Snapshot approval check | pass: approved snapshot in place / fail: no snapshot / **skip: partial table selection** |
+| **Start run** | `ExecutionPage` → RunHeader | pin pinned snapshot + selected tables × every check pass + `runMode !== null` |
+| **Request Review** | `VersionsPage` → SnapshotDetailView | cached result exists + **selectedTables covers all DDL TO-BE tables** + every check pass |
 
-`approved-snapshot` is the only check that uses `skip`: it is only meaningful
-when the user runs against all tables — partial selections cannot validate
-against a project-wide approved snapshot.
+Selection can be a subset (partial migration is a real requirement). startrun
+allows running that subset. Request Review demands the snapshot proven
+end-to-end clean → coverage of the entire DDL is required.
 
-### 18.3 Table selection
+### 18.2 The seven checks
 
-- `TableSelector` lists TO-BE tables with a "select all" checkbox + per-table
-  checkboxes.
-- Empty state ("Register TO-BE DDL first") shown when `ddl-tobe` has not been
-  imported yet — the Pre-flight check button is disabled in that state.
-- Selection drives which AS-IS columns are inspected by `asis-unmapped`, and
-  whether `approved-snapshot` runs (all) or is skipped (subset).
+| id | scope | Data source | Pass when |
+|---|---|---|---|
+| `csv-arrived` | per-table | `site.csvPath` + per-AS-IS file probe (`csv-preview/{name}?limit=1`) | path set + every needed `{asisTable}.csv` (or `{schema}.{table}.csv`) present |
+| `ddl-asis` | project | live DDL store | AS-IS DDL imported |
+| `ddl-tobe` | project | live DDL store | TO-BE DDL imported |
+| `conn-tobe` | project | live BE `tobeDbApi.testConnection` | fields filled + BE returns success |
+| `tobe-bindings` | per-table | snapshot.bindings | every selected TO-BE table has ≥1 binding with sources |
+| `unmapped-cols` | per-table | snapshot.rules + TO-BE DDL | every column has a rule (`null` / `default` / producing `expression`) or an explicit `skip` rule |
+| `asis-unmapped` | **per-AS-IS-table** | snapshot.rules + AS-IS DDL | every column in the AS-IS table is referenced by some rule |
 
-### 18.4 Trigger + mock simulation
+- `project` rows show one inline detail (no expand).
+- `per-table` rows are expandable, showing the per-table breakdown.
+- `asis-unmapped` keys per-table rows by AS-IS physical name (not TO-BE) so
+  the Fix button can navigate to the AS-IS side of MappingPage.
 
-- "Pre-flight check" button starts the run. Each check resolves at a 600 ms
-  interval (mock `setTimeout`); the panel transitions `idle → checking → done`.
-- `?demo=preflight` URL param renders an instant preview state (4 pass + 3
-  fail + 1 skip) — used to verify the design without selecting tables. A
-  "Back to real data" link exits the preview.
+### 18.3 Pin requirement
 
-### 18.5 Fix → wiring (deferred)
+Execution requires a pinned snapshot. Without one the SnapshotDisplay panel
+shows an amber banner, and TableSelector / Pre-flight / Start are all
+disabled. Pin eligibility (`isPinEligible`) is enforced per phase — see
+`store/snapshots.ts`.
 
-Each `fail` row carries a `Fix →` affordance pointing at the page that
-resolves it (Mapping for unbound TO-BE columns, Snapshots for missing
-approval, Settings for DDL import). The onClick wiring + a one-second teal
-pulse on the affected MappingPage column is **P3** — a new `fixTarget`
-zustand store will carry `{ tableId, columnId }` across navigation.
+### 18.4 RunMode derivation (`deriveRunMode(phase, env)`)
 
-### 18.6 Decision history
+Mirrors BE `RunService.resolveRunTypeFromPhase`:
 
-- `CheckStatus` shipped as 4-state → 2-state → settled at 3-state. The third
-  value (`skip`) was introduced for the "snapshot only when ALL is selected"
-  requirement — needed a value distinct from `fail` for the not-applicable
-  case.
-- `snapshotApproved` initially missed `'sign-off'`. The truth lives in
-  `ApprovalsPage.tsx` ("Approve transitions phase: mapping → sign-off"), so a
-  sign-off phase project must read as pass for `approved-snapshot`.
-- `RunHistory` panel was removed (it duplicated `AuditLogPage` semantically).
-  Run history lives in the audit log.
+| env | phase | runMode |
+|---|---|---|
+| production | ready | cutover |
+| production | other | null (blocked) |
+| non-prod | rehearsal | rehearsal |
+| non-prod | cutover / hypercare / done | null (blocked) |
+| non-prod | any other | test |
 
-### 18.7 Out of scope (deferred)
+Phase auto-advance on Start is **forward-only** (e.g., starting a test run
+from `planning` advances to `test`; starting a test from `sign-off` does
+**not** regress to `test`).
 
-- **P2** — backend `POST /api/v1/projects/{id}/preflight/run` and each
-  check's real verification logic. Today the panel runs entirely on mocked
-  store data.
-- **P3** — Fix-button onClick wiring + MappingPage column pulse highlight via
-  the new `fixTarget` store.
-- `ExecutionPage.tsx` L578 `StartRunDialog` Confirm — backend wiring (today
-  `/* backend wiring TBD */`).
-- L202 Abort button onClick wiring.
-- Quarantine / Worker-pool side panels — intentionally excluded from the
-  initial Execution layout.
+### 18.5 Result cache (per-snapshot)
+
+`store/executionPreflight.byProject[projectId].bySnapshot[snapshotId]` holds
+`{ runAt, selectedTables, results }`. This is the **single source of truth**
+for both the Execution display and the Versions Request Review gate. The
+old project-wide `preflightResults` field has been removed (persist v5).
+
+When the pinned snapshot changes on Execution, the display automatically
+switches to that snapshot's cached result (or empty = "not run yet"). No
+separate state reset needed.
+
+### 18.6 Fix routing
+
+| Check id | Destination |
+|---|---|
+| `csv-arrived` | SiteSettings → CSV section (aggregate-only Fix — `fixIsProjectWide: true`) |
+| `ddl-asis` / `ddl-tobe` | `/settings` with `state.highlightSide` |
+| `conn-tobe` | SiteSettings → TO-BE DB section |
+| `tobe-bindings` / `unmapped-cols` | `/mapping` with `state.fixTarget = { kind, table }`. MappingPage matches by qualified name / internalName / physicalName (`tt.short`). |
+| `asis-unmapped` | same as above but `kind: 'unmapped-asis'`, table = AS-IS physical name |
+
+### 18.7 Demo modes
+
+- `?demo=preflight` — 7 fail fixture (worst case).
+- `?demo=run-fail` — 7 pass fixture, then user can `⚡ Simulate failure` mid-run.
+
+### 18.8 BE concurrency note (workaround in place)
+
+`SiteCsvPreviewController` reads via DuckDB through a shared `DuckDbService`.
+Concurrent requests collide with `"Invalid Input Error: Attempting to execute
+an unsuccessful or closed pending query result"`. Workaround: FE calls
+`csv-preview` **sequentially** (`for...of await`) in `startPreflight` instead
+of `Promise.all`. See handoff `2026-05-27-execution-preflight-real.md`.
+
+### 18.9 Decision history
+
+- 8 checks → 7 (`approved-snapshot` removed; snapshot integrity is now
+  enforced via the pin-required model + Versions Request Review gate).
+- `TableSelector` is intentionally kept to support partial-migration
+  scenarios — it limits the run scope (Execution) but does NOT relax the
+  Request Review gate.
+- `unmapped-cols` covers all columns, not just NOT-NULL no-default ones.
+  Rationale: aligns with `DashboardPage` `isMappingRuleMapped` semantics.
+- `asis-unmapped` rows are keyed by AS-IS table, contrary to the other
+  per-table checks which are keyed by TO-BE table. Required so the Fix
+  button can pass the correct table to MappingPage AS-IS side.
+
+### 18.10 Out of scope (deferred)
+
+- BE `POST /api/v1/projects/{id}/preflight/run` — preflight still runs on
+  the frontend; only `csv-preview` and `tobe-db/test-connection` call BE.
+- `CheckStage` / `ExtractStage` (in dev merge but stubs) — once they write
+  to `stage_instances`, preflight can read authoritative completion flags.
+- BE `DuckDbService` concurrency safety / connection pool — required to
+  drop the FE sequential workaround.
+- React style warning (`border` / `borderColor` shorthand mix) in the
+  Preflight panel — cosmetic.
 
 ---
 

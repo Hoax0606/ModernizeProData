@@ -14,6 +14,7 @@ import {
 } from '../store/executionPreflight';
 import { runPreflight, isAllPass, type TableCheckResult } from '../lib/preflightValidation';
 import { tobeDbApi } from '../api/tobeDb';
+import { csvPreviewApi } from '../api/csvPreview';
 import { PreflightResultPanel } from '../components/PreflightResultPanel';
 import { useDemoMode, type DemoMode } from '../lib/useDemoMode';
 import {
@@ -221,11 +222,47 @@ export function ExecutionPage() {
         }
       }
 
+      /* CSV ファイル存在チェックを per-AS-IS-table 並列で実行.
+         選択 TO-BE → bindings → 必要 AS-IS テーブル集合 を計算し、
+         csv-preview/{table}?limit=1 で 404 / 200 を判定. */
+      let csvFilesByAsisTable: Record<string, { exists: boolean; error?: string }> = {};
+      if (site.csvPath?.trim()) {
+        const asisTablesNeeded = new Set<string>();
+        for (const tobeTable of tablesList) {
+          const bindings = (snapshotData.bindings ?? []).filter((b) => b.tobeTable === tobeTable);
+          for (const b of bindings) {
+            for (const src of b.sources ?? []) {
+              if (src.asisTable) asisTablesNeeded.add(src.asisTable);
+            }
+          }
+        }
+        if (asisTablesNeeded.size > 0) {
+          /* BE の DuckDbService が現状スレッドセーフでなく、Promise.all で並列に
+             csv-preview を叩くと "Invalid Input Error: Attempting to execute an
+             unsuccessful or closed pending query result" でランダムに 1 件失敗する.
+             直列化(for-of await)で回避. 数テーブル分の +N × ~100ms 待ち増は preflight
+             の演出時間内に収まるので体感差は無視できる. BE 側の並列対応 / bulk endpoint
+             が入ったら parallel に戻すか bulk 呼び出しに切替可能. */
+          for (const table of asisTablesNeeded) {
+            try {
+              await csvPreviewApi.forTable(site.id, table, 1);
+              csvFilesByAsisTable[table] = { exists: true };
+            } catch (e) {
+              csvFilesByAsisTable[table] = {
+                exists: false,
+                error: e instanceof Error ? e.message : 'not found',
+              };
+            }
+          }
+        }
+      }
+
       const results = runPreflight({
         project, site, tobeSchema, asisSchema, snapshotData,
         selectedTables: tablesList,
         t,
         tobeDbReachable,
+        csvFilesByAsisTable,
       });
       /* 결과를 400ms 간격으로 bySnapshot[pinnedId].results 에 incremental append.
          setTimeout は이미 종료된 mount 후에도 발화하지만 store 가 살아있어 무해. */

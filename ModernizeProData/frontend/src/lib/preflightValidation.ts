@@ -28,6 +28,12 @@ export interface PreflightCheckResult {
   scope: 'project' | 'per-table';
   aggregate: CheckStatus;
   perTable: TableCheckResult[];
+  /**
+   * true = per-table 失敗時の Fix 先がすべて同じ project-wide 設定画面に飛ぶケース.
+   * UI は per-table 行の Fix ボタンを非表示にし、aggregate 行の Fix のみ残す.
+   * (例: csv-arrived は AS-IS テーブルごとに失敗しても、修正先は全部 SiteSettings → CSV)
+   */
+  fixIsProjectWide?: boolean;
 }
 
 type T = (key: TranslationKey, vars?: Record<string, string | number>) => string;
@@ -46,6 +52,12 @@ export interface PreflightInput {
    * 結果を渡す. null = テスト未実施 (e.g. 設定不足で skip).
    */
   tobeDbReachable: { success: boolean; message: string } | null;
+  /**
+   * AS-IS テーブル名 (physicalName) → CSV ファイル存在チェック結果.
+   * 呼び元 (startPreflight) が csv-preview API を叩いて事前に構築.
+   * キーが無い = 検査対象外 (binding がない / csvPath 未設定でスキップした 等).
+   */
+  csvFilesByAsisTable: Record<string, { exists: boolean; error?: string }>;
 }
 
 const ORDER: PreflightCheckId[] = [
@@ -137,19 +149,67 @@ function runOne(id: PreflightCheckId, ctx: Context): PreflightCheckResult {
 function checkCsvArrived(ctx: Context): PreflightCheckResult {
   const t = ctx.t;
   const path = ctx.site.csvPath?.trim() ?? '';
-  const pass = path.length > 0;
+
+  /* path 未設定 → project-wide fail (per-table 表示しない). */
+  if (path.length === 0) {
+    return {
+      id: 'csv-arrived',
+      title: t('execution.preflight.check.csvArrived.title'),
+      scope: 'project',
+      aggregate: 'fail',
+      perTable: [{
+        table: '*', status: 'fail',
+        detail: t('execution.preflight.check.csvArrived.failNoPath'),
+      }],
+    };
+  }
+
+  /* path 設定済 → per-table 検査. 選択 TO-BE が binding 経由で要求する AS-IS
+     테이블의 CSV ファイル存在を確認する. */
+  const tables = ctx.selectedTables;
+  if (tables.length === 0) {
+    return {
+      id: 'csv-arrived',
+      title: t('execution.preflight.check.csvArrived.title'),
+      scope: 'per-table',
+      aggregate: 'skip',
+      perTable: [],
+    };
+  }
+  const perTable: TableCheckResult[] = tables.map((name) => {
+    const bindings = ctx.bindingsByTobe.get(name) ?? [];
+    const asisTables = collectAsisTables(bindings);
+    if (asisTables.length === 0) {
+      return {
+        table: name, status: 'skip',
+        detail: t('execution.preflight.check.csvArrived.skipNoBinding'),
+      };
+    }
+    const missing: string[] = [];
+    for (const asis of asisTables) {
+      const r = ctx.csvFilesByAsisTable[asis];
+      if (!r || !r.exists) missing.push(asis);
+    }
+    return missing.length === 0
+      ? {
+          table: name, status: 'pass',
+          detail: t('execution.preflight.check.csvArrived.passOne', { tables: asisTables.join(', ') }),
+        }
+      : {
+          table: name, status: 'fail',
+          detail: t('execution.preflight.check.csvArrived.failOne', {
+            n: missing.length,
+            tables: missing.slice(0, 5).join(', '),
+          }),
+        };
+  });
   return {
     id: 'csv-arrived',
     title: t('execution.preflight.check.csvArrived.title'),
-    scope: 'project',
-    aggregate: pass ? 'pass' : 'fail',
-    perTable: [{
-      table: '*',
-      status: pass ? 'pass' : 'fail',
-      detail: pass
-        ? t('execution.preflight.check.csvArrived.pass')
-        : t('execution.preflight.check.csvArrived.failNoPath'),
-    }],
+    scope: 'per-table',
+    aggregate: aggregate(perTable),
+    perTable,
+    fixIsProjectWide: true,
   };
 }
 
@@ -350,29 +410,40 @@ function checkAsisUnmapped(ctx: Context): PreflightCheckResult {
     }
   }
 
-  const perTable: TableCheckResult[] = tables.map((name) => {
+  /* per-table 行은 AS-IS テーブル単位 (per-TO-BE ではない). Fix routing が AS-IS 측
+     MappingPage 를 열기 때문에、行の table = AS-IS physical name にしておく必要. */
+  const asisInScope = new Set<string>();
+  for (const name of tables) {
     const bindings = ctx.bindingsByTobe.get(name) ?? [];
-    const asisTables = collectAsisTables(bindings);
-    if (asisTables.length === 0) {
-      return { table: name, status: 'skip', detail: t('execution.preflight.check.asisUnmapped.skipNoBinding') };
+    for (const asis of collectAsisTables(bindings)) asisInScope.add(asis);
+  }
+  if (asisInScope.size === 0) {
+    return {
+      id: 'asis-unmapped',
+      title: t('execution.preflight.check.asisUnmapped.title'),
+      scope: 'per-table',
+      aggregate: 'skip',
+      perTable: [],
+    };
+  }
+  const perTable: TableCheckResult[] = [...asisInScope].map((asis) => {
+    const def = ctx.asisTableByName.get(asis);
+    if (!def) {
+      return { table: asis, status: 'skip', detail: t('execution.preflight.check.asisUnmapped.skipNoBinding') };
     }
-    const unused: string[] = [];
-    for (const asis of asisTables) {
-      const def = ctx.asisTableByName.get(asis);
-      if (!def) continue;
-      for (const col of def.columns) {
-        const key = qualifyAsisCol(asis, col.physicalName);
-        if (!usedAsisCols.has(key)) unused.push(`${asis}.${col.physicalName}`);
-      }
+    const unusedCols: string[] = [];
+    for (const col of def.columns) {
+      const key = qualifyAsisCol(asis, col.physicalName);
+      if (!usedAsisCols.has(key)) unusedCols.push(col.physicalName);
     }
-    return unused.length === 0
-      ? { table: name, status: 'pass', detail: t('execution.preflight.check.asisUnmapped.passOne') }
+    return unusedCols.length === 0
+      ? { table: asis, status: 'pass', detail: t('execution.preflight.check.asisUnmapped.passOne') }
       : {
-          table: name,
+          table: asis,
           status: 'fail',
           detail: t('execution.preflight.check.asisUnmapped.failOne', {
-            n: unused.length,
-            cols: unused.slice(0, 5).join(', '),
+            n: unusedCols.length,
+            cols: unusedCols.slice(0, 5).join(', '),
           }),
         };
   });
