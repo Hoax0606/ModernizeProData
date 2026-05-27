@@ -81,6 +81,20 @@ public class RunService {
                               TriggerSource triggerSource,
                               String requestedBy,
                               String credentialId) {
+        return startRun(projectId, runType, triggerSource, requestedBy, credentialId, null);
+    }
+
+    /**
+     * 부분 실행 지원 — tables(선택 TO-BE 테이블명) 가 주어지면 그 테이블만 처리, null/empty 면 전체.
+     * 선택 목록은 RunHistory.metadata.selectedTables 에 저장 → RunExecutionListener 가 binding 필터.
+     */
+    @Transactional
+    public RunResult startRun(String projectId,
+                              RunType runType,
+                              TriggerSource triggerSource,
+                              String requestedBy,
+                              String credentialId,
+                              List<String> tables) {
 
         // 1. Validate — project 存在 (FOR UPDATE で同時にロック取得)
         Project project = projectRepo.findByIdForUpdate(projectId).orElse(null);
@@ -136,9 +150,13 @@ public class RunService {
         }
 
         // 4. 状態遷移 — run_history INSERT + project.run_status='running'
+        List<String> selectedTables = (tables == null || tables.isEmpty()) ? null : tables;
         RunHistory rh = RunHistory.create(projectId, runType, triggerSource,
                 requestedBy, credentialId, snapshotId);
         rh.setStatus(RunStatus.running);
+        if (selectedTables != null) {
+            rh.setMetadata(Map.of("selectedTables", selectedTables));
+        }
         // worker = 이 project 의 실행 담당 (admin user = ROLE_WORKER 의 username).
         // executionAssignee 가 미할당이면 일반 assignee 를 fallback, 둘 다 없으면 null.
         // (실제 분산 실행은 아직 미구현이지만, audit 로서 "이 run 의 책임자" 를 기록.)
@@ -152,7 +170,10 @@ public class RunService {
         //    tables_total 은 run start 시점의 binding 수로 materialize (mid-run 변경 무시).
         //    같은 @Transactional 안 — 이후 WS dispatch 실패 시 함께 rollback.
         List<String> stageKeys = StageCatalog.forRunType(runType);
-        int tablesTotal = (int) bindingRepo.countByProjectId(projectId);
+        int tablesTotal = selectedTables == null
+                ? (int) bindingRepo.countByProjectId(projectId)
+                : (int) bindingRepo.findByProjectId(projectId).stream()
+                        .filter(b -> selectedTables.contains(b.getTobeTable())).count();
         int seq = 1;
         for (String stageKey : stageKeys) {
             stageInstanceRepo.save(StageInstance.create(rh.getId(), stageKey, seq++, tablesTotal));
