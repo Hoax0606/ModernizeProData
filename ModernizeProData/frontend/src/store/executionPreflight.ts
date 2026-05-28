@@ -100,13 +100,24 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
       },
 
       resetForProject: (projectId) => {
+        /* 전체 초기화 — preflight 결과 캐시 + 테이블 선택 + 활성 run 표시 모두 비움.
+         * activeRunId 는 null (undefined 가 아닌) 로 두어 ExecutionPage 의 mount
+         * 자동 복원 effect 가 재진입하지 않도록 한다. BE 의 run 자체는 손대지 않음
+         * (history 에 남아있어 사용자가 다시 띄우려면 페이지 reload 로 가능). */
         set((s) => {
           const prev = s.byProject[projectId];
           if (!prev) return s;
           return {
             byProject: {
               ...s.byProject,
-              [projectId]: { ...prev, preflightPhase: 'idle', isStale: false, bySnapshot: {} },
+              [projectId]: {
+                ...prev,
+                selectedTables: [],
+                preflightPhase: 'idle',
+                isStale: false,
+                bySnapshot: {},
+                activeRunId: null,
+              },
             },
           };
         });

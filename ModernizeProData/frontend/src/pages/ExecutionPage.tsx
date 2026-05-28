@@ -429,6 +429,7 @@ export function ExecutionPage() {
         onStop={handleStopRun}
         onRetry={handleRetry}
         onDiscard={handleDiscard}
+        onReset={() => useExecutionPreflightStore.getState().resetForProject(project.id)}
       />
       <DisabledOverlay disabled={controlsLocked}>
         <TableSelector
@@ -469,7 +470,7 @@ function DisabledOverlay({ disabled, children }: { disabled: boolean; children: 
 
 function RunHeader({
   t, project, site, runMode, activeRun, runs, preflightPassed, hasPinnedSnapshot,
-  selectedTablesCount, onStart, onPauseToggle, onStop, onRetry, onDiscard,
+  selectedTablesCount, onStart, onPauseToggle, onStop, onRetry, onDiscard, onReset,
 }: {
   t: T;
   project: Project;
@@ -485,6 +486,8 @@ function RunHeader({
   onStop: () => void;
   onRetry: () => void;
   onDiscard: () => void;
+  /** 테스트용 — preflight 캐시 / selectedTables / activeRunId 한꺼번에 비움. */
+  onReset: () => void;
 }) {
   const canStart = preflightPassed && selectedTablesCount > 0 && hasPinnedSnapshot && runMode !== null;
   const isDone = project.phase === 'done';
@@ -555,13 +558,22 @@ function RunHeader({
     : '?';
   const showBanner = (isFailed || isAborted) && !!activeRun.failureReason;
 
+  /* Run 순번 (#N) — runHistoryData desc 정렬에서 활성 run 위치로 계산.
+     가장 오래된=#1, 최신=#N. mock 시절 PreflightEntry.runCounter 와 등가 (BE 폴링 기반). */
+  const activeRunIndex = (() => {
+    const idx = runs.findIndex((r) => r.id === activeRun.runId);
+    return idx >= 0 ? runs.length - idx : null;
+  })();
+
   return (
     <>
       <section style={styles.runHeader}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={styles.runHeaderLabel}>{t('execution.run.active')}</div>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 16, fontWeight: 600 }}>{project.id}</span>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 16, fontWeight: 600 }}>
+              {project.id}{activeRunIndex != null ? ` · #${activeRunIndex}` : ''}
+            </span>
             <StatusBadge tone={statusChipTone}>{statusChipText}</StatusBadge>
             <span style={{ fontSize: 12, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>{elapsedLabel}</span>
           </div>
@@ -601,6 +613,19 @@ function RunHeader({
             title={startTooltip}
           >
             ▶ {t('execution.run.startOver')}
+          </button>
+        )}
+        {isHalted && (
+          /* 테스트용 한방 리셋 — preflight + 테이블 선택 + 활성 run 표시 모두 비움.
+             PreflightPanel 의 Reset 은 DisabledOverlay 안이라 halted 중엔 접근 불가 →
+             여기에서 노출. 활성 run(=running) 중엔 보이지 않음 (orphan 방지). */
+          <button
+            type="button"
+            onClick={onReset}
+            style={{ ...styles.btnGhost, minWidth: 80 }}
+            title={t('execution.preflight.trigger.reset')}
+          >
+            ↺ {t('execution.preflight.trigger.reset')}
           </button>
         )}
         {!isHalted && (

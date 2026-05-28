@@ -49,7 +49,7 @@ export function countDoneStages(stages: Stage[]): number {
  * - status='success' → tone='ok'.
  * - status='failed' → tone='err'.
  * - pct 는 BE 計算値 (tablesSuccess/tablesTotal 割合) をそのまま使用.
- * - rate 는 tablesSuccess + tablesFailed 進捗 카운트 표기 (예: "12/24 tables").
+ * - rate 는 성공한 테이블 수 / 전체 카운트 표기 (예: "12/24 tables"). 실패한 테이블은 분자에서 제외.
  * - eta 는 durationMs / finishedAt 가 분かれば 산출, 없으면 '—'.
  *
  * BE response 에 포함되지 않는 stage 는 idle/0 으로 채움 (=미실행. 하이브리드 표시의 "pending" = 회색).
@@ -70,8 +70,9 @@ export function buildStagesFromStageViews(stageViews: StageView[]): Stage[] {
       : sv.status === 'running' ? 'running'
       : 'idle';
     const pct = Math.max(0, Math.min(100, sv.pct ?? 0));
-    const done = (sv.tablesSuccess ?? 0) + (sv.tablesFailed ?? 0);
-    const rate = sv.tablesTotal > 0 ? `${done}/${sv.tablesTotal} tables` : '—';
+    /* 분자 = 성공한 테이블 수만 (실패 제외). 사용자 인지 — "3개 중 1개 에러 = 2/3" 가 자연스럽다. */
+    const successCount = sv.tablesSuccess ?? 0;
+    const rate = sv.tablesTotal > 0 ? `${successCount}/${sv.tablesTotal} tables` : '—';
     /* eta: 대략 미완료 테이블 수 × 평균 처리시간. BE 가 값을 안 주는 한 '—'. */
     let eta = '—';
     if (sv.status === 'success') eta = 'done';
