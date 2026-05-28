@@ -8,6 +8,7 @@ import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunType;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
@@ -89,6 +90,11 @@ public class AuditStage implements StageRunner {
 
         int successCount = 0;
         int failedCount = 0;
+        // cutover 는 본운영 — 위반이 있으면 분리 없이 fail 시켜 downstream gate(LocalWorkerExecutor)에 맡긴다.
+        // test / rehearsal 은 데이터 검증·시연 목적이므로 위반 row 를 DuckDB tobe_ 에서 분리해
+        // Load 가 정상 row 만 적재하도록 한다 (PoC1 row-level Quarantine separation, sample 5행은
+        // QuarantineService 가 이미 기록).
+        boolean separateViolations = ctx.getRunHistory().getRunType() != RunType.cutover;
 
         for (MappingTableBinding binding : ctx.getBindings()) {
             OffsetDateTime tableStart = OffsetDateTime.now();
@@ -112,15 +118,25 @@ public class AuditStage implements StageRunner {
                         .map(DdlColumn::getPhysicalName)
                         .orElse(cols.isEmpty() ? null : cols.get(0).getPhysicalName());
 
+                /* 위반 row 분리용 WHERE 조건 모음 — 모든 검사가 추가, 마지막에 UNION (OR) 으로 DELETE. */
+                List<String> rowFilters = new ArrayList<>();
                 int violations = 0;
                 for (DdlColumn col : cols) {
-                    violations += auditColumn(ctx, stage, binding, fqTobe, tobeTable, pkCol, col);
+                    violations += auditColumn(ctx, stage, binding, fqTobe, tobeTable, pkCol, col, rowFilters);
                 }
                 // PK 중복(uniqueness) — 테이블 단위 검사
-                violations += checkPkUniqueness(ctx, stage, binding, fqTobe, tobeTable, cols);
+                violations += checkPkUniqueness(ctx, stage, binding, fqTobe, tobeTable, cols, rowFilters);
+
+                long separated = 0;
+                if (separateViolations && !rowFilters.isEmpty()) {
+                    String unionWhere = "(" + String.join(") OR (", rowFilters) + ")";
+                    separated = deleteWhere(fqTobe, unionWhere);
+                    ingest(ctx, "Quarantine separated " + separated + " row(s) from " + tobeTable, true);
+                }
 
                 OffsetDateTime tableEnd = OffsetDateTime.now();
-                if (violations > 0) {
+                if (violations > 0 && !separateViolations) {
+                    // cutover — 분리 안 함, 기존 동작 유지
                     result.setStatus(StageTableStatus.failed);
                     Map<String, Object> detail = new HashMap<>();
                     detail.put("message", violations + " validation violation(s)");
@@ -128,6 +144,13 @@ public class AuditStage implements StageRunner {
                     failedCount++;
                 } else {
                     result.setStatus(StageTableStatus.success);
+                    if (violations > 0) {
+                        Map<String, Object> detail = new HashMap<>();
+                        detail.put("message", violations + " violation(s) quarantined, " + separated + " row(s) separated");
+                        detail.put("violations", violations);
+                        detail.put("rowsSeparated", separated);
+                        result.setErrorDetail(detail);
+                    }
                     successCount++;
                 }
                 result.setFinishedAt(tableEnd);
@@ -162,10 +185,11 @@ public class AuditStage implements StageRunner {
 
     /**
      * 한 컬럼에 적용 가능한 검사(NOT NULL / length / type / range)를 모두 수행.
-     * 위반된 검사 종류 수를 반환 (각 위반은 Quarantine 1 row).
+     * 위반된 검사 종류 수를 반환 (각 위반은 Quarantine 1 row). rowFilters 에 위반 WHERE 조건 누적.
      */
     private int auditColumn(StageContext ctx, StageInstance stage, MappingTableBinding binding,
-                            String fqTobe, String tobeTable, String pkCol, DdlColumn col) throws Exception {
+                            String fqTobe, String tobeTable, String pkCol, DdlColumn col,
+                            List<String> rowFilters) throws Exception {
         int violations = 0;
         String colName = col.getPhysicalName();
         String q = quoteIdent(colName);
@@ -174,14 +198,14 @@ public class AuditStage implements StageRunner {
         if (!col.isNullable()) {
             violations += runCheck(ctx, stage, binding, fqTobe, tobeTable, pkCol, colName,
                     q + " IS NULL",
-                    "NOT NULL violation", "validate.notnull");
+                    "NOT NULL violation", "validate.notnull", rowFilters);
         }
         // 2. length — 문자수 기준 (PG VARCHAR(n) = n 문자)
         Integer len = col.getLength();
         if (len != null && len > 0) {
             violations += runCheck(ctx, stage, binding, fqTobe, tobeTable, pkCol, colName,
                     "LENGTH(CAST(" + q + " AS VARCHAR)) > " + len + " AND " + q + " IS NOT NULL",
-                    "Length > " + len, "validate.length");
+                    "Length > " + len, "validate.length", rowFilters);
         }
         // 3. type — 숫자/날짜/타임스탬프 컬럼인데 cast 실패 (빈 문자열 제외). char/varchar 는 skip.
         String castType = duckCastType(col);
@@ -189,7 +213,7 @@ public class AuditStage implements StageRunner {
             violations += runCheck(ctx, stage, binding, fqTobe, tobeTable, pkCol, colName,
                     "TRY_CAST(" + q + " AS " + castType + ") IS NULL AND " + q + " IS NOT NULL"
                             + " AND TRIM(CAST(" + q + " AS VARCHAR)) <> ''",
-                    "Type cast failed (" + castType + ")", "validate.type");
+                    "Type cast failed (" + castType + ")", "validate.type", rowFilters);
         }
         // 4. range — 숫자지만 DECIMAL(p,s) 자릿수 초과 (정수부 overflow).
         if (isNumeric(col) && col.getPrecision() != null) {
@@ -199,16 +223,18 @@ public class AuditStage implements StageRunner {
                 violations += runCheck(ctx, stage, binding, fqTobe, tobeTable, pkCol, colName,
                         "TRY_CAST(" + q + " AS DECIMAL(" + p + "," + s + ")) IS NULL"
                                 + " AND TRY_CAST(" + q + " AS DOUBLE) IS NOT NULL",
-                        "Numeric out of range DECIMAL(" + p + "," + s + ")", "validate.range");
+                        "Numeric out of range DECIMAL(" + p + "," + s + ")", "validate.range", rowFilters);
             }
         }
         return violations;
     }
 
-    /** 단일 검사 수행 — count > 0 이면 sample 추출 + Quarantine 기록 + 로그, 위반 시 1 반환. */
+    /** 단일 검사 수행 — count > 0 이면 sample 추출 + Quarantine 기록 + 로그, 위반 시 1 반환.
+     *  추가: rowFilters 에 위반 WHERE 조건 append (호출부가 unionWhere 만들어 DELETE 에 사용). */
     private int runCheck(StageContext ctx, StageInstance stage, MappingTableBinding binding,
                          String fqTobe, String tobeTable, String pkCol, String colName,
-                         String whereCond, String reason, String stageLabel) throws Exception {
+                         String whereCond, String reason, String stageLabel,
+                         List<String> rowFilters) throws Exception {
         long count = countWhere(fqTobe, whereCond);
         if (count <= 0) return 0;
         List<List<Object>> samples = fetchSamples(fqTobe, pkCol, colName, whereCond);
@@ -224,6 +250,7 @@ public class AuditStage implements StageRunner {
                 count,
                 ctx.getLogLineSeqCursor());
         ingest(ctx, "Audit " + reason + " in " + tobeTable + "." + colName + " (" + count + " rows)", false);
+        rowFilters.add(whereCond);
         return 1;
     }
 
@@ -278,9 +305,11 @@ public class AuditStage implements StageRunner {
     /**
      * PK 중복(uniqueness) 검사 — tobe_ 데이터에서 TO-BE PK 컬럼 조합이 2회 이상 나오는지.
      * 위반 시 Quarantine(validate.pk_unique) + 1 반환. PK 컬럼 없으면 skip.
+     * 위반 row 분리 정책: 중복 그룹의 모든 row 를 분리 대상으로 표시 (어느 row 가 "옳은" 지 알 수 없음).
      */
     private int checkPkUniqueness(StageContext ctx, StageInstance stage, MappingTableBinding binding,
-                                  String fqTobe, String tobeTable, List<DdlColumn> cols) throws Exception {
+                                  String fqTobe, String tobeTable, List<DdlColumn> cols,
+                                  List<String> rowFilters) throws Exception {
         List<String> pkCols = cols.stream()
                 .filter(c -> c.getPkOrder() != null)
                 .sorted(Comparator.comparing(DdlColumn::getPkOrder))
@@ -331,7 +360,18 @@ public class AuditStage implements StageRunner {
                 "PK duplicate — " + tobeTable, QuarantineSeverity.error, data, dupGroups,
                 ctx.getLogLineSeqCursor());
         ingest(ctx, "Audit PK duplicate in " + tobeTable + " (" + dupGroups + " key group(s))", false);
+
+        // 중복 PK 그룹에 속한 모든 row → 분리 대상. DuckDB 의 row tuple IN 비교 지원 활용.
+        rowFilters.add("(" + pkList + ") IN (SELECT " + pkList + " FROM " + fqTobe
+                + " GROUP BY " + pkList + " HAVING COUNT(*) > 1)");
         return 1;
+    }
+
+    /** 위반 row 일괄 삭제. WHERE 조건들의 OR union 을 DuckDB DELETE 로 실행, 삭제 row 수 반환. */
+    private long deleteWhere(String fqTobe, String unionWhere) throws Exception {
+        try (Statement st = duckDbService.statement()) {
+            return st.executeLargeUpdate("DELETE FROM " + fqTobe + " WHERE " + unionWhere);
+        }
     }
 
     /** dataType → DuckDB TRY_CAST 타입. char/varchar/text 등은 null (type 검사 skip). */
