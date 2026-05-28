@@ -219,7 +219,10 @@ public class DdlImportService {
         if (SIDE_ASIS.equals(side)) {
             raw = site.getAsisDbType();
         } else if (SIDE_TOBE.equals(side)) {
-            Map<String, Object> byEnv = site.getTobeDbByEnv();
+            // scope='project' 면 Project.tobeDbByEnv 우선, 아니면 Site.tobeDbByEnv.
+            Map<String, Object> byEnv = "project".equals(site.getTobeDbScope())
+                    ? project.getTobeDbByEnv()
+                    : site.getTobeDbByEnv();
             if (byEnv != null && site.getEnvironment() != null) {
                 Object envConn = byEnv.get(site.getEnvironment());
                 if (envConn instanceof Map<?, ?> conn) {

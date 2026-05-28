@@ -47,6 +47,17 @@ public class Project {
     @Column(name = "ddl_files", columnDefinition = "jsonb")
     private List<Map<String, Object>> ddlFiles;
 
+    /** Per-project TO-BE DB 연결. Site.tobeDbScope=="project" 일 때만 사용.
+     *  scope="site" 인 동안은 비어 있어도 무방 (Site.tobeDbByEnv 가 권위). */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "tobe_db_by_env", columnDefinition = "jsonb")
+    private Map<String, Object> tobeDbByEnv;
+
+    /** Per-project lock 상태. tobeDbByEnv 와 동일 조건으로 사용. */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "tobe_db_locks", columnDefinition = "jsonb")
+    private Map<String, Boolean> tobeDbLocks;
+
     @Column(nullable = false, length = 64)
     private String owner;
 
@@ -86,6 +97,8 @@ public class Project {
         p.tableCount = 0;
         p.tobeTableCount = 0;
         p.ddlFiles = List.of();
+        p.tobeDbByEnv = Map.of();
+        p.tobeDbLocks = Map.of();
         p.owner = owner;
         p.createdAt = OffsetDateTime.now();
         return p;

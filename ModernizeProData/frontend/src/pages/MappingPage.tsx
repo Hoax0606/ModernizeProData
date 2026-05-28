@@ -15,6 +15,7 @@ import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingR
 import { MappingOnboarding } from './DashboardPage';
 import { isDemoProjectId } from '../lib/demoFixtures';
 import { copyText } from '../lib/clipboard';
+import { effectiveTobeDb } from '../lib/effectiveTobeDb';
 import { Checkbox } from '../components/Checkbox';
 
 /* ============================================================
@@ -297,6 +298,9 @@ export function MappingPage() {
     const p = s.projects.find((p) => p.id === s.activeProjectId);
     return p ? s.sites.find((st) => st.id === p.siteId) ?? null : null;
   });
+  const projectForDialect = useWorkspaceStore(
+    (s) => s.projects.find((p) => p.id === s.activeProjectId) ?? null,
+  );
   useEffect(() => {
     ASIS_TABLES = ddlToAsisTables(asisSchema);
     // PoC: Site 의 csvPath 가 채워져 있으면 모든 AS-IS 테이블을 imported 로 간주.
@@ -308,11 +312,14 @@ export function MappingPage() {
     ASIS_COLUMNS = ddlToAsisColumns(asisSchema);
     MAPPING_BY_TOBE = ddlToMappingByTobe(tobeSchema);
     const asisRaw = siteForDialect?.asisDbType;
-    const tobeRaw = siteForDialect?.tobeDbByEnv?.[siteForDialect.environment]?.type;
+    // scope 따라 Site / Project 의 tobeDbByEnv 를 가린다.
+    const tobeRaw = siteForDialect
+      ? effectiveTobeDb(siteForDialect, projectForDialect)[siteForDialect.environment]?.type
+      : undefined;
     ASIS_DIALECT = asisRaw ? normalizeDialect(asisRaw) : (asisSchema?.latestImport?.dialect ?? 'oracle');
     TOBE_DIALECT = tobeRaw ? normalizeDialect(tobeRaw) : (tobeSchema?.latestImport?.dialect ?? 'oracle');
     setHydrationTick((t) => t + 1);
-  }, [asisSchema, tobeSchema, siteForDialect]);
+  }, [asisSchema, tobeSchema, siteForDialect, projectForDialect]);
 
   // Pre-flight Fix → 첫 unmapped row 찾아 scrollIntoView + 1초 teal pulse.
   // ExecutionPage 가 navigate('/mapping', { state: { fixTarget: { kind } } }) 로 진입.

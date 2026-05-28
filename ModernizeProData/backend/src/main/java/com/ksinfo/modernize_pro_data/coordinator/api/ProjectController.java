@@ -56,7 +56,9 @@ public class ProjectController {
             String owner,
             String assignee,
             String executionAssignee,
-            String runStatus
+            String runStatus,
+            Map<String, Object> tobeDbByEnv,
+            Map<String, Boolean> tobeDbLocks
     ) {}
 
     /* ── Endpoints ─────────────────────────────────── */
@@ -136,6 +138,10 @@ public class ProjectController {
             p.setExecutionAssignee(newExec);
         }
         if (req.runStatus() != null)  p.setRunStatus(req.runStatus());
+        // Per-project TO-BE DB (Site.tobeDbScope=="project" 일 때만 의미가 있지만, 모드 무관하게
+        //   PATCH 가 들어오면 그대로 저장 — scope 전환 후의 dormant 데이터 보존을 위해서도 동일).
+        if (req.tobeDbByEnv() != null) p.setTobeDbByEnv(req.tobeDbByEnv());
+        if (req.tobeDbLocks() != null) p.setTobeDbLocks(req.tobeDbLocks());
 
         // audit log — 의미 있는 변경만 기록
         String actor = auth != null ? auth.getName() : "system";
