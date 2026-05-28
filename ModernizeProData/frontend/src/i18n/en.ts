@@ -423,6 +423,10 @@ export const en: Record<TranslationKey, string> = {
   'versions.pin.toggleTitleIneligible': 'Cannot pin in the current phase',
   'versions.pin.iconAria':           'Pinned to top',
 
+  'versions.preflight.blocked':           'Pin this snapshot on the Execution page and pass preflight to enable Request Review',
+  'versions.preflight.notRun':            'Pin this snapshot on the Execution page and run preflight first',
+  'versions.preflight.partialSelection':  'Run preflight on all tables on the Execution page first',
+
   // CHANGES section (versions detail panel)
   'versions.changes.title':           'Changes',
   'versions.changes.status.added':    'ADDED',
@@ -531,7 +535,7 @@ export const en: Record<TranslationKey, string> = {
   'execution.run.abortReason':        'Aborted by user',
   'execution.run.tablesSummary':      '{n} tables',
   'execution.run.errorBanner':        'Stage {stage} ({name}) failed — {reason}',
-  'execution.run.demo.triggerFail':   '⚡ Simulate failure',
+  'execution.run.errorBannerNoStage': 'Run failed — {reason}',
 
   /* Pre-flight */
   'execution.preflight.title':                             'Pre-flight',
@@ -571,14 +575,39 @@ export const en: Record<TranslationKey, string> = {
   'execution.preflight.check.asisUnmapped.pass':           'All AS-IS columns mapped',
   'execution.preflight.check.unmappedCols.title':          'All TO-BE tables column unmapped check',
   'execution.preflight.check.unmappedCols.pass':           'All TO-BE columns have a source assigned',
-  'execution.preflight.demo.indicator':                    'Preview',
-  'execution.preflight.demo.exit':                         'Back to real data',
-  'execution.preflight.demo.connTobe.fail':                'latency 412 ms · slow response',
-  'execution.preflight.demo.tobeBindings.fail':            '2 TO-BE tables not bound to AS-IS source',
-  'execution.preflight.demo.asisUnmapped.fail':            '3 AS-IS columns are unmapped',
-  'execution.preflight.demo.csvArrived.fail':              'AS-IS extract not received (demo)',
-  'execution.preflight.demo.unmappedCols.fail':            '4 TO-BE columns unmapped (demo)',
-  'execution.preflight.demo.passDetail':                   'OK (demo)',
+
+  /* Pre-flight — per-table new keys */
+  'execution.preflight.check.csvArrived.failNoPath':       'CSV path is not configured in Site settings',
+  'execution.preflight.check.csvArrived.passOne':          'OK: {tables}',
+  'execution.preflight.check.csvArrived.failOne':          '{n} missing: {tables}',
+  'execution.preflight.check.csvArrived.skipNoBinding':    'no binding — nothing to check',
+  'execution.preflight.check.connTobe.passConfigured':     'TO-BE DB reachable in {env} environment',
+  'execution.preflight.check.connTobe.failMissing':        '{env} TO-BE DB host / database / username missing',
+  'execution.preflight.check.connTobe.failUnreachable':    '{env} TO-BE DB unreachable: {msg}',
+  'execution.preflight.check.connTobe.failUntested':       '{env} TO-BE DB connection not tested',
+  'execution.preflight.check.tobeBindings.passOne':        'binding OK',
+  'execution.preflight.check.tobeBindings.failOne':        'no binding to an AS-IS source',
+  'execution.preflight.check.unmappedCols.passOne':        'all {n} columns mapped',
+  'execution.preflight.check.unmappedCols.failOne':        '{n} unmapped: {cols}',
+  'execution.preflight.check.unmappedCols.skipNoDdl':      'no matching TO-BE DDL table',
+  'execution.preflight.check.asisUnmapped.passOne':        'AS-IS columns OK',
+  'execution.preflight.check.asisUnmapped.failOne':        '{n} unused AS-IS columns: {cols}',
+  'execution.preflight.check.asisUnmapped.skipNoBinding':  'no binding — nothing to check',
+
+  'execution.preflight.aggregate.notRun':                  'not run yet',
+  'execution.preflight.aggregate.allPass':                 'all {n} tables pass',
+  'execution.preflight.aggregate.skipped':                 '{skip} / {total} skipped',
+  'execution.preflight.aggregate.mixed':                   '{pass} pass · {fail} fail / {total}',
+  'execution.preflight.aggregate.statusPass':              'pass',
+  'execution.preflight.aggregate.statusFail':              'fail',
+  'execution.preflight.aggregate.statusSkip':              'skip',
+  'execution.preflight.aggregate.noTables':                'no tables to check',
+  'execution.preflight.trigger.disabledNoPin':             'Pin a snapshot on the Versions page first',
+
+  'execution.run.startBlocked.noPin':                      'Pin a snapshot on the Versions page before starting a run',
+  'execution.run.startBlocked.phaseEnv':                   'Cannot start a run when env={env} and phase={phase}',
+  'execution.run.startBtn.cutover':                        'Start cutover',
+  'execution.run.startBtn.rehearsal':                      'Start rehearsal',
 
   /* Overall progress */
   'execution.progress.title':         'Overall progress',
@@ -1260,7 +1289,7 @@ export const en: Record<TranslationKey, string> = {
   'logs.quarantine.pick.all':      'Pick a group…',
   'logs.quarantine.rowsBadge':     '{n} ROWS',
   'logs.quarantine.colProject':    'PROJECT_NAME',
-  'logs.quarantine.colTable':      'TABLE_NAME',
+  'logs.quarantine.colTable':      'ROW',
   'logs.quarantine.colAsIs':       'AS-IS',
   'logs.quarantine.colToBe':       'TO-BE',
 
@@ -1292,6 +1321,7 @@ export const en: Record<TranslationKey, string> = {
   'logs.quarantine.act.rerunTable':    'Re-run only this table',
   'logs.quarantine.act.openMapping':   'Open mapping',
   'logs.quarantine.act.openInspector': 'View in stream',
+  'logs.quarantine.act.downloadParquet': '⬇ Download violating rows',
 
   'siteQuarantine.eyebrow':         'SITE QUARANTINE',
   'siteQuarantine.empty.noSite':    'Select a site first.',

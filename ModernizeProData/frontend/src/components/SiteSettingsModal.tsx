@@ -112,16 +112,19 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
       const scrollT = window.setTimeout(() => {
         tobeDbRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }, 50);
-      const pulseT = window.setTimeout(() => setTobeDbPulse(false), 1500);
-      return () => { window.clearTimeout(scrollT); window.clearTimeout(pulseT); };
+      /* pulse-off タイマーは cleanup 으로 cancel 하지 않는다 — AppShell 측이 focus
+         값을 1 초후에 reset 하기 때문에 cleanup が走り pulse-off が cancel されて
+         pulse が永続표시되는 bug 가 出る. scroll 만 cancel し、pulse-off は自然 fire. */
+      window.setTimeout(() => setTobeDbPulse(false), 1500);
+      return () => { window.clearTimeout(scrollT); };
     }
     if (focus === 'asis-csv') {
       setCsvPathPulse(true);
       const scrollT = window.setTimeout(() => {
         csvPathRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }, 50);
-      const pulseT = window.setTimeout(() => setCsvPathPulse(false), 1500);
-      return () => { window.clearTimeout(scrollT); window.clearTimeout(pulseT); };
+      window.setTimeout(() => setCsvPathPulse(false), 1500);
+      return () => { window.clearTimeout(scrollT); };
     }
   }, [open, focus]);
 

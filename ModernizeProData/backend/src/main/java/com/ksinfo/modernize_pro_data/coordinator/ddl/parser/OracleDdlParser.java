@@ -407,7 +407,11 @@ public class OracleDdlParser {
                     String v = argParts[0].trim();
                     if (!v.equals("*") && !v.isEmpty()) {
                         int n = Integer.parseInt(v);
+                        /* 숫자형 → precision, 시간형(TIMESTAMP(n) / TIME(n)) → fractional-second precision,
+                         * 그 외(VARCHAR/CHAR/RAW 등) → 문자 길이. TIMESTAMP(6) 의 6 을 length 로 저장하면
+                         * audit length 체크가 모든 timestamp 문자열을 위반으로 잘못 판정한다. */
                         if (isNumericType(dataType)) precision = n;
+                        else if (isDateTimeType(dataType)) precision = n;
                         else length = n;
                     }
                 } else if (argParts.length == 2) {
@@ -462,6 +466,12 @@ public class OracleDdlParser {
                 || dataType.equals("INTEGER") || dataType.equals("INT")
                 || dataType.equals("DECIMAL") || dataType.equals("NUMERIC")
                 || dataType.equals("SMALLINT") || dataType.equals("BIGINT");
+    }
+
+    /** TIMESTAMP(n) / TIME(n) 류 — (n) 은 fractional-second precision 으로 저장. */
+    private boolean isDateTimeType(String dataType) {
+        return dataType.startsWith("TIMESTAMP") || dataType.equals("TIME")
+                || dataType.startsWith("INTERVAL");
     }
 
     private void appendComment(StringBuilder sb, String comment) {

@@ -18,23 +18,14 @@ import { LockIcon } from '../components/LockIcon';
 import { HourglassHalfIcon } from '../components/HourglassHalfIcon';
 import { useLicenseStore } from '../store/license';
 import { useWorkspaceStore } from '../store/workspace';
-import { useExecutionPreflightStore } from '../store/executionPreflight';
-import { TOTAL_RUN_MS, computeElapsedMs } from '../lib/pipelineStages';
-import { effectiveTobeDb, isTobeDbConfigured } from '../lib/effectiveTobeDb';
+// import { useExecutionPreflightStore } from '../store/executionPreflight';
+// import { TOTAL_RUN_MS, computeElapsedMs } from '../lib/pipelineStages';
+// import { effectiveTobeDb, isTobeDbConfigured } from '../lib/effectiveTobeDb';
 import { useUiStore } from '../store/ui';
 import { isProjectReadOnly } from '../store/readOnly';
 import { useSnapshotsStore } from '../store/snapshots';
 import { useAsisDdlStore } from '../store/asisDdl';
 import { useTobeDdlStore } from '../store/tobeDdl';
-import {
-  DEMO_ASIS_SCHEMA,
-  DEMO_PROJECT,
-  DEMO_PROJECT_ID,
-  DEMO_SITE,
-  DEMO_SITE_ID,
-  DEMO_TOBE_SCHEMA,
-} from '../lib/demoFixtures';
-import { useDemoMode } from '../lib/useDemoMode';
 import { useAuditLogStore } from '../store/auditLog';
 import { useNotificationStore } from '../store/notifications';
 import { useNotificationPrefsStore, isEventEnabled, actionToEventKey } from '../store/notificationPreferences';
@@ -50,11 +41,6 @@ export function AppShell() {
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const t = useT();
-
-  // `?demo=preflight` 진입 시 workspace + asisDdl + tobeDdl store 에 demo fixture 를
-  // 한 번 inject 하고, demo 가 빠질 때 정확히 원복. demo flag 는 sessionStorage
-  // 기반이라 URL 에서 query 가 빠져도 (다른 페이지로 navigate 해도) 유지된다.
-  const { isDemo } = useDemoMode();
 
   // Pre-flight 의 csv-arrived / conn-tobe Fix 가 `?siteSettings=csv|tobe-db` 를 붙이면
   // SiteSettingsModal 을 자동 open + 해당 섹션을 1초 강조. URL 쿼리는 즉시 정리해서
@@ -79,66 +65,6 @@ export function AppShell() {
     return () => window.clearTimeout(id);
   }, [siteSettingsHighlight]);
 
-  /*
-   * Global active-run finisher. 元は ExecutionPage の useEffect 内にあったため, ユーザーが
-   * 他ページに居る間に elapsed が TOTAL_RUN_MS を越えても activeRun が 'running' のまま居残り,
-   * project.runStatus も更新されずサイドバーの phase chip が「実行中」色のままになっていた.
-   * AppShell でグローバルに監視し, どのページにいても RUN 終了で即 store + workspace を更新する.
-   */
-  const runningProjectKey = useExecutionPreflightStore((s) => {
-    const ids: string[] = [];
-    for (const [id, entry] of Object.entries(s.byProject)) {
-      const ar = entry.activeRun;
-      if (ar && ar.runStatus === 'running' && ar.pausedAt === null) ids.push(id);
-    }
-    return ids.sort().join(',');
-  });
-  useEffect(() => {
-    if (!runningProjectKey) return;
-    const tick = () => {
-      const state = useExecutionPreflightStore.getState();
-      for (const [projectId, entry] of Object.entries(state.byProject)) {
-        const ar = entry.activeRun;
-        if (!ar) continue;
-        if (ar.runStatus !== 'running') continue;
-        if (ar.pausedAt !== null) continue;
-        if (computeElapsedMs(ar) >= TOTAL_RUN_MS) {
-          state.finishActiveRun(projectId);
-          useWorkspaceStore.getState().setProjectRunStatus(projectId, 'completed').catch(() => { /* mock; ignore */ });
-        }
-      }
-    };
-    const id = window.setInterval(tick, 500);
-    return () => window.clearInterval(id);
-  }, [runningProjectKey]);
-
-  useEffect(() => {
-    if (!isDemo) return;
-    /* 실 데이터 백업 — exit 시 정확히 복원하기 위함. demo 동안엔 sandbox 처럼 real 숨김. */
-    const ws = useWorkspaceStore.getState();
-    const prev = {
-      sites: ws.sites,
-      projects: ws.projects,
-      activeSiteId: ws.activeSiteId,
-      activeProjectId: ws.activeProjectId,
-    };
-    const asisPrev = useAsisDdlStore.getState().schemasByProject;
-    const tobePrev = useTobeDdlStore.getState().schemasByProject;
-    /* demo 동안엔 real 숨기고 demo 만 노출. */
-    useWorkspaceStore.setState({
-      sites: [DEMO_SITE],
-      projects: [DEMO_PROJECT],
-      activeSiteId: DEMO_SITE_ID,
-      activeProjectId: DEMO_PROJECT_ID,
-    });
-    useAsisDdlStore.setState({ schemasByProject: { [DEMO_PROJECT_ID]: DEMO_ASIS_SCHEMA } });
-    useTobeDdlStore.setState({ schemasByProject: { [DEMO_PROJECT_ID]: DEMO_TOBE_SCHEMA } });
-    return () => {
-      useWorkspaceStore.setState(prev);
-      useAsisDdlStore.setState({ schemasByProject: asisPrev });
-      useTobeDdlStore.setState({ schemasByProject: tobePrev });
-    };
-  }, [isDemo]);
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
   const loadUsers = useUsersStore((s) => s.loadUsers);
@@ -231,12 +157,8 @@ export function AppShell() {
   }, [location.key, setActiveProject]);
 
   // 10초 간격으로 서버 동기화 (sites → projects → snapshots → audit logs 순서 보장).
-  // demo 중엔 polling 전체 skip — 백업한 real data 를 서버 응답으로 덮어쓰지 않도록.
-  const isDemoRef = useRef(isDemo);
-  isDemoRef.current = isDemo;
   useEffect(() => {
     const sync = async () => {
-      if (isDemoRef.current) return;
       if (isEditingRef.current) return;
       await fetchSites();
       const siteId = useWorkspaceStore.getState().activeSiteId;
@@ -962,7 +884,15 @@ export function AppShell() {
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
       <AccountProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
       <SolutionSettingsModal open={solutionOpen} onClose={() => setSolutionOpen(false)} />
-      <SiteSettingsModal open={siteSettingsOpen} onClose={() => setSiteSettingsOpen(false)} highlight={siteSettingsHighlight} />
+      <SiteSettingsModal
+        open={siteSettingsOpen}
+        onClose={() => setSiteSettingsOpen(false)}
+        focus={
+          siteSettingsHighlight === 'csv' ? 'asis-csv'
+          : siteSettingsHighlight === 'tobe-db' ? 'tobe-db'
+          : siteSettingsFocus
+        }
+      />
       <ClusterAdminModal open={clusterAdminOpen} onClose={() => setClusterAdminOpen(false)} />
       <CreateSiteModal open={createSiteOpen} onClose={() => setCreateSiteOpen(false)} />
       <CreateProjectModal open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} />

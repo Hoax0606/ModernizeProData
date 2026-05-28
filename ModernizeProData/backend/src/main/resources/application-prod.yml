@@ -28,6 +28,9 @@ modernize:
     allowed-origins: ${CORS_ORIGINS:http://localhost:8080}
   license:
     public-key: ${MPD_LICENSE_PUBKEY:classpath:license/public.pem}
+  # 현장 대용량 — 파일 모드로 테이블도 디스크 spill (RAM 초과 OOM 내성). dev/test 는 base 의 in-memory 유지.
+  duckdb:
+    memory-mode: false
 
 logging:
   level:

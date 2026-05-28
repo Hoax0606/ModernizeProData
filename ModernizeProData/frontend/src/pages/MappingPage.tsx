@@ -13,7 +13,6 @@ import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
 import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
 import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult, type MappingRuleDto, type MappingTableBindingDto } from '../api/mappingImport';
 import { MappingOnboarding } from './DashboardPage';
-import { isDemoProjectId } from '../lib/demoFixtures';
 import { copyText } from '../lib/clipboard';
 import { effectiveTobeDb } from '../lib/effectiveTobeDb';
 import { Checkbox } from '../components/Checkbox';
@@ -283,8 +282,6 @@ export function MappingPage() {
 
   useEffect(() => {
     if (!activeProjectId) return;
-    // demo project 는 AppShell 이 schema 를 inject 했으므로 백엔드 fetch 를 건너뛴다.
-    if (isDemoProjectId(activeProjectId)) return;
     useAsisDdlStore.getState().fetch(activeProjectId).catch((e) => console.error('[mapping] asis-ddl fetch failed', e));
     useTobeDdlStore.getState().fetch(activeProjectId).catch((e) => console.error('[mapping] tobe-ddl fetch failed', e));
   }, [activeProjectId]);
@@ -332,7 +329,7 @@ export function MappingPage() {
   const consumedFocusKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const state = location.state as {
-      fixTarget?: { kind: 'unmapped-tobe' | 'unmapped-asis' | 'unbound-tobe' };
+      fixTarget?: { kind: 'unmapped-tobe' | 'unmapped-asis' | 'unbound-tobe'; table?: string };
       focusTable?: { internalName: string };
     } | null;
 
@@ -354,17 +351,33 @@ export function MappingPage() {
     }
 
     const kind = state?.fixTarget?.kind;
+    const targetTable = state?.fixTarget?.table;
     if (!kind) return;
     // unmapped-asis: AS-IS 사이드로 자동 전환해야 AsisTableDetail 이 mount 되고
-    // [data-fix-row="asis-unmapped"] 마커가 DOM 에 등장. 첫 AS-IS 테이블로 switch.
+    // [data-fix-row="asis-unmapped"] 마커가 DOM 에 등장. table 명시 시 그 AS-IS table, 없으면 첫번째.
+    // matcher: qualified name (`schema.physical`) / physical name (`short`) 둘 다 받기.
     if (kind === 'unmapped-asis' && ASIS_TABLES.length > 0) {
-      setSelected({ side: 'asis', name: ASIS_TABLES[0].name });
+      const target = targetTable
+        ? ASIS_TABLES.find((tt) => tt.name === targetTable || tt.short === targetTable)
+        : null;
+      const pick = target ?? ASIS_TABLES[0];
+      setSelected({ side: 'asis', name: pick.name });
     }
-    // unbound-tobe: 첫 unbound TO-BE 테이블(sources 비어있는)을 활성으로 → CollapsibleBinding 렌더.
-    if (kind === 'unbound-tobe') {
-      const firstUnbound = effectiveTobe.find((t) => t.sources.length === 0);
-      if (firstUnbound) {
-        setSelected({ side: 'tobe', name: firstUnbound.name, internalName: firstUnbound.internalName });
+    // unbound-tobe / unmapped-tobe: table 指定 → その TO-BE を選択. なければ最初の該当を選択.
+    // matcher: qualified name / internalName(uuid) / physical name 全部 OK.
+    if (kind === 'unbound-tobe' || kind === 'unmapped-tobe') {
+      let chosen = targetTable
+        ? effectiveTobe.find((tt) =>
+            tt.name === targetTable
+            || tt.internalName === targetTable
+            || tt.short === targetTable,
+          )
+        : null;
+      if (!chosen && kind === 'unbound-tobe') {
+        chosen = effectiveTobe.find((tt) => tt.sources.length === 0);
+      }
+      if (chosen) {
+        setSelected({ side: 'tobe', name: chosen.name, internalName: chosen.internalName });
       }
     }
     const id = window.setTimeout(() => {
