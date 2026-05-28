@@ -56,6 +56,11 @@ public class RunService {
     /** cutover run は production 環境のみで実行可. FE の ProjectEnvironment 値 'production' と一致させる. */
     private static final String PROD_ENV = "production";
 
+    /** Phase 자동 진행 순서 (planning → done). 진행만 하고 후퇴는 안 함. */
+    private static final List<String> PHASE_ORDER = List.of(
+            "planning", "analysis", "test", "sign-off", "rehearsal", "ready", "cutover", "hypercare", "done"
+    );
+
     private final ProjectRepository projectRepo;
     private final RunHistoryRepository runHistoryRepo;
     private final SnapshotRepository snapshotRepo;
@@ -178,6 +183,7 @@ public class RunService {
         runHistoryRepo.save(rh);
 
         project.setRunStatus(STATUS_RUNNING);
+        maybeAdvancePhase(project, runType);
         projectRepo.save(project);
 
         // 5. Stage pre-create — runType 별 stage list 를 pending 상태로 사전 등록.
@@ -394,6 +400,30 @@ public class RunService {
     private static boolean isTerminal(RunStatus s) {
         return s == RunStatus.success || s == RunStatus.failed
                 || s == RunStatus.aborted || s == RunStatus.timed_out;
+    }
+
+    /**
+     * Run 起動 시 phase 자동 진행. 현재보다 앞으로만 이동, 후퇴 없음.
+     *   - test     → 'test'
+     *   - rehearsal → 'rehearsal'
+     *   - cutover  → no-op (이미 'ready' 가드 통과 — cutover 라이프사이클은 별도 작업)
+     * 데모 모드 FE 가 자체적으로 하던 setProjectPhaseAndRunStatus 의 phase 부분을 BE 로 이관.
+     * 참고 선례: DdlImportService.importDdl 의 planning → analysis 자동 전이.
+     */
+    private void maybeAdvancePhase(Project project, RunType runType) {
+        String desired = switch (runType) {
+            case test -> "test";
+            case rehearsal -> "rehearsal";
+            case cutover -> null;
+        };
+        if (desired == null) return;
+        int curIdx = PHASE_ORDER.indexOf(project.getPhase());
+        int desIdx = PHASE_ORDER.indexOf(desired);
+        if (curIdx >= 0 && desIdx > curIdx) {
+            log.info("Phase auto-advance projectId={} {} -> {} (runType={})",
+                    project.getId(), project.getPhase(), desired, runType);
+            project.setPhase(desired);
+        }
     }
 
     private String resolveSnapshotId(String projectId, RunType runType) {

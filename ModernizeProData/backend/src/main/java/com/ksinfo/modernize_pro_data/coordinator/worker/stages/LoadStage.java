@@ -22,6 +22,8 @@ import org.springframework.stereotype.Service;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.OffsetDateTime;
@@ -189,11 +191,21 @@ public class LoadStage implements StageRunner {
                 return false;
             }
 
-            // 1. DuckDB → temp CSV (task 별 connection — 병렬 안전)
+            // 1. DuckDB → temp CSV (task 별 connection — 병렬 안전).
+            //    tobe_ 의 컬럼명을 순서대로 수집 → CSV 필드 순서와 동일 → PG COPY 명시 컬럼 리스트로 전달해
+            //    transform SELECT 순서(mapping_rules 순)와 PG DDL ordinal 의 어긋남으로 인한 silent 컬럼
+            //    misalignment 방지.
             String fqTobeDuck = quoteIdent(schema) + "." + quoteIdent("tobe_" + tobeTable);
             String escapedCsv = tempCsv.toString().replace("\\", "/").replace("'", "''");
+            List<String> tobeColumns = new ArrayList<>();
             try (Connection duck = duckDbService.duplicateConnection();
                  Statement st = duck.createStatement()) {
+                try (ResultSet rs = st.executeQuery("SELECT * FROM " + fqTobeDuck + " LIMIT 0")) {
+                    ResultSetMetaData md = rs.getMetaData();
+                    for (int i = 1; i <= md.getColumnCount(); i++) {
+                        tobeColumns.add(md.getColumnLabel(i));
+                    }
+                }
                 st.execute("COPY " + fqTobeDuck + " TO '" + escapedCsv + "' (FORMAT CSV, HEADER false)");
             }
 
@@ -204,7 +216,7 @@ public class LoadStage implements StageRunner {
                 boolean fkDisabled = pgCopyManager.tryDisableConstraints(conn);
                 try {
                     pgCopyManager.truncate(conn, pgQualified);
-                    rows = pgCopyManager.copyInFromCsv(conn, pgQualified, tempCsv);
+                    rows = pgCopyManager.copyInFromCsv(conn, pgQualified, tempCsv, tobeColumns);
                 } finally {
                     if (fkDisabled) pgCopyManager.restoreConstraints(conn);
                 }

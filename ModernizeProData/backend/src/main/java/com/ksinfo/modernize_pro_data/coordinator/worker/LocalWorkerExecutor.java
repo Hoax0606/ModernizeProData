@@ -90,5 +90,15 @@ public class LocalWorkerExecutor implements WorkerExecutor {
             // 게이트 → run 을 failed 로 (listener 의 catch 가 failRun). 남은 stage 는 pending 유지(미실행).
             throw new IllegalStateException(gateReason);
         }
+        // 게이트 안 났어도 어떤 stage 라도 failed 면 run 도 failed (모든 stage success 일 때만 run.status=success).
+        // continue-on-error 로 luna 통과해도 결과를 사용자에게 정확히 알려야 함 — 화면 "COMPLETED" 인데 실제는 0건 적재 같은 혼동 방지.
+        long failedStages = ctx.getStages().stream()
+                .filter(s -> s.getStatus() == StageStatus.failed)
+                .count();
+        if (failedStages > 0) {
+            String reason = failedStages + " stage(s) failed during run";
+            log.warn("Run finished with failed stages runId={}: {}", runId, reason);
+            throw new IllegalStateException(reason);
+        }
     }
 }

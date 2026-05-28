@@ -10,8 +10,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.stream.Collectors;
 
 /**
  * PostgreSQL COPY 헬퍼.
@@ -82,17 +84,29 @@ public class PgCopyManager {
         }
     }
 
-    /**
-     * CSV 파일 → PostgreSQL COPY FROM stdin.
-     * returns: 적재한 row 수.
-     */
+    /** 컬럼 리스트 없이 적재 (positional). 가능하면 명시 오버로드 사용 권장. */
     public long copyInFromCsv(Connection conn, String schemaQualifiedTable, Path csvFile) throws Exception {
+        return copyInFromCsv(conn, schemaQualifiedTable, csvFile, null);
+    }
+
+    /**
+     * CSV 파일 → PostgreSQL COPY FROM stdin. returns: 적재한 row 수.
+     * columns 가 주어지면 명시적 컬럼 리스트로 COPY — CSV 필드 순서를 컬럼 이름에 매핑하므로
+     * 대상 테이블의 DDL ordinal 과 무관하게 정확히 들어간다 (positional 오정렬 방지).
+     * CSV 필드 순서와 columns 순서는 반드시 동일해야 한다 (caller 책임).
+     */
+    public long copyInFromCsv(Connection conn, String schemaQualifiedTable, Path csvFile,
+                              List<String> columns) throws Exception {
         PGConnection pg = conn.unwrap(PGConnection.class);
         CopyManager copyManager = pg.getCopyAPI();
-        String sql = "COPY " + schemaQualifiedTable + " FROM stdin (FORMAT csv, HEADER false)";
+        String colList = (columns == null || columns.isEmpty()) ? ""
+                : " (" + columns.stream()
+                        .map(c -> "\"" + c.replace("\"", "\"\"") + "\"")
+                        .collect(Collectors.joining(", ")) + ")";
+        String sql = "COPY " + schemaQualifiedTable + colList + " FROM stdin (FORMAT csv, HEADER false)";
         try (InputStream in = Files.newInputStream(csvFile)) {
             long rows = copyManager.copyIn(sql, in);
-            log.info("PG COPY {} ← {} : {} rows", schemaQualifiedTable, csvFile, rows);
+            log.info("PG COPY {}{} ← {} : {} rows", schemaQualifiedTable, colList, csvFile, rows);
             return rows;
         }
     }
