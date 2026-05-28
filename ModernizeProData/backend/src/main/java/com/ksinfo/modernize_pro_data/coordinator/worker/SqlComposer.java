@@ -9,7 +9,10 @@ import java.util.List;
 /**
  * TransformStage 의 FROM 절 + 컬럼 alias 생성. composition_kind 별:
  *
- *   - single : FROM "schema"."asis_{table}" AS "asis"   (기존 호환 — alias 고정 "asis")
+ *   - single : FROM "schema"."asis_{table}" AS {source.alias}
+ *              source.alias 는 MappingImportService.deriveBindings 가 import 시 자동 부여
+ *              (예: CUSTOMERS → "c"). transform_rule SQL 내부 컬럼 참조와 일치해야 한다.
+ *              source.alias 가 비어 있으면 SINGLE_ALIAS_FALLBACK ("asis") 사용.
  *   - join   : FROM asis_{primary} {alias} {joinType} JOIN asis_{j} {alias_j} ON {joinOn} ...
  *              컬럼 alias 는 MappingRule.asisTable 로 source 매칭
  *   - union  : FROM (SELECT * FROM asis_t1 UNION ALL SELECT * FROM asis_t2) AS "u"
@@ -21,7 +24,8 @@ import java.util.List;
  */
 public final class SqlComposer {
 
-    public static final String SINGLE_ALIAS = "asis";
+    /** sources 없을 때만 사용되는 fallback. 정상 single binding 은 source.alias 사용. */
+    public static final String SINGLE_ALIAS_FALLBACK = "asis";
     public static final String UNION_ALIAS = "u";
 
     private SqlComposer() {}
@@ -64,7 +68,7 @@ public final class SqlComposer {
             }
             default: { // single
                 MappingTableBindingSource only = sources.get(0);
-                return fq(schema, "asis_" + only.getAsisTable()) + " AS " + ident(SINGLE_ALIAS);
+                return fq(schema, "asis_" + only.getAsisTable()) + " AS " + ident(aliasOf(only));
             }
         }
     }
@@ -83,7 +87,10 @@ public final class SqlComposer {
             // 매칭 실패 → primary alias fallback
             if (sources != null && !sources.isEmpty()) return aliasOf(primaryOf(sources));
         }
-        return SINGLE_ALIAS;
+        // single — binding source 의 alias 로 통일 (transform_rule 안의 'c.col' 같은 auto-alias 와 매칭)
+        List<MappingTableBindingSource> sources = binding.getSources();
+        if (sources != null && !sources.isEmpty()) return aliasOf(sources.get(0));
+        return SINGLE_ALIAS_FALLBACK;
     }
 
     private static String kindOf(MappingTableBinding b) {
