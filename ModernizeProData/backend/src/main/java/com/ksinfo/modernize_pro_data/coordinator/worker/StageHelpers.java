@@ -18,6 +18,21 @@ public final class StageHelpers {
     private StageHelpers() {}
 
     /**
+     * AS-IS source 의 CSV 파일 해석. 다음 순서로 시도 (둘 다 case-insensitive):
+     *   1) {schema}.{table}.csv  (예: RECRUIT.APPLICANTS.csv) — 문서화된 추출 규칙
+     *   2) {table}.csv           (예: m_employee.csv)
+     * binding 은 schema 를 따로 보존(asis_schema)하므로 schema 한정 추출 파일도 찾을 수 있다.
+     * 없으면 null. (MappingReportService.resolveCsvFile 와 동일 규칙.)
+     */
+    public static Path resolveCsvFile(Path baseDir, String schema, String tableName) {
+        if (schema != null && !schema.isBlank()) {
+            Path qualified = resolveCsvFile(baseDir, schema + "." + tableName);
+            if (qualified != null) return qualified;
+        }
+        return resolveCsvFile(baseDir, tableName);
+    }
+
+    /**
      * Resolve {baseDir}/{tableName}.csv. 대소문자 fallback. 없으면 null.
      */
     public static Path resolveCsvFile(Path baseDir, String tableName) {

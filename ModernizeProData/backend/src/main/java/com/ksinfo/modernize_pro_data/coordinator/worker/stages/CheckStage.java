@@ -160,9 +160,11 @@ public class CheckStage implements StageRunner {
         for (var src : binding.getSources()) {
             String asisTable = src.getAsisTable();
             if (asisTable == null || asisTable.isBlank()) continue;
-            Path csv = StageHelpers.resolveCsvFile(baseDir, asisTable);
+            Path csv = StageHelpers.resolveCsvFile(baseDir, src.getAsisSchema(), asisTable);
             if (csv == null) {
-                return "CSV not found: " + asisTable + ".csv in " + baseDir;
+                String qualified = (src.getAsisSchema() != null && !src.getAsisSchema().isBlank())
+                        ? src.getAsisSchema() + "." + asisTable : asisTable;
+                return "CSV not found: " + qualified + ".csv in " + baseDir;
             }
         }
         return null;

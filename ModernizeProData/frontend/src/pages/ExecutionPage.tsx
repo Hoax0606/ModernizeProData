@@ -275,12 +275,17 @@ export function ExecutionPage() {
          csv-preview/{table}?limit=1 で 404 / 200 を判定. */
       let csvFilesByAsisTable: Record<string, { exists: boolean; error?: string }> = {};
       if (site.csvPath?.trim()) {
-        const asisTablesNeeded = new Set<string>();
+        // key = asisTable(schema 제거된 이름, csvFilesByAsisTable 조회 키), value = preview API 에 넘길 이름
+        // (schema 있으면 'schema.table' — BE resolver 가 schema 한정 파일을 먼저 찾도록).
+        const asisTablesNeeded = new Map<string, string>();
         for (const tobeTable of tablesList) {
           const bindings = (snapshotData.bindings ?? []).filter((b) => b.tobeTable === tobeTable);
           for (const b of bindings) {
             for (const src of b.sources ?? []) {
-              if (src.asisTable) asisTablesNeeded.add(src.asisTable);
+              if (src.asisTable) {
+                const queryName = src.asisSchema ? `${src.asisSchema}.${src.asisTable}` : src.asisTable;
+                asisTablesNeeded.set(src.asisTable, queryName);
+              }
             }
           }
         }
@@ -291,9 +296,9 @@ export function ExecutionPage() {
              直列化(for-of await)で回避. 数テーブル分の +N × ~100ms 待ち増は preflight
              の演出時間内に収まるので体感差は無視できる. BE 側の並列対応 / bulk endpoint
              が入ったら parallel に戻すか bulk 呼び出しに切替可能. */
-          for (const table of asisTablesNeeded) {
+          for (const [table, queryName] of asisTablesNeeded) {
             try {
-              await csvPreviewApi.forTable(site.id, table, 1);
+              await csvPreviewApi.forTable(site.id, queryName, 1);
               csvFilesByAsisTable[table] = { exists: true };
             } catch (e) {
               csvFilesByAsisTable[table] = {

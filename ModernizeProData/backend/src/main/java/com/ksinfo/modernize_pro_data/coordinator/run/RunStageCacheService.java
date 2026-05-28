@@ -21,6 +21,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.TreeSet;
 
 /**
@@ -49,19 +50,22 @@ public class RunStageCacheService {
         // 1. source CSV (path+size+mtime) — distinct asis table, 정렬
         Path baseDir = (ctx.getSite().getCsvPath() == null || ctx.getSite().getCsvPath().isBlank())
                 ? null : Paths.get(ctx.getSite().getCsvPath()).toAbsolutePath().normalize();
-        TreeSet<String> asisTables = new TreeSet<>();
+        TreeMap<String, String> asisTableToSchema = new TreeMap<>();
         for (MappingTableBinding b : ctx.getBindings()) {
             for (var s : b.getSources()) {
-                if (s.getAsisTable() != null && !s.getAsisTable().isBlank()) asisTables.add(s.getAsisTable());
+                if (s.getAsisTable() != null && !s.getAsisTable().isBlank()) {
+                    asisTableToSchema.putIfAbsent(s.getAsisTable(), s.getAsisSchema());
+                }
             }
         }
-        for (String t : asisTables) {
-            Path csv = baseDir == null ? null : StageHelpers.resolveCsvFile(baseDir, t);
+        for (Map.Entry<String, String> e : asisTableToSchema.entrySet()) {
+            String t = e.getKey();
+            Path csv = baseDir == null ? null : StageHelpers.resolveCsvFile(baseDir, e.getValue(), t);
             if (csv != null) {
                 try {
                     sb.append("csv=").append(t).append(':').append(Files.size(csv))
                       .append(':').append(Files.getLastModifiedTime(csv).toMillis()).append('\n');
-                } catch (Exception e) {
+                } catch (Exception ex) {
                     sb.append("csv=").append(t).append(":ERR\n");
                 }
             } else {

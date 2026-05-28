@@ -25,10 +25,9 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.HashMap;
-import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Extract stage — AS-IS CSV → DuckDB load + parquet1 dump.
@@ -39,7 +38,7 @@ import java.util.Set;
  *      - CSV path resolve (site.csv_path + {asis_table}.csv)
  *      - CREATE OR REPLACE TABLE schema.asis_{asis_table} AS SELECT * FROM read_csv_auto(...)
  *      - row_count 합산, parquet1 dump = 'parquet1/{asis_table}.parquet'
- *   3. 같은 asis_table 이 여러 source/binding 에 나오면 한 번만 load (LinkedHashSet 중복 제거)
+ *   3. 같은 asis_table 이 여러 source/binding 에 나오면 한 번만 load (중복 제거)
  *
  * JOIN/UNION 은 TransformStage 가 asis_{asis_table} 들을 결합. 여기선 source 테이블만 적재.
  * composition_kind=none (sources 없음) 은 load 없이 success.
@@ -103,20 +102,24 @@ public class ExtractStage implements StageRunner {
                 Path baseDir = Paths.get(site.getCsvPath()).toAbsolutePath().normalize();
 
                 // binding 의 distinct AS-IS source 테이블 (ordinal 순). composition_kind=none 이면 빈 list.
-                Set<String> asisTables = new LinkedHashSet<>();
+                // distinct AS-IS source 테이블 (ordinal 순, 중복 제거). value = asis_schema (CSV 파일 해석용, null 가능).
+                Map<String, String> asisTableToSchema = new LinkedHashMap<>();
                 for (MappingTableBindingSource src : binding.getSources()) {
                     if (src.getAsisTable() != null && !src.getAsisTable().isBlank()) {
-                        asisTables.add(src.getAsisTable());
+                        asisTableToSchema.putIfAbsent(src.getAsisTable(), src.getAsisSchema());
                     }
                 }
 
                 String encodingClause = encodingClause(site.getAsisEncoding());
 
                 long totalRows = 0;
-                for (String asisTable : asisTables) {
-                    Path csv = StageHelpers.resolveCsvFile(baseDir, asisTable);
+                for (Map.Entry<String, String> entry : asisTableToSchema.entrySet()) {
+                    String asisTable = entry.getKey();
+                    Path csv = StageHelpers.resolveCsvFile(baseDir, entry.getValue(), asisTable);
                     if (csv == null) {
-                        throw new IllegalStateException("CSV not found: " + asisTable + ".csv");
+                        String qualified = (entry.getValue() != null && !entry.getValue().isBlank())
+                                ? entry.getValue() + "." + asisTable : asisTable;
+                        throw new IllegalStateException("CSV not found: " + qualified + ".csv");
                     }
                     String escapedPath = csv.toString().replace("'", "''");
                     String fqTable = quoteIdent(schema) + "." + quoteIdent("asis_" + asisTable);
@@ -145,7 +148,7 @@ public class ExtractStage implements StageRunner {
                 result.setDurationMs(Duration.between(tableStart, tableEnd).toMillis());
                 stageTableResultRepo.save(result);
 
-                ingest(ctx, "Extracted " + tobeTable + ": " + asisTables.size()
+                ingest(ctx, "Extracted " + tobeTable + ": " + asisTableToSchema.size()
                         + " source(s), " + totalRows + " rows total", true);
                 successCount++;
             } catch (Exception e) {
