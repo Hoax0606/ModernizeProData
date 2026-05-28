@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useWorkspaceStore, type Project, type ProjectPhase, type Site } from '../store/workspace';
+import { useWorkspaceStore, type Project, type ProjectPhase, type Site, type ProjectEnvironment, type TobeDbByEnv, type TobeDbLocks } from '../store/workspace';
 import { useNotificationPrefsStore } from '../store/notificationPreferences';
 import { useSettingsStore } from '../store/settings';
 import { projectApi } from '../api/workspace';
@@ -10,6 +10,8 @@ import { useActiveProjectReadOnly } from '../store/readOnly';
 import { DdlSchemaPanel } from '../components/DdlSchemaPanel';
 import { LockIcon } from '../components/LockIcon';
 import { useT } from '../i18n';
+import { isTobeDbConfigured } from '../lib/effectiveTobeDb';
+import { TobeDbCard } from '../components/TobeDbCard';
 
 /** AppShell 의 AS-IS/TO-BE 램프 클릭 → navigate(..., { state: { highlightSide } }) 로 전달.
  *  'asis-csv' 는 MappingPage 의 "CSV not imported" 배지에서 들어오는 경우에 쓰이며
@@ -19,14 +21,7 @@ interface HighlightState { highlightSide?: HighlightSide }
 
 const ALL_PHASES: ProjectPhase[] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
 
-function isSiteDbConfigured(s: Site | null): boolean {
-  if (!s) return false;
-  const db = s.tobeDbByEnv?.[s.environment];
-  if (!db) return false;
-  return !!db.type?.trim() && !!db.host?.trim() && !!db.database?.trim() && !!db.username?.trim();
-}
-
-type SectionKey = 'general' | 'ddl' | 'notify' | 'danger';
+type SectionKey = 'general' | 'ddl' | 'tobedb' | 'notify' | 'danger';
 
 /**
  * Project Settings — 프로토타입의 6-section 구조.
@@ -81,6 +76,10 @@ export function SettingsPage() {
   const sections: { k: SectionKey; l: string; d: string; danger?: boolean }[] = [
     { k: 'general',   l: t('projectSettings.section.general.label'),   d: t('projectSettings.sidebar.general.desc') },
     { k: 'ddl',       l: t('projectSettings.section.ddl.label'),       d: t('projectSettings.sidebar.ddl.desc') },
+    // 프로젝트별 모드일 때만 TO-BE DB 섹션 노출.
+    ...(site?.tobeDbScope === 'project'
+      ? [{ k: 'tobedb' as const, l: 'TO-BE DB', d: 'Project 별 TO-BE DB 접속 정보' }]
+      : []),
     { k: 'notify',    l: t('projectSettings.section.notify.label'),    d: t('projectSettings.sidebar.notify.desc') },
     { k: 'danger',    l: t('projectSettings.section.danger.label'),    d: t('projectSettings.sidebar.danger.desc'), danger: true },
   ];
@@ -124,6 +123,7 @@ export function SettingsPage() {
       <div style={styles.content}>
         {section === 'general'   && <PSGeneral   project={project} site={site} />}
         {section === 'ddl'       && <PSDdl       project={project} highlightSide={highlightSide} />}
+        {section === 'tobedb'    && site && <PSTobeDb project={project} site={site} />}
         {section === 'notify'    && <PSNotify    project={project} />}
         {section === 'danger'    && <PSDanger    project={project} />}
       </div>
@@ -207,7 +207,7 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
           <span style={styles.staticText}>{site?.name ?? '—'}</span>
         </PSRow>
         <PSRow label={t('projectSettings.row.env')}>
-          <span style={isSiteDbConfigured(site) ? styles.envChip : styles.envChipOff}>{site?.environment ?? '—'}</span>
+          <span style={isTobeDbConfigured(site, project) ? styles.envChip : styles.envChipOff}>{site?.environment ?? '—'}</span>
         </PSRow>
         <PSRow label={t('projectSettings.row.createdAt')}>
           <span style={styles.staticText}>{new Date(project.createdAt).toLocaleString()}</span>
@@ -248,6 +248,76 @@ function PSDdl({ project, highlightSide }: { project: Project; highlightSide: Hi
       <PSHead title={t('projectSettings.section.ddl.label')} />
       <DdlSchemaPanel project={project} side="asis" highlight={highlightSide === 'asis'} />
       <DdlSchemaPanel project={project} side="tobe" highlight={highlightSide === 'tobe'} />
+    </>
+  );
+}
+
+/* ─── TO-BE DB (per-project, scope='project' 일 때만) ─────── */
+
+function PSTobeDb({ project, site }: { project: Project; site: Site }) {
+  const t = useT();
+  const user = useAuthStore((s) => s.user);
+  const isMaster = user?.role === 'master';
+  const readOnly = useActiveProjectReadOnly();
+  const updateProject = useWorkspaceStore((s) => s.updateProject);
+
+  const [stage, setStage] = useState<ProjectEnvironment>(site.environment);
+  const [tobeDbByEnv, setTobeDbByEnv] = useState<TobeDbByEnv>(project.tobeDbByEnv ?? {});
+  const [tobeDbLocks, setTobeDbLocks] = useState<TobeDbLocks>(project.tobeDbLocks ?? {});
+
+  // 다른 프로젝트로 전환되거나 Site 의 environment 가 바뀌면 로컬 draft 재초기화.
+  useEffect(() => {
+    setTobeDbByEnv(project.tobeDbByEnv ?? {});
+    setTobeDbLocks(project.tobeDbLocks ?? {});
+    setStage(site.environment);
+  }, [project.id, site.environment, project.tobeDbByEnv, project.tobeDbLocks]);
+
+  const isDirty =
+    JSON.stringify(tobeDbByEnv) !== JSON.stringify(project.tobeDbByEnv ?? {}) ||
+    JSON.stringify(tobeDbLocks) !== JSON.stringify(project.tobeDbLocks ?? {});
+
+  const handleSave = async () => {
+    if (!isDirty || readOnly) return;
+    // type 이 비어있거나 사용자가 명시적으로 lock 하지 않은 stage 는 저장하지 않음.
+    // lock 시점에 connection test ok 검증 → lock 된 stage = 검증된 stage.
+    // 미검증/실패 stage 의 입력은 backend 로 보내지 않는다.
+    const cleanedByEnv: TobeDbByEnv = {};
+    const finalLocks: TobeDbLocks = {};
+    for (const [k, v] of Object.entries(tobeDbByEnv) as [ProjectEnvironment, TobeDbByEnv[ProjectEnvironment]][]) {
+      if (v && v.type.trim() && tobeDbLocks[k]) {
+        cleanedByEnv[k] = v;
+        finalLocks[k] = true;
+      }
+    }
+    await updateProject(project.id, { tobeDbByEnv: cleanedByEnv, tobeDbLocks: finalLocks });
+  };
+
+  return (
+    <>
+      <PSHead
+        title="TO-BE Database"
+        desc="프로젝트별 TO-BE DB 접속 정보 (Site Setting 의 'TO-BE DB scope' 가 Per-project 일 때 사용)"
+        actions={
+          <button
+            onClick={handleSave}
+            disabled={!isDirty || readOnly}
+            style={{ ...styles.btnPrimary, ...((!isDirty || readOnly) ? styles.btnDisabled : {}) }}
+          >
+            {t('projectSettings.action.saveChanges')}
+          </button>
+        }
+      />
+      <TobeDbCard
+        stage={stage}
+        onStageChange={setStage}
+        value={tobeDbByEnv}
+        onValueChange={setTobeDbByEnv}
+        locks={tobeDbLocks}
+        onLocksChange={setTobeDbLocks}
+        editDisabled={readOnly}
+        isMaster={isMaster}
+        siteIdForTest={site.id}
+      />
     </>
   );
 }
