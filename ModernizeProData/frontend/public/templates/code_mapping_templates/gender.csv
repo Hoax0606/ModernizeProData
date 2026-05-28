@@ -1,3 +1,0 @@
-domain,source_value,target_value,description
-GENDER,1,M,男性 / Male — AS-IS M_CUSTOMER.GENDER_CD '1' → TO-BE customer.gender 'M'
-GENDER,2,F,女性 / Female — AS-IS M_CUSTOMER.GENDER_CD '2' → TO-BE customer.gender 'F'

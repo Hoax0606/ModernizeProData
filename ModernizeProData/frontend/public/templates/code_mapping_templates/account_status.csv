@@ -1,5 +1,0 @@
-domain,source_value,target_value,description
-ACCOUNT_STATUS,A,ACTIVE,稼働中 / Active — AS-IS M_ACCOUNT.STATUS_CD 'A' → TO-BE account.status 'ACTIVE'
-ACCOUNT_STATUS,C,CLOSED,解約済 / Closed — AS-IS M_ACCOUNT.STATUS_CD 'C' → TO-BE account.status 'CLOSED'
-ACCOUNT_STATUS,F,FROZEN,凍結中 / Frozen — AS-IS M_ACCOUNT.STATUS_CD 'F' → TO-BE account.status 'FROZEN'
-ACCOUNT_STATUS,P,PENDING,保留中 / Pending — AS-IS M_ACCOUNT.STATUS_CD 'P' → TO-BE account.status 'PENDING'

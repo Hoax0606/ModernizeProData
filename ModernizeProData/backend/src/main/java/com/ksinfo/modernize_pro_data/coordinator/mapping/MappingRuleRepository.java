@@ -21,4 +21,8 @@ public interface MappingRuleRepository extends JpaRepository<MappingRule, String
     @Modifying
     @Query("DELETE FROM MappingRule r WHERE r.projectId = :projectId")
     int deleteAllByProjectId(@Param("projectId") String projectId);
+
+    @Modifying
+    @Query("DELETE FROM MappingRule r WHERE r.projectId = :projectId AND r.tobeTable = :tobeTable")
+    int deleteByProjectIdAndTobeTable(@Param("projectId") String projectId, @Param("tobeTable") String tobeTable);
 }

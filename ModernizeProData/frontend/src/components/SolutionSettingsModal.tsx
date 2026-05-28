@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom';
 import { Modal } from './Modal';
 import { BrandName } from './BrandName';
 import { Toggle } from './Toggle';
-import { Toast } from './Toast';
 import { useSettingsStore, type Theme, type Language, type NotificationScope } from '../store/settings';
 import { useAuthStore } from '../store/auth';
 import { LANGUAGE_LABELS, useT } from '../i18n';
@@ -33,7 +32,6 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
   const [notifications, setNotifications] = useState(store.notifications);
   const [notifScope, setNotifScope] = useState<NotificationScope>(store.notificationScope);
   const [notifRetention, setNotifRetention] = useState(store.notificationRetention);
-  const [saved, setSaved] = useState(false);
 
   // 모달 열릴 때마다 store 의 현재 값으로 리셋
   useEffect(() => {
@@ -43,7 +41,6 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
     setNotifications(store.notifications);
     setNotifScope(store.notificationScope);
     setNotifRetention(store.notificationRetention);
-    setSaved(false);
   }, [open, store.theme, store.language, store.notifications, store.notificationScope, store.notificationRetention]);
 
   // 변경 여부 — Save 버튼 활성 조건
@@ -63,7 +60,6 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
     store.setNotifications(notifications);
     store.setNotificationScope(notifScope);
     if (isMaster) store.setNotificationRetention(notifRetention);
-    setSaved(true);
   };
 
   return (
@@ -91,7 +87,6 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
         </button>
       </div>
 
-      <Toast visible={saved} message={t('solution.savedToast')} onHide={() => setSaved(false)} />
 
       {/* License */}
       <LicenseCard isMaster={isMaster} />

@@ -13,7 +13,6 @@ import { CreateSiteModal } from '../components/CreateSiteModal';
 import { CreateProjectModal } from '../components/CreateProjectModal';
 import { SignOutModal } from '../components/SignOutModal';
 import { ClusterAdminModal } from '../components/ClusterAdminModal';
-import { NotificationToast } from '../components/NotificationToast';
 import { LicenseBanner } from '../components/LicenseBanner';
 import { LockIcon } from '../components/LockIcon';
 import { HourglassHalfIcon } from '../components/HourglassHalfIcon';
@@ -982,7 +981,6 @@ export function AppShell() {
         onCancel={() => setSignOutOpen(false)}
         onConfirm={() => { setSignOutOpen(false); handleLogout(); }}
       />
-      <NotificationToast />
       </div>
     </div>
   );
@@ -1133,7 +1131,12 @@ function Tab({ to, end, label }: { to: string; end?: boolean; label: string }) {
         whiteSpace: 'nowrap',
         textDecoration: 'none',
         transition: 'color .08s',
-        boxShadow: isActive ? 'inset 0 -2px 0 var(--navy)' : 'none',
+        // 밑줄은 border-bottom 으로. (이전 inset box-shadow 는 구형 WebKit/WebView 에서
+        // 좌측으로 누출돼 active 탭 왼쪽에 세로 선이 생기던 원인.)
+        borderBottom: isActive ? '2px solid var(--navy)' : '2px solid transparent',
+        boxSizing: 'border-box',
+        outline: 'none',
+        WebkitTapHighlightColor: 'transparent',
       })}
     >
       {label}

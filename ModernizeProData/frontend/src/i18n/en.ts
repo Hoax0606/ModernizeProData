@@ -173,7 +173,6 @@ export const en: Record<TranslationKey, string> = {
   'solution.external.tokenCopied': 'Copied!',
   'solution.external.triggerExamples.title': 'Trigger commands',
   'solution.external.triggerExamples.desc':  'curl commands an external scheduler can use to trigger this tool. The URL and token come from the values you entered above; project IDs are populated from the projects created in this tool. Copy and run as-is.',
-  'solution.savedToast': 'Settings saved',
 
   'solution.license':            'License',
   'solution.license.desc':       'This site\'s Coordinator license. Renew before it expires.',
@@ -694,7 +693,6 @@ export const en: Record<TranslationKey, string> = {
   'asisDdl.button.import':    '+ Import AS-IS DDL',
   'asisDdl.button.loading':   'Importing…',
   'asisDdl.error.prefix':     'Error',
-  'asisDdl.toast.success':    'AS-IS DDL imported',
   'asisDdl.modal.title':              'AS-IS schema',
   'asisDdl.modal.loading':            'Loading…',
   'asisDdl.modal.empty':              'No AS-IS DDL imported yet',
@@ -763,6 +761,7 @@ export const en: Record<TranslationKey, string> = {
   'siteSettings.csvPathHint': 'CSV files in this path are auto-converted to Parquet by the tool. No separate import needed.',
   'siteSettings.csvPathPlaceholder': 'D:\\migration\\csv or \\\\server\\share\\csv',
   'siteSettings.csvPathBrowse': 'Browse',
+  'siteSettings.csvPathDialogTitle': 'Select any file inside the AS-IS CSV folder (that folder becomes the path)',
   'siteSettings.notes': 'Notes',
   'siteSettings.notesHint': 'Contract no., site lead, memo (optional)',
   'siteSettings.tobeDb': 'TO-BE Target DB',
@@ -830,8 +829,6 @@ export const en: Record<TranslationKey, string> = {
   'encoding.utf8': 'UTF-8',
   'encoding.ebcdic': 'EBCDIC',
 
-  'dashboard.toast.siteCreated': 'Site created',
-  'dashboard.toast.projectCreated': 'Project created',
   'dashboard.empty.title': 'No mapping targets yet',
   'dashboard.empty.hint': 'Import a TO-BE DDL and the table list and mapping status will appear here.',
   'dashboard.devCard.title': 'Tool info (dev only)',
@@ -970,7 +967,6 @@ export const en: Record<TranslationKey, string> = {
   'projectSettings.action.save':                'Save',
   'projectSettings.action.saving':              'Saving…',
   'projectSettings.action.saveChanges':         'Save changes',
-  'projectSettings.action.savedToast':          'Settings saved',
   'projectSettings.action.testConnection':      'Test connection',
   'projectSettings.action.testing':             'Testing connection…',
 

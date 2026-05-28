@@ -331,7 +331,9 @@ public class MappingReportService {
         if (expr == null || expr.isBlank()) expr = r.getTransformRule();
         if (expr == null || expr.isBlank()) return "NULL";
         String safe = expr.replaceAll("(?i)\\bCAST\\s*\\(", "TRY_CAST(");
-        return "(" + safe + ")";
+        // 식에 라인 주석(--)이 있으면 SELECT 한 줄로 합쳐질 때 뒤따르는 ") AS col, ..." 까지
+        // 주석 처리되어 SQL 이 깨진다. 앞뒤에 개행을 넣어 라인 주석이 그 줄에서만 끝나게 한다.
+        return "(\n" + safe + "\n)";
     }
 
     private static String quoteIdent(String name) {

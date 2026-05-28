@@ -149,3 +149,37 @@ input, select, textarea { font-family: inherit; }
   background-color: #D0EAEA !important;
   transition: background-color 0.4s ease;
 }
+
+/* ── Native form control 통일 (JavaFX WebView 구형 WebKit 호환) ──────────
+   WebView 의 WebKit 은 accent-color / focus-visible 을 지원하지 않아 native
+   checkbox·radio·focus 가 "옛날 윈도우" 룩으로 나온다. appearance:none 으로 끄고
+   체크표시·점·화살표를 직접 그려서 데스크톱(WebView)·브라우저 어디서든 동일하게.
+   select 의 inline `background: var(--panel)` shorthand 가 background-image 를
+   리셋하므로 chevron 은 !important 로 강제(배경색은 inline 값 유지). */
+select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%23678b86' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 9px center !important;
+  padding-right: 28px !important;
+}
+select::-ms-expand { display: none; }
+
+/* checkbox / radio 는 components/Checkbox.tsx 의 custom <span> 컴포넌트로 그린다.
+   (구형 WebKit 이 native checkbox 의 appearance:none 을 완전히 못 먹어 초록 체크가
+   남는 문제 때문에 native input 자체를 쓰지 않음.) */
+
+/* 구형 WebKit 의 dotted focus ring 제거 — 데스크톱(WebView) 앱이라 마우스 위주.
+   (탭 클릭 시 좌우로 보이던 점선이 이것.) -webkit-focus-ring-color 까지 무력화. */
+* { -webkit-tap-highlight-color: transparent; }
+*:focus,
+a:focus,
+button:focus,
+select:focus,
+input:focus,
+textarea:focus,
+[tabindex]:focus {
+  outline: none;
+}

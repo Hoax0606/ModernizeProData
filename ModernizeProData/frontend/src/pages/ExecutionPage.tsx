@@ -6,6 +6,7 @@ import { useTobeDdlStore } from '../store/tobeDdl';
 import { useAsisDdlStore } from '../store/asisDdl';
 import { useAuthStore } from '../store/auth';
 import { useSnapshotsStore, usePinnedSnapshotsStore, type MappingSnapshot } from '../store/snapshots';
+import { Checkbox } from '../components/Checkbox';
 import {
   useExecutionPreflightStore,
   type PreflightCheck,
@@ -790,6 +791,7 @@ function TableSelector({
         <div style={{ padding: '4px 18px 14px' }}>
           <div style={{ border: '1px solid var(--border)', borderRadius: 4, background: 'var(--panel)', overflow: 'hidden' }}>
             <label
+              onClick={toggleAll}
               style={{
                 display: 'flex', alignItems: 'center', gap: 10,
                 padding: '8px 14px',
@@ -798,18 +800,14 @@ function TableSelector({
                 cursor: 'pointer', fontSize: 12, fontWeight: 600,
               }}
             >
-              <input
-                type="checkbox"
-                checked={allChecked}
-                ref={(el) => { if (el) el.indeterminate = !noneChecked && !allChecked; }}
-                onChange={toggleAll}
-              />
+              <Checkbox checked={allChecked} indeterminate={!noneChecked && !allChecked} onChange={toggleAll} />
               {t('execution.preflight.tableSelector.selectAll')}
             </label>
             <div style={{ maxHeight: 220, overflowY: 'auto' }}>
               {tables.map((name) => (
                 <label
                   key={name}
+                  onClick={() => toggleOne(name)}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 10,
                     padding: '6px 14px',
@@ -817,11 +815,7 @@ function TableSelector({
                     cursor: 'pointer', fontSize: 12, fontFamily: 'var(--mono)',
                   }}
                 >
-                  <input
-                    type="checkbox"
-                    checked={selected.has(name)}
-                    onChange={() => toggleOne(name)}
-                  />
+                  <Checkbox checked={selected.has(name)} onChange={() => toggleOne(name)} />
                   {name}
                 </label>
               ))}

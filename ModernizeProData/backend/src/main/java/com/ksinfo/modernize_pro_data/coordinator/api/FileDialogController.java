@@ -9,10 +9,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import javax.swing.JFileChooser;
-import javax.swing.JFrame;
 import javax.swing.SwingUtilities;
-import javax.swing.UIManager;
 import java.awt.FileDialog;
 import java.awt.Frame;
 import java.awt.GraphicsEnvironment;
@@ -65,14 +62,20 @@ public class FileDialogController {
 
     /**
      * macOS — AWT FileDialog with {@code apple.awt.fileDialogForDirectories} gives
-     * the real Cocoa folder picker. Other OSes use Swing JFileChooser with system L&F.
+     * the real Cocoa folder picker (the directory itself is selectable).
+     *
+     * Windows/Linux — AWT FileDialog gives the OS-native file-open dialog
+     * (Explorer-style on Windows, with an address bar you can paste a path into and
+     * navigate to), identical to the DDL {@code <input type=file>} picker. Since the
+     * native dialog on Windows can't select a folder directly, the user picks any
+     * file inside the CSV folder and we return that file's parent directory.
      */
     private String showDialog(String title, String startPath) {
         String os = System.getProperty("os.name", "").toLowerCase();
         if (os.contains("mac")) {
             return showMacDialog(title, startPath);
         }
-        return showSwingDialog(title, startPath);
+        return showNativeFileDialog(title, startPath);
     }
 
     private String showMacDialog(String title, String startPath) {
@@ -96,31 +99,22 @@ public class FileDialogController {
         }
     }
 
-    private String showSwingDialog(String title, String startPath) {
-        try {
-            UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
-        } catch (Exception ignored) {
-            /* fall back to default L&F */
-        }
-        JFileChooser chooser = new JFileChooser();
-        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
-        chooser.setDialogTitle(title);
+    private String showNativeFileDialog(String title, String startPath) {
+        FileDialog fd = new FileDialog((Frame) null, title, FileDialog.LOAD);
         if (startPath != null && !startPath.isBlank()) {
             File start = new File(startPath);
-            if (start.isDirectory()) chooser.setCurrentDirectory(start);
+            if (start.isDirectory()) {
+                fd.setDirectory(start.getAbsolutePath());
+            } else if (start.getParentFile() != null && start.getParentFile().isDirectory()) {
+                fd.setDirectory(start.getParentFile().getAbsolutePath());
+            }
         }
-        JFrame anchor = new JFrame();
-        anchor.setUndecorated(true);
-        anchor.setAlwaysOnTop(true);
-        anchor.setLocationRelativeTo(null);
-        anchor.setVisible(true);
-        try {
-            int result = chooser.showOpenDialog(anchor);
-            if (result != JFileChooser.APPROVE_OPTION) return null;
-            File selected = chooser.getSelectedFile();
-            return selected == null ? null : selected.getAbsolutePath();
-        } finally {
-            anchor.dispose();
-        }
+        fd.setAlwaysOnTop(true);
+        fd.setVisible(true);
+        String dir = fd.getDirectory();
+        String file = fd.getFile();
+        if (dir == null || file == null) return null; // cancelled
+        // dir = the folder that contains the chosen file = the CSV directory.
+        return new File(dir).getAbsolutePath();
     }
 }

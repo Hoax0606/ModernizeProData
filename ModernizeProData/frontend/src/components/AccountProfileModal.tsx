@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Modal } from './Modal';
 import { useAuthStore, roleLabel } from '../store/auth';
 import { usersApi } from '../api/users';
@@ -42,6 +42,12 @@ export function AccountProfileModal({ open, onClose }: Props) {
     setPwError(null); setPwSuccess(false);
   };
   const closePw = () => { setPwOpen(false); resetPwForm(); };
+
+  // 모달을 열 때마다 비밀번호 변경 폼을 닫고 초기화한다 (이전 입력값 잔존 방지).
+  useEffect(() => {
+    if (open) { setPwOpen(false); resetPwForm(); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const canSubmitPw = !!curPw && !!newPw && newPw === confirmPw && newPw.length >= 4 && !pwSaving;
 

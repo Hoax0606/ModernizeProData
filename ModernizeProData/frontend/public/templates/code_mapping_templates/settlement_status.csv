@@ -1,4 +1,0 @@
-domain,source_value,target_value,description
-SETTLEMENT_STATUS,P,PENDING,未確定 / Pending — AS-IS T_SETTLEMENT.STATUS_CD 'P' → TO-BE settlement.status 'PENDING'
-SETTLEMENT_STATUS,C,CONFIRMED,確定 / Confirmed — AS-IS T_SETTLEMENT.STATUS_CD 'C' → TO-BE settlement.status 'CONFIRMED'
-SETTLEMENT_STATUS,X,CANCELLED,取消 / Cancelled — AS-IS T_SETTLEMENT.STATUS_CD 'X' → TO-BE settlement.status 'CANCELLED'

@@ -39,7 +39,7 @@ export function CsvPathField({ value, onChange }: Props) {
     if (busy) return;
     setBusy(true);
     try {
-      const res = await fileDialogApi.pickDirectory(value || undefined, 'AS-IS CSV 디렉터리 선택');
+      const res = await fileDialogApi.pickDirectory(value || undefined, t('siteSettings.csvPathDialogTitle'));
       if (!res.cancelled && res.path) onChange(res.path);
     } catch (e) {
       // Backend가 headless 거나 다이얼로그를 못 띄우면 prompt 로 폴백.

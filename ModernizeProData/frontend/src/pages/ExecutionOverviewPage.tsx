@@ -4,6 +4,7 @@ import { useUsersStore } from '../store/users';
 import { useAuthStore } from '../store/auth';
 import { useSnapshotsStore, usePinnedSnapshotsStore, type MappingSnapshot } from '../store/snapshots';
 import { useExecutionPreflightStore } from '../store/executionPreflight';
+import { Checkbox } from '../components/Checkbox';
 import {
   TOTAL_RUN_MS,
   buildStages,
@@ -342,7 +343,7 @@ export function ExecutionOverviewPage() {
           <thead>
             <tr>
               <th style={{ ...styles.th, width: 28, paddingLeft: 12 }}>
-                <input type="checkbox" checked={allSelected} onChange={toggleAll} aria-label="Select all" />
+                <Checkbox checked={allSelected} onChange={toggleAll} ariaLabel="Select all" />
               </th>
               <Th>{t('executionOverview.col.project')}</Th>
               <Th align="center">{t('executionOverview.col.phase')}</Th>
@@ -372,13 +373,12 @@ export function ExecutionOverviewPage() {
                 return (
                   <tr key={p.id} style={{ background: rowBg, borderBottom: '1px solid var(--border)' }}>
                     <td style={{ ...styles.td, paddingLeft: 12 }}>
-                      <input
-                        type="checkbox"
+                      <Checkbox
                         checked={checked}
                         disabled={!selectable}
                         onChange={() => toggleOne(p.id)}
                         title={selectable ? '' : t('executionOverview.notSelectable', { phase: p.phase })}
-                        aria-label={p.name}
+                        ariaLabel={p.name}
                       />
                     </td>
                     <td style={styles.td}>

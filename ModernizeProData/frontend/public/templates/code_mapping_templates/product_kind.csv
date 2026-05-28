@@ -1,5 +1,0 @@
-domain,source_value,target_value,description
-PRODUCT_KIND,10,EQUITY,株式 / Equity — AS-IS M_PRODUCT.PRODUCT_KIND_CD '10' → TO-BE product.product_kind 'EQUITY'
-PRODUCT_KIND,20,FUND,投資信託 / Investment Fund — AS-IS M_PRODUCT.PRODUCT_KIND_CD '20' → TO-BE product.product_kind 'FUND'
-PRODUCT_KIND,30,BOND,債券 / Bond — AS-IS M_PRODUCT.PRODUCT_KIND_CD '30' → TO-BE product.product_kind 'BOND'
-PRODUCT_KIND,40,FX_MMF,外貨MMF / Foreign-currency MMF — AS-IS M_PRODUCT.PRODUCT_KIND_CD '40' → TO-BE product.product_kind 'FX_MMF'
