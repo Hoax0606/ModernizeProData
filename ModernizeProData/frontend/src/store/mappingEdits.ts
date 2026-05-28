@@ -22,6 +22,8 @@ export type TableBindingEdit = {
   }>;
   mode: 'join' | 'union';
   whereFilter?: string;
+  /** master project_id — 값 있으면 자식 link, row editor read-only, master 룰 inherit. */
+  sharedFromProjectId?: string;
 };
 
 export type RowEdit = {

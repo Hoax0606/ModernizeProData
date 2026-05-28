@@ -67,6 +67,7 @@ public class MappingImportService {
     private final MappingRuleRepository ruleRepo;
     private final MappingCodeMapRepository codeRepo;
     private final MappingTableBindingRepository bindingRepo;
+    private final com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository ddlTableRepo;
 
     /**
      * @param columnCsv    column_mapping.csv 의 원본 바이트
@@ -117,7 +118,14 @@ public class MappingImportService {
             ParsedRules parsed = new ParsedRules(List.of());
             if (hasColumn) {
                 columnTmp = writeTemp(columnCsv, "column_mapping");
-                parsed = parseColumnCsv(columnTmp);
+                // 이 project 의 AS-IS DDL 의 (schema, physical_name) set — site 통합 csv 에서
+                // 다른 project 용 row 가 잘못된 combine 으로 들어가는 사고 방지.
+                java.util.Set<String> projectAsisKeys = ddlTableRepo
+                        .findByProjectIdAndSideOrderByOrdinalAsc(projectId, "asis").stream()
+                        .map(t -> (t.getSchemaName() == null ? "" : t.getSchemaName().toLowerCase())
+                                + "|" + (t.getPhysicalName() == null ? "" : t.getPhysicalName().toLowerCase()))
+                        .collect(java.util.stream.Collectors.toSet());
+                parsed = parseColumnCsv(columnTmp, projectAsisKeys);
                 // 테이블 단위 적용이면 그 TO-BE 테이블의 룰만 남긴다.
                 if (tobeTableFilter != null) {
                     List<RuleRow> only = new ArrayList<>();
@@ -209,6 +217,42 @@ public class MappingImportService {
 
             // (b) column rules
             if (hasColumn) {
+                // 자식 link 된 (schema, table) 은 csv re-import 로 덮어쓰지 않음 — master 가 진실의
+                // source. project 단위든 테이블 단위든 동일 — 자식 binding 사본 보존 + parsed.rules 의
+                // 그 키 row 제거.
+                Set<String> linkedKeys = new HashSet<>();
+                List<MappingTableBinding> linkedBindingsToPreserve = new ArrayList<>();
+                for (MappingTableBinding lb : bindingRepo.findByProjectId(projectId)) {
+                    if (lb.getSharedFromProjectId() == null) continue;
+                    // 테이블 단위 import 시 그 테이블 외에는 어차피 wipe 안 됨 — 보존 불필요.
+                    if (tobeTableFilter != null && !tobeTableFilter.equalsIgnoreCase(lb.getTobeTable())) continue;
+                    linkedKeys.add((lb.getTobeSchema() == null ? "" : lb.getTobeSchema()) + "|" + lb.getTobeTable());
+                    MappingTableBinding cp = new MappingTableBinding();
+                    // 새 UUID — 1차 캐시 충돌 / merge 회피. link 정보만 보존이 핵심.
+                    cp.setId("mb-" + UUID.randomUUID().toString().substring(0, 8));
+                    cp.setProjectId(lb.getProjectId());
+                    cp.setImportId(null);
+                    cp.setTobeSchema(lb.getTobeSchema());
+                    cp.setTobeTable(lb.getTobeTable());
+                    cp.setCompositionKind(lb.getCompositionKind());
+                    cp.setWhereFilter(lb.getWhereFilter());
+                    cp.setBindingOrigin(lb.getBindingOrigin());
+                    cp.setSharedFromProjectId(lb.getSharedFromProjectId());
+                    cp.setCreatedBy(lb.getCreatedBy());
+                    cp.setCreatedAt(lb.getCreatedAt());
+                    cp.setUpdatedBy(lb.getUpdatedBy());
+                    cp.setUpdatedAt(now);
+                    linkedBindingsToPreserve.add(cp);
+                }
+                if (!linkedKeys.isEmpty()) {
+                    List<RuleRow> filtered = new ArrayList<>();
+                    for (RuleRow r : parsed.rules) {
+                        String k = (r.tobeSchema == null ? "" : r.tobeSchema) + "|" + r.tobeTable;
+                        if (!linkedKeys.contains(k)) filtered.add(r);
+                    }
+                    parsed = new ParsedRules(filtered);
+                }
+
                 // alias 자동 할당 — (tobe_table 그룹 × asis_table) 마다 단일 alias.
                 Map<String, Map<String, String>> aliasMaps = buildAliasMaps(parsed.rules);
 
@@ -261,6 +305,8 @@ public class MappingImportService {
                 else bindingRepo.deleteByProjectIdAndTobeTable(projectId, tobeTableFilter);
                 bindingRepo.flush();
                 List<MappingTableBinding> bindings = deriveBindings(parsed.rules, projectId, mi.getId(), userName, now);
+                // 자식 link binding 은 csv 와 무관하게 보존 (link 정보 + master inherit 유지)
+                bindings.addAll(linkedBindingsToPreserve);
                 bindingRepo.saveAll(bindings);
             }
 
@@ -297,6 +343,16 @@ public class MappingImportService {
      * 그룹의 변환 ロジック / default / code_domain / notes 등 메타는 **첫 row 의 값만** 사용한다.
      */
     private ParsedRules parseColumnCsv(Path csv) {
+        return parseColumnCsv(csv, null);
+    }
+
+    /**
+     * @param projectAsisKeys 이 project 의 AS-IS DDL 에 등록된 (schema_lower|table_lower) set.
+     *                       null 이면 검증 안 함 (모든 row 통과). 값 있으면 그 set 의 asis_table 만
+     *                       parsed.rules 에 포함 — site 통합 csv 에서 다른 project row 의 잘못된
+     *                       combine 방지.
+     */
+    private ParsedRules parseColumnCsv(Path csv, java.util.Set<String> projectAsisKeys) {
         Map<String, Integer> headers = new HashMap<>();
         // LinkedHashMap — 입력 순서 보존 (셀결합 흉내가 의미 있으려면 순서가 중요).
         LinkedHashMap<String, RuleRow> grouped = new LinkedHashMap<>();
@@ -344,6 +400,21 @@ public class MappingImportService {
                 String dedupKey = tobeSchema + "|" + tobeTable + "|" + tobeColumn;
                 String asisColumnCell = trimToNull(get(rs, headers, "asis_column"));
                 String asisTypeCell   = trimToNull(get(rs, headers, "asis_type"));
+
+                // project AS-IS DDL 검증: site 통합 csv 에서 다른 project row 가 들어와도
+                // 이 project 의 AS-IS DDL 에 없는 asis_table 의 row 는 skip — 잘못된 combine 방지.
+                if (projectAsisKeys != null) {
+                    String asisTableRawCheck = trimToNull(get(rs, headers, "asis_table"));
+                    if (asisTableRawCheck != null) {
+                        int adot2 = asisTableRawCheck.indexOf('.');
+                        String aSchema = adot2 > 0 ? asisTableRawCheck.substring(0, adot2) : "";
+                        String aTable  = adot2 > 0 ? asisTableRawCheck.substring(adot2 + 1) : asisTableRawCheck;
+                        String checkKey = aSchema.toLowerCase() + "|" + aTable.toLowerCase();
+                        if (!projectAsisKeys.contains(checkKey)) {
+                            continue;
+                        }
+                    }
+                }
 
                 RuleRow existing = grouped.get(dedupKey);
                 if (existing != null) {
@@ -566,12 +637,41 @@ public class MappingImportService {
     @Transactional
     public int rebuildBindings(String projectId, String userName) {
         List<MappingRule> existing = ruleRepo.findByProjectId(projectId);
+
+        // 자식 link binding 은 csv re-import / rebuild 로 덮어쓰지 않음. 사전 사본 + wipe 후
+        // 다시 insert. 자식 binding 의 mapping_rules 는 이미 link 시점에 wipe 되었으므로
+        // existing 에서 자식 키 row 가 있다면 그건 stale — filter.
+        OffsetDateTime now = OffsetDateTime.now();
+        Set<String> linkedKeys = new HashSet<>();
+        List<MappingTableBinding> linkedBindingsToPreserve = new ArrayList<>();
+        for (MappingTableBinding lb : bindingRepo.findByProjectId(projectId)) {
+            if (lb.getSharedFromProjectId() == null) continue;
+            linkedKeys.add((lb.getTobeSchema() == null ? "" : lb.getTobeSchema()) + "|" + lb.getTobeTable());
+            MappingTableBinding cp = new MappingTableBinding();
+            cp.setId("mb-" + UUID.randomUUID().toString().substring(0, 8));
+            cp.setProjectId(lb.getProjectId());
+            cp.setImportId(null);
+            cp.setTobeSchema(lb.getTobeSchema());
+            cp.setTobeTable(lb.getTobeTable());
+            cp.setCompositionKind(lb.getCompositionKind());
+            cp.setWhereFilter(lb.getWhereFilter());
+            cp.setBindingOrigin(lb.getBindingOrigin());
+            cp.setSharedFromProjectId(lb.getSharedFromProjectId());
+            cp.setCreatedBy(lb.getCreatedBy());
+            cp.setCreatedAt(lb.getCreatedAt());
+            cp.setUpdatedBy(lb.getUpdatedBy());
+            cp.setUpdatedAt(now);
+            linkedBindingsToPreserve.add(cp);
+        }
+
         bindingRepo.deleteAllByProjectId(projectId);
         bindingRepo.flush();
-        if (existing.isEmpty()) return 0;
+        if (existing.isEmpty() && linkedBindingsToPreserve.isEmpty()) return 0;
 
         List<RuleRow> rows = new ArrayList<>(existing.size());
         for (MappingRule e : existing) {
+            String k = (e.getTobeSchema() == null ? "" : e.getTobeSchema()) + "|" + e.getTobeTable();
+            if (linkedKeys.contains(k)) continue;  // 자식 키는 deriveBindings 가 만들지 않음
             RuleRow r = new RuleRow();
             r.tobeSchema   = e.getTobeSchema() == null ? "" : e.getTobeSchema();
             r.tobeTable    = e.getTobeTable();
@@ -589,7 +689,8 @@ public class MappingImportService {
             rows.add(r);
         }
         List<MappingTableBinding> bindings = deriveBindings(
-                rows, projectId, /* importId */ null, userName, OffsetDateTime.now());
+                rows, projectId, /* importId */ null, userName, now);
+        bindings.addAll(linkedBindingsToPreserve);
         bindingRepo.saveAll(bindings);
         return bindings.size();
     }
@@ -622,6 +723,15 @@ public class MappingImportService {
         }
         String schema = req.tobeSchema() == null ? "" : req.tobeSchema();
         OffsetDateTime now = OffsetDateTime.now();
+
+        // 자식 link 된 테이블은 mapping_rules 작성 차단. master 에서 수정해야.
+        bindingRepo.findByProjectIdAndTobeSchemaAndTobeTable(projectId, schema, req.tobeTable())
+                .filter(b -> b.getSharedFromProjectId() != null)
+                .ifPresent(b -> {
+                    throw new ApiException("LOCKED_BY_LINK",
+                            "이 테이블은 " + b.getSharedFromProjectId() + " project 의 자식으로 link 되어 있습니다. master 에서 수정하세요.",
+                            HttpStatus.CONFLICT);
+                });
 
         MappingRule r = ruleRepo
                 .findByProjectIdAndTobeSchemaAndTobeTableAndTobeColumn(
@@ -668,7 +778,12 @@ public class MappingImportService {
             String tobeTable,
             String compositionKind,
             String whereFilter,
-            List<UpsertSourceDto> sources
+            List<UpsertSourceDto> sources,
+            /**
+             * 자식 link 마킹용 master project_id. null 또는 비우면 자체 정의 (기본).
+             * 값 있을 때는 sources 는 무시됨 (master 의 sources 를 read 시점에 inherit).
+             */
+            String sharedFromProjectId
     ) {}
 
     public record UpsertSourceDto(
@@ -715,6 +830,32 @@ public class MappingImportService {
         b.setCreatedAt(createdAt);
         b.setUpdatedBy(userName);
         b.setUpdatedAt(now);
+
+        // 자식 link 마킹. 값 있으면 sources 도 자식 측의 mapping_rules 도 모두 무시 — master 의
+        // 것을 read 시점에 inherit. 자식 mapping_rules 가 남아 있으면 wipe.
+        String sharedFrom = req.sharedFromProjectId();
+        if (sharedFrom != null && sharedFrom.isBlank()) sharedFrom = null;
+
+        // 자기 자신이 이미 다른 project 의 자식들의 master 로 쓰이고 있으면 link 거부 —
+        // 부모가 다시 자식이 되는 chain 방지.
+        if (sharedFrom != null) {
+            boolean iAmMasterToSomeone = !bindingRepo.findAll().stream()
+                    .filter(other -> projectId.equals(other.getSharedFromProjectId())
+                            && schema.equalsIgnoreCase(other.getTobeSchema() == null ? "" : other.getTobeSchema())
+                            && req.tobeTable().equalsIgnoreCase(other.getTobeTable()))
+                    .toList()
+                    .isEmpty();
+            if (iAmMasterToSomeone) {
+                throw new ApiException("CANNOT_LINK_PARENT",
+                        "이 테이블은 이미 다른 project 의 master 입니다. 먼저 자식 link 를 모두 해제하세요.",
+                        HttpStatus.CONFLICT);
+            }
+        }
+        b.setSharedFromProjectId(sharedFrom);
+        if (sharedFrom != null) {
+            ruleRepo.deleteByProjectIdAndTobeTable(projectId, req.tobeTable());
+            return bindingRepo.save(b);  // sources 추가 없이 저장
+        }
 
         List<UpsertSourceDto> srcDtos = req.sources() == null ? List.of() : req.sources();
         for (UpsertSourceDto s : srcDtos) {
@@ -868,6 +1009,7 @@ public class MappingImportService {
         if (!"string".equals(typeCategory(asisType))) return null;
         String t = tobeType.toUpperCase().trim();
         boolean isDate = t.equals("DATE");
+        boolean isTimestampTz = t.contains("WITH TIME ZONE") || t.equals("TIMESTAMPTZ");
         boolean isTimestamp = t.startsWith("TIMESTAMP");
         if (!isDate && !isTimestamp) return null;
 
@@ -878,7 +1020,14 @@ public class MappingImportService {
             case 14: fmt = "%Y%m%d%H%M%S"; break;
             case 10: fmt = "%Y-%m-%d"; break;
             case 19: fmt = "%Y-%m-%d %H:%M:%S"; break;
-            default: return null;  // unknown — fallback to CAST
+            default:
+                // TIMESTAMPTZ target + 길이 >=25 → microsec + offset 포함 timestamp 문자열 가정.
+                // 운영팀 export 의 일반적 형식 "YYYY-MM-DD HH:MM:SS.ffffff +HH:MM" 를 strptime 으로 파싱.
+                if (isTimestampTz && len >= 25) {
+                    fmt = "%Y-%m-%d %H:%M:%S.%f %z";
+                    break;
+                }
+                return null;  // unknown — fallback to CAST
         }
         String parsed = "STRPTIME(" + src + ", '" + fmt + "')";
         return isDate ? parsed + "::DATE" : parsed;

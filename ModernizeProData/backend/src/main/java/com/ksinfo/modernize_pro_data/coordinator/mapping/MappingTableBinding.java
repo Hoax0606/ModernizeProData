@@ -57,6 +57,14 @@ public class MappingTableBinding {
     @Column(name = "binding_origin", nullable = false, length = 16)
     private String bindingOrigin = "imported";
 
+    /**
+     * 자식 link 마킹. null = 자체 정의 (기본). 값 있음 = master project_id —
+     * 그 project 의 같은 (tobe_schema, tobe_table) 의 binding sources + mapping_rules 를
+     * read 시점에 inherit. row editor 는 read-only.
+     */
+    @Column(name = "shared_from_project_id", length = 40)
+    private String sharedFromProjectId;
+
     @Column(name = "created_by", nullable = false, length = 64)
     private String createdBy;
 

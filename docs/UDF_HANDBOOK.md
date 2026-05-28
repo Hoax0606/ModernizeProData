@@ -35,6 +35,103 @@ CAST(apply_scale(e.COUNT_RAW, 0)  AS INTEGER)         -- "0000045D" → -45
 
 ---
 
+## unpack_comp
+
+```
+unpack_comp(VARCHAR raw_hex, INTEGER scale) → VARCHAR
+```
+
+COBOL COMP / COMP-4 (Binary Integer) — 빅엔디언 2's complement signed 정수. hex 길이로 자동 자릿수 판단.
+
+- 4 자 (2 byte) → short, 8 자 (4 byte) → int, 16 자 (8 byte) → long
+- COBOL `PIC S9(7)V99 COMP` 같이 implied decimal (scale) 지정 가능
+- `apply_scale` 와 같은 VARCHAR 반환 + 사용자 CAST 패턴
+- null / hex 길이 4·8·16 외 / 비-hex → null
+- volatile: no
+
+```sql
+unpack_comp('0064', 0)      -- "100"
+unpack_comp('FFFF', 0)      -- "-1"
+unpack_comp('00000064', 2)  -- "1.00"
+unpack_comp('80000000', 0)  -- "-2147483648"
+```
+
+---
+
+## unpack_comp_float
+
+```
+unpack_comp_float(VARCHAR raw_hex) → DOUBLE
+```
+
+IBM Hexadecimal Floating Point (HFP) — COMP-1 / COMP-2. hex 길이로 자동 분기.
+
+- 8 자 (4 byte) → COMP-1 (single), 16 자 (8 byte) → COMP-2 (double)
+- layout: `sign(1) | exp(7, excess-64) | fraction(24 or 56)`
+- `value = (-1)^sign × fraction/16^digits × 16^(exp − 64)`
+- IEEE 754 와 달리 base 16 — 정확도 손실 가능
+- null / 길이 8·16 외 / 비-hex → null
+- volatile: no
+
+```sql
+unpack_comp_float('41100000')         --  1.0   (COMP-1)
+unpack_comp_float('C1100000')         -- -1.0
+unpack_comp_float('4110000000000000') --  1.0   (COMP-2)
+unpack_comp_float('00000000')         --  0.0
+```
+
+---
+
+## unpack_signed_separate
+
+```
+unpack_signed_separate(VARCHAR raw) → VARCHAR
+```
+
+COBOL `SIGN IS LEADING/TRAILING SEPARATE` — 부호가 별도 문자로 앞 또는 뒤에 붙음. 위치 자동 감지.
+
+- 첫 문자가 `+/-` → leading sign
+- 마지막 문자가 `+/-` → trailing sign
+- 부호 없으면 양수로 간주
+- 양끝 모두 부호 = 모호 → null
+- digit 외 문자 / null → null
+- volatile: no
+
+```sql
+unpack_signed_separate('+12345')   -- "12345"
+unpack_signed_separate('-12345')   -- "-12345"
+unpack_signed_separate('12345-')   -- "-12345"
+unpack_signed_separate('12345')    -- "12345"
+unpack_signed_separate('+12345-')  -- null (모호)
+```
+
+---
+
+## unpack_overpunch
+
+```
+unpack_overpunch(VARCHAR raw) → VARCHAR
+```
+
+COBOL `SIGN IS TRAILING` (zone-encoded embedded sign). 부호와 마지막 digit 이 한 문자에 합쳐져 인코딩됨. EBCDIC → ASCII 변환 후 그대로 보이는 문자 처리.
+
+- 양수: `{` = 0, `A`~`I` = 1~9 (EBCDIC zone C)
+- 음수: `}` = 0, `J`~`R` = 1~9 (EBCDIC zone D)
+- 마지막이 일반 digit 이면 부호 없는 케이스로 통과
+- leading overpunch (첫 문자 인코딩) 는 별도 UDF 로 분리 (덜 흔함)
+- null / overpunch 외 문자 → null
+- volatile: no
+
+```sql
+unpack_overpunch('1234{')  -- "12340"
+unpack_overpunch('1234I')  -- "12349"
+unpack_overpunch('1234}')  -- "-12340"
+unpack_overpunch('1234R')  -- "-12349"
+unpack_overpunch('12345')  -- "12345" (부호 없는 케이스)
+```
+
+---
+
 ## convert_era
 
 ```

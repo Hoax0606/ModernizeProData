@@ -11,7 +11,7 @@ import { useSnapshotsStore, usePinnedSnapshotsStore, type FrozenBinding, type Fr
 import { PinIconSvg } from './VersionsPage';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
 import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
-import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult, type MappingRuleDto, type MappingTableBindingDto } from '../api/mappingImport';
+import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult, type MappingRuleDto, type MappingTableBindingDto, type LinkCandidatesResponse } from '../api/mappingImport';
 import { MappingOnboarding } from './DashboardPage';
 import { copyText } from '../lib/clipboard';
 import { effectiveTobeDb } from '../lib/effectiveTobeDb';
@@ -50,6 +50,10 @@ type TobeTable = {
   compositionKind: 'single' | 'join' | 'union' | 'none';
   sources: { alias: string; table: string; role: 'primary' | 'join' | 'union'; joinType?: string; joinOn?: string; rows: number }[];
   whereFilter?: string;
+  /** 부모 project_id — null/undef 면 자체 정의, 값 있으면 자식 link */
+  linkedFromProjectId?: string;
+  /** 다른 project 의 자식들이 자기를 link 한 부모인지 */
+  isParent?: boolean;
 };
 
 type MappingRow = {
@@ -57,7 +61,7 @@ type MappingRow = {
   tgt: string;
   srcType: string;
   tgtType: string;
-  rule: 'auto' | 'rule' | 'unmapped' | 'null' | 'default' | 'added' | 'skip';
+  rule: 'auto' | 'rule' | 'unmapped' | 'null' | 'default' | 'added' | 'skip' | 'link';
   status: 'ok' | 'warn' | 'err' | 'skip' | 'queued';
   pk?: boolean;
   sourceAlias?: string;
@@ -289,6 +293,18 @@ export function MappingPage() {
   // Hydrate module-level fixtures whenever schemas change, then bump a state value
   // to force a re-render so children see the new ASIS_TABLES / TOBE_TABLES / etc.
   const [hydrationTick, setHydrationTick] = useState(0);
+  // 부모 테이블 마킹 — sidebar 의 badge 분기용. mapping 화면 진입 시 link-candidates 한 번 fetch.
+  const [parentTableKeys, setParentTableKeys] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    if (!activeProjectId) { setParentTableKeys(new Set()); return; }
+    mappingImportApi.getLinkCandidates(activeProjectId)
+      .then((r) => {
+        const keys = new Set<string>();
+        for (const p of r.parentOf) keys.add(p.tobeSchema.toLowerCase() + '|' + p.tobeTable.toLowerCase());
+        setParentTableKeys(keys);
+      })
+      .catch(() => setParentTableKeys(new Set()));
+  }, [activeProjectId, hydrationTick]);
   // dialect 는 site 의 DB type 을 1차 source 로 사용 (DDL 재임포트 없이 즉시 반영).
   // site 정보가 없거나 type 이 비어있으면 ddl_imports.dialect 폴백.
   const siteForDialect = useWorkspaceStore((s) => {
@@ -501,6 +517,7 @@ export function MappingPage() {
       compositionKind,
       whereFilter: edit.whereFilter ?? null,
       sources,
+      sharedFromProjectId: edit.sharedFromProjectId ?? null,
     }).catch((e) => console.warn('[mapping] upsertBinding failed', e));
     demoteToAnalysisOnEdit(activeProjectId);
   }, [activeProjectId, readOnly]);
@@ -513,19 +530,26 @@ export function MappingPage() {
 
   const effectiveTobe = useMemo(() =>
     TOBE_TABLES.map((t) => {
+      const i = t.name.indexOf('.');
+      const tSchema = (i > 0 ? t.name.slice(0, i) : '').toLowerCase();
+      const tTable = (i > 0 ? t.name.slice(i + 1) : t.name).toLowerCase();
+      const isParent = parentTableKeys.has(tSchema + '|' + tTable);
       const edit = tableBindingEdits[t.internalName];
-      if (!edit) return t;
+      if (!edit) return { ...t, isParent };
       const srcs = edit.sources;
       return {
         ...t,
         sources: srcs,
-        unrouted: srcs.length === 0,
+        // 자식 link 상태면 sources 가 0 이어도 unrouted 로 표시하지 않음 (별도 linked 뱃지로 나옴).
+        unrouted: !edit.sharedFromProjectId && srcs.length === 0,
         compositionKind: (srcs.length === 0 ? 'none' : srcs.length === 1 ? 'single' : edit.mode) as TobeTable['compositionKind'],
         whereFilter: edit.whereFilter ?? t.whereFilter,
+        linkedFromProjectId: edit.sharedFromProjectId,
+        isParent,
       };
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tableBindingEdits, hydrationTick]);
+    [tableBindingEdits, hydrationTick, parentTableKeys]);
 
   const effectiveAsis = useMemo(() => {
     const routedByAsis: Record<string, string[]> = {};
@@ -801,13 +825,17 @@ function InventoryItem({
   const selBg  = side === 'asis' ? 'var(--amber-50)' : 'var(--navy-50)';
 
   let badgeText = '';
+  let badgeIcon: string | null = null;
   let badgeTone: 'ok' | 'warn' | 'info' | null = null;
   if (side === 'tobe') {
     const tt = table as TobeTable;
-    if (unrouted)                              { badgeText = 'no source'; badgeTone = 'warn'; }
+    if (tt.linkedFromProjectId)                { badgeText = 'linked'; badgeIcon = 'fa-link'; badgeTone = 'info'; }
+    else if (unrouted)                         { badgeText = 'no source'; badgeTone = 'warn'; }
     else if (tt.compositionKind === 'join')    { badgeText = `⋈ ${tt.sources.length}`; badgeTone = 'info'; }
     else if (tt.compositionKind === 'union')   { badgeText = `∪ ${tt.sources.length}`; badgeTone = 'info'; }
     else                                       { badgeText = '← 1'; badgeTone = 'ok'; }
+    // 부모 테이블이면 fa-link 아이콘 추가 (badgeText 는 유지)
+    if (tt.isParent && !tt.linkedFromProjectId) badgeIcon = 'fa-link';
   } else {
     const at = table as AsisTable;
     if (unrouted) { badgeText = 'unrouted'; badgeTone = 'warn'; }
@@ -833,7 +861,10 @@ function InventoryItem({
         fontWeight: isSelected ? 600 : 500,
       }}>
         <span style={styles.invItemName}>{(table as TobeTable).short || table.name}</span>
-        <span style={{ ...styles.invItemBadge, color: toneColor, background: toneBg, borderColor: toneColor }}>{badgeText}</span>
+        <span style={{ ...styles.invItemBadge, color: toneColor, background: toneBg, borderColor: toneColor, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          {badgeIcon && <i className={`fa-solid ${badgeIcon}`} style={{ fontSize: 9 }} />}
+          {badgeText}
+        </span>
       </div>
       <div style={styles.invItemSub}>
         {table.columnCount} cols · {table.rows >= 1e6 ? (table.rows / 1e6).toFixed(1) + 'M' : table.rows.toLocaleString()} rows
@@ -933,8 +964,16 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
   hydrationTick: number;
 }) {
   const navigate = useNavigate();
-  const [bindingOpen, setBindingOpen] = useState((bindingEdit?.sources ?? table.sources).length === 0);
+  // 자식 link 면 binding 패널 closed. 자체 정의 + sources 비어 있으면 열림 (사용자 알림).
+  const [bindingOpen, setBindingOpen] = useState(
+    !bindingEdit?.sharedFromProjectId
+    && (bindingEdit?.sources ?? table.sources).length === 0
+  );
   const [bindingPulse, setBindingPulse] = useState(false);
+  // bindingEdit.sharedFromProjectId 가 link/unlink 로 변하면 bindingOpen 도 sync.
+  useEffect(() => {
+    if (bindingEdit?.sharedFromProjectId) setBindingOpen(false);
+  }, [bindingEdit?.sharedFromProjectId]);
   const readOnly = useActiveProjectReadOnly();
   const triggerBindingHighlight = () => {
     setBindingOpen(true);
@@ -956,6 +995,94 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
   const [coverageFilter, setCoverageFilter] = useState<RuleFilter>('all');
   const [activeIdx, setActiveIdx] = useState(0);
   const activeProjectIdForRow = useWorkspaceStore((s) => s.activeProjectId);
+  const allProjects = useWorkspaceStore((s) => s.projects);
+
+  // Master-child link 상태. bindingEdit.sharedFromProjectId 가 있으면 자식 — row editor 와
+  // binding 패널 모두 lock. master project 이름 lookup 은 workspace store 에서.
+  const isLinkedChild = !!bindingEdit?.sharedFromProjectId;
+  const masterProject = useMemo(
+    () => isLinkedChild ? allProjects.find((p) => p.id === bindingEdit?.sharedFromProjectId) : null,
+    [isLinkedChild, allProjects, bindingEdit?.sharedFromProjectId],
+  );
+  const [linkModalOpen, setLinkModalOpen] = useState(false);
+  const [linkCandidates, setLinkCandidates] = useState<LinkCandidatesResponse | null>(null);
+  const [linkSelection, setLinkSelection] = useState<string>('');  // "projectId|schema|table" 또는 ""
+  const [linkSaving, setLinkSaving] = useState(false);
+
+  // 자기 테이블이 다른 project 의 자식들의 부모인지 확인 — banner 분기용. mapping 화면 진입 시
+  // link-candidates 한 번 fetch 해서 parentOf 정보 보관.
+  useEffect(() => {
+    if (!activeProjectIdForRow) { setLinkCandidates(null); return; }
+    mappingImportApi.getLinkCandidates(activeProjectIdForRow)
+      .then(setLinkCandidates)
+      .catch(() => setLinkCandidates(null));
+  }, [activeProjectIdForRow, hydrationTick]);
+  const tobeSplitForBanner = useMemo(() => {
+    const i = table.name.indexOf('.');
+    return {
+      schema: i > 0 ? table.name.slice(0, i) : '',
+      table: i > 0 ? table.name.slice(i + 1) : table.name,
+    };
+  }, [table.name]);
+  const parentInfo = useMemo(
+    () => linkCandidates?.parentOf.find(
+      (p) => p.tobeSchema.toLowerCase() === tobeSplitForBanner.schema.toLowerCase()
+          && p.tobeTable.toLowerCase() === tobeSplitForBanner.table.toLowerCase(),
+    ),
+    [linkCandidates, tobeSplitForBanner],
+  );
+  const isParentTable = !isLinkedChild && !!parentInfo;
+  useEffect(() => {
+    if (!linkModalOpen || !activeProjectIdForRow) return;
+    mappingImportApi.getLinkCandidates(activeProjectIdForRow)
+      .then((r) => setLinkCandidates(r))
+      .catch((e) => console.warn('[mapping] getLinkCandidates failed', e));
+    setLinkSelection(bindingEdit?.sharedFromProjectId
+      ? `${bindingEdit.sharedFromProjectId}||${table.short}`
+      : '');
+  }, [linkModalOpen, activeProjectIdForRow, bindingEdit?.sharedFromProjectId, table.short]);
+
+  const applyLink = async (newSharedFromProjectId: string | null) => {
+    if (!activeProjectIdForRow) return;
+    setLinkSaving(true);
+    try {
+      const tobeQualified = table.name;
+      const i = tobeQualified.indexOf('.');
+      const tobeSchema = i > 0 ? tobeQualified.slice(0, i) : '';
+      const tobeTable = i > 0 ? tobeQualified.slice(i + 1) : tobeQualified;
+      await mappingImportApi.upsertBinding(activeProjectIdForRow, {
+        tobeSchema,
+        tobeTable,
+        compositionKind: newSharedFromProjectId ? 'none' : (bindingMode === 'union' ? 'union' : (bindingSources.length === 1 ? 'single' : 'join')),
+        whereFilter: newSharedFromProjectId ? null : (bindingWhere || null),
+        sources: newSharedFromProjectId ? [] : bindingSources.map((s, idx) => {
+          const si = s.table.indexOf('.');
+          return {
+            ordinal: idx,
+            asisSchema: si > 0 ? s.table.slice(0, si) : null,
+            asisTable: si > 0 ? s.table.slice(si + 1) : s.table,
+            alias: s.alias,
+            role: s.role,
+            joinType: s.joinType ?? null,
+            joinOn: s.joinOn ?? null,
+          };
+        }),
+        sharedFromProjectId: newSharedFromProjectId,
+      });
+      // store 의 binding edit 도 갱신
+      onBindingChange({
+        sources: newSharedFromProjectId ? [] : bindingSources,
+        mode: bindingMode,
+        whereFilter: bindingWhere,
+        sharedFromProjectId: newSharedFromProjectId ?? undefined,
+      });
+      setLinkModalOpen(false);
+    } catch (e) {
+      console.warn('[mapping] applyLink failed', e);
+    } finally {
+      setLinkSaving(false);
+    }
+  };
 
   // 프로젝트의 고정핀(baseline) snapshot — context bar 의 table chip 옆에 version 표시.
   // 진입 시 1 회 fetch (이미 다른 화면에서 불러와 있으면 store 가 채워둠).
@@ -1004,6 +1131,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
         edits[tobe.internalName] = {
           mode,
           whereFilter: b.whereFilter ?? undefined,
+          sharedFromProjectId: b.sharedFromProjectId ?? undefined,
           sources: b.sources.map((s) => ({
             alias: s.alias,
             table: (s.asisSchema ? s.asisSchema + '.' : '') + s.asisTable,
@@ -1139,6 +1267,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
   }, [testStatus]);
   const handleSaveEdit = useCallback(async (r: MappingRow, edit: RowEdit) => {
     if (!activeProjectIdForRow || readOnly) return;
+    // 자식 link 테이블은 master 에서 수정해야 함 — UI 에서 disable 이지만 안전망.
+    if (isLinkedChild) return;
     // 사용자가 row 편집기에서 저장한 것 = manual
     const editWithOrigin: RowEdit = { ...edit, ruleOrigin: 'manual' };
     useMappingEditsStore.getState().setRowEdit(activeProjectIdForRow, table.internalName, r.tgt, editWithOrigin);
@@ -1192,7 +1322,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     // 옛 live 데이터를 가져와 사용자 변경값을 덮어쓰는 race 가 발생.
     clearBaselineIfPinned();
     demoteToAnalysisOnEdit(activeProjectIdForRow);
-  }, [activeProjectIdForRow, table.internalName, table.name, bindingEdit, clearBaselineIfPinned, readOnly]);
+  }, [activeProjectIdForRow, table.internalName, table.name, bindingEdit, clearBaselineIfPinned, readOnly, isLinkedChild]);
   const [bindingSources, setBindingSources] = useState(bindingEdit?.sources ?? table.sources);
   const [bindingMode, setBindingMode] = useState<'join' | 'union'>(
     bindingEdit?.mode ?? (table.compositionKind === 'union' ? 'union' : 'join'),
@@ -1206,6 +1336,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     setBindingWhere(bindingEdit?.whereFilter ?? table.whereFilter ?? '');
   }, [bindingEdit, table.internalName, table.sources, table.compositionKind, table.whereFilter]);
   const allRows = useMemo(() => rows.map((r) => {
+    // 자식 link 테이블은 모든 컬럼이 'link' state — master 에서 inherit 함을 표시.
+    if (isLinkedChild) return { ...r, rule: 'link' as const };
     const re = rowEdits[r.tgt];
     if (!re) return r;
     const filledSrc = re.savedSrc?.some((s) => s && s.trim() !== '') ?? false;
@@ -1231,7 +1363,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     const noteFromEdit = re.savedNotes && re.savedNotes.trim() ? re.savedNotes : undefined;
     if (eff === r.rule && noteFromEdit === r.note) return r;
     return { ...r, rule: eff, note: noteFromEdit ?? r.note };
-  }), [rows, rowEdits]);
+  }), [rows, rowEdits, isLinkedChild]);
 
   const visibleRows = useMemo(() => allRows.filter((r) => r.rule !== 'skip'), [allRows]);
 
@@ -1294,7 +1426,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
         <div style={styles.statusCounts}>
           {(() => {
             // 우선순위 — 매핑 작업 순. 한 번에 하나씩만 표시.
-            if (bindingSources.length === 0) {
+            if (bindingSources.length === 0 && !isLinkedChild) {
               return (
                 <button
                   type="button"
@@ -1349,22 +1481,57 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
         )}
       </div>
 
-      {!reportOpen && bindingSources.length === 0 && (
+      {!reportOpen && bindingSources.length === 0 && !isLinkedChild && (
         <div style={styles.noSourceBanner}>
           <Ic.warn />
           <span>AS-IS 테이블이 매핑되지 않았습니다. <b>Table binding</b> 패널에서 <b>+ Add source</b>로 테이블을 추가하세요.</span>
         </div>
       )}
       {!reportOpen && (
-        <CollapsibleBinding
-          table={table} open={bindingOpen} pulse={bindingPulse} onToggle={() => setBindingOpen((o) => !o)}
-          sources={bindingSources}
-          onSourcesChange={(s) => { setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode, whereFilter: bindingWhere }); }}
-          compositionMode={bindingMode}
-          onCompositionModeChange={(m) => { setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m, whereFilter: bindingWhere }); }}
-          whereFilter={bindingWhere}
-          onWhereChange={(v) => { setBindingWhere(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: v }); }}
-        />
+        <div style={{ padding: '8px 16px', borderBottom: '1px solid var(--border)', background: 'var(--panel-2)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          {isLinkedChild ? (
+            <>
+              <i className="fa-solid fa-link" style={{ fontSize: 11, color: 'var(--text-2)' }} />
+              <span style={{ fontSize: 11, color: 'var(--text-2)' }}>Inherited from</span>
+              <span style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 600 }}>
+                {masterProject?.name ?? bindingEdit?.sharedFromProjectId}
+              </span>
+              <div style={{ flex: 1 }} />
+              <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>Change / Unlink</button>
+            </>
+          ) : isParentTable && parentInfo ? (
+            <>
+              <i className="fa-solid fa-link" style={{ fontSize: 11, color: 'var(--text-2)' }} />
+              <span style={{ fontSize: 11, color: 'var(--text-2)' }}>Parent of</span>
+              {parentInfo.children.map((c, i) => (
+                <span key={c.projectId + '|' + c.tobeTable + '|' + i} style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 600 }}>
+                  {c.projectName}{i < parentInfo.children.length - 1 ? ',' : ''}
+                </span>
+              ))}
+              <div style={{ flex: 1 }} />
+            </>
+          ) : (
+            <>
+              <i className="fa-solid fa-unlink" style={{ fontSize: 11, color: 'var(--text-3)' }} />
+              <span style={{ fontSize: 11, color: 'var(--text-3)' }}>자체 정의된 테이블입니다.</span>
+              <div style={{ flex: 1 }} />
+              <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>Link to parent...</button>
+            </>
+          )}
+        </div>
+      )}
+      {!reportOpen && (
+        <div style={isLinkedChild ? { pointerEvents: 'none', opacity: 0.55 } : undefined}>
+          <CollapsibleBinding
+            table={table} open={bindingOpen} pulse={bindingPulse} onToggle={() => setBindingOpen((o) => !o)}
+            sources={bindingSources}
+            onSourcesChange={(s) => { if (isLinkedChild) return; setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode, whereFilter: bindingWhere }); }}
+            compositionMode={bindingMode}
+            onCompositionModeChange={(m) => { if (isLinkedChild) return; setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m, whereFilter: bindingWhere }); }}
+            whereFilter={bindingWhere}
+            onWhereChange={(v) => { if (isLinkedChild) return; setBindingWhere(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: v }); }}
+          />
+        </div>
       )}
 
       {/* Toolbar */}
@@ -1442,6 +1609,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
             }}
             filter={coverageFilter}
             onFilter={setCoverageFilter}
+            hideFilters={isLinkedChild}
           />
           <table style={{ ...styles.gridTable, tableLayout: 'auto', minWidth: 980 }}>
             <colgroup>
@@ -1479,6 +1647,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                     key={`${r.src}>${r.tgt}-${i}`}
                     data-fix-row={r.rule === 'unmapped' ? 'tobe-unmapped' : undefined}
                     onClick={() => {
+                      // 자식 link 테이블은 master 에서만 수정 가능 — Inspector 안 열림.
+                      if (isLinkedChild) return;
                       // 같은 행을 다시 누르면 inspector 를 닫는다 (토글). 다른 행이면 그 행으로 열기.
                       if (inspectorOpen && activeIdx === realIdx) {
                         setInspectorOpen(false);
@@ -1567,12 +1737,84 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
           />
         )}
       </div>
+
+      {/* Master-child link 모달 — site 안 다른 project / 테이블 중 master 선택 또는 unlink. */}
+      {linkModalOpen && (
+        <div
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}
+          onClick={() => linkSaving ? undefined : setLinkModalOpen(false)}
+        >
+          <div
+            style={{ background: 'var(--panel)', border: '1px solid var(--border-strong)', borderRadius: 6, width: 600, maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>Link {table.short} → parent table</div>
+              <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 4 }}>
+                같은 site 의 다른 project 의 부모 테이블을 link 하면 이 테이블의 모든 룰을 그 project 에서 inherit 합니다. row editor 와 binding 패널은 read-only 가 됩니다.
+              </div>
+            </div>
+            <div style={{ overflow: 'auto', padding: '12px 18px', flex: 1 }}>
+              <label style={{ display: 'flex', gap: 8, padding: 8, border: '1px solid var(--border)', borderRadius: 4, marginBottom: 6, cursor: 'pointer' }}>
+                <input type="radio" name="link-target" checked={linkSelection === ''} onChange={() => setLinkSelection('')} />
+                <span>자체 정의 (unlink)</span>
+              </label>
+              {(() => {
+                // 같은 (tobeSchema, tobeTable) 이름 매칭되는 후보만 — 그 테이블을 포함한 다른 project 들.
+                const i = table.name.indexOf('.');
+                const mySchema = i > 0 ? table.name.slice(0, i) : '';
+                const myTable = i > 0 ? table.name.slice(i + 1) : table.name;
+                const filtered = (linkCandidates?.manualOptions ?? []).filter(
+                  (o) => (o.tobeSchema ?? '').toLowerCase() === mySchema.toLowerCase()
+                      && o.tobeTable.toLowerCase() === myTable.toLowerCase()
+                );
+                if (filtered.length === 0) {
+                  return (
+                    <div style={{ fontSize: 11, color: 'var(--text-3)', padding: 8 }}>
+                      같은 site 의 다른 project 에 같은 이름의 테이블이 없습니다.
+                    </div>
+                  );
+                }
+                return filtered.map((o) => {
+                  const key = `${o.projectId}|${o.tobeSchema}|${o.tobeTable}`;
+                  return (
+                    <label key={key} style={{ display: 'flex', gap: 8, padding: 8, border: '1px solid var(--border)', borderRadius: 4, marginBottom: 6, cursor: 'pointer' }}>
+                      <input type="radio" name="link-target" checked={linkSelection === key} onChange={() => setLinkSelection(key)} />
+                      <span>
+                        <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{o.tobeSchema ? `${o.tobeSchema}.${o.tobeTable}` : o.tobeTable}</span>
+                        <span style={{ fontSize: 11, color: 'var(--text-3)', marginLeft: 8 }}>in {o.projectName}</span>
+                      </span>
+                    </label>
+                  );
+                });
+              })()}
+            </div>
+            <div style={{ padding: '12px 18px', borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button type="button" style={styles.btnGhost} disabled={linkSaving} onClick={() => setLinkModalOpen(false)}>Cancel</button>
+              <button
+                type="button"
+                style={linkSaving ? { ...styles.btnPrimary, ...styles.btnDisabled } : styles.btnPrimary}
+                disabled={linkSaving}
+                onClick={() => {
+                  if (linkSelection === '') {
+                    applyLink(null);
+                  } else {
+                    const [pid] = linkSelection.split('|');
+                    applyLink(pid);
+                  }
+                }}
+              >{linkSaving ? 'Saving…' : 'Apply'}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 function srcCellColor(r: MappingRow): string {
   if (r.rule === 'skip') return 'var(--text-3)';
+  if (r.rule === 'link') return 'var(--text-3)';
   if (r.rule === 'added' || r.rule === 'unmapped' || r.rule === 'null' || r.rule === 'default') return 'var(--text-4)';
   return 'var(--text)';
 }
@@ -1580,6 +1822,7 @@ function arrowColor(r: MappingRow): string {
   if (r.rule === 'skip')     return 'var(--text-4)';
   if (r.rule === 'added')    return 'var(--green)';
   if (r.rule === 'unmapped') return 'var(--text-4)';
+  if (r.rule === 'link')     return 'var(--text-3)';
   return 'var(--text-3)';
 }
 function srcCellContent(r: MappingRow): React.ReactNode {
@@ -1587,6 +1830,7 @@ function srcCellContent(r: MappingRow): React.ReactNode {
   if (r.rule === 'unmapped') return <span style={{ fontStyle: 'italic' }}>(unassigned)</span>;
   if (r.rule === 'null')     return <span style={{ fontStyle: 'italic', color: 'var(--text-3)' }}>NULL</span>;
   if (r.rule === 'default')  return <span style={{ fontStyle: 'italic', color: 'var(--text-3)' }}>DEFAULT</span>;
+  if (r.rule === 'link')     return <span style={{ fontStyle: 'italic', color: 'var(--text-3)' }}>(inherited from master)</span>;
   return r.src;
 }
 
@@ -2070,19 +2314,23 @@ const SQL_FUNCS = new Set(Object.keys(SQL_FUNC_SIGS));
 // 백엔드: backend/.../common/duckdb/udf/{UdfRegistry, *Udf}.java
 const UDF_FUNC_SIGS: Record<string, string> = {
   // 숫자 / 소수점
-  APPLY_SCALE:         '(raw_hex, scale)',
-  UNPACK_ZONE_DECIMAL: '(zone_hex)',
+  APPLY_SCALE:            '(raw_hex, scale)',
+  UNPACK_ZONE_DECIMAL:    '(zone_hex)',
+  UNPACK_COMP:            '(raw_hex, scale)',
+  UNPACK_COMP_FLOAT:      '(raw_hex)',
+  UNPACK_SIGNED_SEPARATE: '(raw)',
+  UNPACK_OVERPUNCH:       '(raw)',
   // 날짜 / 시간
-  CONVERT_ERA:         '(era_text)',
+  CONVERT_ERA:            '(era_text)',
   // 채번
-  ASSIGN_SEQ:          '(partition_key)',
+  ASSIGN_SEQ:             '(partition_key)',
   // 식별자 검증
-  VALIDATE_BIZNO:      '(bizno)',
+  VALIDATE_BIZNO:         '(bizno)',
   // 마스킹 / 해시
-  MASK_PHONE:          '(phone)',
-  HASH_SHA256:         '(input)',
+  MASK_PHONE:             '(phone)',
+  HASH_SHA256:            '(input)',
   // 문자열 정규화
-  NORMALIZE_CORP:      '(corp_name)',
+  NORMALIZE_CORP:         '(corp_name)',
 };
 const UDF_FUNCS = new Set(Object.keys(UDF_FUNC_SIGS));
 
@@ -4007,11 +4255,13 @@ const TOBE_RULE_COLORS: Record<Exclude<TobeRuleFilter, 'all'>, string> = {
   null:     '#8AEDC3',  // step 3/3 — lightest
 };
 
-function TobeCoverageBar({ total, ruleCounts, filter, onFilter }: {
+function TobeCoverageBar({ total, ruleCounts, filter, onFilter, hideFilters }: {
   total: number;
   ruleCounts: { unmapped: number; auto: number; rule: number; null: number; default: number };
   filter: TobeRuleFilter;
   onFilter: (f: TobeRuleFilter) => void;
+  /** 자식 link 시 필터 chip 들만 숨김 (progress track / state 라벨은 유지). */
+  hideFilters?: boolean;
 }) {
   const pct = (n: number) => (total === 0 ? 0 : (n / total) * 100);
   const btn = (key: TobeRuleFilter, label: string, count: number, dotColor?: string) => {
@@ -4038,7 +4288,7 @@ function TobeCoverageBar({ total, ruleCounts, filter, onFilter }: {
     <div style={{ ...styles.coverageWrap, minWidth: 980 }}>
       <div style={styles.coverageHeader}>
         <span style={styles.coverageLabel}>State</span>
-        <div style={styles.coverageFilters}>
+        <div style={{ ...styles.coverageFilters, visibility: hideFilters ? 'hidden' : 'visible' }}>
           {btn('all',      'All',         total)}
           {btn('unmapped', 'Unmapped',    ruleCounts.unmapped, TOBE_RULE_COLORS.unmapped)}
           {btn('auto',     'Pass',        ruleCounts.auto,     TOBE_RULE_COLORS.auto)}
@@ -4102,8 +4352,9 @@ function StatusBadge({ tone, children }: { tone: 'ok' | 'warn' | 'err' | 'info' 
 function RuleTag({ rule, status }: { rule: MappingRow['rule']; status?: MappingRow['status'] }) {
   const labels: Record<MappingRow['rule'], string> = {
     auto: 'Pass', rule: 'Rule', null: 'Null', default: 'Default',
-    unmapped: 'Unmapped', added: 'New', skip: 'Skip',
+    unmapped: 'Unmapped', added: 'New', skip: 'Skip', link: 'Link',
   };
+  if (rule === 'link') return <StatusBadge tone="info">Link</StatusBadge>;
   // status err/warn 은 색을 덮어쓴다 (룰과 무관하게 위험 신호 우선).
   if (status === 'err') return <StatusBadge tone="err">{labels[rule]}</StatusBadge>;
   if (status === 'warn') return <StatusBadge tone="warn">{labels[rule]}</StatusBadge>;
