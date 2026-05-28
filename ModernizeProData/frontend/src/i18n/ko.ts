@@ -539,7 +539,7 @@ export const ko = {
   'execution.run.abortReason':        '사용자가 중단함',
   'execution.run.tablesSummary':      '{n} tables',
   'execution.run.errorBanner':        '{stage}단계 ({name}) 실패 — {reason}',
-  'execution.run.demo.triggerFail':   '⚡ 실패 시뮬레이션',
+  'execution.run.errorBannerNoStage': '실행 실패 — {reason}',
 
   /* Pre-flight */
   'execution.preflight.title':                             'Pre-flight',
@@ -579,14 +579,6 @@ export const ko = {
   'execution.preflight.check.asisUnmapped.pass':           '모든 AS-IS 컬럼 매핑됨',
   'execution.preflight.check.unmappedCols.title':          '모든 TO-BE 테이블의 컬럼 unmapped 여부',
   'execution.preflight.check.unmappedCols.pass':           '모든 TO-BE 컬럼에 소스 지정됨',
-  'execution.preflight.demo.indicator':                    'Preview',
-  'execution.preflight.demo.exit':                         '실데이터로 보기',
-  'execution.preflight.demo.connTobe.fail':                'latency 412 ms · 응답 지연',
-  'execution.preflight.demo.tobeBindings.fail':            '2개 TO-BE 테이블이 AS-IS 소스 미연결',
-  'execution.preflight.demo.asisUnmapped.fail':            '3개 AS-IS 컬럼이 미매핑',
-  'execution.preflight.demo.csvArrived.fail':              '추출 파일 미도착 (시연용)',
-  'execution.preflight.demo.unmappedCols.fail':            '4개 TO-BE 컬럼 매핑 누락 (시연용)',
-  'execution.preflight.demo.passDetail':                   'OK (시연용)',
 
   /* Pre-flight — per-table 化 new keys */
   'execution.preflight.check.csvArrived.failNoPath':       'CSV 경로가 Site 설정에 등록되어 있지 않습니다',

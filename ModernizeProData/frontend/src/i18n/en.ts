@@ -535,7 +535,7 @@ export const en: Record<TranslationKey, string> = {
   'execution.run.abortReason':        'Aborted by user',
   'execution.run.tablesSummary':      '{n} tables',
   'execution.run.errorBanner':        'Stage {stage} ({name}) failed — {reason}',
-  'execution.run.demo.triggerFail':   '⚡ Simulate failure',
+  'execution.run.errorBannerNoStage': 'Run failed — {reason}',
 
   /* Pre-flight */
   'execution.preflight.title':                             'Pre-flight',
@@ -575,14 +575,6 @@ export const en: Record<TranslationKey, string> = {
   'execution.preflight.check.asisUnmapped.pass':           'All AS-IS columns mapped',
   'execution.preflight.check.unmappedCols.title':          'All TO-BE tables column unmapped check',
   'execution.preflight.check.unmappedCols.pass':           'All TO-BE columns have a source assigned',
-  'execution.preflight.demo.indicator':                    'Preview',
-  'execution.preflight.demo.exit':                         'Back to real data',
-  'execution.preflight.demo.connTobe.fail':                'latency 412 ms · slow response',
-  'execution.preflight.demo.tobeBindings.fail':            '2 TO-BE tables not bound to AS-IS source',
-  'execution.preflight.demo.asisUnmapped.fail':            '3 AS-IS columns are unmapped',
-  'execution.preflight.demo.csvArrived.fail':              'AS-IS extract not received (demo)',
-  'execution.preflight.demo.unmappedCols.fail':            '4 TO-BE columns unmapped (demo)',
-  'execution.preflight.demo.passDetail':                   'OK (demo)',
 
   /* Pre-flight — per-table new keys */
   'execution.preflight.check.csvArrived.failNoPath':       'CSV path is not configured in Site settings',

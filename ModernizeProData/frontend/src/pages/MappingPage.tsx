@@ -13,7 +13,6 @@ import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
 import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
 import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult, type MappingRuleDto, type MappingTableBindingDto } from '../api/mappingImport';
 import { MappingOnboarding } from './DashboardPage';
-import { isDemoProjectId } from '../lib/demoFixtures';
 import { copyText } from '../lib/clipboard';
 import { Checkbox } from '../components/Checkbox';
 
@@ -282,8 +281,6 @@ export function MappingPage() {
 
   useEffect(() => {
     if (!activeProjectId) return;
-    // demo project 는 AppShell 이 schema 를 inject 했으므로 백엔드 fetch 를 건너뛴다.
-    if (isDemoProjectId(activeProjectId)) return;
     useAsisDdlStore.getState().fetch(activeProjectId).catch((e) => console.error('[mapping] asis-ddl fetch failed', e));
     useTobeDdlStore.getState().fetch(activeProjectId).catch((e) => console.error('[mapping] tobe-ddl fetch failed', e));
   }, [activeProjectId]);

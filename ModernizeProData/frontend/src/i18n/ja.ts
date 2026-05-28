@@ -541,7 +541,7 @@ export const ja: Record<TranslationKey, string> = {
   'execution.run.abortReason':        'ユーザーによる中断',
   'execution.run.tablesSummary':      '{n} tables',
   'execution.run.errorBanner':        'Stage {stage} ({name}) 失敗 — {reason}',
-  'execution.run.demo.triggerFail':   '⚡ 失敗をシミュレート',
+  'execution.run.errorBannerNoStage': '実行失敗 — {reason}',
 
   /* Pre-flight */
   'execution.preflight.title':                             'Pre-flight',
@@ -581,14 +581,6 @@ export const ja: Record<TranslationKey, string> = {
   'execution.preflight.check.asisUnmapped.pass':           '全ての AS-IS カラムがマッピング済み',
   'execution.preflight.check.unmappedCols.title':          '全ての TO-BE テーブルのカラム unmapped 検査',
   'execution.preflight.check.unmappedCols.pass':           '全ての TO-BE カラムにソースが割当て済み',
-  'execution.preflight.demo.indicator':                    'Preview',
-  'execution.preflight.demo.exit':                         '実データに戻る',
-  'execution.preflight.demo.connTobe.fail':                'latency 412 ms · 応答遅延',
-  'execution.preflight.demo.tobeBindings.fail':            '2 TO-BE テーブルが AS-IS ソース未連結',
-  'execution.preflight.demo.asisUnmapped.fail':            '3 AS-IS カラムが未マッピング',
-  'execution.preflight.demo.csvArrived.fail':              '抽出ファイル未到着 (デモ用)',
-  'execution.preflight.demo.unmappedCols.fail':            '4 件の TO-BE カラムが未マッピング (デモ用)',
-  'execution.preflight.demo.passDetail':                   'OK (デモ用)',
 
   /* Pre-flight — per-table 化 new keys */
   'execution.preflight.check.csvArrived.failNoPath':       'CSV パスが Site 設定に登録されていません',

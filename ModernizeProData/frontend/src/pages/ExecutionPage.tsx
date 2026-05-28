@@ -11,7 +11,6 @@ import {
   useExecutionPreflightStore,
   type PreflightCheck,
   type PreflightPhase,
-  type ActiveRunState,
 } from '../store/executionPreflight';
 import { runPreflight, isAllPass, type TableCheckResult } from '../lib/preflightValidation';
 import { tobeDbApi } from '../api/tobeDb';
@@ -19,16 +18,10 @@ import { csvPreviewApi } from '../api/csvPreview';
 import { runsApi, type RunHistoryDto, type StageView } from '../api/runs';
 import { usePipelineProgress, isTerminal } from '../hooks/usePipelineProgress';
 import { PreflightResultPanel } from '../components/PreflightResultPanel';
-import { useDemoMode, type DemoMode } from '../lib/useDemoMode';
 import {
-  STAGE_MS,
-  TOTAL_STAGES,
-  TOTAL_RUN_MS,
   BASE_STAGES,
   buildStages,
-  buildStagesFromActiveRun,
   buildStagesFromStageViews,
-  computeElapsedMs,
   type Stage,
   type StageTone,
 } from '../lib/pipelineStages';
@@ -36,6 +29,20 @@ import { useQuery } from '@tanstack/react-query';
 import { useT, type TranslationKey } from '../i18n';
 
 type T = (key: TranslationKey, vars?: Record<string, string | number>) => string;
+
+/** BE run + stageViews 를 한 묶음의 표시용 shape 로 합성. RunHeader · banner 등 UI 가 사용. */
+type ActiveRunStatus = 'running' | 'completed' | 'failed' | 'aborted';
+interface ActiveRunState {
+  runId: string;
+  selectedTables: string[];
+  startedAt: number;
+  pausedAt: number | null;
+  pauseAccumMs: number;
+  runStatus: ActiveRunStatus;
+  failedStageIndex: number | null;
+  failureReason: string | null;
+  haltedAt: number | null;
+}
 
 type RunMode = 'test' | 'rehearsal' | 'cutover';
 type RunResult = 'ok' | 'warn' | 'failed' | 'aborted' | 'running';
@@ -73,37 +80,12 @@ export function ExecutionPage() {
     [sites, project],
   );
 
-  const { isDemo, demoMode, exitDemo } = useDemoMode();
   const user = useAuthStore((s) => s.user);
 
-  /* Demo モードの mock activeRun. real モードでは触らない. */
-  const storeActiveRun: ActiveRunState | null = useExecutionPreflightStore(
-    (s) => (project ? s.byProject[project.id]?.activeRun : null) ?? null,
-  );
-  const [tick, setTick] = useState(0);
-
-  /* real モードの活性 run id. start に成功したら BE 返却値を保存 → usePipelineProgress
-     が自動 polling. setActiveRunId(null) で polling 停止 + 表示クリア. */
+  /* 활성 run id. start 성공 시 BE 반환값 보존 → usePipelineProgress 자동 polling.
+     setActiveRunId(null) 로 polling 정지 + 표시 클리어. */
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
-  const { run, stages: stageViews } = usePipelineProgress(isDemo ? null : activeRunId);
-
-  useEffect(() => {
-    if (!storeActiveRun) return;
-    if (storeActiveRun.runStatus !== 'running') return;
-    if (storeActiveRun.pausedAt !== null) return;
-    const id = window.setInterval(() => setTick((n) => n + 1), 250);
-    return () => window.clearInterval(id);
-  }, [storeActiveRun?.runId, storeActiveRun?.pausedAt, storeActiveRun?.runStatus]);
-
-  const projectId = project?.id ?? null;
-  useEffect(() => {
-    if (!projectId || !storeActiveRun) return;
-    if (storeActiveRun.runStatus !== 'running') return;
-    if (computeElapsedMs(storeActiveRun) >= TOTAL_RUN_MS) {
-      useExecutionPreflightStore.getState().finishActiveRun(projectId);
-      useWorkspaceStore.getState().setProjectRunStatus(projectId, 'completed').catch(() => { /* mock; ignore */ });
-    }
-  }, [tick, storeActiveRun, projectId]);
+  const { run, stages: stageViews } = usePipelineProgress(activeRunId);
 
   /* TO-BE / AS-IS DDL schemas — used for table selector + preflight validation. */
   const tobeSchema = useTobeDdlStore((s) => project ? s.schemasByProject[project.id] : undefined);
@@ -134,22 +116,6 @@ export function ExecutionPage() {
     [projectSnapshots, pinnedIds],
   );
 
-  /* Demo 모드 stale flag 시연 */
-  const [demoStale, setDemoStale] = useState(false);
-  useEffect(() => {
-    setDemoStale(false);
-  }, [isDemo, demoMode, project?.id]);
-
-  /* Demo 진입 시 fixture 의 모든 TO-BE 테이블 자동 선택 */
-  useEffect(() => {
-    if (!isDemo || !project) return;
-    const store = useExecutionPreflightStore.getState();
-    const entry = store.byProject[project.id];
-    if ((entry?.selectedTables.length ?? 0) === 0 && tobeTables.length > 0) {
-      store.setSelected(project.id, tobeTables);
-    }
-  }, [isDemo, project?.id, tobeTables.length]);
-
   const entrySelected = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.selectedTables : undefined);
   const entryPhase    = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.preflightPhase : undefined);
   const entryStale    = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.isStale : undefined);
@@ -162,7 +128,6 @@ export function ExecutionPage() {
   const setSelectedTables = (next: Set<string>) => {
     if (!project) return;
     useExecutionPreflightStore.getState().setSelected(project.id, [...next]);
-    if (isDemo) setDemoStale(true);
   };
 
   /* mount 시 stuck 'checking' 검출 → idle 복구. 이전 실행이 throw 했거나 navigate 로
@@ -183,7 +148,7 @@ export function ExecutionPage() {
 
   /* BE polling 結果 (RunHistoryDto + StageView[]) を ActiveRunState 形に合成. real モードのみ. */
   const realActiveRun: ActiveRunState | null = useMemo(() => {
-    if (isDemo || !run) return null;
+    if (!run) return null;
     const startedAtMs = run.startedAt ? new Date(run.startedAt).getTime() : Date.now();
     const haltedAtMs = run.finishedAt && isTerminal(run.status) ? new Date(run.finishedAt).getTime() : null;
     const failedIdx = stageViews ? findFailedStageIndex(stageViews) : null;
@@ -201,14 +166,14 @@ export function ExecutionPage() {
       failureReason: run.errorMessage ?? null,
       haltedAt: haltedAtMs,
     };
-  }, [isDemo, run, stageViews]);
+  }, [run, stageViews]);
 
-  const displayedActiveRun: ActiveRunState | null = isDemo ? storeActiveRun : realActiveRun;
+  const displayedActiveRun: ActiveRunState | null = realActiveRun;
 
   /* 実行履歴: real は BE fetch、demo は既存 mock. project が未確定なら disabled. */
   const runHistoryQuery = useQuery<RunHistoryDto[]>({
     queryKey: ['run-history', projectIdForReset],
-    enabled: !isDemo && !!projectIdForReset,
+    enabled: !!projectIdForReset,
     queryFn: () => runsApi.listByProject(projectIdForReset!),
     staleTime: 5_000,
     refetchInterval: activeRunId ? 5_000 : false,
@@ -229,10 +194,6 @@ export function ExecutionPage() {
   /* selection / pin 변경 → snapshot 결과 캐시 / store 결과 모두 stale 화 (UX 명료성). */
 
   const startPreflight = async () => {
-    if (isDemo) {
-      setDemoStale(false);
-      return;
-    }
     if (!project || !site || !pinnedSnapshot) return;
     if (selectedTables.size === 0 || preflightPhase === 'checking') return;
 
@@ -343,73 +304,30 @@ export function ExecutionPage() {
   const pinnedResult = (pinnedSnapshot && entryBySnapshot) ? entryBySnapshot[pinnedSnapshot.id] : undefined;
   const cachedResults: PreflightCheck[] = pinnedResult?.results ?? [];
 
-  /* Demo 모드: trigger 없이 즉시 결과 표시. 8 fail / 8 pass 분기. */
-  const displayedResults = demoMode === 'run-fail'
-    ? buildDemoPreflightPassChecks(t)
-    : demoMode === 'preflight'
-      ? buildDemoPreflightChecks(t)
-      : cachedResults;
-  /* phase 派生: checking 中なら checking、cache に結果 있으면 done、그 외 idle */
-  const displayedPhase: PreflightPhase = isDemo
-    ? 'done'
-    : preflightPhase === 'checking'
-      ? 'checking'
-      : cachedResults.length > 0
-        ? 'done'
-        : 'idle';
-  const displayedStale = isDemo ? demoStale : isStale;
+  const displayedResults = cachedResults;
+  /* phase 派生: checking 中なら checking、cache 에 결과 있으면 done、그 외 idle */
+  const displayedPhase: PreflightPhase = preflightPhase === 'checking'
+    ? 'checking'
+    : cachedResults.length > 0
+      ? 'done'
+      : 'idle';
+  const displayedStale = isStale;
   const preflightPassed = displayedPhase === 'done'
     && !displayedStale
     && isAllPass(displayedResults);
 
-  /* stages 表示: demo は mock タイマー派生、real は BE polling 派生.
-     どちらも null なら project.phase ベースの静的 fallback. */
-  const stages = isDemo
-    ? (storeActiveRun ? buildStagesFromActiveRun(storeActiveRun, TOTAL_RUN_MS) : buildStages(project.phase))
-    : (stageViews ? buildStagesFromStageViews(stageViews) : buildStages(project.phase));
+  /* stages 표시: BE polling 派生. null 이면 project.phase ベースの 정적 fallback. */
+  const stages = stageViews ? buildStagesFromStageViews(stageViews) : buildStages(project.phase);
 
-  const runs = isDemo
-    ? buildRuns(project)
-    : (runHistoryData ?? []).map(beRunToRunCard);
+  const runs = (runHistoryData ?? []).map(beRunToRunCard);
 
   const controlsLocked = displayedActiveRun !== null || !hasPinnedSnapshot;
 
-  const handleStartRun = async () => {
-    if (!preflightPassed || selectedTables.size === 0) return;
-    if (!hasPinnedSnapshot || !pinnedSnapshot) return;
-    if (!runMode) return;
-
-    const tables = Array.from(selectedTables);
-
-    /* Demo モード: 既存の mock 起動 (BE 呼ばない). */
-    if (isDemo) {
-      const current = useExecutionPreflightStore.getState().byProject[project.id]?.activeRun;
-      if (current && current.runStatus !== 'running') {
-        useExecutionPreflightStore.getState().clearActiveRun(project.id);
-      } else if (current && current.runStatus === 'running') {
-        return;
-      }
-      useExecutionPreflightStore.getState().startActiveRun(project.id, tables);
-      if (runMode === 'cutover') {
-        useWorkspaceStore.getState().startCutover(project.id, pinnedSnapshot.id, user?.username ?? 'Admin')
-          .catch(() => { /* mock; ignore */ });
-      } else {
-        const desiredPhase: ProjectPhase = runMode === 'rehearsal' ? 'rehearsal' : 'test';
-        const nextPhase: ProjectPhase =
-          phaseOrder(project.phase) < phaseOrder(desiredPhase) ? desiredPhase : project.phase;
-        useWorkspaceStore.getState()
-          .setProjectPhaseAndRunStatus(project.id, nextPhase, 'running')
-          .catch(() => { /* mock */ });
-      }
-      return;
-    }
-
-    /* Real モード: BE に start を投げて返却 runId を保存. polling は usePipelineProgress
-       が自動で開始. project.runStatus / phase は BE 側の RunService が更新 →
-       AppShell の 10s polling で sidebar に反映 (FE 側 自前 update 不要). */
-    if (activeRunId) return;  // 既に走ってる、二重起動防止
+  /* Real モードの run 起動本体 — start API 呼び出し + runId 保存.
+     handleStartRun(二重起動 guard 経由) と handleRetry(guard なしで再起動) が共有. */
+  const startRealRun = async (tables: string[], mode: RunMode) => {
     try {
-      const result = await runsApi.start(project.id, runMode, tables);
+      const result = await runsApi.start(project.id, mode, tables);
       if (result.status === 'STARTED' && result.runId) {
         setActiveRunId(result.runId);
       } else {
@@ -423,20 +341,22 @@ export function ExecutionPage() {
     }
   };
 
+  const handleStartRun = async () => {
+    if (!preflightPassed || selectedTables.size === 0) return;
+    if (!hasPinnedSnapshot || !pinnedSnapshot) return;
+    if (!runMode) return;
+
+    const tables = Array.from(selectedTables);
+
+    /* BE에 start 던지고 반환 runId 보존. polling은 usePipelineProgress가 자동 시작.
+       project.runStatus / phase는 BE의 RunService가 갱신 → AppShell의 10s polling으로 sidebar 반영. */
+    if (activeRunId) return;  // 이미 도는 중 — 이중 기동 방지
+    await startRealRun(tables, runMode);
+  };
+
   const handlePauseToggle = async () => {
-    if (isDemo) {
-      if (!storeActiveRun) return;
-      if (storeActiveRun.pausedAt === null) {
-        useExecutionPreflightStore.getState().pauseActiveRun(project.id);
-        useWorkspaceStore.getState().setProjectRunStatus(project.id, 'paused').catch(() => { /* mock */ });
-      } else {
-        useExecutionPreflightStore.getState().resumeActiveRun(project.id);
-        useWorkspaceStore.getState().setProjectRunStatus(project.id, 'running').catch(() => { /* mock */ });
-      }
-      return;
-    }
-    /* Real モード: BE pause/resume endpoint へ. 状態遷移は usePipelineProgress polling が
-       次の tick で picking up するため、ここで手動更新は不要 (paused は非 terminal → polling 継続). */
+    /* BE pause/resume endpoint 호출. 상태 전이는 usePipelineProgress polling이
+       다음 tick에서 캐치 — 수동 갱신 불필요 (paused는 non-terminal → polling 계속). */
     if (!activeRunId || !run) return;
     try {
       if (run.status === 'running')     await runsApi.pause(activeRunId);
@@ -447,63 +367,29 @@ export function ExecutionPage() {
     }
   };
 
-  const handleTriggerFail = () => {
-    if (!storeActiveRun || storeActiveRun.runStatus !== 'running') return;
-    const elapsed = computeElapsedMs(storeActiveRun);
-    const stageIndex = Math.min(Math.floor(elapsed / STAGE_MS), TOTAL_STAGES - 1);
-    const stageName = BASE_STAGES[stageIndex]?.name ?? '?';
-    const reason = `Demo: ${stageName} 단계에서 PK 위반 3건 — accounts.account_id`;
-    useExecutionPreflightStore.getState().failActiveRun(project.id, stageIndex, reason);
-    useWorkspaceStore.getState().setProjectRunStatus(project.id, 'failed').catch(() => { /* mock */ });
-  };
-
   const handleRetry = async () => {
-    if (isDemo) {
-      useExecutionPreflightStore.getState().retryActiveRun(project.id, STAGE_MS);
-      useWorkspaceStore.getState().setProjectRunStatus(project.id, 'running').catch(() => { /* mock */ });
-      return;
-    }
-    /* Real モードの retry = 失敗した run を捨てて新しい run を起こす. handleStartRun と同じ流れ. */
+    /* Retry = 失敗した run を捨てて新しい run を起こす.
+       handleStartRun の `if (activeRunId) return` を経由すると、setActiveRunId(null) が
+       同期反映されず stale closure の旧 activeRunId を見て no-op になる → startRealRun 직접 호출. */
+    if (!runMode || selectedTables.size === 0) return;
     setActiveRunId(null);
-    await handleStartRun();
+    await startRealRun(Array.from(selectedTables), runMode);
   };
 
   const handleDiscard = () => {
-    if (isDemo) {
-      useExecutionPreflightStore.getState().clearActiveRun(project.id);
-      useWorkspaceStore.getState().setProjectRunStatus(project.id, 'idle').catch(() => { /* mock */ });
-      return;
-    }
-    /* Real モード: polling 停止 + UI から「現在の run」を外す.
-       BE の run 自体は履歴に残るが、ExecutionPage 上の active 表示は消える. */
+    /* polling 停止 + UI から「현재 run」을 외す. BE 의 run 자체는 履歴에 남音. */
     setActiveRunId(null);
   };
 
   const handleStopRun = async () => {
-    if (isDemo) {
-      if (!storeActiveRun || storeActiveRun.runStatus !== 'running') return;
-      const elapsed = computeElapsedMs(storeActiveRun);
-      const stageIndex = Math.min(Math.floor(elapsed / STAGE_MS), TOTAL_STAGES - 1);
-      const reason = t('execution.run.abortReason');
-      useExecutionPreflightStore.getState().abortActiveRun(project.id, stageIndex, reason);
-      useWorkspaceStore.getState().setProjectRunStatus(project.id, 'aborted').catch(() => { /* mock */ });
-      return;
-    }
-    /* Real モード: BE に abort 送信. polling が即次の tick で aborted を拾って UI 更新. */
     if (!activeRunId) return;
-    if (run && isTerminal(run.status)) return; // 既に terminal なら何もしない
+    if (run && isTerminal(run.status)) return; // 既に terminal 이면 무시
     try {
       await runsApi.abort(activeRunId, t('execution.run.abortReason'));
     } catch (e) {
-      /* BE が abort endpoint 未対応 (S2 まだ push 前) なら 404/400. console に出して終わり. */
-      console.warn('[execution] abort failed (BE not ready or other error):', e);
+      console.warn('[execution] abort failed:', e);
       alert(`Abort failed: ${e instanceof Error ? e.message : 'unknown error'}`);
     }
-  };
-
-  const handleExitDemo = () => {
-    if (project) useExecutionPreflightStore.getState().clearActiveRun(project.id);
-    exitDemo();
   };
 
   return (
@@ -518,11 +404,9 @@ export function ExecutionPage() {
         preflightPassed={preflightPassed}
         hasPinnedSnapshot={hasPinnedSnapshot}
         selectedTablesCount={selectedTables.size}
-        isDemo={isDemo}
         onStart={handleStartRun}
         onPauseToggle={handlePauseToggle}
         onStop={handleStopRun}
-        onTriggerFail={handleTriggerFail}
         onRetry={handleRetry}
         onDiscard={handleDiscard}
       />
@@ -543,9 +427,6 @@ export function ExecutionPage() {
           startDisabledReason={!hasPinnedSnapshot ? t('execution.preflight.trigger.disabledNoPin') : t('execution.preflight.trigger.disabled')}
           onStart={startPreflight}
           onReset={() => useExecutionPreflightStore.getState().resetForProject(project.id)}
-          isDemo={isDemo}
-          demoMode={demoMode}
-          onExitDemo={handleExitDemo}
         />
       </DisabledOverlay>
       <OverallProgress t={t} stages={stages} />
@@ -568,7 +449,7 @@ function DisabledOverlay({ disabled, children }: { disabled: boolean; children: 
 
 function RunHeader({
   t, project, site, runMode, activeRun, runs, preflightPassed, hasPinnedSnapshot,
-  selectedTablesCount, isDemo, onStart, onPauseToggle, onStop, onTriggerFail, onRetry, onDiscard,
+  selectedTablesCount, onStart, onPauseToggle, onStop, onRetry, onDiscard,
 }: {
   t: T;
   project: Project;
@@ -579,11 +460,9 @@ function RunHeader({
   preflightPassed: boolean;
   hasPinnedSnapshot: boolean;
   selectedTablesCount: number;
-  isDemo: boolean;
   onStart: () => void;
   onPauseToggle: () => void;
   onStop: () => void;
-  onTriggerFail: () => void;
   onRetry: () => void;
   onDiscard: () => void;
 }) {
@@ -631,19 +510,12 @@ function RunHeader({
   const isAborted = activeRun.runStatus === 'aborted';
   const isHalted = isCompleted || isFailed || isAborted;
   const running = activeRun.runStatus === 'running' && !isPaused;
-  const elapsedMs = computeElapsedMs(activeRun);
-  const totalMs = STAGE_MS * BASE_STAGES.length;
-  const remainingMs = Math.max(0, totalMs - elapsedMs);
-  const elapsedLabel = isHalted
-    ? t('execution.run.elapsed', {
-        time: formatTimeOfDay(activeRun.startedAt),
-        elapsed: formatDuration(elapsedMs),
-      })
-    : t('execution.run.elapsedEta', {
-        time: formatTimeOfDay(activeRun.startedAt),
-        elapsed: formatDuration(elapsedMs),
-        eta: formatDuration(remainingMs),
-      });
+  /* elapsed: BE 真値 기반 wall-clock(시작~정지/현재). 신뢰할 ETA 없으므로 미표시. */
+  const elapsedMs = Math.max(0, (activeRun.haltedAt ?? activeRun.pausedAt ?? Date.now()) - activeRun.startedAt);
+  const elapsedLabel = t('execution.run.elapsed', {
+    time: formatTimeOfDay(activeRun.startedAt),
+    elapsed: formatDuration(elapsedMs),
+  });
 
   const statusChipTone: BadgeTone =
     isFailed ? 'err'
@@ -676,14 +548,9 @@ function RunHeader({
           <div style={{ fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: 3 }}>
             {t('execution.run.triggeredBy')}{' '}
             <b style={{ color: 'var(--text-2)' }}>{project.executionAssignee ?? project.owner ?? 'Admin'}</b>
-            <span> · {t('execution.run.tablesSummary', { n: activeRun.selectedTables.length })}</span>
+            <span> · {t('execution.run.tablesSummary', { n: selectedTablesCount })}</span>
           </div>
         </div>
-        {isDemo && running && (
-          <button type="button" onClick={onTriggerFail} style={styles.btnGhost} title={t('execution.run.demo.triggerFail')}>
-            {t('execution.run.demo.triggerFail')}
-          </button>
-        )}
         {isHalted && (
           <button
             type="button"
@@ -732,11 +599,15 @@ function RunHeader({
         <div style={isAborted ? styles.warnBanner : styles.errorBanner}>
           <span style={{ fontSize: 14 }}>{isAborted ? '⏹' : '❌'}</span>
           <span>
-            {t('execution.run.errorBanner', {
-              stage: (activeRun.failedStageIndex ?? 0) + 1,
-              name: failedStageName,
-              reason: activeRun.failureReason ?? '',
-            })}
+            {activeRun.failedStageIndex != null
+              ? t('execution.run.errorBanner', {
+                  stage: activeRun.failedStageIndex + 1,
+                  name: failedStageName,
+                  reason: activeRun.failureReason ?? '',
+                })
+              : t('execution.run.errorBannerNoStage', {
+                  reason: activeRun.failureReason ?? '',
+                })}
           </span>
         </div>
       )}
@@ -853,7 +724,7 @@ function SnapshotDisplay({ t, pinned }: { t: T; pinned: MappingSnapshot | null }
 /* ───────────────────────── Pre-flight panel ────────────────────── */
 
 function PreflightPanel({
-  t, checks, phase, isStale, canStart, startDisabledReason, onStart, onReset, isDemo, demoMode, onExitDemo,
+  t, checks, phase, isStale, canStart, startDisabledReason, onStart, onReset,
 }: {
   t: T;
   checks: PreflightCheck[];
@@ -863,9 +734,6 @@ function PreflightPanel({
   startDisabledReason: string;
   onStart: () => void;
   onReset: () => void;
-  isDemo?: boolean;
-  demoMode?: DemoMode | null;
-  onExitDemo?: () => void;
 }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -878,7 +746,6 @@ function PreflightPanel({
     if (isChecking || hasBlocking) setOpen(true);
   }, [isChecking, hasBlocking]);
 
-  const search = demoMode ? `?demo=${demoMode}` : '';
   const handleFix = (c: PreflightCheck, table?: string) => {
     switch (c.id) {
       case 'csv-arrived':
@@ -889,19 +756,19 @@ function PreflightPanel({
         return;
       }
       case 'ddl-asis':
-        navigate({ pathname: '/settings', search }, { state: { highlightSide: 'asis' } });
+        navigate('/settings', { state: { highlightSide: 'asis' } });
         return;
       case 'ddl-tobe':
-        navigate({ pathname: '/settings', search }, { state: { highlightSide: 'tobe' } });
+        navigate('/settings', { state: { highlightSide: 'tobe' } });
         return;
       case 'tobe-bindings':
-        navigate({ pathname: '/mapping', search }, { state: { fixTarget: { kind: 'unbound-tobe', table } } });
+        navigate('/mapping', { state: { fixTarget: { kind: 'unbound-tobe', table } } });
         return;
       case 'unmapped-cols':
-        navigate({ pathname: '/mapping', search }, { state: { fixTarget: { kind: 'unmapped-tobe', table } } });
+        navigate('/mapping', { state: { fixTarget: { kind: 'unmapped-tobe', table } } });
         return;
       case 'asis-unmapped':
-        navigate({ pathname: '/mapping', search }, { state: { fixTarget: { kind: 'unmapped-asis', table } } });
+        navigate('/mapping', { state: { fixTarget: { kind: 'unmapped-asis', table } } });
         return;
     }
   };
@@ -926,23 +793,6 @@ function PreflightPanel({
           {counts.fail > 0 && <StatusBadge tone="err">{t('execution.preflight.count.fail', { n: counts.fail })}</StatusBadge>}
           {counts.skip > 0 && <StatusBadge tone="queued">{t('execution.preflight.count.skip', { n: counts.skip })}</StatusBadge>}
         </div>
-        {isDemo && (
-          <span
-            onClick={(e) => { e.stopPropagation(); onExitDemo?.(); }}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              padding: '2px 8px', marginLeft: 6,
-              fontSize: 10, fontWeight: 700, fontFamily: 'var(--mono)',
-              background: 'var(--navy-50)', color: 'var(--navy)',
-              border: '1px solid var(--navy)', borderRadius: 2,
-              letterSpacing: 0.4, textTransform: 'uppercase', cursor: 'pointer',
-            }}
-            title={t('execution.preflight.demo.exit')}
-          >
-            {t('execution.preflight.demo.indicator')}
-            <span style={{ fontSize: 10 }}>✕</span>
-          </span>
-        )}
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>{hint}</span>
         <button
@@ -1228,82 +1078,6 @@ function countResults(checks: PreflightCheck[]): { pass: number; fail: number; s
     },
     { pass: 0, fail: 0, skip: 0 },
   );
-}
-
-const DEMO_TABLES = ['accounts', 'transactions', 'customers', 'audit_log'];
-
-/** Demo: 7 checks all fail. Per-table rows synthesised over a fixed demo table list. */
-function buildDemoPreflightChecks(t: T): PreflightCheck[] {
-  const projectFail = (id: PreflightCheck['id'], title: TranslationKey, detail: TranslationKey): PreflightCheck => ({
-    id, title: t(title), scope: 'project', aggregate: 'fail',
-    perTable: [{ table: '*', status: 'fail', detail: t(detail) }],
-  });
-  const perTableFail = (id: PreflightCheck['id'], title: TranslationKey, detail: TranslationKey): PreflightCheck => ({
-    id, title: t(title), scope: 'per-table', aggregate: 'fail',
-    perTable: DEMO_TABLES.map<TableCheckResult>((table) => ({ table, status: 'fail', detail: t(detail) })),
-  });
-  return [
-    projectFail('csv-arrived',  'execution.preflight.check.csvArrived.title',  'execution.preflight.demo.csvArrived.fail'),
-    projectFail('ddl-asis',     'execution.preflight.check.ddlAsis.title',     'execution.preflight.check.ddlAsis.fail'),
-    projectFail('ddl-tobe',     'execution.preflight.check.ddlTobe.title',     'execution.preflight.check.ddlTobe.fail'),
-    projectFail('conn-tobe',    'execution.preflight.check.connTobe.title',    'execution.preflight.demo.connTobe.fail'),
-    perTableFail('tobe-bindings','execution.preflight.check.tobeBindings.title','execution.preflight.demo.tobeBindings.fail'),
-    perTableFail('asis-unmapped','execution.preflight.check.asisUnmapped.title','execution.preflight.demo.asisUnmapped.fail'),
-    perTableFail('unmapped-cols','execution.preflight.check.unmappedCols.title','execution.preflight.demo.unmappedCols.fail'),
-  ];
-}
-
-function buildDemoPreflightPassChecks(t: T): PreflightCheck[] {
-  const projectPass = (id: PreflightCheck['id'], title: TranslationKey): PreflightCheck => ({
-    id, title: t(title), scope: 'project', aggregate: 'pass',
-    perTable: [{ table: '*', status: 'pass', detail: t('execution.preflight.demo.passDetail') }],
-  });
-  const perTablePass = (id: PreflightCheck['id'], title: TranslationKey): PreflightCheck => ({
-    id, title: t(title), scope: 'per-table', aggregate: 'pass',
-    perTable: DEMO_TABLES.map<TableCheckResult>((table) => ({
-      table, status: 'pass', detail: t('execution.preflight.demo.passDetail'),
-    })),
-  });
-  return [
-    projectPass('csv-arrived',  'execution.preflight.check.csvArrived.title'),
-    projectPass('ddl-asis',     'execution.preflight.check.ddlAsis.title'),
-    projectPass('ddl-tobe',     'execution.preflight.check.ddlTobe.title'),
-    projectPass('conn-tobe',    'execution.preflight.check.connTobe.title'),
-    perTablePass('tobe-bindings','execution.preflight.check.tobeBindings.title'),
-    perTablePass('asis-unmapped','execution.preflight.check.asisUnmapped.title'),
-    perTablePass('unmapped-cols','execution.preflight.check.unmappedCols.title'),
-  ];
-}
-
-function buildRuns(project: Project): Run[] {
-  const phase = project.phase;
-  if (phase === 'planning' || phase === 'analysis') return [];
-
-  const baseDate = '2026-05-22';
-  const runs: Run[] = [];
-
-  if (phase === 'rehearsal' || phase === 'cutover') {
-    runs.push({
-      id: phase === 'cutover' ? 'cut-001' : 'reh-003',
-      mode: phase === 'cutover' ? 'cutover' : 'rehearsal',
-      scope: 'all',
-      startedAt: `${baseDate} 10:12`,
-      elapsed: '04:38',
-      eta: '06:20',
-      result: 'running',
-      triggeredBy: { actor: project.executionAssignee ?? 'Admin', source: 'manual' },
-    });
-  }
-  if (phase !== 'test') {
-    runs.push(
-      { id: 'reh-002', mode: 'rehearsal', scope: 'all', startedAt: `${baseDate} 09:01`, elapsed: '06:12', result: 'ok',   quarantineCount: 0, triggeredBy: { actor: 'Admin', source: 'manual' } },
-      { id: 'reh-001', mode: 'rehearsal', scope: 'all', startedAt: '2026-05-21 17:40', elapsed: '06:30', result: 'warn', quarantineCount: 24, triggeredBy: { actor: 'Admin', source: 'manual' } },
-    );
-  }
-  if (phase === 'hypercare' || phase === 'done') {
-    runs.unshift({ id: 'cut-001', mode: 'cutover', scope: 'all', startedAt: `${baseDate} 02:00`, elapsed: '05:48', result: 'ok', quarantineCount: 0, triggeredBy: { actor: project.cutover?.startedBy ?? 'Admin', source: 'manual · cutover' } });
-  }
-  return runs;
 }
 
 /* ───────────────────────── Styles ──────────────────────────────── */
