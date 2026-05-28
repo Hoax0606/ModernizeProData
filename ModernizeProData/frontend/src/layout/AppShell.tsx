@@ -20,7 +20,7 @@ import { useLicenseStore } from '../store/license';
 import { useWorkspaceStore } from '../store/workspace';
 // import { useExecutionPreflightStore } from '../store/executionPreflight';
 // import { TOTAL_RUN_MS, computeElapsedMs } from '../lib/pipelineStages';
-// import { effectiveTobeDb, isTobeDbConfigured } from '../lib/effectiveTobeDb';
+import { effectiveTobeDb, isTobeDbConfigured } from '../lib/effectiveTobeDb';
 import { useUiStore } from '../store/ui';
 import { isProjectReadOnly } from '../store/readOnly';
 import { useSnapshotsStore } from '../store/snapshots';
