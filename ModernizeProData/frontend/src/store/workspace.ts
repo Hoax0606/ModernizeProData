@@ -50,6 +50,9 @@ export interface Site {
   notes?: string;
   /** 현재 활성 운영 단계 (test/dev/staging/production). TO-BE DB 는 이 단계의 것을 사용. */
   environment: ProjectEnvironment;
+  /** TO-BE DB 연결 범위. 'site' = 모든 Project 가 Site.tobeDbByEnv 공유 (기본, 통합 이행),
+   *  'project' = 각 Project 가 자기 tobeDbByEnv 보유 (업무별 분리 이행). */
+  tobeDbScope?: 'site' | 'project';
   /** 운영 단계별로 따로 저장하는 TO-BE DB 접속 정보. */
   tobeDbByEnv: TobeDbByEnv;
   /**
@@ -95,6 +98,11 @@ export interface Project {
   scheduleLastRunAt?: string | null;
   /** Quartz 가 계산한 다음 발화 시각. UI 표시 용 cache (서버가 갱신). */
   scheduleNextRunAt?: string | null;
+  /** Per-project TO-BE DB 연결. Site.tobeDbScope === 'project' 일 때만 의미.
+   *  scope === 'site' 중에는 비어 있어도 무방 (Site.tobeDbByEnv 가 권위). */
+  tobeDbByEnv?: TobeDbByEnv;
+  /** Per-project lock 상태. tobeDbByEnv 와 동일 조건으로 사용. */
+  tobeDbLocks?: TobeDbLocks;
   createdAt: string;
 }
 

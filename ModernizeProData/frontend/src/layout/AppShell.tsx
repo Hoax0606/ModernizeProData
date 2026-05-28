@@ -20,6 +20,7 @@ import { useLicenseStore } from '../store/license';
 import { useWorkspaceStore } from '../store/workspace';
 import { useExecutionPreflightStore } from '../store/executionPreflight';
 import { TOTAL_RUN_MS, computeElapsedMs } from '../lib/pipelineStages';
+import { effectiveTobeDb, isTobeDbConfigured } from '../lib/effectiveTobeDb';
 import { useUiStore } from '../store/ui';
 import { isProjectReadOnly } from '../store/readOnly';
 import { useSnapshotsStore } from '../store/snapshots';
@@ -254,14 +255,10 @@ export function AppShell() {
   const activeProject = useMemo(() => allProjects.find((p) => p.id === activeProjectId) ?? null, [allProjects, activeProjectId]);
   const activeProjectReadOnly = isProjectReadOnly(activeProject, user);
 
-  const siteDbConfigured = (s: typeof sites[number]) => {
-    const db = s.tobeDbByEnv?.[s.environment] as Partial<{ type: string; host: string; database: string; username: string }> | undefined;
-    return !!db
-      && !!db.type?.trim()
-      && !!db.host?.trim()
-      && !!db.database?.trim()
-      && !!db.username?.trim();
-  };
+  // scope='project' 인 site 의 active project 가 그 site 면 Project DB 로,
+  // 아니면 Site DB(또는 dormant 복사본)로 판단. helper 가 일원화.
+  const siteDbConfigured = (s: typeof sites[number]) =>
+    isTobeDbConfigured(s, s.id === activeSiteId ? activeProject : null);
 
   const STAGE_SHORT: Record<string, string> = {
     dev: 'DEV',
@@ -284,7 +281,8 @@ export function AppShell() {
     return raw.trim();
   };
   const siteDialects = (s: typeof sites[number]) => {
-    const tobeRaw = (s.tobeDbByEnv?.[s.environment] as { type?: string } | undefined)?.type;
+    const proj = s.id === activeSiteId ? activeProject : null;
+    const tobeRaw = effectiveTobeDb(s, proj)[s.environment]?.type;
     return { asis: dialectLabel(s.asisDbType), tobe: dialectLabel(tobeRaw) };
   };
 

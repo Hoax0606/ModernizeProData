@@ -58,6 +58,11 @@ public class Site {
     @Column(nullable = false, length = 16)
     private String environment;
 
+    /** TO-BE DB 연결 범위. "site" = 모든 Project 가 Site.tobeDbByEnv 공유,
+     *  "project" = 각 Project 가 자기 tobeDbByEnv 보유. 기본 "site". */
+    @Column(name = "tobe_db_scope", nullable = false, length = 16)
+    private String tobeDbScope;
+
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "tobe_db_by_env", columnDefinition = "jsonb")
     private Map<String, Object> tobeDbByEnv;
@@ -88,6 +93,7 @@ public class Site {
         s.csvPath = csvPath != null ? csvPath : "";
         s.notes = notes;
         s.environment = environment != null ? environment : "dev";
+        s.tobeDbScope = "site";
         s.tobeDbByEnv = tobeDbByEnv != null ? tobeDbByEnv : Map.of();
         s.tobeDbLocks = tobeDbLocks != null ? tobeDbLocks : Map.of();
         s.createdBy = createdBy;

@@ -2,6 +2,8 @@ package com.ksinfo.modernize_pro_data.coordinator.api;
 
 import com.ksinfo.modernize_pro_data.common.dto.ApiResponse;
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.coordinator.site.Project;
+import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.Site;
 import com.ksinfo.modernize_pro_data.coordinator.site.SiteRepository;
 import jakarta.validation.Valid;
@@ -34,6 +36,7 @@ import java.util.Map;
 public class SiteController {
 
     private final SiteRepository siteRepository;
+    private final ProjectRepository projectRepository;
 
     /* ── DTOs ──────────────────────────────────────── */
 
@@ -48,6 +51,7 @@ public class SiteController {
             String asisDbVersion,
             String notes,
             String environment,
+            String tobeDbScope,
             Map<String, Object> tobeDbByEnv,
             Map<String, Boolean> tobeDbLocks
     ) {}
@@ -63,6 +67,7 @@ public class SiteController {
             String asisDbVersion,
             String notes,
             String environment,
+            String tobeDbScope,
             Map<String, Object> tobeDbByEnv,
             Map<String, Boolean> tobeDbLocks
     ) {}
@@ -98,6 +103,9 @@ public class SiteController {
         );
         if (req.asisDbType() != null)    site.setAsisDbType(req.asisDbType());
         if (req.asisDbVersion() != null) site.setAsisDbVersion(req.asisDbVersion());
+        if (req.tobeDbScope() != null && !req.tobeDbScope().isEmpty()) {
+            site.setTobeDbScope(req.tobeDbScope());
+        }
         siteRepository.save(site);
         log.info("Site created: {} ({})", site.getName(), site.getId());
         return ApiResponse.ok(site);
@@ -127,6 +135,26 @@ public class SiteController {
         if (req.environment() != null)  site.setEnvironment(req.environment());
         if (req.tobeDbByEnv() != null)  site.setTobeDbByEnv(req.tobeDbByEnv());
         if (req.tobeDbLocks() != null)  site.setTobeDbLocks(req.tobeDbLocks());
+
+        // scope 전환: site → project 면 Site 의 tobeDbByEnv/Locks 를 그 Site 의 모든 Project 에 복사
+        // (Map 참조 공유 방지를 위해 새 LinkedHashMap 으로 깊은 복사 1단계).
+        if (req.tobeDbScope() != null && !req.tobeDbScope().isEmpty()) {
+            String prevScope = site.getTobeDbScope();
+            String newScope = req.tobeDbScope();
+            site.setTobeDbScope(newScope);
+            if (!"project".equals(prevScope) && "project".equals(newScope)) {
+                Map<String, Object> siteDb = site.getTobeDbByEnv() != null ? site.getTobeDbByEnv() : Map.of();
+                Map<String, Boolean> siteLocks = site.getTobeDbLocks() != null ? site.getTobeDbLocks() : Map.of();
+                List<Project> projects = projectRepository.findBySiteId(site.getId());
+                for (Project p : projects) {
+                    p.setTobeDbByEnv(new java.util.LinkedHashMap<>(siteDb));
+                    p.setTobeDbLocks(new java.util.LinkedHashMap<>(siteLocks));
+                    projectRepository.save(p);
+                }
+                log.info("Site {} scope: site -> project; copied TO-BE DB to {} projects",
+                        site.getId(), projects.size());
+            }
+        }
 
         siteRepository.save(site);
         log.info("Site updated: {} ({})", site.getName(), site.getId());

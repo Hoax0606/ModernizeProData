@@ -91,6 +91,9 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
   const [asisDbType, setAsisDbType] = useState('');
   const [asisDbVersion, setAsisDbVersion] = useState('');
   const [stage, setStage] = useState<ProjectEnvironment>('dev');
+  /** TO-BE DB 연결 범위 — 'site' = 모든 Project 가 이 Site DB 공유 (기본),
+   *  'project' = 각 Project 가 자기 DB 보유 (입력은 Project Settings 에서). */
+  const [tobeDbScope, setTobeDbScope] = useState<'site' | 'project'>('site');
   const [tobeDbByEnv, setTobeDbByEnv] = useState<TobeDbByEnv>({});
   const [tobeDbLocks, setTobeDbLocks] = useState<TobeDbLocks>({});
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -133,6 +136,7 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
     setAsisDbType(site.asisDbType ?? '');
     setAsisDbVersion(site.asisDbVersion ?? '');
     setStage(site.environment);
+    setTobeDbScope(site.tobeDbScope === 'project' ? 'project' : 'site');
     setTobeDbByEnv({ ...site.tobeDbByEnv });
     setTobeDbLocks({ ...site.tobeDbLocks });
     setConfirmOpen(false);
@@ -149,7 +153,7 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
   const tobeDb: SiteDbConnection = { ...emptyDbConnection(), ...(tobeDbByEnv[stage] ?? {}) };
   const stageLocked = !!tobeDbLocks[stage];
   const siteEditDisabled = !siteUnlocked;
-  const dbFieldsDisabled = stageLocked || siteEditDisabled;
+  const dbFieldsDisabled = stageLocked || siteEditDisabled || tobeDbScope === 'project';
 
   const patchTobeDb = (patch: Partial<SiteDbConnection>) => {
     if (stageLocked) return;
@@ -184,28 +188,34 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
 
   const toggleStageLock = () => {
     if (!isMaster) return;
+    // DB lock 토글은 site unlock 상태에서만 가능 — 이중 보안 유지. site lock 인 상태에서
+    // DB unlock 만 풀리면 site lock 의 의미가 사라짐.
+    if (!siteUnlocked) return;
     setTobeDbLocks((cur) => ({ ...cur, [stage]: !cur[stage] }));
   };
 
-  // site lock 가드: site name 비어있거나 현재 stage 의 DB lock 풀려있으면 차단
+  // site lock 가드: site name 비어있거나 현재 stage 의 DB lock 풀려있으면 차단.
+  // scope='project' 면 Site 의 dbCard 자체가 숨겨져 있어 DB lock 을 잠글 수 없으므로 이 체크를 스킵.
   const nameMissing = !name.trim();
-  const dbUnlockedNow = !tobeDbLocks[stage];
+  const dbUnlockedNow = tobeDbScope === 'project' ? false : !tobeDbLocks[stage];
   const siteLockBlocked = nameMissing || dbUnlockedNow;
 
   const toggleSiteLock = () => {
     if (siteUnlocked) {
-      // 잠그려는 시도
-      if (siteLockBlocked) {
-        window.alert(
-          nameMissing
-            ? t('siteSettings.siteLock.blockedNameMissing')
-            : t('siteSettings.siteLock.blockedDbUnlocked')
-        );
-        return;
-      }
+      // 잠그려는 시도 — 차단 조건이면 silently 무시 (브라우저 alert 안 씀).
+      if (siteLockBlocked) return;
       setSiteUnlocked(false);
     } else {
+      // site unlock 시점에 모든 stage 의 DB lock 을 강제 true 로 — 이중 보안.
+      // DB 를 편집하려면 site unlock 후에도 stage 별 DB lock 을 사용자가 따로 풀어야 함.
       setSiteUnlocked(true);
+      setTobeDbLocks((cur) => {
+        const next: TobeDbLocks = { ...cur };
+        for (const env of PROJECT_ENVIRONMENTS) {
+          next[env] = true;
+        }
+        return next;
+      });
     }
   };
 
@@ -219,6 +229,7 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
     asisDbType !== (site.asisDbType ?? '') ||
     asisDbVersion !== (site.asisDbVersion ?? '') ||
     stage !== site.environment ||
+    tobeDbScope !== (site.tobeDbScope === 'project' ? 'project' : 'site') ||
     JSON.stringify(tobeDbByEnv) !== JSON.stringify(site.tobeDbByEnv) ||
     JSON.stringify(tobeDbLocks) !== JSON.stringify(site.tobeDbLocks);
 
@@ -240,6 +251,9 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
 
   const handleSave = async () => {
     if (!canSave) return;
+    // scope 'site' → 'project' 전환 시 backend 가 Site 의 DB 설정을 그 Site 의 모든
+    // Project 에 복사한다 (사용자에게 별도 confirm UI 는 안 띄움 — 브라우저 네이티브
+    // 팝업을 안 쓰는 정책. Site Setting 의 scope 토글 옆 hint 로 안내한다).
     // type 이 비어있는 단계는 저장하지 않음.
     const finalByEnv: TobeDbByEnv = {};
     for (const env of PROJECT_ENVIRONMENTS) {
@@ -262,6 +276,7 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
       asisDbType: asisDbType.trim(),
       asisDbVersion: asisDbVersion.trim(),
       environment: stage,
+      tobeDbScope,
       tobeDbByEnv: finalByEnv,
       tobeDbLocks: finalLocks,
     });
@@ -405,11 +420,45 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
         </Field>
       </div>
 
-      <Field label={t('siteSettings.stage')}>
-        <StagePills value={stage} onChange={setStage} byEnv={tobeDbByEnv} locks={tobeDbLocks} t={t} />
-      </Field>
+      {isMaster && (
+        <Field label="TO-BE DB scope">
+          <div style={{ display: 'inline-flex', gap: 4 }}>
+            <button
+              type="button"
+              onClick={() => setTobeDbScope('site')}
+              disabled={!siteUnlocked}
+              style={{
+                ...styles.btnGhost,
+                ...(tobeDbScope === 'site' ? styles.btnTestActive : {}),
+                ...(!siteUnlocked ? styles.btnDisabled : {}),
+              }}
+            >
+              Site shared
+            </button>
+            <button
+              type="button"
+              onClick={() => setTobeDbScope('project')}
+              disabled={!siteUnlocked}
+              style={{
+                ...styles.btnGhost,
+                ...(tobeDbScope === 'project' ? styles.btnTestActive : {}),
+                ...(!siteUnlocked ? styles.btnDisabled : {}),
+              }}
+            >
+              Per-project
+            </button>
+          </div>
+        </Field>
+      )}
 
-      {/* TO-BE DB */}
+      {tobeDbScope === 'site' && (
+        <Field label={t('siteSettings.stage')}>
+          <StagePills value={stage} onChange={setStage} byEnv={tobeDbByEnv} locks={tobeDbLocks} t={t} />
+        </Field>
+      )}
+
+      {/* TO-BE DB — scope='site' 일 때만 활성, 'project' 면 Project Settings 의 'TO-BE DB' 섹션. */}
+      {tobeDbScope === 'site' && (
       <div
         ref={tobeDbRef}
         style={{
@@ -482,6 +531,20 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
           </button>
         </div>
       </div>
+      )}
+
+      {tobeDbScope === 'project' && (
+        <div style={{
+          padding: '12px 14px',
+          fontSize: 12,
+          color: 'var(--text-3)',
+          background: 'var(--panel-2)',
+          border: '1px solid var(--border)',
+          borderRadius: 4,
+        }}>
+          프로젝트별 모드 — TO-BE DB 는 각 프로젝트의 Settings 페이지(TO-BE DB 섹션)에서 입력하세요.
+        </div>
+      )}
 
       </div>{/* /siteEditDisabled wrap */}
 
