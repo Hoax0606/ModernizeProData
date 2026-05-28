@@ -23,6 +23,9 @@ interface PreflightEntry {
   isStale: boolean;
   /** snapshot id → cached preflight result. Execution / Versions 両画面の唯一の真実. */
   bySnapshot: Record<string, PreflightSnapshotResult>;
+  /** 마지막으로 표시 중이던 run id. 새로고침 시 pipeline 복원용.
+   *  Discard 시 null. 새 run start 시 갱신. undefined = legacy(persist v6) 진입. */
+  activeRunId?: string | null;
 }
 
 const EMPTY_ENTRY: PreflightEntry = Object.freeze({
@@ -30,6 +33,7 @@ const EMPTY_ENTRY: PreflightEntry = Object.freeze({
   preflightPhase: 'idle',
   isStale: false,
   bySnapshot: {},
+  activeRunId: null,
 }) as PreflightEntry;
 
 interface ExecutionPreflightState {
@@ -45,6 +49,9 @@ interface ExecutionPreflightState {
   /** 진행 중인 preflight 의 결과 1 件을 bySnapshot[snapshotId].results 끝에 추가. */
   appendSnapshotResultCheck: (projectId: string, snapshotId: string, check: PreflightCheck) => void;
   clearSnapshotResult: (projectId: string, snapshotId: string) => void;
+
+  /** 새로고침 시 pipeline 복원용 — start 시 setActiveRunId(runId), discard 시 null. */
+  setActiveRunId: (projectId: string, runId: string | null) => void;
 }
 
 /**
@@ -164,6 +171,19 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
             byProject: {
               ...s.byProject,
               [projectId]: { ...prev, bySnapshot: rest },
+            },
+          };
+        });
+      },
+
+      setActiveRunId: (projectId, runId) => {
+        set((s) => {
+          const prev = s.byProject[projectId] ?? EMPTY_ENTRY;
+          if (prev.activeRunId === runId) return s;
+          return {
+            byProject: {
+              ...s.byProject,
+              [projectId]: { ...prev, activeRunId: runId },
             },
           };
         });

@@ -83,8 +83,18 @@ export function ExecutionPage() {
   const user = useAuthStore((s) => s.user);
 
   /* 활성 run id. start 성공 시 BE 반환값 보존 → usePipelineProgress 자동 polling.
-     setActiveRunId(null) 로 polling 정지 + 표시 클리어. */
-  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+     setActiveRunId(null) 로 polling 정지 + 표시 클리어.
+     localStorage(zustand persist) 에 저장돼 새로고침 후 pipeline 복원 — mount 시 store 가
+     undefined (legacy / 첫 방문) 이면 아래 useEffect 가 runHistoryData 의 최신 run 으로 자동 복원.
+     null 은 사용자가 Discard 한 의도로 간주 → 복원 안 함. */
+  const storedActiveRunId = useExecutionPreflightStore((s) =>
+    project ? s.byProject[project.id]?.activeRunId : undefined,
+  );
+  const activeRunId: string | null = storedActiveRunId ?? null;
+  const setActiveRunId = (runId: string | null) => {
+    if (!project) return;
+    useExecutionPreflightStore.getState().setActiveRunId(project.id, runId);
+  };
   const { run, stages: stageViews } = usePipelineProgress(activeRunId);
 
   /* TO-BE / AS-IS DDL schemas — used for table selector + preflight validation. */
@@ -179,6 +189,16 @@ export function ExecutionPage() {
     refetchInterval: activeRunId ? 5_000 : false,
   });
   const runHistoryData = runHistoryQuery.data;
+
+  /* 새로고침 후 pipeline 복원: store 의 activeRunId 가 undefined (한 번도 set 안 된 상태)
+     이고 BE 히스토리에 run 이 있으면 최신 run 으로 자동 복원. null (Discard) 은 사용자 의도
+     이므로 손대지 않는다. */
+  useEffect(() => {
+    if (!projectIdForReset) return;
+    if (storedActiveRunId !== undefined) return;
+    if (!runHistoryData || runHistoryData.length === 0) return;
+    useExecutionPreflightStore.getState().setActiveRunId(projectIdForReset, runHistoryData[0].id);
+  }, [projectIdForReset, runHistoryData, storedActiveRunId]);
 
   if (!project || !site) {
     return (
@@ -541,12 +561,13 @@ function RunHeader({
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={styles.runHeaderLabel}>{t('execution.run.active')}</div>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 16, fontWeight: 600 }}>{activeRun.runId}</span>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 16, fontWeight: 600 }}>{project.id}</span>
             <StatusBadge tone={statusChipTone}>{statusChipText}</StatusBadge>
             <span style={{ fontSize: 12, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>{elapsedLabel}</span>
           </div>
           <div style={{ fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: 3 }}>
-            {t('execution.run.triggeredBy')}{' '}
+            <span>run </span><b style={{ color: 'var(--text-2)' }}>{activeRun.runId}</b>
+            <span> · </span>{t('execution.run.triggeredBy')}{' '}
             <b style={{ color: 'var(--text-2)' }}>{project.executionAssignee ?? project.owner ?? 'Admin'}</b>
             <span> · {t('execution.run.tablesSummary', { n: selectedTablesCount })}</span>
           </div>
