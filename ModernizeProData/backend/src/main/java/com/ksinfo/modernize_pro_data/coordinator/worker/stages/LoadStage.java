@@ -82,8 +82,7 @@ public class LoadStage implements StageRunner {
         String schema = ctx.getDuckdbSchema();
         ingest(ctx, "Stage load started — " + ctx.getBindings().size() + " bindings", true);
 
-        @SuppressWarnings("unchecked")
-        Map<String, Object> dbConfig = (Map<String, Object>) site.getTobeDbByEnv().get(site.getTobeEnv());
+        Map<String, Object> dbConfig = site.getActiveTobeDbConfig();
         if (dbConfig == null) {
             failStage(stage, startedAt, 0, ctx.getBindings().size(), "tobe DB config not set");
             ingest(ctx, "Load failed — tobe DB config not set", false);

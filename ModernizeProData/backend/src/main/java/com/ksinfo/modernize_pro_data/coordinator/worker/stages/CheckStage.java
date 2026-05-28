@@ -168,15 +168,12 @@ public class CheckStage implements StageRunner {
         return null;
     }
 
-    /** TO-BE DB connection ping. site.tobeDbByEnv[site.tobeEnv] 에서 host/port/database/username/password. */
-    @SuppressWarnings("unchecked")
+    /** TO-BE DB connection ping. site.tobeDbByEnv[site.environment] 에서 host/port/database/username/password. */
     private String pingTobeDb(Site site) {
         Map<String, Object> byEnv = site.getTobeDbByEnv();
         if (byEnv == null) return "tobe_db_by_env not set";
-        String env = site.getTobeEnv();
-        Object cfgObj = byEnv.get(env);
-        if (!(cfgObj instanceof Map)) return "tobe DB config not set for env=" + env;
-        Map<String, Object> cfg = (Map<String, Object>) cfgObj;
+        Map<String, Object> cfg = site.getActiveTobeDbConfig();
+        if (cfg == null) return "tobe DB config not set for env=" + site.getEnvironment();
         String host = (String) cfg.get("host");
         Object portObj = cfg.get("port");
         String database = (String) cfg.get("database");
