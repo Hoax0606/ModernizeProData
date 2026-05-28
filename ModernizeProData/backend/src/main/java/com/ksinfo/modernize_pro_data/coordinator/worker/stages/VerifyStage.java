@@ -101,6 +101,8 @@ public class VerifyStage implements StageRunner {
             OffsetDateTime tableStart = OffsetDateTime.now();
             String tobeSchema = binding.getTobeSchema() == null ? "" : binding.getTobeSchema();
             String tobeTable  = binding.getTobeTable();
+            /* Quarantine / 사용자 표시용 — schema 있으면 'schema.table'. SQL 식별자 아님. */
+            String tableLabel = tobeSchema.isBlank() ? tobeTable : tobeSchema + "." + tobeTable;
 
             StageTableResult result = stageTableResultRepo
                     .findByStageInstanceIdAndBindingId(stage.getId(), binding.getId())
@@ -129,10 +131,10 @@ public class VerifyStage implements StageRunner {
                 if (duckCount != pgCount) {
                     Map<String, Object> sampleData = new HashMap<>();
                     sampleData.put("reason", "Row count mismatch");
-                    sampleData.put("detail", tobeTable + ": DuckDB=" + duckCount + " vs PostgreSQL=" + pgCount);
+                    sampleData.put("detail", tableLabel + ": DuckDB=" + duckCount + " vs PostgreSQL=" + pgCount);
                     sampleData.put("severity", "error");
                     sampleData.put("stageLabel", "verify.checksum");
-                    sampleData.put("table", tobeTable);
+                    sampleData.put("table", tableLabel);
                     sampleData.put("columns", List.of("source", "rowCount"));
                     sampleData.put("columnRoles", List.of("pk", "violated"));
                     sampleData.put("sampleRows", List.of(
@@ -143,7 +145,7 @@ public class VerifyStage implements StageRunner {
                             stage.getId(),
                             binding.getId(),
                             null,
-                            "Row count mismatch — " + tobeTable,
+                            "Row count mismatch — " + tableLabel,
                             QuarantineSeverity.error,
                             sampleData,
                             Math.abs(duckCount - pgCount),
@@ -152,7 +154,7 @@ public class VerifyStage implements StageRunner {
                     Map<String, Object> detail = new HashMap<>();
                     detail.put("message", "DuckDB=" + duckCount + " ≠ PG=" + pgCount);
                     result.setErrorDetail(detail);
-                    ingest(ctx, "Verify mismatch " + tobeTable + ": DuckDB=" + duckCount + " vs PG=" + pgCount, false);
+                    ingest(ctx, "Verify mismatch " + tableLabel + ": DuckDB=" + duckCount + " vs PG=" + pgCount, false);
                     failedCount++;
                 } else {
                     // row count 일치 → PK 정렬 전수 비교 (행 정체성·누락 검출)
@@ -161,10 +163,10 @@ public class VerifyStage implements StageRunner {
                     if (pkMismatch != null) {
                         Map<String, Object> sampleData = new HashMap<>();
                         sampleData.put("reason", "PK row mismatch");
-                        sampleData.put("detail", tobeTable + ": " + pkMismatch);
+                        sampleData.put("detail", tableLabel + ": " + pkMismatch);
                         sampleData.put("severity", "error");
                         sampleData.put("stageLabel", "verify.rowmatch");
-                        sampleData.put("table", tobeTable);
+                        sampleData.put("table", tableLabel);
                         sampleData.put("columns", List.of("pk", "detail"));
                         sampleData.put("columnRoles", List.of("pk", "violated"));
                         sampleData.put("sampleRows", List.of(List.of(String.join(",", pkCols), pkMismatch)));
@@ -173,7 +175,7 @@ public class VerifyStage implements StageRunner {
                                 stage.getId(),
                                 binding.getId(),
                                 null,
-                                "PK row mismatch — " + tobeTable,
+                                "PK row mismatch — " + tableLabel,
                                 QuarantineSeverity.error,
                                 sampleData,
                                 1,
@@ -182,12 +184,12 @@ public class VerifyStage implements StageRunner {
                         Map<String, Object> detail = new HashMap<>();
                         detail.put("message", pkMismatch);
                         result.setErrorDetail(detail);
-                        ingest(ctx, "Verify PK mismatch " + tobeTable + ": " + pkMismatch, false);
+                        ingest(ctx, "Verify PK mismatch " + tableLabel + ": " + pkMismatch, false);
                         failedCount++;
                     } else {
                         result.setStatus(StageTableStatus.success);
                         result.setRowCount(pgCount);
-                        ingest(ctx, "Verified " + tobeTable + ": " + pgCount + " rows (all PK rows OK)", true);
+                        ingest(ctx, "Verified " + tableLabel + ": " + pgCount + " rows (all PK rows OK)", true);
                         successCount++;
                     }
                 }
