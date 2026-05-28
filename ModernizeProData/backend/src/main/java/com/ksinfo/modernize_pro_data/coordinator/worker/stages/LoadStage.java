@@ -1,7 +1,12 @@
 package com.ksinfo.modernize_pro_data.coordinator.worker.stages;
 
 import com.ksinfo.modernize_pro_data.common.duckdb.DuckDbService;
+import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlColumn;
+import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlColumnRepository;
+import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTable;
+import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository;
 import com.ksinfo.modernize_pro_data.coordinator.load.PgCopyManager;
+import com.ksinfo.modernize_pro_data.coordinator.load.PgDdlGenerator;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
@@ -64,6 +69,8 @@ public class LoadStage implements StageRunner {
 
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
+    private final DdlTableRepository ddlTableRepo;
+    private final DdlColumnRepository ddlColumnRepo;
     private final DuckDbService duckDbService;
     private final PgCopyManager pgCopyManager;
     private final RunLogIngestService runLogIngest;
@@ -91,6 +98,15 @@ public class LoadStage implements StageRunner {
             return;
         }
 
+        // PoC1 부트스트랩 — TO-BE DDL 의 컬럼 메타 미리 적재. ensurePgTable 가 사용.
+        // (별도 migration tooling 도입 전까지 LoadStage 가 schema/table 도 자동 생성.)
+        String projectId = ctx.getProject().getId();
+        Map<String, List<DdlColumn>> columnsByTable = new HashMap<>();
+        for (DdlTable t : ddlTableRepo.findByProjectIdAndSideOrderByOrdinalAsc(projectId, "tobe")) {
+            columnsByTable.put(t.getPhysicalName(),
+                    ddlColumnRepo.findByTableIdOrderByOrdinalAsc(t.getId()));
+        }
+
         Path tempDir = ctx.getOutputDir().resolve("temp");
         try {
             Files.createDirectories(tempDir);
@@ -107,7 +123,7 @@ public class LoadStage implements StageRunner {
         if (parallelism <= 1 || bindings.size() <= 1) {
             // 순차 (기본)
             for (MappingTableBinding b : bindings) {
-                if (loadBinding(ctx, stage, b, dbConfig, tempDir)) success.incrementAndGet();
+                if (loadBinding(ctx, stage, b, dbConfig, tempDir, columnsByTable)) success.incrementAndGet();
                 else failed.incrementAndGet();
             }
         } else {
@@ -119,7 +135,7 @@ public class LoadStage implements StageRunner {
                 List<Future<?>> futures = new ArrayList<>();
                 for (MappingTableBinding b : bindings) {
                     futures.add(pool.submit(() -> {
-                        if (loadBinding(ctx, stage, b, dbConfig, tempDir)) success.incrementAndGet();
+                        if (loadBinding(ctx, stage, b, dbConfig, tempDir, columnsByTable)) success.incrementAndGet();
                         else failed.incrementAndGet();
                     }));
                 }
@@ -166,7 +182,8 @@ public class LoadStage implements StageRunner {
      * DuckDB 는 duplicateConnection(공유 connection 동시 사용 회피), PG 는 per-binding openConnection.
      */
     private boolean loadBinding(StageContext ctx, StageInstance stage, MappingTableBinding binding,
-                                Map<String, Object> dbConfig, Path tempDir) {
+                                Map<String, Object> dbConfig, Path tempDir,
+                                Map<String, List<DdlColumn>> columnsByTable) {
         String schema = ctx.getDuckdbSchema();
         OffsetDateTime tableStart = OffsetDateTime.now();
         String tobeSchema = binding.getTobeSchema() == null ? "" : binding.getTobeSchema();
@@ -209,10 +226,11 @@ public class LoadStage implements StageRunner {
                 st.execute("COPY " + fqTobeDuck + " TO '" + escapedCsv + "' (FORMAT CSV, HEADER false)");
             }
 
-            // 2. PostgreSQL Connection + (FK off) + TRUNCATE + COPY + (FK 복귀)
+            // 2. PostgreSQL Connection + (PoC1 부트스트랩) + (FK off) + TRUNCATE + COPY + (FK 복귀)
             String pgQualified = pgTableName(tobeSchema, tobeTable);
             long rows;
             try (Connection conn = pgCopyManager.openConnection(dbConfig)) {
+                ensurePgTable(ctx, conn, tobeSchema, tobeTable, columnsByTable);
                 boolean fkDisabled = pgCopyManager.tryDisableConstraints(conn);
                 try {
                     pgCopyManager.truncate(conn, pgQualified);
@@ -265,6 +283,24 @@ public class LoadStage implements StageRunner {
             if (failed) return true;
         }
         return false;
+    }
+
+    /**
+     * PoC1 부트스트랩 — target PG 에 TO-BE schema/table 이 없으면 자동 생성.
+     * {@code IF NOT EXISTS} 라 DBA 가 미리 Migration SQL 적용해두면 NO-OP.
+     * 컬럼 메타가 없으면 (DDL 미등록) skip — 기존 동작(테이블 부재 → COPY 실패) 그대로.
+     */
+    private void ensurePgTable(StageContext ctx, Connection conn, String tobeSchema, String tobeTable,
+                               Map<String, List<DdlColumn>> columnsByTable) throws Exception {
+        List<DdlColumn> cols = columnsByTable.get(tobeTable);
+        if (cols == null || cols.isEmpty()) return;
+        try (Statement st = conn.createStatement()) {
+            if (tobeSchema != null && !tobeSchema.isBlank()) {
+                st.executeUpdate(PgDdlGenerator.createSchemaIfNotExists(tobeSchema));
+            }
+            st.executeUpdate(PgDdlGenerator.createTableIfNotExists(tobeSchema, tobeTable, cols));
+        }
+        ingest(ctx, "Ensured PG table " + (tobeSchema == null || tobeSchema.isBlank() ? "" : tobeSchema + ".") + tobeTable, true);
     }
 
     /** PostgreSQL 의 qualified table 명. schema 가 비면 unquoted (default search_path). */
