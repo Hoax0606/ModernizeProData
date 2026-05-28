@@ -7,8 +7,10 @@ import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -32,6 +34,7 @@ public class LocalWorkerExecutor implements WorkerExecutor {
 
     private final List<StageRunner> stageRunners;
     private final RunControlRegistry runControlRegistry;
+    private final SimpMessagingTemplate stomp;
 
     private Map<String, StageRunner> registry;
 
@@ -75,6 +78,9 @@ public class LocalWorkerExecutor implements WorkerExecutor {
                 threw = true;
                 log.error("StageRunner {} threw", stage.getStageKey(), e);
             }
+            /* 실시간 진행 알림 — FE 의 /topic/run/{id}/progress 구독자가 invalidate 한다.
+               옵션 채널 — STOMP 끊겨도 FE 의 polling(2s)이 fallback. */
+            broadcastStage(runId, stage, threw);
             // 하이브리드 게이트 (단계 사이): 구조적 실패(throw)면 항상, cutover 면 stage 실패도 downstream 중단.
             boolean stageFailed = threw || stage.getStatus() == StageStatus.failed;
             if (threw || (isCutover && stageFailed)) {
@@ -99,6 +105,23 @@ public class LocalWorkerExecutor implements WorkerExecutor {
             String reason = failedStages + " stage(s) failed during run";
             log.warn("Run finished with failed stages runId={}: {}", runId, reason);
             throw new IllegalStateException(reason);
+        }
+    }
+
+    /** Stage 완료(or throw) 후 한 줄 알림. payload 는 FE 가 invalidate 트리거로만 사용 가능. */
+    private void broadcastStage(String runId, StageInstance stage, boolean threw) {
+        try {
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("type", "stage");
+            payload.put("stageKey", stage.getStageKey());
+            payload.put("status", threw ? "failed"
+                    : stage.getStatus() == null ? "unknown" : stage.getStatus().name());
+            payload.put("success", stage.getTablesSuccess() == null ? 0 : stage.getTablesSuccess());
+            payload.put("failed", stage.getTablesFailed() == null ? 0 : stage.getTablesFailed());
+            stomp.convertAndSend("/topic/run/" + runId + "/progress", payload);
+        } catch (Exception e) {
+            log.debug("Stage broadcast failed runId={} stage={}: {}",
+                    runId, stage.getStageKey(), e.getMessage());
         }
     }
 }

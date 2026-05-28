@@ -19,6 +19,7 @@ import com.ksinfo.modernize_pro_data.coordinator.site.SnapshotRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -71,6 +72,7 @@ public class RunService {
     private final MappingTableBindingRepository bindingRepo;
     private final ApplicationEventPublisher eventPublisher;
     private final RunControlRegistry runControlRegistry;
+    private final SimpMessagingTemplate stomp;
 
     /**
      * Run を起動する. 3 系統 (Nightly Quartz / CLI / REST) のすべてがこの入口を通る.
@@ -341,6 +343,18 @@ public class RunService {
         projectRepo.save(project);
 
         log.info("finishRun runId={} status={} durationMs={}", runId, finalStatus, durationMs);
+
+        /* 실시간 진행 알림 — run 최종 상태 도달. FE 가 invalidate 해서 status chip / 버튼 즉시 갱신. */
+        try {
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("type", "run");
+            payload.put("status", finalStatus.name());
+            if (errorMessage != null) payload.put("errorMessage", errorMessage);
+            stomp.convertAndSend("/topic/run/" + runId + "/progress", payload);
+        } catch (Exception e) {
+            log.debug("Run finish broadcast failed runId={}: {}", runId, e.getMessage());
+        }
+
         return rh;
     }
 
