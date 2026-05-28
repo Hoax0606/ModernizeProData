@@ -97,7 +97,23 @@ public class MappingReportService {
         MappingTableBinding binding = bindingRepo
                 .findByProjectIdAndTobeSchemaAndTobeTable(projectId, schema, tobeTable)
                 .orElse(null);
-        List<MappingRule> rules = ruleRepo.findByProjectIdAndTobeTable(projectId, tobeTable).stream()
+
+        // 자식 link 라면 master 의 binding + rules 로 swap. 자식 측의 site csvPath 그대로 사용
+        // (자식 의 데이터에 master 의 변환 룰 적용).
+        String ruleSourceProjectId = projectId;
+        if (binding != null && binding.getSharedFromProjectId() != null) {
+            String masterProjectId = binding.getSharedFromProjectId();
+            MappingTableBinding masterBinding = bindingRepo
+                    .findByProjectIdAndTobeSchemaAndTobeTable(masterProjectId, schema, tobeTable)
+                    .orElse(null);
+            if (masterBinding != null) {
+                binding = masterBinding;
+                ruleSourceProjectId = masterProjectId;
+            }
+        }
+
+        final String effRuleSourceProjectId = ruleSourceProjectId;
+        List<MappingRule> rules = ruleRepo.findByProjectIdAndTobeTable(effRuleSourceProjectId, tobeTable).stream()
                 .filter(r -> (r.getTobeSchema() == null ? "" : r.getTobeSchema()).equals(schema))
                 .sorted(Comparator.comparing(MappingRule::getTobeColumn))
                 .toList();

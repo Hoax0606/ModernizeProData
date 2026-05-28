@@ -88,6 +88,36 @@ export interface MappingTableBindingDto {
   createdBy: string;
   createdAt: string;
   sources: MappingTableBindingSourceDto[];
+  /** 자식 link 마킹 — null 이면 자체 정의. 값 있으면 master project_id. */
+  sharedFromProjectId?: string | null;
+}
+
+/* ── Link candidates ─────────────────────────────── */
+
+export interface LinkCandidateOtherTable {
+  projectId: string;
+  projectName: string;
+  tobeSchema: string;
+  tobeTable: string;
+}
+
+export interface LinkSuggestion {
+  tobeSchema: string;
+  tobeTable: string;
+  currentSharedFromProjectId: string | null;
+  candidates: LinkCandidateOtherTable[];
+}
+
+export interface LinkParentInfo {
+  tobeSchema: string;
+  tobeTable: string;
+  children: LinkCandidateOtherTable[];
+}
+
+export interface LinkCandidatesResponse {
+  suggestions: LinkSuggestion[];
+  manualOptions: LinkCandidateOtherTable[];
+  parentOf: LinkParentInfo[];
 }
 
 export const mappingImportApi = {
@@ -211,10 +241,18 @@ export const mappingImportApi = {
       joinType: string | null;
       joinOn: string | null;
     }>;
+    /** 자식 link 마킹 — 값 있으면 sources 무시 + master 의 룰 inherit. null 이면 자체 정의. */
+    sharedFromProjectId?: string | null;
   }): Promise<MappingTableBindingDto> =>
     unwrap(api.post<ApiResponse<MappingTableBindingDto>>(
       `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/bindings`,
       payload,
+    )),
+
+  /** Link candidates — 자동 추천 + 수동 link UI 용. */
+  getLinkCandidates: (projectId: string): Promise<LinkCandidatesResponse> =>
+    unwrap(api.get<ApiResponse<LinkCandidatesResponse>>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/link-candidates`,
     )),
 
   /** Wipe all mapping_table_bindings rows for the project. */
