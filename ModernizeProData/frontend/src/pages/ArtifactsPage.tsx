@@ -1,6 +1,10 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import ExcelJS from 'exceljs';
 import { useWorkspaceStore } from '../store/workspace';
+import { snapshotApi } from '../api/workspace';
+import { useSnapshotsStore, type FrozenRule } from '../store/snapshots';
+import { asisDdlApi, type DdlSchema, type DdlColumn } from '../api/asisDdl';
+import { tobeDdlApi } from '../api/tobeDdl';
 import { useT, type TranslationKey } from '../i18n';
 
 /**
@@ -641,6 +645,64 @@ function formatCell(v: Cell | undefined): string {
   return String(v);
 }
 
+/** snapshot rule 의 strategy → diff Status 분류. skip 은 null(행 제외). */
+function diffStatusKind(r: FrozenRule): 'rule' | 'default' | 'null' | 'passed' | null {
+  if (r.strategy === 'skip') return null;
+  if (r.strategy === 'null') return 'null';
+  if (r.strategy === 'default') return 'default';
+  // expression: 단일 소스의 단순 alias.column 이면 변환 없이 그대로 → passed, 그 외 → rule.
+  const expr = (r.transformSql ?? r.transformRule ?? '').trim();
+  const singleSource = (r.asisColumn?.length ?? 0) <= 1;
+  if (singleSource && /^\w+\.\w+$/.test(expr)) return 'passed';
+  return 'rule';
+}
+
+/** DdlSchema 를 `${table}.${column}` (lowercase) → DdlColumn 맵으로. */
+function ddlColumnMap(schema: DdlSchema | null): Map<string, DdlColumn> {
+  const m = new Map<string, DdlColumn>();
+  if (!schema) return m;
+  for (const t of schema.tables) {
+    for (const c of t.columns) {
+      m.set(`${t.table.physicalName}.${c.physicalName}`.toLowerCase(), c);
+    }
+  }
+  return m;
+}
+
+/** snapshot rules + ASIS/TOBE DDL → MAPPING(diff) 시트 9컬 rows. skip 제외.
+ *  컬럼 순서: Status, Table, ASIS column, ASIS type, ASIS null, TOBE column, TOBE type, TOBE null, Mapping/default. */
+function buildDiffRows(
+  rules: FrozenRule[],
+  asisSchema: DdlSchema | null,
+  tobeSchema: DdlSchema | null,
+): Cell[][] {
+  const asisMap = ddlColumnMap(asisSchema);
+  const tobeMap = ddlColumnMap(tobeSchema);
+  const out: Cell[][] = [];
+  for (const r of rules) {
+    const kind = diffStatusKind(r);
+    if (!kind) continue;
+    const firstAsisCol = r.asisColumn?.[0] ?? null;
+    const aCol =
+      r.asisTable && firstAsisCol
+        ? asisMap.get(`${r.asisTable}.${firstAsisCol}`.toLowerCase())
+        : undefined;
+    const tCol = tobeMap.get(`${r.tobeTable}.${r.tobeColumn}`.toLowerCase());
+    const table = r.asisTable || r.tobeTable;
+    const asisColDisplay = (r.asisColumn ?? []).join(' + ') || '—';
+    const asisType = aCol?.dataTypeRaw ?? (r.asisType?.join(' + ') || '—');
+    const asisNull = aCol ? (aCol.nullable ? 'YES' : 'NO') : '—';
+    const tobeType = tCol?.dataTypeRaw ?? '—';
+    const tobeNull = tCol ? (tCol.nullable ? 'YES' : 'NO') : '—';
+    const mapping =
+      r.transformSql ??
+      r.transformRule ??
+      (r.strategy === 'default' ? (r.defaultValue ?? 'NULL') : r.strategy === 'null' ? 'NULL' : '');
+    out.push([kind, table, asisColDisplay, asisType, asisNull, r.tobeColumn, tobeType, tobeNull, mapping]);
+  }
+  return out;
+}
+
 /** Status 컬럼 값별 배지 색상 — 프로토타입의 running/blocked/warn/done 매칭. */
 const STATUS_BADGE: Record<string, React.CSSProperties> = {
   running: { background: '#fff4d4', color: '#7a5a00' },
@@ -655,6 +717,22 @@ const RULE_BADGE: Record<string, React.CSSProperties> = {
   rename: { background: '#d4eedb', color: '#0a5a1f' },
   add:    { background: '#fff0c2', color: '#7a5a00' },
   drop:   { background: '#f3d3d3', color: '#a00000' },
+};
+
+/** MAPPING(diff) Status 컬럼 배지 — 매핑 strategy 분류. */
+const STRATEGY_BADGE: Record<string, React.CSSProperties> = {
+  rule:    { background: '#d4eedb', color: '#0a5a1f' },     // green
+  default: { background: '#d6e3f3', color: '#0a448a' },     // blue
+  null:    { background: '#f0f0f0', color: '#605e5c' },     // gray
+  passed:  { background: 'transparent', color: '#605e5c' }, // plain
+};
+
+/** strategy 별 행 전체 tint (배지보다 연하게). */
+const STRATEGY_ROW_TINT: Record<string, string> = {
+  rule:    '#eef7f1',
+  default: '#eef2fa',
+  null:    '#f7f7f7',
+  passed:  '#ffffff',
 };
 
 /** Verdict 컬럼 — Validation 시트의 검증 결과 배지. */
@@ -1301,6 +1379,50 @@ export function ArtifactsPage() {
     [projects, activeProjectId],
   );
 
+  // MAPPING(diff) 산출물 — 최신 mapping snapshot rules + ASIS/TOBE DDL 조합.
+  const snapshots = useSnapshotsStore((s) => s.snapshots);
+  const fetchSnapshots = useSnapshotsStore((s) => s.fetchByProject);
+  useEffect(() => {
+    if (activeProjectId) fetchSnapshots(activeProjectId);
+  }, [activeProjectId, fetchSnapshots]);
+  const latestMappingSnapshot = useMemo(
+    () =>
+      snapshots
+        .filter((s) => s.projectId === activeProjectId && s.type === 'mapping')
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null,
+    [snapshots, activeProjectId],
+  );
+  const [mappingRules, setMappingRules] = useState<FrozenRule[]>([]);
+  const [asisSchema, setAsisSchema] = useState<DdlSchema | null>(null);
+  const [tobeSchema, setTobeSchema] = useState<DdlSchema | null>(null);
+  useEffect(() => {
+    if (!latestMappingSnapshot) {
+      setMappingRules([]);
+      return;
+    }
+    let cancelled = false;
+    snapshotApi
+      .getMapping(latestMappingSnapshot.id)
+      .then((d) => { if (!cancelled) setMappingRules(d.rules); })
+      .catch(() => { if (!cancelled) setMappingRules([]); });
+    return () => { cancelled = true; };
+  }, [latestMappingSnapshot]);
+  useEffect(() => {
+    if (!activeProjectId) {
+      setAsisSchema(null);
+      setTobeSchema(null);
+      return;
+    }
+    let cancelled = false;
+    asisDdlApi.get(activeProjectId).then((d) => { if (!cancelled) setAsisSchema(d); }).catch(() => { if (!cancelled) setAsisSchema(null); });
+    tobeDdlApi.get(activeProjectId).then((d) => { if (!cancelled) setTobeSchema(d); }).catch(() => { if (!cancelled) setTobeSchema(null); });
+    return () => { cancelled = true; };
+  }, [activeProjectId]);
+  const diffRows = useMemo(
+    () => buildDiffRows(mappingRules, asisSchema, tobeSchema),
+    [mappingRules, asisSchema, tobeSchema],
+  );
+
   const [openCats, setOpenCats] = useState<Record<CategoryKey, boolean>>({
     dashboard: true,
     diff: true,
@@ -1321,10 +1443,12 @@ export function ArtifactsPage() {
   /* 자식 산출물 목록은 프로젝트명에 의존 (DDL Scripts 의 child 이름이 projectSlug).
      project null 일 때도 hook 자체는 호출되어야 — early return 위로 끌어올려야
      "Rendered more hooks than during the previous render" 가 안 남. */
-  const childTables = useMemo(
-    () => childTablesFor(project?.name ?? ''),
-    [project?.name],
-  );
+  const childTables = useMemo(() => {
+    const base = childTablesFor(project?.name ?? '');
+    // MAPPING(diff) 테이블 목록은 snapshot 의 실제 테이블 (asis 우선, 없으면 tobe).
+    const diffTables = Array.from(new Set(diffRows.map((r) => String(r[1]))));
+    return { ...base, diff: diffTables };
+  }, [project?.name, diffRows]);
 
   if (!project) {
     return (
@@ -1390,6 +1514,7 @@ export function ArtifactsPage() {
           selectedTable={selectedTable}
           activeSheet={activeSheet}
           onSelectSheet={handleSelectSheet}
+          diffRows={diffRows}
         />
       </section>
     </div>
@@ -1482,6 +1607,8 @@ interface ExcelWorkbookProps {
   selectedTable?: string;
   activeSheet: string;
   onSelectSheet: (sheet: string) => void;
+  /** MAPPING(diff) 의 Diff 시트 — snapshot rules + DDL 조합 행. */
+  diffRows?: Cell[][];
 }
 
 function ExcelWorkbook({
@@ -1490,6 +1617,7 @@ function ExcelWorkbook({
   selectedTable,
   activeSheet,
   onSelectSheet,
+  diffRows,
 }: ExcelWorkbookProps) {
   const t = useT();
   /* Copy 버튼 직후 짧은 "Copied" 토스트를 띄우기 위한 상태.
@@ -1510,9 +1638,11 @@ function ExcelWorkbook({
   /* diff/validation 은 사이드바에서 고른 테이블별 데이터를 본다 — MOCK_ROWS_BY_TABLE 우선.
      dashboard/sql/ddl 은 테이블 무관이라 MOCK_ROWS 그대로. */
   const dataRows: Cell[][] =
-    (category.key === 'diff' || category.key === 'validation') && selectedTable
-      ? MOCK_ROWS_BY_TABLE[category.key][selectedTable]?.[activeSheet] ?? []
-      : MOCK_ROWS[category.key]?.[activeSheet] ?? [];
+    category.key === 'diff' && activeSheet === 'Diff'
+      ? (diffRows ?? []).filter((r) => !selectedTable || String(r[1]) === selectedTable)
+      : (category.key === 'diff' || category.key === 'validation') && selectedTable
+        ? MOCK_ROWS_BY_TABLE[category.key][selectedTable]?.[activeSheet] ?? []
+        : MOCK_ROWS[category.key]?.[activeSheet] ?? [];
 
   /* SQL 뷰일 때만 사용 — DDL Scripts 는 프로젝트 단위 단일 산출물이라 모든 테이블의
      AS-IS / TO-BE DDL 을 하나로 연결해서 보여준다. */
@@ -1743,18 +1873,21 @@ function ExcelWorkbook({
                  - Validation Overview (freeForm) → title/meta/header/PASS/total 행 종류별 스타일 */}
             {dataRows.map((row, r) => {
               /* Diff 시트면 Status 값(enum key)으로, Summary 시트면 첫 컬럼 라벨로 행 색을 결정. */
+              // Diff 시트(snapshot) Status = mapping strategy, Summary 시트(mock) = DiffStatusKey.
+              const isMappingDiff = category.key === 'diff' && activeSheet === 'Diff';
+              const mappingStatusKind =
+                isMappingDiff && typeof row[0] === 'string' ? (row[0] as string) : undefined;
               const diffStatusKey: DiffStatusKey | undefined =
-                category.key === 'diff' && activeSheet === 'Diff'
-                  ? (row[0] as DiffStatusKey | undefined)
-                  : category.key === 'diff' && activeSheet === 'Summary'
-                    ? detectSummaryKind(row[0])
-                    : undefined;
+                !isMappingDiff && category.key === 'diff' && activeSheet === 'Summary'
+                  ? detectSummaryKind(row[0])
+                  : undefined;
               const diffRowTint = diffStatusKey ? DIFF_STATUS_STYLE[diffStatusKey]?.rowTint : undefined;
+              const mappingRowTint = mappingStatusKind ? STRATEGY_ROW_TINT[mappingStatusKind] : undefined;
               /* freeForm Overview 행 분류 (validation Overview 만). */
               const isOverviewFreeForm =
                 currentSheet.freeForm === true && category.key === 'validation' && activeSheet === 'Overview';
               const ovStyle: OverviewRowStyle | null = isOverviewFreeForm ? classifyOverviewRow(row) : null;
-              const rowTint = ovStyle?.rowTint ?? diffRowTint;
+              const rowTint = ovStyle?.rowTint ?? mappingRowTint ?? diffRowTint;
               /* freeForm 시트는 thead 의 컬럼명/타입 헤더 2 행이 생략되므로, 데이터 row 번호도 1 부터. */
               const displayRowNum = currentSheet.freeForm ? r + 1 : r + 3;
               return (
@@ -1783,6 +1916,11 @@ function ExcelWorkbook({
                     const verdictBadgeStyle = isVerdictCol
                       ? VERDICT_BADGE[value as string]
                       : undefined;
+                    /* Diff 시트(snapshot) Status 컬럼 → strategy 배지. */
+                    const isMappingStatusCol = isMappingDiff && col.name === 'Status' && typeof value === 'string';
+                    const strategyBadgeStyle = isMappingStatusCol
+                      ? STRATEGY_BADGE[value as string]
+                      : undefined;
                     const cellBg = rowTint ? { background: rowTint } : undefined;
                     /* freeForm Overview 전용 셀 스타일 — 1열 라벨 굵게, em-dash 가운데 정렬, 빈 셀은 보더 투명. */
                     const isFirstCol = c === 0;
@@ -1797,7 +1935,7 @@ function ExcelWorkbook({
                           ...(isOverviewFreeForm && isFirstCol && ovStyle?.titleStyle ? ovStyle.titleStyle : {}),
                           ...(isOverviewFreeForm && isFirstCol && ovStyle?.metaLabelStyle ? ovStyle.metaLabelStyle : {}),
                           ...(isOverviewFreeForm && ovStyle?.cellExtra ? ovStyle.cellExtra : {}),
-                          ...(diffBadgeStyle ?? plainBadgeStyle ?? ruleBadgeStyle ?? verdictBadgeStyle ?? {}),
+                          ...(diffBadgeStyle ?? plainBadgeStyle ?? ruleBadgeStyle ?? verdictBadgeStyle ?? strategyBadgeStyle ?? {}),
                           ...(isEmDash ? { textAlign: 'center', color: '#888' } : {}),
                           ...(isEmptyCellInOverview
                             ? { borderRight: '1px solid transparent', borderBottom: '1px solid transparent' }
