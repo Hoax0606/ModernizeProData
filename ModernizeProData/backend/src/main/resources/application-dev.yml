@@ -1,0 +1,19 @@
+# Local dev profile — backend 루트의 compose.yaml 기준 PG 가 :5432 에 떠있음을 가정.
+# spring-boot-docker-compose 의존성 덕에 `mvn spring-boot:run` 시 compose 가 자동 기동됨.
+spring:
+  datasource:
+    url:      jdbc:postgresql://localhost:5432/mpd_meta
+    username: mpd
+    password: mpd
+
+  jpa:
+    show-sql: true
+
+  flyway:
+    # dev 단계에선 마이그레이션 적용 로그 자세히
+    out-of-order: false
+
+logging:
+  level:
+    org.flywaydb: INFO
+    org.hibernate.SQL: DEBUG

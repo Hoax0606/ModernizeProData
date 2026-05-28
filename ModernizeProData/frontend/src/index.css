@@ -1,111 +1,185 @@
-:root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+/* 한국어·영문 = Pretendard Variable (SF Pro 영감, 가변 가중치, 단일 파일).
+   일본어     = Noto Sans JP (가나·한자 표준).
+   코드      = JetBrains Mono. */
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.css');
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+:root, [data-theme="light"] {
+  --bg: #f9fafb;
+  --panel: #ffffff;
+  --panel-2: #f2f4f3;
+  --zebra: #fafcfb;
+  --border: #dae3e0;
+  --border-strong: #b8cec9;
+  --text: #0c1f1b;
+  --text-2: #334f4a;
+  --text-3: #678b86;
+  --text-4: #9bbdb8;
+  --navy: #0e7268;
+  --navy-700: #0a5850;
+  --navy-50: #e8f4f2;
+  --green: #0c9e6a;
+  --green-50: #e2f5ec;
+  --amber: #b87219;
+  --amber-50: #fdf0de;
+  --red: #c42f2f;
+  --red-50: #fce6e6;
+  --gray: #678b86;
+  --gray-50: #f2f4f3;
+  --snapshot:    #2563eb;  /* royal blue — snapshot 액션 전용 (phase-analysis 와 별개) */
+  --snapshot-50: #dbeafe;
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
-  color: var(--text);
+  /* phase colors */
+  --phase-planning:    #7c5dbf;  /* 연보라 */
+  --phase-planning-50: #ede8f5;
+  --phase-analysis:    #2d92c7;  /* 하늘색 */
+  --phase-analysis-50: #e1f0f7;
+  --phase-test:        #d4508b;  /* pink */
+  --phase-test-50:     #fce8f1;
+  --phase-rehearsal:    #d96e1c; /* 주황색 */
+  --phase-rehearsal-50: #fdebd4;
+  --phase-signoff:      #b8961a; /* 노랑색 */
+  --phase-signoff-50:   #fbf3d4;
+  --phase-ready:        #a0724e;
+  --phase-ready-50:     #f5ece4;
+  --phase-cutover:      #c42f2f; /* 빨강색 */
+  --phase-cutover-50:   #fce6e6;
+  --phase-hypercare:    #65a020; /* 연두색 */
+  --phase-hypercare-50: #ecf6dc;
+  --phase-done:         #678b86; /* 회색 */
+  --phase-done-50:      #f2f4f3;
+
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* 본문: Pretendard Variable 이 한·영을 깔끔하게 처리.
+     일본어 글자는 Noto Sans JP 로 fallback (브라우저 자동 코드포인트 매칭). */
+  --sans: 'Pretendard Variable', 'Noto Sans JP', -apple-system, system-ui, sans-serif;
+}
+
+[data-theme="dark"] {
+  --bg: #0d1614;
+  --panel: #141f1d;
+  --panel-2: #1a2724;
+  --zebra: #161f1d;
+  --border: #243330;
+  --border-strong: #2e4440;
+  --text: #ddf0ec;
+  --text-2: #9bbdb8;
+  --text-3: #607d79;
+  --text-4: #3d5450;
+  --navy: #3dbfb0;
+  --navy-700: #5cd0c2;
+  --navy-50: #152822;
+  --green: #35cc88;
+  --green-50: #0d2318;
+  --amber: #e8a84a;
+  --amber-50: #271a0a;
+  --red: #e06060;
+  --red-50: #261212;
+  --gray: #607d79;
+  --gray-50: #1a2724;
+  --snapshot:    #60a5fa;
+  --snapshot-50: #142a4a;
+
+  /* phase colors (dark) */
+  --phase-planning:    #b59edd;
+  --phase-planning-50: #211a32;
+  --phase-analysis:    #6abbe0;
+  --phase-analysis-50: #0f2530;
+  --phase-test:        #e87aad;
+  --phase-test-50:     #2a1220;
+  --phase-rehearsal:    #f0934a;
+  --phase-rehearsal-50: #2d1c0e;
+  --phase-signoff:      #e0c050;
+  --phase-signoff-50:   #2a2310;
+  --phase-ready:        #c9956a;
+  --phase-ready-50:     #2a1e14;
+  --phase-cutover:      #e06060;
+  --phase-cutover-50:   #261212;
+  --phase-hypercare:    #9bd750;
+  --phase-hypercare-50: #1a2810;
+  --phase-done:         #8aa5a0;
+  --phase-done-50:      #1a2724;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
   background: var(--bg);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.45;
+  letter-spacing: -0.005em;
+  font-feature-settings: 'ss01', 'cv01', 'cv11', 'tnum';
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
+  text-rendering: optimizeLegibility;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
+#root { height: 100vh; }
 
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
-}
+button { font-family: inherit; font-size: inherit; color: inherit; }
+input, select, textarea { font-family: inherit; }
 
-#root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
+/* Tightened scrollbars */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 6px;
+  border: 2px solid var(--panel);
 }
+*::-webkit-scrollbar-thumb:hover { background: var(--text-4); }
 
-body {
-  margin: 0;
-}
-
-h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
-  color: var(--text-h);
-}
-
-h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
-}
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
-}
-p {
-  margin: 0;
-}
-
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
+/* Pre-flight Fix 도착지 강조 — DdlSchemaPanel 의 정적 highlight 효과를 className 으로
+   재사용 가능하게. 부모가 className 을 1초간 토글 → 0.4s transition 으로 부드럽게 ON/OFF. */
+.mpd-fix-highlight {
+  background-color: #D0EAEA !important;
+  /* 외곽 2px deep teal (DdlSchemaPanel border 와 동일, layout shift 없음)
+     + 그 바깥 4px glow (DdlSchemaPanel box-shadow 와 동일) → 총 spread 6px. */
+  box-shadow: 0 0 0 2px #0E7C7B, 0 0 0 6px rgba(14, 124, 123, 0.22) !important;
   border-radius: 4px;
-  color: var(--text-h);
+  transition: background-color 0.4s ease, box-shadow 0.4s ease;
+}
+/* table row 의 td inline background (zebra / isActive) 를 덮기 위한 자식 셀렉터. */
+.mpd-fix-highlight > td {
+  background-color: #D0EAEA !important;
+  transition: background-color 0.4s ease;
 }
 
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+/* ── Native form control 통일 (JavaFX WebView 구형 WebKit 호환) ──────────
+   WebView 의 WebKit 은 accent-color / focus-visible 을 지원하지 않아 native
+   checkbox·radio·focus 가 "옛날 윈도우" 룩으로 나온다. appearance:none 으로 끄고
+   체크표시·점·화살표를 직접 그려서 데스크톱(WebView)·브라우저 어디서든 동일하게.
+   select 의 inline `background: var(--panel)` shorthand 가 background-image 를
+   리셋하므로 chevron 은 !important 로 강제(배경색은 inline 값 유지). */
+select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%23678b86' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 9px center !important;
+  padding-right: 28px !important;
+}
+select::-ms-expand { display: none; }
+
+/* checkbox / radio 는 components/Checkbox.tsx 의 custom <span> 컴포넌트로 그린다.
+   (구형 WebKit 이 native checkbox 의 appearance:none 을 완전히 못 먹어 초록 체크가
+   남는 문제 때문에 native input 자체를 쓰지 않음.) */
+
+/* 구형 WebKit 의 dotted focus ring 제거 — 데스크톱(WebView) 앱이라 마우스 위주.
+   (탭 클릭 시 좌우로 보이던 점선이 이것.) -webkit-focus-ring-color 까지 무력화. */
+* { -webkit-tap-highlight-color: transparent; }
+*:focus,
+a:focus,
+button:focus,
+select:focus,
+input:focus,
+textarea:focus,
+[tabindex]:focus {
+  outline: none;
 }

@@ -1,0 +1,104 @@
+spring:
+  application:
+    name: modernize-pro-data
+
+  # ── Docker Compose 자동 기동 비활성 ───────────────────────────────────
+  # 기본 PG 경로는 인스톨러 동봉 (production) / 로컬 설치본 (dev). compose
+  # 는 명시적으로 `docker compose up` 으로만 사용. compose 사용 원하면
+  # profile/env 에서 enabled=true 로 overrride.
+  docker:
+    compose:
+      enabled: false
+
+  # ── 메타 DB (Coordinator 가 보관하는 매핑·사용자·audit log 등) ─────────
+  # PostgreSQL 18. 운영 시 인스톨러가 동봉 PG 를 별도 포트로 설치.
+  # 접속 정보는 환경 변수로 주입 (12-factor).
+  datasource:
+    url:      ${DB_URL:jdbc:postgresql://localhost:5432/mpd_meta}
+    username: ${DB_USER:mpd}
+    password: ${DB_PASSWORD:mpd}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      connection-timeout: 5000
+
+  jpa:
+    # Flyway 가 스키마 단일 책임. Hibernate 는 검증만.
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+  # ── Flyway — 스키마 마이그레이션 단독 관리 ───────────────────────────
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    out-of-order: true
+
+  # ── Spring Batch — 자체 init 끔. Flyway 가 V1 로 스키마 적용. ──────
+  batch:
+    jdbc:
+      initialize-schema: never
+
+  # ── Quartz 스케줄러 ──────────────────────────────────────────────────
+  # PoC: memory job-store (재시작 시 job 초기화).
+  # production: jdbc 로 전환 시 Flyway 마이그레이션에 Quartz 스크립트 추가 필요.
+  quartz:
+    job-store-type: memory
+    properties:
+      org.quartz.threadPool.threadCount: 5
+
+  # 기본 자동 사용자 생성 비활성 (JWT 직접 처리)
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration
+
+# ── 서버 설정 ───────────────────────────────────────────────────────────
+server:
+  address: 0.0.0.0
+  port: 8080
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+# ── ModernizeProData 자체 설정 ──────────────────────────────────────────
+modernize:
+  # 도구 동작 모드: coordinator | worker | standalone
+  # 인스톨러가 사용자 선택을 MPD_MODE env 로 전달하면 그 값이 우선.
+  mode: ${MPD_MODE:coordinator}
+
+  # JWT
+  # PoC secret. Production 직전 rotate. 환경 변수 JWT_SECRET 로 override 가능.
+  # 생성: openssl rand -base64 64
+  jwt:
+    secret: ${JWT_SECRET:2h0DvU8r0PfHRT3RoGw3m/qSe+4EYMDY3IfwVeDdnOKm8cmOGvhQDKv/IS1Wr/bHmn0vVfv+eDbVuWyMl3IqkQ==}
+    expiration-hours: 8
+
+  # CORS (개발 시 Vite dev server 허용)
+  cors:
+    allowed-origins: ${CORS_ORIGINS:http://localhost:5173,http://localhost:8080}
+
+  # Coordinator 정보 (Worker 모드일 때 사용)
+  coordinator:
+    url: ${COORDINATOR_URL:http://localhost:8080}
+
+  # DuckDB
+  duckdb:
+    memory-mode: true # false 면 파일 모드
+    file-path: ./data/duckdb.db
+
+# ── 로깅 ────────────────────────────────────────────────────────────────
+logging:
+  level:
+    root: INFO
+    com.ksinfo.modernize_pro_data: DEBUG
+    org.springframework.security: INFO
+    org.springframework.web: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"

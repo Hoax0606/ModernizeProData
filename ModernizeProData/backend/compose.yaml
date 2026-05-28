@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mpd-meta-pg
+    environment:
+      POSTGRES_DB: mpd_meta
+      POSTGRES_USER: mpd
+      POSTGRES_PASSWORD: mpd
+    ports:
+      - "5432:5432"
+    volumes:
+      - mpd_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mpd -d mpd_meta"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  mpd_pgdata:

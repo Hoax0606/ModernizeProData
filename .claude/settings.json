@@ -1,0 +1,33 @@
+{
+  "_comment": "팀 공통 권한·설정. 개인용은 settings.local.json 에. 새 항목은 PR 으로 추가하고, 위험 명령(taskkill, rm, git push --force 등)은 절대 넣지 말 것.",
+  "permissions": {
+    "allow": [
+      "Bash(./mvnw spring-boot:run)",
+      "Bash(./mvnw spring-boot:run -o)",
+      "Bash(./mvnw compile)",
+      "Bash(./mvnw -q -DskipTests compile test-compile)",
+      "Bash(./mvnw -DskipTests compile test-compile)",
+      "Bash(./mvnw test)",
+      "Bash(./mvnw verify)",
+      "Bash(./mvnw clean *)",
+      "Bash(npm install)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(npx tsc --noEmit)",
+      "Bash(npx tsc:*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git branch)",
+      "Bash(git branch -v)",
+      "Bash(git show*)",
+      "Bash(curl -s http://localhost:5173)",
+      "Bash(curl -s http://localhost:5173/*)",
+      "Bash(curl -s http://localhost:8080/api/v1/health)",
+      "Bash(curl -s http://localhost:8080/api/v1/health/*)",
+      "Bash(docker compose up -d postgres)",
+      "Bash(docker compose ps)",
+      "Bash(docker compose logs *)"
+    ]
+  }
+}
