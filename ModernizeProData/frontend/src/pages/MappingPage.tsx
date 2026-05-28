@@ -582,7 +582,12 @@ export function MappingPage() {
           projectId={activeProjectId ?? ''}
           activeFiles={{ column: projMapStatus.columnFilename, code: projMapStatus.codeFilename }}
           onClose={() => setFullImportOpen(false)}
-          onChanged={async () => { await refreshProjMapStatus(); setHydrationTick((n) => n + 1); return []; }}
+          onChanged={async (tf) => {
+            await refreshProjMapStatus();
+            setHydrationTick((n) => n + 1);
+            // project-wide import → tf=null → 전체 DDL 검증.
+            return await findUncoveredDdlColumns(activeProjectId ?? '', tf);
+          }}
           tableFilter={null}
         />
       )}
@@ -867,6 +872,44 @@ function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, eff
   );
 }
 
+/**
+ * 검증: DDL 의 (TO-BE table.column) 중 매핑정의서 (mapping_rules) 에 없는 것 목록.
+ * MappingPage 의 project-wide import 와 TobeMappingDetail 의 table-remap 양쪽에서 호출하므로
+ * 컴포넌트 closure 가 아닌 모듈 함수로 둔다. TOBE_TABLES / MAPPING_BY_TOBE 는 모듈 mutable
+ * 라 그대로 접근 가능.
+ * tableFilter (스키마 제외 테이블명) 있으면 그 테이블만, 없으면 전체 DDL.
+ */
+async function findUncoveredDdlColumns(projectId: string, tableFilter: string | null = null): Promise<string[]> {
+  if (TOBE_TABLES.length === 0) return [];
+  try {
+    const rules = await mappingImportApi.listRules(projectId);
+    const ruleCols = new Map<string, Set<string>>();  // `${schema}|${table}` → Set<column>
+    for (const r of rules) {
+      const key = (r.tobeSchema || '') + '|' + r.tobeTable;
+      if (!ruleCols.has(key)) ruleCols.set(key, new Set());
+      ruleCols.get(key)!.add(r.tobeColumn);
+    }
+    const targets = tableFilter
+      ? TOBE_TABLES.filter((t) => (t.name.split('.').pop() || t.name) === tableFilter)
+      : TOBE_TABLES;
+    const uncovered: string[] = [];
+    for (const tobe of targets) {
+      const i = tobe.name.indexOf('.');
+      const schema = i > 0 ? tobe.name.slice(0, i) : '';
+      const table = i > 0 ? tobe.name.slice(i + 1) : tobe.name;
+      const haveCols = ruleCols.get(schema + '|' + table) || new Set();
+      const ddlCols = MAPPING_BY_TOBE[tobe.internalName] || [];
+      for (const c of ddlCols) {
+        if (!haveCols.has(c.tgt)) uncovered.push(`${tobe.name}.${c.tgt}`);
+      }
+    }
+    return uncovered;
+  } catch (e) {
+    console.warn('[mapping] failed to compute uncovered DDL columns', e);
+    return [];
+  }
+}
+
 // ── TO-BE mapping detail ─────────────────────────────────────
 
 function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydrationTick }: {
@@ -965,39 +1008,6 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
   }, []);
 
   /**
-   * 검증: DDL 의 (TO-BE table.column) 중 매핑정의서 (mapping_rules) 에 없는 것 목록.
-   * 사이트의 맵핑정의서는 슈퍼셋이어야 하고, 프로젝트 DDL 은 부분집합. DDL 컬럼이
-   * 매핑정의서에 없으면 그 컬럼을 채울 명세가 없는 것 → 사용자에게 경고.
-   */
-  const findUncoveredDdlColumns = useCallback(async (projectId: string): Promise<string[]> => {
-    if (TOBE_TABLES.length === 0) return [];
-    try {
-      const rules = await mappingImportApi.listRules(projectId);
-      const ruleCols = new Map<string, Set<string>>();  // `${schema}|${table}` → Set<column>
-      for (const r of rules) {
-        const key = (r.tobeSchema || '') + '|' + r.tobeTable;
-        if (!ruleCols.has(key)) ruleCols.set(key, new Set());
-        ruleCols.get(key)!.add(r.tobeColumn);
-      }
-      const uncovered: string[] = [];
-      for (const tobe of TOBE_TABLES) {
-        const i = tobe.name.indexOf('.');
-        const schema = i > 0 ? tobe.name.slice(0, i) : '';
-        const table = i > 0 ? tobe.name.slice(i + 1) : tobe.name;
-        const haveCols = ruleCols.get(schema + '|' + table) || new Set();
-        const ddlCols = MAPPING_BY_TOBE[tobe.internalName] || [];
-        for (const c of ddlCols) {
-          if (!haveCols.has(c.tgt)) uncovered.push(`${tobe.name}.${c.tgt}`);
-        }
-      }
-      return uncovered;
-    } catch (e) {
-      console.warn('[mapping] failed to compute uncovered DDL columns', e);
-      return [];
-    }
-  }, []);
-
-  /**
    * DB 의 mapping_rules → zustand 의 rowEdits 로 hydrate.
    * Bindings 를 alias 매핑 소스로 사용 (asis_table → alias).
    */
@@ -1056,7 +1066,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     }
   }, []);
 
-  const refreshMappingStatus = useCallback(async (): Promise<string[]> => {
+  const refreshMappingStatus = useCallback(async (tableFilter: string | null = null): Promise<string[]> => {
     if (!activeProjectIdForRow) return [];
     try {
       const st = await mappingImportApi.status(activeProjectIdForRow);
@@ -1066,8 +1076,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     }
     await hydrateBindingsFromDb(activeProjectIdForRow);
     await hydrateRowEditsFromDb(activeProjectIdForRow);
-    return await findUncoveredDdlColumns(activeProjectIdForRow);
-  }, [activeProjectIdForRow, hydrateBindingsFromDb, hydrateRowEditsFromDb, findUncoveredDdlColumns]);
+    return await findUncoveredDdlColumns(activeProjectIdForRow, tableFilter);
+  }, [activeProjectIdForRow, hydrateBindingsFromDb, hydrateRowEditsFromDb]);
 
   useEffect(() => {
     if (!activeProjectIdForRow) {
@@ -2938,8 +2948,10 @@ function MappingDefinitionImportModal({
   projectId: string;
   activeFiles: { column: string | null; code: string | null };
   onClose: () => void;
-  /** Returns the list of TO-BE qualified names from DB bindings that didn't match TOBE_TABLES. */
-  onChanged: () => Promise<string[]>;
+  /** Returns the list of TO-BE qualified names that are in the DDL but missing from mapping rules.
+   *  Caller passes tableFilter so table-remap narrows the check to that single TO-BE table; project-wide
+   *  import passes null and checks the entire DDL. */
+  onChanged: (tableFilter: string | null) => Promise<string[]>;
   /** null/undefined = 프로젝트 전체. 값이 있으면 그 TO-BE 테이블만 적용 (스키마 제외 테이블명). */
   tableFilter?: string | null;
 }) {
@@ -2973,6 +2985,9 @@ function MappingDefinitionImportModal({
         await mappingImportApi.reapplyLatest(projectId, tableFilter ?? null);
       }
       await mappingImportApi.rebuildBindings(projectId);
+      // mapping 을 건드린 셈이므로 phase 를 analysis 로 demote — rule 직접 편집과 동일 정책.
+      // import / reapply / delete / 단순 rebuild 어떤 경로든 일관되게 적용.
+      demoteToAnalysisOnEdit(projectId);
 
       // Snapshot baseline 자동 해제: apply 후 데이터가 frozen snapshotData 와 달라지면 핀 해제.
       // - code CSV 변경 (codePending != 'none') → frozen codeMaps 와 다를 가능성 매우 큼.
@@ -2998,7 +3013,7 @@ function MappingDefinitionImportModal({
         }
       }
 
-      const unmatched = await onChanged();
+      const unmatched = await onChanged(tableFilter ?? null);
       if (unmatched.length > 0) {
         const shown = unmatched.slice(0, 5).join(', ');
         const more = unmatched.length > 5 ? ` 외 ${unmatched.length - 5}개` : '';
@@ -3026,8 +3041,8 @@ function MappingDefinitionImportModal({
   const codDisp = displayName('code');
 
   return (
-    <div style={styles.modalBackdrop} onClick={saving ? undefined : onClose}>
-      <div style={{ ...styles.modalCard, width: 520 }} onClick={(e) => e.stopPropagation()}>
+    <div style={styles.modalBackdrop}>
+      <div style={{ ...styles.modalCard, width: 520 }}>
         <div style={styles.modalHeader}>
           <div style={styles.modalTitle}>Mapping Definition{tableFilter ? ` · ${tableFilter}` : ''}</div>
           <div style={{ flex: 1 }} />

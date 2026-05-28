@@ -188,6 +188,9 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
 
   const toggleStageLock = () => {
     if (!isMaster) return;
+    // DB lock 토글은 site unlock 상태에서만 가능 — 이중 보안 유지. site lock 인 상태에서
+    // DB unlock 만 풀리면 site lock 의 의미가 사라짐.
+    if (!siteUnlocked) return;
     setTobeDbLocks((cur) => ({ ...cur, [stage]: !cur[stage] }));
   };
 
@@ -199,18 +202,20 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
 
   const toggleSiteLock = () => {
     if (siteUnlocked) {
-      // 잠그려는 시도
-      if (siteLockBlocked) {
-        window.alert(
-          nameMissing
-            ? t('siteSettings.siteLock.blockedNameMissing')
-            : t('siteSettings.siteLock.blockedDbUnlocked')
-        );
-        return;
-      }
+      // 잠그려는 시도 — 차단 조건이면 silently 무시 (브라우저 alert 안 씀).
+      if (siteLockBlocked) return;
       setSiteUnlocked(false);
     } else {
+      // site unlock 시점에 모든 stage 의 DB lock 을 강제 true 로 — 이중 보안.
+      // DB 를 편집하려면 site unlock 후에도 stage 별 DB lock 을 사용자가 따로 풀어야 함.
       setSiteUnlocked(true);
+      setTobeDbLocks((cur) => {
+        const next: TobeDbLocks = { ...cur };
+        for (const env of PROJECT_ENVIRONMENTS) {
+          next[env] = true;
+        }
+        return next;
+      });
     }
   };
 
@@ -247,14 +252,8 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
   const handleSave = async () => {
     if (!canSave) return;
     // scope 'site' → 'project' 전환 시 backend 가 Site 의 DB 설정을 그 Site 의 모든
-    // Project 에 복사한다. 사용자에게 확인.
-    const prevScope = site.tobeDbScope === 'project' ? 'project' : 'site';
-    if (prevScope === 'site' && tobeDbScope === 'project') {
-      const ok = window.confirm(
-        '프로젝트별 모드로 바꾸면 이 사이트의 모든 프로젝트에 현재 TO-BE DB 설정이 복사됩니다. 진행할까요?',
-      );
-      if (!ok) return;
-    }
+    // Project 에 복사한다 (사용자에게 별도 confirm UI 는 안 띄움 — 브라우저 네이티브
+    // 팝업을 안 쓰는 정책. Site Setting 의 scope 토글 옆 hint 로 안내한다).
     // type 이 비어있는 단계는 저장하지 않음.
     const finalByEnv: TobeDbByEnv = {};
     for (const env of PROJECT_ENVIRONMENTS) {
