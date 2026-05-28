@@ -53,6 +53,7 @@ public class MappingImportController {
             @PathVariable String id,
             @RequestParam(name = "columnMapping", required = false) MultipartFile columnMapping,
             @RequestParam(name = "codeMapping", required = false) MultipartFile codeMapping,
+            @RequestParam(name = "tobeTable", required = false) String tobeTable,
             Authentication auth
     ) {
         boolean hasColumn = columnMapping != null && !columnMapping.isEmpty();
@@ -86,7 +87,8 @@ public class MappingImportController {
                 hasColumn ? columnMapping.getOriginalFilename() : null,
                 codeBytes,
                 hasCode ? codeMapping.getOriginalFilename() : null,
-                auth.getName());
+                auth.getName(),
+                (tobeTable != null && !tobeTable.isBlank()) ? tobeTable : null);
         return ApiResponse.ok(result);
     }
 
@@ -168,8 +170,12 @@ public class MappingImportController {
     /** 가장 최근 임포트의 CSV 내용으로 룰·코드맵·바인딩 모두 재적용 (수동 수정 reset). */
     @PostMapping("/{id}/mapping/reapply")
     @PreAuthorize("hasAnyRole('MASTER','ADMIN')")
-    public ApiResponse<MappingImport> reapplyLatest(@PathVariable String id, Authentication auth) {
-        return ApiResponse.ok(importService.reapplyLatest(id, auth.getName()));
+    public ApiResponse<MappingImport> reapplyLatest(
+            @PathVariable String id,
+            @RequestParam(name = "tobeTable", required = false) String tobeTable,
+            Authentication auth) {
+        String filter = (tobeTable != null && !tobeTable.isBlank()) ? tobeTable : null;
+        return ApiResponse.ok(importService.reapplyLatest(id, auth.getName(), filter));
     }
 
     @PostMapping("/{id}/mapping/bindings")

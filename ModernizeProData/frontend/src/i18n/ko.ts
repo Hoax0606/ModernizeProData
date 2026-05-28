@@ -177,7 +177,6 @@ export const ko = {
   'solution.external.tokenCopied': 'Copied!',
   'solution.external.triggerExamples.title': 'Trigger commands',
   'solution.external.triggerExamples.desc':  '외부 스케줄러에서 본 도구를 trigger 하는 curl 명령. URL 과 token 은 위에서 입력한 값, project ID 는 본 도구에서 생성된 각 project 의 ID 가 들어가 있습니다. 그대로 복사하여 실행 가능.',
-  'solution.savedToast': '설정이 저장되었습니다.',
 
   'solution.license':            'License',
   'solution.license.desc':       '본 사이트 Coordinator 의 라이선스 상태입니다. 만료 전 갱신이 필요합니다.',
@@ -661,7 +660,6 @@ export const ko = {
   'asisDdl.button.import':    '+ Import AS-IS DDL',
   'asisDdl.button.loading':   '임포트 중…',
   'asisDdl.error.prefix':     '에러',
-  'asisDdl.toast.success':    'AS-IS DDL 임포트 완료',
   'asisDdl.modal.title':              'AS-IS schema',
   'asisDdl.modal.loading':            '로딩 중…',
   'asisDdl.modal.empty':              'AS-IS DDL이 아직 임포트되지 않았습니다.',
@@ -730,6 +728,7 @@ export const ko = {
   'siteSettings.csvPathHint': '이 경로의 CSV 를 도구가 자동으로 Parquet 으로 변환합니다. 별도 import 는 필요하지 않습니다.',
   'siteSettings.csvPathPlaceholder': 'D:\\migration\\csv 또는 \\\\server\\share\\csv',
   'siteSettings.csvPathBrowse': 'Browse',
+  'siteSettings.csvPathDialogTitle': 'AS-IS CSV 폴더 안의 파일을 하나 선택하세요 (해당 폴더가 경로로 지정됩니다)',
   'siteSettings.notes': 'Notes',
   'siteSettings.notesHint': '계약번호·사이트 리더·메모 (선택)',
   'siteSettings.tobeDb': 'TO-BE Target DB',
@@ -797,8 +796,6 @@ export const ko = {
   'encoding.utf8': 'UTF-8',
   'encoding.ebcdic': 'EBCDIC',
 
-  'dashboard.toast.siteCreated': '사이트가 만들어졌습니다.',
-  'dashboard.toast.projectCreated': '프로젝트가 만들어졌습니다.',
   'dashboard.empty.title': 'No mapping targets yet',
   'dashboard.empty.hint': 'TO-BE DDL 을 임포트하면 여기에 테이블 목록과 매핑 상태가 표시됩니다.',
   'dashboard.devCard.title': 'Tool info (dev only)',
@@ -937,7 +934,6 @@ export const ko = {
   'projectSettings.action.save':                'Save',
   'projectSettings.action.saving':              'Saving…',
   'projectSettings.action.saveChanges':         'Save changes',
-  'projectSettings.action.savedToast':          '설정이 저장되었습니다.',
   'projectSettings.action.testConnection':      'Test connection',
   'projectSettings.action.testing':             'Testing connection…',
 

@@ -19,7 +19,7 @@ import { credentialsApi, type CurrentCredentialDto } from '../api/credentials';
 import { solutionSettingsApi, type SolutionSettingsDto, type InternalMode } from '../api/solutionSettings';
 import { scheduleApi } from '../api/schedule';
 import { Toggle } from '../components/Toggle';
-import { Toast } from '../components/Toast';
+import { Radio } from '../components/Checkbox';
 import { useT } from '../i18n';
 import { toHHmm, toHHmmss, formatTimestamp, formatDuration } from '../lib/formatters';
 
@@ -69,7 +69,6 @@ export function SchedulerPage() {
   const [registering, setRegistering] = useState(false);
 
   const [saving, setSaving] = useState(false);
-  const [savedToast, setSavedToast] = useState(false);
 
   // Trigger examples docs の shell type 切替.
   //   bash       — `-d '{...}'`
@@ -266,7 +265,6 @@ export function SchedulerPage() {
       setExtEndpoint(ep);
       setExtEndpointBaseline(ep);
       setStoreExternalIntegrations(updated.externalEnabled);
-      setSavedToast(true);
     } catch (e) {
       setError(formatError(e));
     } finally {
@@ -414,8 +412,6 @@ export function SchedulerPage() {
         </button>
       </div>
 
-      <Toast visible={savedToast} message={t('solution.savedToast')} onHide={() => setSavedToast(false)} />
-
       {/* Internal scheduler (Quartz Nightly) — External 와 mutex.
           Phase 5: Internal=ON 시 mode (common/individual) 선택 + 時刻 입력 필수. */}
       <section style={styles.cardSection}>
@@ -440,22 +436,12 @@ export function SchedulerPage() {
               {/* Mode selection — radio */}
               <div style={styles.modeRow}>
                 <div style={styles.modeLabel}>{t('scheduler.internal.modeLabel')}</div>
-                <label style={styles.radioLabel}>
-                  <input
-                    type="radio"
-                    name="internal-mode"
-                    checked={internalMode === 'common'}
-                    onChange={() => handleSelectMode('common')}
-                  />
+                <label style={styles.radioLabel} onClick={() => handleSelectMode('common')}>
+                  <Radio checked={internalMode === 'common'} onChange={() => handleSelectMode('common')} />
                   <span style={{ marginLeft: 6 }}>{t('scheduler.internal.modeCommonLabel')}</span>
                 </label>
-                <label style={styles.radioLabel}>
-                  <input
-                    type="radio"
-                    name="internal-mode"
-                    checked={internalMode === 'individual'}
-                    onChange={() => handleSelectMode('individual')}
-                  />
+                <label style={styles.radioLabel} onClick={() => handleSelectMode('individual')}>
+                  <Radio checked={internalMode === 'individual'} onChange={() => handleSelectMode('individual')} />
                   <span style={{ marginLeft: 6 }}>{t('scheduler.internal.modeIndividualLabel')}</span>
                 </label>
                 {internalMode === null && (

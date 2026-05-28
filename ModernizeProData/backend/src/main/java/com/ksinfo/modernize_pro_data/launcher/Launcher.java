@@ -389,7 +389,6 @@ public class Launcher {
                         java.util.Map.entry("creds.tokenMissing","Login response missing token."),
                         java.util.Map.entry("creds.refused",     "Account refused (license / role)."),
                         java.util.Map.entry("creds.connectFailed","Connect failed: {reason}"),
-                        java.util.Map.entry("worker.disconnect",  "Disconnect"),
                         java.util.Map.entry("worker.loadFailed",  "Failed to load Coordinator UI: {reason}")
                 ),
                 "ko", java.util.Map.ofEntries(
@@ -419,7 +418,6 @@ public class Launcher {
                         java.util.Map.entry("creds.tokenMissing","로그인 응답에 토큰이 없습니다."),
                         java.util.Map.entry("creds.refused",     "계정이 거부됐습니다 (라이선스 / 권한)."),
                         java.util.Map.entry("creds.connectFailed","연결 실패: {reason}"),
-                        java.util.Map.entry("worker.disconnect",  "연결 해제"),
                         java.util.Map.entry("worker.loadFailed",  "Coordinator UI 로드 실패: {reason}")
                 ),
                 "ja", java.util.Map.ofEntries(
@@ -449,7 +447,6 @@ public class Launcher {
                         java.util.Map.entry("creds.tokenMissing","ログイン応答にトークンがありません。"),
                         java.util.Map.entry("creds.refused",     "アカウントが拒否されました (ライセンス / 権限)。"),
                         java.util.Map.entry("creds.connectFailed","接続失敗: {reason}"),
-                        java.util.Map.entry("worker.disconnect",  "切断"),
                         java.util.Map.entry("worker.loadFailed",  "Coordinator UI の読み込みに失敗: {reason}")
                 )
         );
@@ -491,6 +488,17 @@ public class Launcher {
         private Stage stage;
         private BorderPane root;
         private Thread heartbeatThread;
+        /** 현재 연결된 Coordinator URL + 로그인 username. 창 X 닫기 시 backend
+         *  logout 을 보내거나 React Sign out 후 credentials 화면으로 돌아갈 때 쓴다. */
+        private volatile String coordUrl;
+        private volatile String username;
+
+        /** backend 세션 정리 — currentSessionId 를 null 로. 실패해도 무시 (best-effort). */
+        private void serverLogout() {
+            if (jwt == null || coordUrl == null) return;
+            try { post(coordUrl, "/api/v1/auth/logout", "{}", true); }
+            catch (Exception e) { System.out.println("worker logout failed: " + e.getMessage()); }
+        }
 
         public static void launch(String[] args) {
             Application.launch(WorkerApp.class, args);
@@ -509,7 +517,12 @@ public class Launcher {
             tryLoadIcon(stage);
             stage.setScene(new Scene(root, 1200, 760));
             applyStandardWindowChrome(stage);
-            stage.setOnCloseRequest(e -> { Platform.exit(); System.exit(0); });
+            stage.setOnCloseRequest(e -> {
+                // 창 닫을 때 backend 세션 정리 (best-effort, 짧은 timeout 의 동기 호출).
+                serverLogout();
+                Platform.exit();
+                System.exit(0);
+            });
             stage.show();
             stage.centerOnScreen();
 
@@ -831,11 +844,35 @@ public class Launcher {
         /** Swap the form for a WebView pointed at the Coordinator UI + start
          *  the self-register / heartbeat loop. */
         private void swapToWebView(String coordUrl, String username, String password) {
+            this.coordUrl = coordUrl;
+            this.username = username;
             WebView webView = new WebView();
             wireFreshUserData(webView);
-            webView.getEngine().locationProperty().addListener((o, oldUrl, newUrl) ->
-                    System.out.println("WorkerWebView nav: " + newUrl));
             wireJsDialogs(webView.getEngine(), stage);
+
+            // worker 의 로그아웃은 WebView 안 React 의 "Sign out" 하나로 통일.
+            // React 가 Sign out → authApi.logout() (backend 세션 정리) → /login 으로
+            // 이동하는데, JavaFX 쪽 heartbeat 가 살아 있으면 60초 후 401 → 자동
+            // 재로그인으로 세션이 되살아난다. 그래서 WebView 가 /login 으로 가는
+            // 순간 (단, 한 번 앱에 진입한 뒤) heartbeat 를 끊고 credentials 화면으로
+            // 되돌린다. reachedApp 플래그로 초기 부팅 중 잠깐 스치는 /login 은 무시.
+            final boolean[] reachedApp = {false};
+            webView.getEngine().locationProperty().addListener((o, oldUrl, newUrl) -> {
+                System.out.println("WorkerWebView nav: " + newUrl);
+                if (newUrl == null || !newUrl.startsWith("http")) return;
+                if (newUrl.contains("/login")) {
+                    if (reachedApp[0]) {
+                        Platform.runLater(() -> {
+                            if (heartbeatThread != null) heartbeatThread.interrupt();
+                            jwt = null;
+                            authData = null;
+                            showCredentialsStep(coordUrl, username, null);
+                        });
+                    }
+                } else {
+                    reachedApp[0] = true;
+                }
+            });
 
             // If the WebView fails to load the Coordinator URL (process died,
             // network dropped mid-handshake, …), bail back to the credentials
@@ -854,36 +891,7 @@ public class Launcher {
                 }
             });
 
-            // Disconnect bar at the top — user can drop the session and go
-            // back to the URL step without restarting the app.
-            Button disconnectBtn = new Button(WorkerI18n.t("worker.disconnect"));
-            disconnectBtn.setStyle(
-                "-fx-background-color: transparent;" +
-                "-fx-border-color: " + C_BORDER_STRONG + ";" +
-                "-fx-text-fill: " + C_MUTED + ";" +
-                "-fx-font-size: 12px;" +
-                "-fx-padding: 5 12;" +
-                "-fx-background-radius: 4;" +
-                "-fx-border-radius: 4;" +
-                "-fx-cursor: hand;");
-            disconnectBtn.setOnAction(ev -> {
-                if (heartbeatThread != null) heartbeatThread.interrupt();
-                jwt = null;
-                authData = null;
-                showUrlStep(coordUrl, null);
-            });
-            javafx.scene.layout.HBox toolbar = new javafx.scene.layout.HBox(disconnectBtn);
-            toolbar.setAlignment(Pos.CENTER_RIGHT);
-            toolbar.setStyle(
-                "-fx-padding: 6 12;" +
-                "-fx-background-color: " + C_BG + ";" +
-                "-fx-border-color: " + C_BORDER + ";" +
-                "-fx-border-width: 0 0 1 0;");
-
-            BorderPane wrap = new BorderPane();
-            wrap.setTop(toolbar);
-            wrap.setCenter(webView);
-            root.setCenter(wrap);
+            root.setCenter(webView);
             // Cache-bust so a previously-blocked LICENSE_MISSING response can't
             // be served by the WebView cache. bootstrap_* params hand the
             // JWT/user info from the JavaFX form's login over to the React

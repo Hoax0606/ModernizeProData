@@ -18,4 +18,8 @@ public interface MappingCodeMapRepository extends JpaRepository<MappingCodeMap, 
     @Modifying
     @Query("DELETE FROM MappingCodeMap c WHERE c.projectId = :projectId")
     int deleteAllByProjectId(@Param("projectId") String projectId);
+
+    @Modifying
+    @Query("DELETE FROM MappingCodeMap c WHERE c.projectId = :projectId AND c.domain IN :domains")
+    int deleteByProjectIdAndDomainIn(@Param("projectId") String projectId, @Param("domains") java.util.Collection<String> domains);
 }

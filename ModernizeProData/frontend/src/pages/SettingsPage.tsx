@@ -9,7 +9,6 @@ import { useAuthStore } from '../store/auth';
 import { useActiveProjectReadOnly } from '../store/readOnly';
 import { DdlSchemaPanel } from '../components/DdlSchemaPanel';
 import { LockIcon } from '../components/LockIcon';
-import { Toast } from '../components/Toast';
 import { useT } from '../i18n';
 
 /** AppShell 의 AS-IS/TO-BE 램프 클릭 → navigate(..., { state: { highlightSide } }) 로 전달.
@@ -279,7 +278,6 @@ function PSNotify({ project }: { project: Project }) {
 
   // 로컬 draft — Save 누르기 전까지는 store 에 반영 안 됨
   const [draftSubs, setDraftSubs] = useState<Record<string, boolean>>(savedSubs);
-  const [savedToast, setSavedToast] = useState(false);
 
   // 프로젝트가 바뀌면 draft 를 저장값으로 재초기화
   useEffect(() => {
@@ -305,7 +303,6 @@ function PSNotify({ project }: { project: Project }) {
       const v = draftSubs[e.k] ?? true;
       setSubscription(project.id, e.k, v);
     }
-    setSavedToast(true);
   };
 
   return (
@@ -346,8 +343,6 @@ function PSNotify({ project }: { project: Project }) {
           </div>
         ))}
       </PSCard>
-
-      <Toast visible={savedToast} message={t('projectSettings.action.savedToast')} onHide={() => setSavedToast(false)} />
     </>
   );
 }
@@ -699,7 +694,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '10px 0',
     overflow: 'auto',
     alignSelf: 'stretch',
-    minHeight: 'calc(100vh - 122px)',
+    minHeight: '100%',
   },
   asideHeader: {
     padding: '4px 14px 6px',

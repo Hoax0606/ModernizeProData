@@ -10,6 +10,7 @@ import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.Site;
 import com.ksinfo.modernize_pro_data.coordinator.site.SiteRepository;
+import com.ksinfo.modernize_pro_data.coordinator.site.AuditLogService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -44,6 +45,7 @@ public class DdlImportService {
     private final ProjectRepository projectRepo;
     private final SiteRepository siteRepo;
     private final OracleDdlParser parser;
+    private final AuditLogService auditLogService;
 
     @Transactional
     public DdlImport importDdl(String projectId, String side, String filename, byte[] content, String importedBy) {
@@ -107,6 +109,13 @@ public class DdlImportService {
         autoAdvancePhaseIfBothDdlImported(project);
         projectRepo.save(project);
 
+        // DDL import 알림 — toast 대신 audit_log 에 기록해서 알림 벨(Notification)로 노출.
+        String sideLabel = SIDE_ASIS.equals(side) ? "AS-IS" : "TO-BE";
+        auditLogService.record(project, importedBy, "DDL imported")
+                .target(side)
+                .details(sideLabel + " · " + filename + " · " + parsed.getTables().size() + " tables")
+                .save();
+
         log.info("DDL imported: project={}, side={}, file={}, tables={}, columns={}",
                 projectId, side, filename, parsed.getTables().size(), parsed.totalColumnCount());
         return ddlImport;
@@ -123,6 +132,20 @@ public class DdlImportService {
             project.setPhase("analysis");
             log.info("Project {} auto-advanced phase: planning → analysis (both DDLs imported)",
                     project.getId());
+        }
+    }
+
+    /**
+     * AS-IS 또는 TO-BE DDL 중 하나라도 없으면 (둘 다 import 되지 않으면) phase 를 planning 으로
+     * 되돌린다. autoAdvancePhaseIfBothDdlImported 의 역 — DDL 이 불완전하면 무조건 planning.
+     */
+    private void demoteToPlanningIfDdlIncomplete(Project project) {
+        if ((project.getTableCount() == 0 || project.getTobeTableCount() == 0)
+                && !"planning".equals(project.getPhase())) {
+            String prev = project.getPhase();
+            project.setPhase("planning");
+            log.info("Project {} demoted phase: {} → planning (DDL incomplete)",
+                    project.getId(), prev);
         }
     }
 
@@ -161,6 +184,7 @@ public class DdlImportService {
                         "프로젝트를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
         ddlImportRepo.deleteByProjectIdAndSide(projectId, side);
         applyTableCountToProject(project, side, 0);
+        demoteToPlanningIfDdlIncomplete(project);
         projectRepo.save(project);
         log.info("DDL deleted: project={}, side={}", projectId, side);
     }

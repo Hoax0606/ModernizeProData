@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { tobeDdlApi, type DdlSchema } from '../api/tobeDdl';
 import { mappingImportApi, type MappingRuleDto } from '../api/mappingImport';
@@ -11,7 +11,6 @@ import { useExecutionPreflightStore, type ActiveRunState } from '../store/execut
 import { CreateSiteModal } from '../components/CreateSiteModal';
 import { CreateProjectModal } from '../components/CreateProjectModal';
 import { DdlImportButton } from '../components/DdlImportButton';
-import { Toast } from '../components/Toast';
 import { HourglassHalfIcon } from '../components/HourglassHalfIcon';
 import { useT } from '../i18n';
 
@@ -34,35 +33,6 @@ export function DashboardPage() {
   const project = useMemo(() => projects.find((p) => p.id === activeProjectId) ?? null, [projects, activeProjectId]);
   const siteProjects = useMemo(() => projects.filter((p) => p.siteId === activeSiteId), [projects, activeSiteId]);
 
-  // 생성 직후 토스트 — sites/projects 수가 늘었을 때만 (삭제·전환 시엔 무음)
-  const prevSitesCount = useRef(sites.length);
-  const prevProjectsCount = useRef(projects.length);
-  const prevTableCount = useRef(project?.tableCount ?? 0);
-  const [toast, setToast] = useState<{ msg: string } | null>(null);
-
-  useEffect(() => {
-    if (sites.length > prevSitesCount.current && site) {
-      setToast({ msg: `${t('dashboard.toast.siteCreated')} · ${site.name}` });
-    }
-    prevSitesCount.current = sites.length;
-  }, [sites.length, site, t]);
-
-  useEffect(() => {
-    if (projects.length > prevProjectsCount.current && project) {
-      setToast({ msg: `${t('dashboard.toast.projectCreated')} · ${project.name}` });
-    }
-    prevProjectsCount.current = projects.length;
-  }, [projects.length, project, t]);
-
-  // AS-IS DDL 인포트 성공 토스트 — tableCount 가 0 → 양수로 바뀐 순간 한 번만.
-  useEffect(() => {
-    const current = project?.tableCount ?? 0;
-    if (prevTableCount.current === 0 && current > 0) {
-      setToast({ msg: `${t('asisDdl.toast.success')} · ${current} tables` });
-    }
-    prevTableCount.current = current;
-  }, [project?.tableCount, t]);
-
   return (
     <>
       {!site ? <SiteOnboarding />
@@ -71,11 +41,6 @@ export function DashboardPage() {
         : (project.tableCount === 0 || project.tobeTableCount === 0)
           ? <MappingOnboarding project={project} />
         : <ProjectDashboard project={project} />}
-      <Toast
-        visible={!!toast}
-        message={toast?.msg ?? ''}
-        onHide={() => setToast(null)}
-      />
     </>
   );
 }
