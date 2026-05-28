@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { useQuery } from '@tanstack/react-query';
 import { useWorkspaceStore } from '../store/workspace';
 import { useT } from '../i18n';
 import {
@@ -17,6 +18,9 @@ import {
   humanizeQuarantineDetail,
   quarantineRowAsIs,
   quarantineRowToBe,
+  quarantineRowPk,
+  quarantinePkColumnName,
+  quarantineViolatedColumnName,
   type QuarantineGroup,
   type QuarantineSeverity,
 } from './quarantineMock';
@@ -40,14 +44,17 @@ export function LogViewerPage() {
     () => projects.find((p) => p.id === activeProjectId) ?? null,
     [projects, activeProjectId],
   );
-  /** project 의 최근 run 의 runId. listByProject 의 첫 row (started_at desc). */
-  const [runId, setRunId] = useState<string>('');
-  useEffect(() => {
-    if (!activeProjectId) { setRunId(''); return; }
-    runsApi.listByProject(activeProjectId)
-      .then((rs) => setRunId(rs[0]?.id ?? ''))
-      .catch(() => setRunId(''));
-  }, [activeProjectId]);
+  /** project 의 최근 run — useQuery 로 5s 폴링 + window focus refetch + WS invalidate 와 키 공유.
+     mount 후 새 run 起動되면 자동으로 최신 run 의 로그·quarantine 으로 전환된다. */
+  const { data: runHistory } = useQuery<RunHistoryDto[]>({
+    queryKey: ['run-history', activeProjectId],
+    enabled: !!activeProjectId,
+    queryFn: () => runsApi.listByProject(activeProjectId!),
+    refetchInterval: 5_000,
+    refetchOnWindowFocus: true,
+    staleTime: 2_000,
+  });
+  const runId = runHistory?.[0]?.id ?? '';
 
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -93,14 +100,17 @@ export function LogViewerPage() {
     });
   }, [allLines, debouncedSearch, levelFilter, stepFilter]);
 
-  /** Quarantine groups — runId 의 위반 row 묶음. quarantineApi.byRun 으로 fetch. */
-  const [allGroups, setAllGroups] = useState<QuarantineGroup[]>([]);
-  useEffect(() => {
-    if (!runId) { setAllGroups([]); return; }
-    quarantineApi.byRun(runId)
-      .then(setAllGroups)
-      .catch((e) => { console.error('quarantine fetch failed', e); setAllGroups([]); });
-  }, [runId]);
+  /** Quarantine groups — runId 의 위반 row 묶음. useQuery 로 캐시 + 자동 refetch.
+     runId 변경 시 자동 refetch. usePipelineProgress 의 WS invalidate('run-history') 와는
+     별개 queryKey 라 직접 invalidate 안 받지만, 5s 폴링이 곧 따라잡음. */
+  const { data: allGroupsData } = useQuery<QuarantineGroup[]>({
+    queryKey: ['quarantine', runId],
+    enabled: !!runId,
+    queryFn: () => quarantineApi.byRun(runId),
+    refetchInterval: 5_000,
+    staleTime: 2_000,
+  });
+  const allGroups: QuarantineGroup[] = allGroupsData ?? [];
   const groupStats = useMemo(() => {
     let errRows = 0, warnRows = 0;
     for (const g of allGroups) {
@@ -545,6 +555,7 @@ export function LogViewerPage() {
                     g={g}
                     t={t}
                     open={openGroupId === g.id}
+                    runId={runId}
                     onToggle={() => setOpenGroupId((cur) => (cur === g.id ? null : g.id))}
                     onOpenMapping={() => navigate('/mapping')}
                     onOpenInspector={() => {
@@ -708,13 +719,14 @@ function SevTab({ label, count, active, onClick, tone }: {
 }
 
 /** Quarantine group card — 카드 클릭으로 열고 닫음. 열렸을 때만 액션바(이 테이블만 다시 이행/매핑/Requeue/...) 표시. */
-function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector }: {
+function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, runId }: {
   g: QuarantineGroup;
   t: (k: string, v?: Record<string, string>) => string;
   open: boolean;
   onToggle: () => void;
   onOpenMapping: () => void;
   onOpenInspector: () => void;
+  runId: string | null;
 }) {
   const isErr = g.severity === 'error';
   const sevColor = isErr ? '#c92a3f' : '#a86b00';
@@ -779,23 +791,36 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector }
         {open && (
           <div style={styles.cardExpand}>
             <div style={styles.cardTableWrap}>
+              {/* 첫 컬럼: PK (어느 row 가 위반인지 식별). 헤더는 PK 컬럼명, 없으면 fallback "ROW".
+                 (이전엔 group 의 table 이름을 매 row 반복 표시 — 행 식별 불가했음.) */}
               <table style={styles.cardTable}>
                 <thead>
+                  {/* AS-IS 헤더에 violated 컬럼명 부기 — 예: "AS-IS · gender" */}
                   <tr>
-                    <th style={{ ...styles.cardTh, ...styles.cardThTable }}>{t('logs.quarantine.colTable')}</th>
-                    <th style={{ ...styles.cardTh, color: sevColor }}>{t('logs.quarantine.colAsIs')}</th>
+                    <th style={{ ...styles.cardTh, ...styles.cardThTable }}>
+                      {quarantinePkColumnName(g) ?? t('logs.quarantine.colTable')}
+                    </th>
+                    <th style={{ ...styles.cardTh, color: sevColor }}>
+                      {t('logs.quarantine.colAsIs')}
+                      {quarantineViolatedColumnName(g) && (
+                        <span style={{ fontWeight: 400, opacity: 0.75 }}> · {quarantineViolatedColumnName(g)}</span>
+                      )}
+                    </th>
                     <th style={styles.cardTh}>{t('logs.quarantine.colToBe')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {sample.map((_, ri) => {
+                    const pk = quarantineRowPk(g, ri);
                     const asIs = quarantineRowAsIs(g, ri);
                     const toBe = quarantineRowToBe(g, ri);
                     /* AS-IS NULL 은 위반 값이므로 severity 색, TO-BE NULL 은 거부됐다는 표시라 중립색. */
                     const asIsNullStyle = { ...styles.nullCell, color: sevColor, background: 'transparent', border: `1px solid ${sevBorder}` };
                     return (
                       <tr key={ri}>
-                        <td style={{ ...styles.cardTd, ...styles.cardTdTable }}>{g.table}</td>
+                        <td style={{ ...styles.cardTd, ...styles.cardTdTable }}>
+                          {pk === null ? <span style={styles.nullCell}>—</span> : String(pk)}
+                        </td>
                         <td style={{ ...styles.cardTd, color: sevColor, fontWeight: 700, background: sevBg }}>
                           {asIs === null ? <span style={asIsNullStyle}>NULL</span> : String(asIs)}
                         </td>
@@ -818,6 +843,18 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector }
               >
                 {t('logs.quarantine.act.openMapping')}
               </button>
+              {/* 위반 row 전수 parquet 다운로드 — BE 가 bindingId 채운 경우만 노출. */}
+              {runId && g.bindingId && (
+                <a
+                  href={`/api/v1/runs/${runId}/quarantine/${g.bindingId}/download`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  download
+                  style={{ ...styles.actLink, textDecoration: 'none' }}
+                >
+                  {t('logs.quarantine.act.downloadParquet')}
+                </a>
+              )}
               <div style={{ flex: 1 }} />
               <button
                 type="button"

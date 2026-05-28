@@ -6,6 +6,9 @@ import {
   humanizeQuarantineDetail,
   quarantineRowAsIs,
   quarantineRowToBe,
+  quarantineRowPk,
+  quarantinePkColumnName,
+  quarantineViolatedColumnName,
   type SiteQuarantineGroup,
   type QuarantineSeverity,
 } from './quarantineMock';
@@ -258,22 +261,34 @@ function SiteQuarantineCard({ g, t, open, onToggle, onOpenMapping }: {
             <div style={styles.cardTableWrap}>
               <table style={styles.cardTable}>
                 <thead>
+                  {/* PROJECT 컬럼은 cross-project 뷰의 식별 도움 (card 헤더와 중복이지만 긴 스크롤 시 유용).
+                      TABLE 컬럼은 PK 로 교체 — 같은 group 안에서 row 식별. */}
                   <tr>
                     <th style={{ ...styles.cardTh, ...styles.cardThTable }}>{t('logs.quarantine.colProject')}</th>
-                    <th style={{ ...styles.cardTh, ...styles.cardThTable }}>{t('logs.quarantine.colTable')}</th>
-                    <th style={{ ...styles.cardTh, color: sevColor }}>{t('logs.quarantine.colAsIs')}</th>
+                    <th style={{ ...styles.cardTh, ...styles.cardThTable }}>
+                      {quarantinePkColumnName(g) ?? t('logs.quarantine.colTable')}
+                    </th>
+                    <th style={{ ...styles.cardTh, color: sevColor }}>
+                      {t('logs.quarantine.colAsIs')}
+                      {quarantineViolatedColumnName(g) && (
+                        <span style={{ fontWeight: 400, opacity: 0.75 }}> · {quarantineViolatedColumnName(g)}</span>
+                      )}
+                    </th>
                     <th style={styles.cardTh}>{t('logs.quarantine.colToBe')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {g.sampleRows.map((_, ri) => {
+                    const pk = quarantineRowPk(g, ri);
                     const asIs = quarantineRowAsIs(g, ri);
                     const toBe = quarantineRowToBe(g, ri);
                     const asIsNullStyle = { ...styles.nullCell, color: sevColor, background: 'transparent', border: `1px solid ${sevBorder}` };
                     return (
                       <tr key={ri}>
                         <td style={{ ...styles.cardTd, ...styles.cardTdTable }}>{g.projectName}</td>
-                        <td style={{ ...styles.cardTd, ...styles.cardTdTable }}>{g.table}</td>
+                        <td style={{ ...styles.cardTd, ...styles.cardTdTable }}>
+                          {pk === null ? <span style={styles.nullCell}>—</span> : String(pk)}
+                        </td>
                         <td style={{ ...styles.cardTd, color: sevColor, fontWeight: 700, background: sevBg }}>
                           {asIs === null ? <span style={asIsNullStyle}>NULL</span> : String(asIs)}
                         </td>

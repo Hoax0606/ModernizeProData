@@ -1295,7 +1295,7 @@ export const ja: Record<TranslationKey, string> = {
   'logs.quarantine.pick.all':      '項目を選択…',
   'logs.quarantine.rowsBadge':     '{n} ROWS',
   'logs.quarantine.colProject':    'PROJECT_NAME',
-  'logs.quarantine.colTable':      'TABLE_NAME',
+  'logs.quarantine.colTable':      'ROW',
   'logs.quarantine.colAsIs':       'AS-IS',
   'logs.quarantine.colToBe':       'TO-BE',
 
@@ -1327,6 +1327,7 @@ export const ja: Record<TranslationKey, string> = {
   'logs.quarantine.act.rerunTable':    'このテーブルだけ再実行',
   'logs.quarantine.act.openMapping':   'マッピングを開く',
   'logs.quarantine.act.openInspector': 'ストリームで表示',
+  'logs.quarantine.act.downloadParquet': '⬇ 違反行のダウンロード',
 
   'siteQuarantine.eyebrow':         'SITE QUARANTINE',
   'siteQuarantine.empty.noSite':    'サイトを先に選択してください。',

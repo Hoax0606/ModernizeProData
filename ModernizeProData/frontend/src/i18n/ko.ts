@@ -1293,7 +1293,7 @@ export const ko = {
   'logs.quarantine.pick.all':      '항목 선택…',
   'logs.quarantine.rowsBadge':     '{n} ROWS',
   'logs.quarantine.colProject':    'PROJECT_NAME',
-  'logs.quarantine.colTable':      'TABLE_NAME',
+  'logs.quarantine.colTable':      'ROW',
   'logs.quarantine.colAsIs':       'AS-IS',
   'logs.quarantine.colToBe':       'TO-BE',
 
@@ -1327,6 +1327,7 @@ export const ko = {
   'logs.quarantine.act.rerunTable':    '이 테이블만 다시 이행',
   'logs.quarantine.act.openMapping':   '매핑 열기',
   'logs.quarantine.act.openInspector': '스트림에서 보기',
+  'logs.quarantine.act.downloadParquet': '⬇ 위반 row 다운로드',
 
   'siteQuarantine.eyebrow':         'SITE QUARANTINE',
   'siteQuarantine.empty.noSite':    '사이트를 먼저 선택하세요.',

@@ -1289,7 +1289,7 @@ export const en: Record<TranslationKey, string> = {
   'logs.quarantine.pick.all':      'Pick a group…',
   'logs.quarantine.rowsBadge':     '{n} ROWS',
   'logs.quarantine.colProject':    'PROJECT_NAME',
-  'logs.quarantine.colTable':      'TABLE_NAME',
+  'logs.quarantine.colTable':      'ROW',
   'logs.quarantine.colAsIs':       'AS-IS',
   'logs.quarantine.colToBe':       'TO-BE',
 
@@ -1321,6 +1321,7 @@ export const en: Record<TranslationKey, string> = {
   'logs.quarantine.act.rerunTable':    'Re-run only this table',
   'logs.quarantine.act.openMapping':   'Open mapping',
   'logs.quarantine.act.openInspector': 'View in stream',
+  'logs.quarantine.act.downloadParquet': '⬇ Download violating rows',
 
   'siteQuarantine.eyebrow':         'SITE QUARANTINE',
   'siteQuarantine.empty.noSite':    'Select a site first.',
