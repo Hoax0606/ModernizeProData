@@ -1009,6 +1009,7 @@ public class MappingImportService {
         if (!"string".equals(typeCategory(asisType))) return null;
         String t = tobeType.toUpperCase().trim();
         boolean isDate = t.equals("DATE");
+        boolean isTimestampTz = t.contains("WITH TIME ZONE") || t.equals("TIMESTAMPTZ");
         boolean isTimestamp = t.startsWith("TIMESTAMP");
         if (!isDate && !isTimestamp) return null;
 
@@ -1019,7 +1020,14 @@ public class MappingImportService {
             case 14: fmt = "%Y%m%d%H%M%S"; break;
             case 10: fmt = "%Y-%m-%d"; break;
             case 19: fmt = "%Y-%m-%d %H:%M:%S"; break;
-            default: return null;  // unknown — fallback to CAST
+            default:
+                // TIMESTAMPTZ target + 길이 >=25 → microsec + offset 포함 timestamp 문자열 가정.
+                // 운영팀 export 의 일반적 형식 "YYYY-MM-DD HH:MM:SS.ffffff +HH:MM" 를 strptime 으로 파싱.
+                if (isTimestampTz && len >= 25) {
+                    fmt = "%Y-%m-%d %H:%M:%S.%f %z";
+                    break;
+                }
+                return null;  // unknown — fallback to CAST
         }
         String parsed = "STRPTIME(" + src + ", '" + fmt + "')";
         return isDate ? parsed + "::DATE" : parsed;
