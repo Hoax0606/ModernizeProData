@@ -278,14 +278,16 @@ function PSTobeDb({ project, site }: { project: Project; site: Site }) {
 
   const handleSave = async () => {
     if (!isDirty || readOnly) return;
-    // 저장 시 type 이 비어있는 단계는 정리, 데이터 있는 stage 는 자동 lock — SiteSettings 와 동일 정책.
+    // type 이 비어있거나 사용자가 명시적으로 lock 하지 않은 stage 는 저장하지 않음.
+    // lock 시점에 connection test ok 검증 → lock 된 stage = 검증된 stage.
+    // 미검증/실패 stage 의 입력은 backend 로 보내지 않는다.
     const cleanedByEnv: TobeDbByEnv = {};
-    for (const [k, v] of Object.entries(tobeDbByEnv) as [ProjectEnvironment, TobeDbByEnv[ProjectEnvironment]][]) {
-      if (v && v.type.trim()) cleanedByEnv[k] = v;
-    }
     const finalLocks: TobeDbLocks = {};
-    for (const k of Object.keys(cleanedByEnv) as ProjectEnvironment[]) {
-      finalLocks[k] = true;
+    for (const [k, v] of Object.entries(tobeDbByEnv) as [ProjectEnvironment, TobeDbByEnv[ProjectEnvironment]][]) {
+      if (v && v.type.trim() && tobeDbLocks[k]) {
+        cleanedByEnv[k] = v;
+        finalLocks[k] = true;
+      }
     }
     await updateProject(project.id, { tobeDbByEnv: cleanedByEnv, tobeDbLocks: finalLocks });
   };
