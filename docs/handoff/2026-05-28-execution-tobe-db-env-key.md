@@ -12,7 +12,7 @@
 
 ## 함정 / 결정 이력
 - `Site` 에 env 필드 3개(`asisEnv`/`tobeEnv`=인프라 종류, `environment`=운영 단계) 혼동 주의.
-- **별도 버그(미수정)**: `RunService.PROD_ENV="prod"` vs FE `"production"` → prod 사이트에서 `isProd=false`, cutover 게이트 오작동 가능.
+- **`RunService.PROD_ENV` 버그 수정**: `"prod"`→`"production"` (FE 값과 일치). prod 사이트에서 `isProd=false` 라 cutover 가 영원히 reject, test/rehearsal 은 잘못 허용되던 것 해소. 별도 커밋.
 
 ## 안 한 것 (의도적으로)
 - blocker #2(AS-IS CSV 부재) / #3(`SqlComposer` alias) — Load 실적재까지 green 은 별도 작업.

@@ -53,8 +53,8 @@ public class RunService {
     private static final String STATUS_IDLE    = "idle";
     private static final String STATUS_RUNNING = "running";
 
-    /** cutover run は production 環境のみで実行可. */
-    private static final String PROD_ENV = "prod";
+    /** cutover run は production 環境のみで実行可. FE の ProjectEnvironment 値 'production' と一致させる. */
+    private static final String PROD_ENV = "production";
 
     private final ProjectRepository projectRepo;
     private final RunHistoryRepository runHistoryRepo;
