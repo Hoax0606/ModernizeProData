@@ -29,10 +29,23 @@ export function SchedulerPage() {
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
 
-  const projects = useWorkspaceStore((s) => s.projects);
-  const sites = useWorkspaceStore((s) => s.sites);
+  const allProjects = useWorkspaceStore((s) => s.projects);
+  const allSites = useWorkspaceStore((s) => s.sites);
+  const activeSiteId = useWorkspaceStore((s) => s.activeSiteId);
   const fetchSites = useWorkspaceStore((s) => s.fetchSites);
   const fetchProjects = useWorkspaceStore((s) => s.fetchProjects);
+  /* SchedulerPage は active site の context で開かれる前提.
+     trigger curl 例 / project schedule 設定 / project 一覧 などはすべて active site
+     に絞る. activeSiteId が null の時は空 list (= site が選ばれていない、サイドバーで
+     site を選択するように促す形). */
+  const sites = useMemo(
+    () => allSites.filter((s) => s.id === activeSiteId),
+    [allSites, activeSiteId],
+  );
+  const projects = useMemo(
+    () => allProjects.filter((p) => p.siteId === activeSiteId),
+    [allProjects, activeSiteId],
+  );
 
   // settings store の externalIntegrations toggle は BE と optimistic mirror.
   const setStoreExternalIntegrations = useSettingsStore((s) => s.setExternalIntegrations);
@@ -318,28 +331,39 @@ export function SchedulerPage() {
     catch (e) { setError(formatError(e)); }
   };
 
+  /* Page scope = active site. History も active site の project が走らせた run のみ.
+     runsApi.listAll() は全 site 横断で返るため FE 側で project.siteId 照合. */
+  const activeSiteProjectIds = useMemo(
+    () => new Set(allProjects.filter((p) => p.siteId === activeSiteId).map((p) => p.id)),
+    [allProjects, activeSiteId],
+  );
+  const historyForSite = useMemo(
+    () => history.filter((r) => activeSiteProjectIds.has(r.projectId)),
+    [history, activeSiteProjectIds],
+  );
+
   /** Run history dropdown 選択肢 — 現データに存在する値だけ derive. */
   const historyStatusOptions = useMemo(() => {
     const m = new Map<string, number>();
-    for (const r of history) m.set(r.status, (m.get(r.status) ?? 0) + 1);
+    for (const r of historyForSite) m.set(r.status, (m.get(r.status) ?? 0) + 1);
     return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [history]);
+  }, [historyForSite]);
   const historyTypeOptions = useMemo(() => {
     const m = new Map<string, number>();
-    for (const r of history) m.set(r.runType, (m.get(r.runType) ?? 0) + 1);
+    for (const r of historyForSite) m.set(r.runType, (m.get(r.runType) ?? 0) + 1);
     return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [history]);
+  }, [historyForSite]);
   const historyTriggerOptions = useMemo(() => {
     const m = new Map<string, number>();
-    for (const r of history) m.set(r.triggerSource, (m.get(r.triggerSource) ?? 0) + 1);
+    for (const r of historyForSite) m.set(r.triggerSource, (m.get(r.triggerSource) ?? 0) + 1);
     return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [history]);
-  const filteredHistory = useMemo(() => history.filter((r) => {
+  }, [historyForSite]);
+  const filteredHistory = useMemo(() => historyForSite.filter((r) => {
     if (historyStatusFilter && r.status !== historyStatusFilter) return false;
     if (historyTypeFilter && r.runType !== historyTypeFilter) return false;
     if (historyTriggerFilter && r.triggerSource !== historyTriggerFilter) return false;
     return true;
-  }), [history, historyStatusFilter, historyTypeFilter, historyTriggerFilter]);
+  }), [historyForSite, historyStatusFilter, historyTypeFilter, historyTriggerFilter]);
 
   /* データから消えた値を選んでた場合は filter をリセット. */
   useEffect(() => {
@@ -385,21 +409,26 @@ export function SchedulerPage() {
   //   windows      : curl ... -d "{\"...\"}"
   //   powershell   : curl.exe --% ... -d "{\"...\"}"   (--% で PowerShell の引数加工を停止)
   const curlCmd = shellMode === 'powershell' ? 'curl.exe --%' : 'curl';
-  // /runs/all は 2026-05-29 から siteId 必須. site が 1 個しかない時はその id を埋めて
-  // コピペで動くようにし、複数 site 持ちの Coordinator では <YOUR_SITE_ID> placeholder.
-  const bulkSiteIdSample = sites.length === 1 ? sites[0].id : '<YOUR_SITE_ID>';
-  const bulkBody = shellMode === 'bash'
-    ? `'{"siteId":"${bulkSiteIdSample}"}'`
-    : `"{\\"siteId\\":\\"${bulkSiteIdSample}\\"}"`;
-  const bulkCommand = `${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs/all -H "Authorization: Bearer ${tokenForDocs}" -H "Content-Type: application/json" -d ${bulkBody}`;
-  const singleProjectCommands = projects.length === 0
-    ? '# (project 未作成 — All Projects 画面で project を作成すると単発実行コマンドがここに表示されます)'
-    : projects.map((p) => {
-        const body = shellMode === 'bash'
-          ? `'{"projectId":"${p.id}"}'`
-          : `"{\\"projectId\\":\\"${p.id}\\"}"`;
-        return `# ${p.name} (phase=${p.phase})\n${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs -H "Authorization: Bearer ${tokenForDocs}" -H "Content-Type: application/json" -d ${body}`;
-      }).join('\n\n');
+  const quoteBody = (obj: Record<string, string>) => {
+    const json = JSON.stringify(obj);
+    return shellMode === 'bash' ? `'${json}'` : `"${json.replace(/"/g, '\\"')}"`;
+  };
+  /* /runs/all は siteId 必須 (2026-05-29 改). このページは active site scope なので
+     その site の bulk + その site の project の single だけを表示. */
+  const activeSite = sites[0] ?? null;
+  const triggerExamplesText = (() => {
+    if (!activeSite) {
+      return '# (サイドバーで site を選んでください)';
+    }
+    const bulkCmd = `${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs/all -H "Authorization: Bearer ${tokenForDocs}" -H "Content-Type: application/json" -d ${quoteBody({ siteId: activeSite.id })}`;
+    const singleCmds = projects.length === 0
+      ? '# (この site にはまだ project がありません)'
+      : projects.map((p) => {
+          const body = quoteBody({ projectId: p.id });
+          return `# ${p.name} (phase=${p.phase})\n${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs -H "Authorization: Bearer ${tokenForDocs}" -H "Content-Type: application/json" -d ${body}`;
+        }).join('\n\n');
+    return `${t('scheduler.external.docs.bulkComment')}\n${bulkCmd}\n\n${t('scheduler.external.docs.singleComment')}\n${singleCmds}`;
+  })();
 
   return (
     <div style={styles.page}>
@@ -657,11 +686,7 @@ export function SchedulerPage() {
               borderRadius: 3, lineHeight: 1.6,
               whiteSpace: 'pre-wrap',
             }}>
-{`${t('scheduler.external.docs.bulkComment')}
-${bulkCommand}
-
-${t('scheduler.external.docs.singleComment')}
-${singleProjectCommands}`}
+{triggerExamplesText}
             </pre>
           </div>
 
@@ -677,7 +702,7 @@ ${singleProjectCommands}`}
             {t('scheduler.section.history')}
             {(historyStatusFilter || historyTypeFilter || historyTriggerFilter) && (
               <span style={styles.historyFilterCount}>
-                {filteredHistory.length} / {history.length}
+                {filteredHistory.length} / {historyForSite.length}
               </span>
             )}
           </h3>
@@ -690,7 +715,7 @@ ${singleProjectCommands}`}
                 style={styles.historyFilterSelect}
                 disabled={historyStatusOptions.length === 0}
               >
-                <option value="">All ({history.length})</option>
+                <option value="">All ({historyForSite.length})</option>
                 {historyStatusOptions.map(([v, n]) => (
                   <option key={v} value={v}>{v} ({n})</option>
                 ))}
@@ -704,7 +729,7 @@ ${singleProjectCommands}`}
                 style={styles.historyFilterSelect}
                 disabled={historyTypeOptions.length === 0}
               >
-                <option value="">All ({history.length})</option>
+                <option value="">All ({historyForSite.length})</option>
                 {historyTypeOptions.map(([v, n]) => (
                   <option key={v} value={v}>{v} ({n})</option>
                 ))}
@@ -718,7 +743,7 @@ ${singleProjectCommands}`}
                 style={styles.historyFilterSelect}
                 disabled={historyTriggerOptions.length === 0}
               >
-                <option value="">All ({history.length})</option>
+                <option value="">All ({historyForSite.length})</option>
                 {historyTriggerOptions.map(([v, n]) => (
                   <option key={v} value={v}>{v} ({n})</option>
                 ))}
