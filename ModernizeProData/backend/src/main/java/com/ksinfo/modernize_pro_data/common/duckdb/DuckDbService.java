@@ -51,6 +51,16 @@ public class DuckDbService {
 
     public synchronized Connection getConnection() throws SQLException {
         if (connection == null || connection.isClosed()) {
+            // 파일 모드면 부모 디렉토리 보장 — DuckDB 가 자체 생성 안 함.
+            // jpackage 첫 설치 환경처럼 cwd 아래 data/ 가 없으면 IO Error 로 startup fail.
+            if (!memoryMode) {
+                try {
+                    Path parent = Path.of(filePath).toAbsolutePath().getParent();
+                    if (parent != null) Files.createDirectories(parent);
+                } catch (Exception e) {
+                    log.warn("DuckDB file-path 부모 디렉토리 생성 실패 {} : {}", filePath, e.getMessage());
+                }
+            }
             String url = memoryMode ? "jdbc:duckdb:" : "jdbc:duckdb:" + filePath;
             connection = DriverManager.getConnection(url);
             log.info("DuckDB connection opened: {}", url);
