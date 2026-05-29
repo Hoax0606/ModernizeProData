@@ -156,22 +156,37 @@ export function AppShell() {
     setActiveProject(st.activateProjectId ?? null);
   }, [location.key, setActiveProject]);
 
-  // 10초 간격으로 서버 동기화 (sites → projects → snapshots → audit logs 순서 보장).
+  /* 2 つの sync を分ける:
+     - heavy sync (10 s): sites → snapshots → audit logs.  changes slow, can wait.
+     - light sync ( 2 s): projects のみ. phase / runStatus がここに乗ってて、サイドバーの
+       phase badge の "running" カラーが Execution 画面の 2 秒 progress 表示と揃うように
+       同じ周期で fetch. Execution 起動直後でも phase badge が即色付く. */
   useEffect(() => {
-    const sync = async () => {
+    const heavySync = async () => {
       if (isEditingRef.current) return;
       await fetchSites();
       const siteId = useWorkspaceStore.getState().activeSiteId;
       if (siteId) {
-        await fetchProjects(siteId);
         await fetchSnapshots(siteId);
         await useAuditLogStore.getState().fetchBySite(siteId);
       }
     };
-    void sync();
-    const id = setInterval(() => void sync(), 10_000);
+    void heavySync();
+    const id = setInterval(() => void heavySync(), 10_000);
     return () => clearInterval(id);
-  }, [fetchSites, fetchProjects, fetchSnapshots]);
+  }, [fetchSites, fetchSnapshots]);
+
+  useEffect(() => {
+    const lightSync = async () => {
+      if (isEditingRef.current) return;
+      const siteId = useWorkspaceStore.getState().activeSiteId;
+      if (!siteId) return;
+      await fetchProjects(siteId);
+    };
+    void lightSync();
+    const id = setInterval(() => void lightSync(), 2_000);
+    return () => clearInterval(id);
+  }, [fetchProjects]);
 
   const activeSite = useMemo(() => sites.find((s) => s.id === activeSiteId) ?? null, [sites, activeSiteId]);
   const activeProject = useMemo(() => allProjects.find((p) => p.id === activeProjectId) ?? null, [allProjects, activeProjectId]);

@@ -1,18 +1,28 @@
 package com.ksinfo.modernize_pro_data.coordinator.worker;
 
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity;
+import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.runlog.RunLogLine;
+import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.OffsetDateTime;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 /**
  * Stage runner 공통 유틸 (static methods).
  *   - CSV 파일 해석 (SiteCsvPreviewController 패턴 그대로 — case-insensitive fallback)
  *   - RunLogLine 빌더 헬퍼
+ *   - Stage-level 실패의 Quarantine 카드 기록 (모든 stage 가 일관 사용)
  */
+@Slf4j
 public final class StageHelpers {
 
     private StageHelpers() {}
@@ -74,5 +84,54 @@ public final class StageHelpers {
 
     public static RunLogLine error(long seq, String runId, String stage, String message) {
         return line(seq, runId, stage, RunLogLine.LEVEL_ERROR, message);
+    }
+
+    /**
+     * Stage 실행 중 binding-level 실패 (timezone 파싱 / SQL syntax / 파일 부재 / encoding 등 구조적 에러)
+     * 를 Quarantine 카드로 노출. row-level 검증 위반과 달리 sample row 가 없으므로
+     * columns=["error"] / sampleRows=[[errorMessage]] 형태로 message 만 표시.
+     * LogViewer 의 Quarantine 탭에 카드로 나타나 사용자가 stream ERROR 만 보지 않아도 인지 가능.
+     *
+     * 사용처: 모든 stage 의 binding-level catch 절 — Check / Extract / Reconcile / Transform / Load.
+     * Audit / Verify 는 row-level / mismatch 카드를 자체 생성하므로 별개.
+     *
+     * @param stageDisplayName 카드 reason / detail 에 사용되는 stage 이름 (예: 'Transform', 'Extract').
+     * @param stageLabel       quarantineMock.ts 의 humanize 분기용 라벨 (예: 'transform.failure', 'encode').
+     */
+    public static void recordStageFailureQuarantine(
+            StageContext ctx,
+            QuarantineService quarantineService,
+            StageInstance stage,
+            MappingTableBinding binding,
+            String tableLabel,
+            String stageDisplayName,
+            String stageLabel,
+            String errorMessage) {
+        try {
+            String msg = errorMessage == null ? "(no message)" : errorMessage;
+            Map<String, Object> data = new HashMap<>();
+            data.put("reason", stageDisplayName + " failure");
+            data.put("detail", tableLabel + ": " + msg);
+            data.put("severity", "error");
+            data.put("stageLabel", stageLabel);
+            data.put("table", tableLabel);
+            data.put("columns", List.of("error"));
+            data.put("columnRoles", List.of("violated"));
+            data.put("sampleRows", List.of(List.of(msg)));
+            quarantineService.record(
+                    ctx.getRunHistory().getId(),
+                    stage.getId(),
+                    binding.getId(),
+                    null,
+                    stageDisplayName + " failure — " + tableLabel,
+                    QuarantineSeverity.error,
+                    data,
+                    1L,
+                    ctx.getLogLineSeqCursor());
+        } catch (Exception ex) {
+            // quarantine 기록 자체가 실패해도 stage 처리에 영향 X.
+            log.warn("Stage failure quarantine record failed for {} ({}): {}",
+                    tableLabel, stageDisplayName, ex.getMessage());
+        }
     }
 }

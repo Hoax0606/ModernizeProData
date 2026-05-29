@@ -3,6 +3,7 @@ package com.ksinfo.modernize_pro_data.coordinator.worker.stages;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlImport;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlImportRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
@@ -55,6 +56,8 @@ public class CheckStage implements StageRunner {
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
     private final DdlImportRepository ddlImportRepo;
+    private final QuarantineService quarantineService;
+    private final com.ksinfo.modernize_pro_data.common.duckdb.DuckDbService duckDbService;
     private final RunLogIngestService runLogIngest;
 
     @Override
@@ -86,6 +89,7 @@ public class CheckStage implements StageRunner {
             OffsetDateTime tableStart = OffsetDateTime.now();
             String tobeSchema = binding.getTobeSchema() == null ? "" : binding.getTobeSchema();
             String tobeTable  = binding.getTobeTable();
+            String tableLabel = tobeSchema.isBlank() ? tobeTable : tobeSchema + "." + tobeTable;
 
             StageTableResult result = stageTableResultRepo
                     .findByStageInstanceIdAndBindingId(stage.getId(), binding.getId())
@@ -95,6 +99,11 @@ public class CheckStage implements StageRunner {
             String error = projectError;
             if (error == null) {
                 error = validateBindingCsv(site, binding);
+            }
+            // Step 2 — CSV 존재까지 통과했으면 LIMIT 100 시범 read_csv_auto 로 인코딩/형식 사전 발견.
+            // Extract 가기 전에 미리 알림 → 대량 데이터 시간 절약.
+            if (error == null) {
+                error = probeBindingEncoding(ctx, site, binding, tableLabel);
             }
 
             OffsetDateTime tableEnd = OffsetDateTime.now();
@@ -106,11 +115,14 @@ public class CheckStage implements StageRunner {
                 Map<String, Object> detail = new HashMap<>();
                 detail.put("message", error);
                 result.setErrorDetail(detail);
-                ingest(ctx, "Check failed for " + tobeTable + ": " + error, false);
+                /* Step 1 — Quarantine 카드로도 노출. binding-level 실패가 한 탭에서 보이도록. */
+                StageHelpers.recordStageFailureQuarantine(ctx, quarantineService, stage, binding,
+                        tableLabel, "Check", "check.failure", error);
+                ingest(ctx, "Check failed for " + tableLabel + ": " + error, false);
                 failedCount++;
             } else {
                 result.setStatus(StageTableStatus.success);
-                ingest(ctx, "Check OK for " + tobeTable);
+                ingest(ctx, "Check OK for " + tableLabel);
                 successCount++;
             }
             stageTableResultRepo.save(result);
@@ -196,6 +208,56 @@ public class CheckStage implements StageRunner {
         } catch (Exception e) {
             return e.getMessage();
         }
+    }
+
+    /**
+     * Step 2 — binding 별 LIMIT 100 시범 read_csv_auto. Extract 의 정식 read 보다 가벼움
+     * (sample_size 작게 + LIMIT). 인코딩/형식 에러를 Extract 전에 발견 → 대량 데이터 시간 절약.
+     * 자동 변환은 안 함 (옵션 B 의 Source Reader SPI 영역, PoC2 이관).
+     *
+     * @return 에러 메시지 (null 이면 통과).
+     */
+    private String probeBindingEncoding(StageContext ctx, Site site,
+                                        MappingTableBinding binding, String tableLabel) {
+        if (site.getCsvPath() == null || site.getCsvPath().isBlank()) return null;
+        Path baseDir = Paths.get(site.getCsvPath()).toAbsolutePath().normalize();
+        String encodingClause = encodingClauseFor(site.getAsisEncoding());
+
+        for (var src : binding.getSources()) {
+            String asisTable = src.getAsisTable();
+            if (asisTable == null || asisTable.isBlank()) continue;
+            Path csv = StageHelpers.resolveCsvFile(baseDir, src.getAsisSchema(), asisTable);
+            if (csv == null) continue;  // validateBindingCsv 가 이미 잡았어야 — 방어적 skip.
+            String escapedPath = csv.toString().replace("\\", "/").replace("'", "''");
+            String probeSql = "SELECT * FROM read_csv_auto('" + escapedPath
+                    + "', header=true, sample_size=200, all_varchar=true" + encodingClause + ") LIMIT 100";
+            try (var st = duckDbService.statement();
+                 var rs = st.executeQuery(probeSql)) {
+                // ResultSet 소비 — 인코딩/형식 위반은 next() 도중 throw.
+                while (rs.next()) { /* drain */ }
+            } catch (Exception e) {
+                return "encoding/format probe failed for " + asisTable + ".csv: " + e.getMessage();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * ExtractStage 의 encodingClause 와 동일 규칙. site.asisEncoding → read_csv 의 encoding 절.
+     * UTF-8 / null / blank → 빈 문자열 (DuckDB native).
+     */
+    private static String encodingClauseFor(String asisEncoding) {
+        if (asisEncoding == null || asisEncoding.isBlank()) return "";
+        String enc = asisEncoding.trim().toLowerCase();
+        if (enc.equals("utf-8") || enc.equals("utf8")) return "";
+        if (enc.equals("shift_jis") || enc.equals("shiftjis") || enc.equals("sjis")) {
+            return ", encoding='shift_jis'";
+        }
+        if (enc.equals("euc-jp") || enc.equals("euc_jp") || enc.equals("eucjp")) {
+            return ", encoding='EUC_JP'";
+        }
+        // pass-through — DuckDB encodings 확장이 인식 가능하면 통과, 아니면 read 시 throw.
+        return ", encoding='" + asisEncoding.trim().replace("'", "''") + "'";
     }
 
     private void ingest(StageContext ctx, String message) {
