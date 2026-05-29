@@ -2282,9 +2282,17 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
 
           {sources.length > 0 && (
             <div style={{ marginTop: 12 }}>
-              <div style={styles.whereLabel}>
+              <div style={{ ...styles.whereLabel, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span>EXPAND (row 1:N)</span>
                 <span style={styles.whereHint}>{t('mapping.binding.expandHint')}</span>
+                <div style={{ flex: 1 }} />
+                <ExpandTemplateMenu
+                  onPick={(kind) => {
+                    const alias = sources[0]?.alias || 't';
+                    onExpandChange(kind === null ? '' : generateExpandTemplate(kind, alias));
+                  }}
+                  disabled={readOnly}
+                />
               </div>
               <AutocompleteInput
                 completions={aliasColumnOptions}
@@ -2349,6 +2357,28 @@ type RowEdit = { savedSrc?: string[]; savedRule?: string; savedDefault?: string;
  * row editor / 자동완성이 expand alias.column 도 source 후보로 보여줄 수 있게 한다.
  * type 정보는 expand_expr 에 없으므로 VARCHAR fallback.
  */
+/** EXPAND template kind — dropdown 의 선택 항목. null = Clear. */
+type ExpandTemplateKind = 'wide_to_long' | 'array_unnest';
+
+/**
+ * binding 의 첫 source alias 를 받아 expand_expr 의 boilerplate SQL 을 생성.
+ * 사용자가 dropdown 에서 template 선택 시 호출. -- TODO: 주석으로 수정 위치 안내.
+ */
+function generateExpandTemplate(kind: ExpandTemplateKind, sourceAlias: string): string {
+  const a = sourceAlias || 't';
+  // 사용자 수정 부분은 {...} 마커로 표시 — input 안에서 부분 색/이탤릭은 native 로 안 되므로
+  // 시각적 구분은 마커 syntax 로. 사용자가 {...} 모두 교체하지 않으면 SQL invalid 라
+  // Trial 에서 즉시 피드백.
+  if (kind === 'wide_to_long') {
+    return `CROSS JOIN LATERAL (VALUES
+  ('{label1}', ${a}.{COLUMN_A}),
+  ('{label2}', ${a}.{COLUMN_B})
+) AS {alias}({label_col}, {value_col})`;
+  }
+  // array_unnest
+  return `, UNNEST([{'A','B','C'}], [${a}.{VAL_A}, ${a}.{VAL_B}, ${a}.{VAL_C}]) AS {alias}({code_col}, {val_col})`;
+}
+
 function parseExpandAliases(expr: string | undefined | null): { alias: string; columns: string[] }[] {
   if (!expr) return [];
   const out: { alias: string; columns: string[] }[] = [];
@@ -2360,6 +2390,106 @@ function parseExpandAliases(expr: string | undefined | null): { alias: string; c
   }
   return out;
 }
+
+/**
+ * EXPAND template dropdown — binding 패널의 EXPAND label 우측에 표시.
+ * 사용자가 항목 선택 → onPick callback. kind=null 은 Clear (EXPAND 칸 비우기).
+ */
+function ExpandTemplateMenu({ onPick, disabled }: {
+  onPick: (kind: ExpandTemplateKind | null) => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener('mousedown', onDocClick);
+    return () => window.removeEventListener('mousedown', onDocClick);
+  }, [open]);
+  const pick = (kind: ExpandTemplateKind | null) => {
+    onPick(kind);
+    setOpen(false);
+  };
+  return (
+    <div ref={wrapRef} style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          background: 'transparent',
+          border: '1px solid var(--border)',
+          padding: '2px 8px',
+          fontSize: 10.5,
+          fontFamily: 'var(--mono)',
+          color: 'var(--text-2)',
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          opacity: disabled ? 0.5 : 1,
+          borderRadius: 2,
+        }}
+      >
+        {t('mapping.binding.expandTemplate.button')}
+      </button>
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '100%',
+            right: 0,
+            marginTop: 2,
+            background: 'var(--panel)',
+            border: '1px solid var(--border)',
+            borderRadius: 2,
+            boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
+            zIndex: 100,
+            minWidth: 200,
+            padding: '4px 0',
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => pick('wide_to_long')}
+            style={menuItemStyle}
+          >
+            {t('mapping.binding.expandTemplate.wideToLong')}
+          </button>
+          <button
+            type="button"
+            onClick={() => pick('array_unnest')}
+            style={menuItemStyle}
+          >
+            {t('mapping.binding.expandTemplate.arrayUnnest')}
+          </button>
+          <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+          <button
+            type="button"
+            onClick={() => pick(null)}
+            style={{ ...menuItemStyle, color: 'var(--text-3)' }}
+          >
+            {t('mapping.binding.expandTemplate.clear')}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const menuItemStyle: React.CSSProperties = {
+  display: 'block',
+  width: '100%',
+  textAlign: 'left',
+  background: 'transparent',
+  border: 'none',
+  padding: '6px 12px',
+  fontSize: 11,
+  fontFamily: 'var(--mono)',
+  color: 'var(--text)',
+  cursor: 'pointer',
+};
 
 function resolveSrcType(s: string, sources: TobeTable['sources'], expandExpr?: string): string {
   if (!s) return '—';
