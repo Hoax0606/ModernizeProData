@@ -261,6 +261,18 @@ public class RunController {
             }
             RunResult r = runService.startRun(
                     p.getId(), rtOpt.get(), source, requestedBy, credentialId);
+            // Bulk run marker — 이 run 이 /runs/all (= 일괄 시작) 으로 생성됐음을 metadata 에
+            // 박는다. 진행 중 abort 권한이 master 한정인지 (= bulk) 아니면 그 assignee 본인도
+            // 가능한지 (= 단일) frontend 가 이 값으로 분기.
+            if (r.status() == RunStartStatus.STARTED && r.runId() != null) {
+                runHistoryRepo.findById(r.runId()).ifPresent(rh -> {
+                    java.util.Map<String, Object> md = new java.util.HashMap<>(
+                            rh.getMetadata() == null ? java.util.Map.of() : rh.getMetadata());
+                    md.put("bulk", true);
+                    rh.setMetadata(md);
+                    runHistoryRepo.save(rh);
+                });
+            }
             results.add(RunResultDto.of(r, p.getId(), p.getName()));
             switch (r.status()) {
                 case STARTED -> started++;

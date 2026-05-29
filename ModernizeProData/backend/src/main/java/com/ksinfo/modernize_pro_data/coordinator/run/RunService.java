@@ -262,18 +262,10 @@ public class RunService {
             stageInstanceRepo.save(si);
         }
 
-        // 6. WS dispatch — Worker へ RUN_START
-        try {
-            workerDispatcher.dispatchRunStart(rh);
-        } catch (Exception e) {
-            // WS push 失敗時はトランザクション巻き戻しを誘発するため例外を伝播
-            // → run_history INSERT も project.run_status='running' もロールバックされる
-            log.error("WS dispatch failed for runId={}, rolling back", rh.getId(), e);
-            throw new RuntimeException("Failed to dispatch run to Worker: " + e.getMessage(), e);
-        }
-
-        // 7. Local stage 실행 trigger — transaction commit 후 별 thread 에서 7-stage 실행.
-        //    @TransactionalEventListener(AFTER_COMMIT) + @Async (RunExecutionListener).
+        // 6. 실행 트리거 — transaction commit 후 RunExecutionListener 가 dispatch / local 분기.
+        //    이 transaction 안에서 직접 WS push 하면 Worker 가 메시지 받은 시점에 run_history
+        //    INSERT 가 아직 commit 전이라 runRepo.findById 가 null → "run not found" race.
+        //    @TransactionalEventListener(AFTER_COMMIT) 이 listener 가 push 와 local 실행 둘 다 처리.
         eventPublisher.publishEvent(new RunStartedEvent(rh.getId(), projectId));
 
         log.info("startRun started runId={} projectId={} runType={} trigger={}",
@@ -304,10 +296,15 @@ public class RunService {
      * 中断 — run_history.status='aborted' + projects.run_status='idle' 复귀.
      * 使い道: 사용자가 명시적으로 취소 / 시간 초과 sweep / dev 환경에서 stuck 解除.
      * fail 와의 차이: 시스템 에러가 아니라 의도된 중단 (audit 上 구별).
+     *
+     * Worker dispatch 가 걸렸던 run 이면 그 worker 에도 RUN_CANCEL envelope 을 보내 worker
+     * process 의 in-memory RunControlRegistry 가 stage runner 를 깨우게 한다.
+     * (Coordinator 의 runControlRegistry.cancel 만 호출해서는 Worker JVM 에 신호가 안 간다.)
      */
     @Transactional
     public RunHistory abortRun(String runId, String reason) {
         runControlRegistry.cancel(runId);   // 다음 stage 경계 진입 전 break.
+        dispatchCancelToWorkerIfRemote(runId, reason);
         return finishRun(runId, RunStatus.aborted, null, null, reason);
     }
 
@@ -318,7 +315,32 @@ public class RunService {
     @Transactional
     public RunHistory timeoutRun(String runId, String reason) {
         runControlRegistry.cancel(runId);
+        dispatchCancelToWorkerIfRemote(runId, reason);
         return finishRun(runId, RunStatus.timed_out, null, null, reason);
+    }
+
+    /**
+     * RunHistory.workerId 가 가리키는 worker 가 Coordinator self 가 아니고 현재 online 이면
+     * 그 worker 에 RUN_CANCEL WS push. offline / self / 미할당 인 경우 no-op.
+     * 호출자 (abortRun/timeoutRun) 가 finishRun 전에 부르는 게 의도 — worker stage runner
+     * 가 cancel signal 받는 시점이 DB 상태 변경보다 약간 앞서도 무방.
+     */
+    private void dispatchCancelToWorkerIfRemote(String runId, String reason) {
+        RunHistory rh = runHistoryRepo.findById(runId).orElse(null);
+        if (rh == null) return;
+        String assignee = rh.getWorkerId();
+        if (assignee == null || assignee.isBlank()) return;
+        if (assignee.equals(coordinatorSelfUsername)) return;
+        if (workerNodeService.findOnlineForUsername(assignee).isEmpty()) {
+            log.info("RUN_CANCEL skipped — worker offline runId={} workerId={}", runId, assignee);
+            return;
+        }
+        try {
+            workerDispatcher.dispatchRunCancel(assignee, runId, reason);
+            log.info("RUN_CANCEL dispatched runId={} workerId={} reason={}", runId, assignee, reason);
+        } catch (Exception e) {
+            log.error("RUN_CANCEL dispatch failed runId={} workerId={}", runId, assignee, e);
+        }
     }
 
     // pauseRun / resumeRun 제거 (2026-05-29). Stop + Retry (resume-from-failed-stage) 가
@@ -370,6 +392,16 @@ public class RunService {
         if (rh.getRunType() == RunType.rehearsal) {
             project.setScheduleLastRunAt(OffsetDateTime.now());
         }
+
+        // cutover 成功完了 → phase を hypercare へ自動遷移 (one-way).
+        // 失敗/abort/timeout の場合は cutover phase に留まり、再試行を許す.
+        if (rh.getRunType() == RunType.cutover && finalStatus == RunStatus.success
+                && "cutover".equals(project.getPhase())) {
+            log.info("Phase auto-advance projectId={} cutover -> hypercare (runId={})",
+                    project.getId(), runId);
+            project.setPhase("hypercare");
+        }
+
         projectRepo.save(project);
 
         log.info("finishRun runId={} status={} durationMs={}", runId, finalStatus, durationMs);
@@ -460,8 +492,8 @@ public class RunService {
     /**
      * Run 起動 시 phase 자동 진행. 현재보다 앞으로만 이동, 후퇴 없음.
      *   - test     → 'test'
-     *   - rehearsal → 'rehearsal'
-     *   - cutover  → no-op (이미 'ready' 가드 통과 — cutover 라이프사이클은 별도 작업)
+     *   - rehearsal → 'rehearsal' (sign-off 에서 Run 시 rehearsal 로 진행)
+     *   - cutover  → 'cutover'   (ready 에서 Run 시 cutover 로 진행 — 종료 시 finishRun 이 hypercare 로 추가 advance)
      * 데모 모드 FE 가 자체적으로 하던 setProjectPhaseAndRunStatus 의 phase 부분을 BE 로 이관.
      * 참고 선례: DdlImportService.importDdl 의 planning → analysis 자동 전이.
      */
@@ -469,9 +501,8 @@ public class RunService {
         String desired = switch (runType) {
             case test -> "test";
             case rehearsal -> "rehearsal";
-            case cutover -> null;
+            case cutover -> "cutover";
         };
-        if (desired == null) return;
         int curIdx = PHASE_ORDER.indexOf(project.getPhase());
         int desIdx = PHASE_ORDER.indexOf(desired);
         if (curIdx >= 0 && desIdx > curIdx) {

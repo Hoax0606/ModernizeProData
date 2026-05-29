@@ -37,6 +37,7 @@ export function ExecutionOverviewPage() {
   const activeSiteId = useWorkspaceStore((s) => s.activeSiteId);
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const setProjectExecutionAssignee = useWorkspaceStore((s) => s.setProjectExecutionAssignee);
+  const fetchProjects = useWorkspaceStore((s) => s.fetchProjects);
 
   const site = useMemo(() => sites.find((s) => s.id === activeSiteId) ?? null, [sites, activeSiteId]);
   // assignee 변경에도 행 순서가 바뀌지 않도록 createdAt asc 로 명시 정렬.
@@ -121,11 +122,37 @@ export function ExecutionOverviewPage() {
   useEffect(() => { loadMetrics(); }, [loadMetrics]);
   // (A) 자동 갱신 — Execution 단일 페이지와 동일한 5초 polling. 다른 페이지로 떠나면 cleanup.
   // run 시작 / 종료 / abort 후 사용자가 Refresh 안 눌러도 화면이 따라온다.
+  // metrics 만이 아니라 projects 도 같이 refetch — finishRun 이 cutover→hypercare 로
+  // phase 를 advance 하므로 chip 색상도 같이 따라와야 한다.
   useEffect(() => {
     if (!activeSiteId) return;
-    const id = window.setInterval(() => loadMetrics(), 5_000);
+    const id = window.setInterval(() => {
+      loadMetrics();
+      fetchProjects(activeSiteId);
+    }, 5_000);
     return () => window.clearInterval(id);
-  }, [activeSiteId, loadMetrics]);
+  }, [activeSiteId, loadMetrics, fetchProjects]);
+
+  // Run 종료 시 그 행만 selected 에서 자동 해제 — 사용자가 매번 직접 체크 해제할 필요 없게.
+  // running / paused / pending / null (run 시작 전) 은 유지 — Abort 활성화를 위해.
+  // success / failed / aborted / timed_out 으로 떨어지면 자동 해제.
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set(prev);
+      let changed = false;
+      for (const id of prev) {
+        const m = apiMetrics[id];
+        if (!m) continue;
+        const s = m.runStatus;
+        if (s === 'success' || s === 'failed' || s === 'aborted' || s === 'timed_out') {
+          next.delete(id);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [apiMetrics]);
 
   // worker_nodes — master 만 fetch (endpoint 가 master only). assignee 별 online dot 용.
   // 90s heartbeat timeout. 동일 5초 polling.
@@ -284,8 +311,12 @@ export function ExecutionOverviewPage() {
       // TODO(toast): 페이지에 inline 토스트 도입 후 alert 제거.
       window.alert(rejected.join('\n'));
     }
-    setSelected(new Set());
+    // 선택 유지 — Run 직후 Abort 활성화를 위해 selectedRunningCount 가 살아 있어야 함.
+    // 사용자가 명시적으로 체크 해제하기 전까지는 그대로.
     loadMetrics();
+    // Run 起動と同時に backend が phase advance (sign-off→rehearsal, ready→cutover) +
+    // run_status='running' に変えるので、projects も refetch して chip / 行状態を即反映.
+    if (activeSiteId) fetchProjects(activeSiteId);
   };
   const handleAbort = async () => {
     if (!isMaster) return;
@@ -297,6 +328,7 @@ export function ExecutionOverviewPage() {
       .map((m) => m.latestRunId!);
     await Promise.allSettled(runIds.map((rid) => runsApi.abort(rid, 'aborted from overview')));
     loadMetrics();
+    if (activeSiteId) fetchProjects(activeSiteId);
   };
 
   // KPI 집계 — phase 기준 (running/done counter 용).
@@ -324,7 +356,12 @@ export function ExecutionOverviewPage() {
       : failedRuns > 0
         ? t('executionOverview.statusFailed', { n: failedRuns })
         : t('executionOverview.statusAllDone');
-  const totalTables = siteProjects.reduce((a, p) => a + p.tableCount, 0);
+  /* "전체 tables" 는 그 project 가 run 에서 처리한 테이블 수 기준 (metric.tablesTotal).
+     run 박제가 없으면 project.tableCount (= DDL TO-BE 수) 로 fallback. DDL 에는 5 테이블이
+     있어도 mapping 이 3 만 정의돼있고 그 3 만 run 했다면 "3/3" 으로 보여야 자연스럽다. */
+  const totalTables = siteProjects.reduce(
+    (a, p) => a + (metrics[p.id]?.tablesTotal ?? p.tableCount ?? 0), 0,
+  );
   const totalRows = siteProjects.reduce((a, p) => a + (metrics[p.id]?.rows ?? 0), 0);
   const totalTablesDone = siteProjects.reduce((a, p) => a + (metrics[p.id]?.tablesDone ?? 0), 0);
   const totalErrors = siteProjects.reduce((a, p) => a + (metrics[p.id]?.errorCount ?? 0), 0);
@@ -487,7 +524,7 @@ export function ExecutionOverviewPage() {
                       <span style={{ ...styles.projName, ...(dimColor ? { color: dimColor } : {}) }}>{p.name}</span>
                     </td>
                     <td style={styles.td}>
-                      <span style={{ ...styles.phaseChip, ...phaseChipColor(p.phase, p.runStatus) }}>{p.phase}</span>
+                      <span style={{ ...styles.phaseChip, ...phaseChipColor(p.phase, metrics[p.id]?.runStatus ?? p.runStatus) }}>{p.phase}</span>
                     </td>
                     <td style={styles.td}>
                       {(() => {

@@ -75,4 +75,16 @@ export const snapshotApi = {
   /** 고정핀 해제. */
   clearBaseline: (id: string) =>
     unwrap(api.delete<ApiResponse<MappingSnapshot>>(`/api/v1/snapshots/${id}/baseline`)),
+
+  /** + New / + Cutover snapshot 버튼 활성화 판단용.
+   *  - hasChanges: mapping snapshot 활성 기준 (직전 snapshot 대비 변경 여부).
+   *  - hasRun:     cutover snapshot 활성 기준 (project 에 run 이력 있는지 — mapping 변경 무관). */
+  hasChanges: (projectId: string) =>
+    unwrap(api.get<ApiResponse<{
+      hasChanges: boolean;
+      hasRun: boolean;
+      added: number;
+      modified: number;
+      removed: number;
+    }>>(`/api/v1/projects/${projectId}/snapshots/has-changes`)),
 };

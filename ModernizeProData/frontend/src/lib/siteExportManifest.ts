@@ -562,3 +562,213 @@ export function manifestToClipboardText(site: Site, manifest: ManifestEntry[], g
     ...manifest.map(m => `${m.path}\t${fmtBytes(m.size)}`),
   ].join('\n');
 }
+
+/* ────────────────────────────────────────────────────────────────
+ * 미리보기용 데이터 생성기 — Migration SQL / Validation plan / Mapping preview.
+ * snapshot rules + bindings + DDL 으로 실 동작 가능한 SQL / 검증 계획을 생성.
+ * (백엔드 export job 이 결국 같은 것을 만듦. FE 미리보기는 작업 검수용.)
+ * ──────────────────────────────────────────────────────────────── */
+
+/** Validation 시트 컬럼 정의 — ArtifactsPage.tsx SHEETS.validation 과 동일. */
+export interface ValidationSheetSpec {
+  name: string;
+  columns: { name: string; type: string }[];
+  freeForm?: boolean;
+}
+export const VALIDATION_SHEET_COLUMNS: ValidationSheetSpec[] = [
+  { name: 'Overview', freeForm: true, columns: [
+    { name: 'Item',    type: 'TEXT' },
+    { name: 'ASIS',    type: 'TEXT' },
+    { name: 'TOBE',    type: 'TEXT' },
+    { name: 'Verdict', type: 'TEXT' },
+  ]},
+  { name: 'Sum recon', columns: [
+    { name: 'Column',    type: 'VARCHAR' },
+    { name: 'Type',      type: 'VARCHAR' },
+    { name: 'SUM(ASIS)', type: 'NUMBER' },
+    { name: 'SUM(TOBE)', type: 'NUMBER' },
+    { name: 'Δ %',       type: 'TEXT' },
+    { name: 'Verdict',   type: 'TEXT' },
+  ]},
+  { name: 'NULL parity', columns: [
+    { name: 'Column',     type: 'VARCHAR' },
+    { name: 'Type',       type: 'VARCHAR' },
+    { name: 'NULLS ASIS', type: 'BIGINT' },
+    { name: 'NULLS TOBE', type: 'BIGINT' },
+    { name: 'Δ',          type: 'BIGINT' },
+    { name: 'Verdict',    type: 'TEXT' },
+  ]},
+  { name: 'Range', columns: [
+    { name: 'Column',        type: 'VARCHAR' },
+    { name: 'Type',          type: 'VARCHAR' },
+    { name: 'Bound',         type: 'TEXT' },
+    { name: 'Observed max',  type: 'NUMBER' },
+    { name: 'Overflow rows', type: 'INT' },
+    { name: 'Verdict',       type: 'TEXT' },
+  ]},
+];
+
+/** Migration SQL 한 테이블당 entry — Tables 시트 + Sample SQL 시트 용도. */
+export interface MigrationSqlEntry {
+  table: string;          // fully qualified TOBE table
+  ruleCount: number;
+  composition: string;    // 'single' | 'join (N)' | 'union (N)' | 'none'
+  source: string;         // AS-IS source(s) joined by composition symbol
+  sql: string;            // CREATE + INSERT statements
+}
+
+/** snapshot rules + bindings + TOBE DDL → 실 INSERT/CREATE SQL.
+ *  공통 transformation logic — 백엔드 export job 의 출력과 큰 틀 동일. */
+export function generateMigrationSql(
+  rules: Array<{
+    strategy: 'expression' | 'null' | 'default' | 'skip';
+    tobeSchema: string; tobeTable: string; tobeColumn: string;
+    asisTable: string | null; asisColumn: string[] | null;
+    transformSql: string | null; transformRule: string | null;
+    defaultValue: string | null;
+  }>,
+  bindings: Array<{
+    tobeSchema: string; tobeTable: string;
+    compositionKind: 'single' | 'join' | 'union' | 'none';
+    sources: Array<{ asisSchema: string | null; asisTable: string; alias: string; role: 'primary' | 'join' | 'union'; joinType: string | null; joinOn: string | null }>;
+  }>,
+  tobeSchema: DdlSchema | null,
+): MigrationSqlEntry[] {
+  if (!tobeSchema) return [];
+  const rulesByTable = new Map<string, typeof rules>();
+  for (const r of rules) {
+    const key = `${r.tobeSchema || ''}.${r.tobeTable}`.toLowerCase();
+    if (!rulesByTable.has(key)) rulesByTable.set(key, []);
+    rulesByTable.get(key)!.push(r);
+  }
+  const bindingByTable = new Map<string, typeof bindings[number]>();
+  for (const b of bindings) bindingByTable.set(`${b.tobeSchema || ''}.${b.tobeTable}`.toLowerCase(), b);
+
+  const out: MigrationSqlEntry[] = [];
+  for (const tw of [...tobeSchema.tables].sort((a, b) => a.table.ordinal - b.table.ordinal)) {
+    const key = `${tw.table.schemaName || ''}.${tw.table.physicalName}`.toLowerCase();
+    const tableRules = rulesByTable.get(key) ?? [];
+    if (tableRules.length === 0) continue;
+    const tobeFqn = `${tw.table.schemaName ? tw.table.schemaName + '.' : ''}${tw.table.physicalName}`;
+    const binding = bindingByTable.get(key);
+
+    const composition: string = binding
+      ? binding.compositionKind === 'single' ? 'single'
+        : binding.compositionKind === 'none' ? 'none'
+        : `${binding.compositionKind} (${binding.sources.length})`
+      : 'none';
+    const sourceJoin = binding?.compositionKind === 'join' ? ' ⋈ '
+                    : binding?.compositionKind === 'union' ? ' ∪ ' : ', ';
+    const source = binding && binding.sources.length > 0
+      ? binding.sources.map((s) => `${s.asisSchema ? s.asisSchema + '.' : ''}${s.asisTable}`).join(sourceJoin)
+      : '—';
+
+    const nonSkip = tableRules.filter((r) => r.strategy !== 'skip');
+    const insertCols = nonSkip.map((r) => r.tobeColumn);
+    const primary = binding?.sources.find((s) => s.role === 'primary') ?? binding?.sources[0];
+    const primaryAlias = primary?.alias || 'a';
+
+    const selectExprs = nonSkip.map((r) => {
+      if (r.strategy === 'null') return `NULL AS ${r.tobeColumn}`;
+      if (r.strategy === 'default') {
+        const dv = r.defaultValue ?? '';
+        const isNum = /^-?\d+(\.\d+)?$/.test(dv);
+        return `${isNum ? dv : `'${dv.replace(/'/g, "''")}'`} AS ${r.tobeColumn}`;
+      }
+      if (r.transformSql && r.transformSql.trim()) return `${r.transformSql.trim()} AS ${r.tobeColumn}`;
+      const cols = (r.asisColumn ?? []).filter((c) => c && c.trim());
+      if (cols.length === 0) return `NULL /* no source */ AS ${r.tobeColumn}`;
+      if (cols.length === 1) return `${primaryAlias}.${cols[0]} AS ${r.tobeColumn}`;
+      return `/* combine: ${cols.join(', ')} */ ${primaryAlias}.${cols[0]} AS ${r.tobeColumn}`;
+    });
+
+    let fromClause = '';
+    if (!binding || binding.sources.length === 0) {
+      fromClause = `FROM (/* no binding */)`;
+    } else if (binding.compositionKind === 'single' || binding.sources.length === 1) {
+      const p = primary!;
+      fromClause = `FROM ${p.asisSchema ? p.asisSchema + '.' : ''}${p.asisTable} AS ${p.alias || 'a'}`;
+    } else if (binding.compositionKind === 'join') {
+      const lines = [`FROM ${primary!.asisSchema ? primary!.asisSchema + '.' : ''}${primary!.asisTable} AS ${primary!.alias}`];
+      for (const s of binding.sources) {
+        if (s === primary) continue;
+        const jt = s.joinType || 'LEFT JOIN';
+        const tn = `${s.asisSchema ? s.asisSchema + '.' : ''}${s.asisTable}`;
+        const on = s.joinOn?.trim() || '/* missing join clause */';
+        lines.push(`${jt} ${tn} AS ${s.alias} ON ${on}`);
+      }
+      fromClause = lines.join('\n');
+    } else {
+      // union
+      fromClause = `FROM ${primary!.asisSchema ? primary!.asisSchema + '.' : ''}${primary!.asisTable} AS ${primary!.alias}  -- (UNION ALL with ${binding.sources.length - 1} more)`;
+    }
+
+    const createCols = tw.columns
+      .sort((a, b) => a.ordinal - b.ordinal)
+      .map((c) => {
+        const nn = c.nullable ? '' : ' NOT NULL';
+        const dv = c.defaultValue ? ` DEFAULT ${c.defaultValue}` : '';
+        return `  ${c.physicalName} ${c.dataTypeRaw}${nn}${dv}`;
+      });
+    const pkCols = tw.columns
+      .filter((c) => c.pkOrder != null)
+      .sort((a, b) => (a.pkOrder ?? 0) - (b.pkOrder ?? 0))
+      .map((c) => c.physicalName);
+    const pkLine = pkCols.length > 0 ? `,\n  PRIMARY KEY (${pkCols.join(', ')})` : '';
+
+    const sql = [
+      `-- ${tobeFqn}`,
+      `CREATE TABLE IF NOT EXISTS ${tobeFqn} (`,
+      createCols.join(',\n') + pkLine,
+      `);`,
+      ``,
+      `INSERT INTO ${tobeFqn} (`,
+      insertCols.map((c) => `  ${c}`).join(',\n'),
+      `)`,
+      `SELECT`,
+      selectExprs.map((e) => `  ${e}`).join(',\n'),
+      fromClause,
+      `;`,
+    ].join('\n');
+
+    out.push({ table: tobeFqn, ruleCount: nonSkip.length, composition, source, sql });
+  }
+  return out;
+}
+
+/** TOBE DDL → 어떤 컬럼에 어떤 검증이 걸리는지 (Sum/NULL/Range) 플랜. 비교 값은 'pending'. */
+export interface ValidationPlanRows {
+  Overview:      (string | number | null)[][];
+  'Sum recon':   (string | number | null)[][];
+  'NULL parity': (string | number | null)[][];
+  Range:         (string | number | null)[][];
+}
+
+const NUMERIC_TYPE_RE = /^(NUMBER|NUMERIC|DECIMAL|INT|INTEGER|BIGINT|SMALLINT|FLOAT|REAL|DOUBLE)/i;
+const STRING_BOUND_TYPE_RE = /^(VARCHAR|CHAR|VARCHAR2)/i;
+
+export function generateValidationPlan(tobeSchema: DdlSchema | null): ValidationPlanRows {
+  const empty: ValidationPlanRows = { Overview: [], 'Sum recon': [], 'NULL parity': [], Range: [] };
+  if (!tobeSchema) return empty;
+
+  for (const tw of [...tobeSchema.tables].sort((a, b) => a.table.ordinal - b.table.ordinal)) {
+    const tobeFqn = `${tw.table.schemaName ? tw.table.schemaName + '.' : ''}${tw.table.physicalName}`;
+    empty.Overview.push([tobeFqn, 'pending', 'pending', 'pending']);
+    for (const c of tw.columns) {
+      const type = (c.dataType || c.dataTypeRaw || '').toUpperCase();
+      const rawType = c.dataTypeRaw || type;
+      if (NUMERIC_TYPE_RE.test(type)) {
+        empty['Sum recon'].push([c.physicalName, rawType, null, null, null, 'pending']);
+      }
+      if (c.nullable) {
+        empty['NULL parity'].push([c.physicalName, rawType, null, null, null, 'pending']);
+      }
+      if (c.length != null && STRING_BOUND_TYPE_RE.test(type)) {
+        empty.Range.push([c.physicalName, rawType, `len ≤ ${c.length}`, null, null, 'pending']);
+      } else if (/SMALLINT/i.test(type)) {
+        empty.Range.push([c.physicalName, rawType, '±32767', null, null, 'pending']);
+      }
+    }
+  }
+  return empty;
+}

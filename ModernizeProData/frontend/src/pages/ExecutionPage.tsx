@@ -81,6 +81,7 @@ export function ExecutionPage() {
   );
 
   const user = useAuthStore((s) => s.user);
+  const isMaster = user?.role === 'master';
 
   /* 활성 run id. start 성공 시 BE 반환값 보존 → usePipelineProgress 자동 polling.
      setActiveRunId(null) 로 polling 정지 + 표시 클리어.
@@ -164,6 +165,31 @@ export function ExecutionPage() {
   const selectedTables = useMemo(() => new Set(entrySelected ?? []), [entrySelected]);
   const preflightPhase: PreflightPhase = entryPhase ?? 'idle';
   const isStale: boolean = entryStale ?? false;
+
+  /* pinned snapshot 이 바뀔 때 그 snapshot 의 박제된 tables 로 selectedTables 동기.
+     - 박제 있음 → 그 run 에서 status='success' 인 tobeTable 만 자동 체크.
+       (실패한 tobeTable 까지 union 하면 다음 run 도 또 실패 — mapping 미정의 테이블이
+       반복적으로 selectedTables 에 끼는 사용자 함정 발생.)
+     - 박제 없음 (= 새 snapshot 이라 아직 한 번도 run 안 됨) → 빈 set.
+     deps 는 pinnedSnapshot.id + executionContext.runId — 같은 snapshot 으로 재실행
+     해서 executionContext 가 갱신된 경우도 따라간다. */
+  useEffect(() => {
+    if (!project) return;
+    if (!pinnedSnapshot) return; // pin 없으면 그대로 (test ad-hoc 등).
+    const ctx = pinnedSnapshot.executionContext;
+    if (!ctx) {
+      useExecutionPreflightStore.getState().setSelected(project.id, []);
+      return;
+    }
+    const tables = new Set<string>();
+    for (const st of ctx.stages) {
+      for (const t of st.tables) {
+        if (t.tobeTable && t.status === 'success') tables.add(t.tobeTable);
+      }
+    }
+    useExecutionPreflightStore.getState().setSelected(project.id, [...tables]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinnedSnapshot?.id, pinnedSnapshot?.executionContext?.runId, project?.id]);
 
   const setSelectedTables = (next: Set<string>) => {
     if (!project) return;
@@ -426,7 +452,15 @@ export function ExecutionPage() {
     if (fallbackSnapshot) setDiscardedSnapshotId(fallbackSnapshot.id);
   };
 
+  // Stop 권한: 자기 project 인 assignee 본인은 자기 run 을 stop 가능. 단 그 run 이
+  // master 가 /runs/all 로 일괄 시작한 bulk run (metadata.bulk === true) 이면 master 만.
+  // master 는 모든 경우 stop 가능.
+  const isMyProject = !!user?.username && project?.executionAssignee === user.username;
+  const runIsBulk = run?.metadata != null && (run.metadata as Record<string, unknown>).bulk === true;
+  const canStop = isMaster || (isMyProject && !runIsBulk);
+
   const handleStopRun = async () => {
+    if (!canStop) return;
     if (!activeRunId) return;
     if (run && isTerminal(run.status)) return; // 既に terminal 이면 무시
     try {
@@ -451,6 +485,7 @@ export function ExecutionPage() {
         selectedTablesCount={selectedTables.size}
         onStart={handleStartRun}
         onStop={handleStopRun}
+        canStop={canStop}
         onRetry={handleRetry}
         onDiscard={handleDiscard}
       />
@@ -505,6 +540,8 @@ function RunHeader({
   selectedTablesCount: number;
   onStart: () => void;
   onStop: () => void;
+  /** Stop 권한 — assignee 본인은 자기 run stop 가능, 단 bulk run (master 가 일괄 시작) 은 master 만. */
+  canStop: boolean;
   onRetry: () => void;
   onDiscard: () => void;
 }) {
@@ -1073,22 +1110,23 @@ function phaseOrder(phase: ProjectPhase): number {
 
 /**
  * phase × site.environment から起動可能な run mode を導出.
- * BE 側 `RunService.resolveRunTypeFromPhase` と一致させる:
+ * BE 側 `RunService.resolveRunTypeFromPhase` と一致させる (2026-05-29 update):
  *   - production + ready             → cutover (本番移行)
  *   - production + その他            → null   (本番では ready のみ実行可)
- *   - non-prod   + rehearsal         → rehearsal (リハーサル run)
+ *   - non-prod   + sign-off          → rehearsal (sign-off で Run = rehearsal 進行)
+ *   - non-prod   + rehearsal         → rehearsal
  *   - non-prod   + cutover/hypercare/done → null (既に走っている / 終了済)
- *   - non-prod   + その他            → test (planning / analysis / test / sign-off / ready
- *                                            すべて test run 扱い — preflight 通れば起動可)
+ *   - non-prod   + その他            → test (planning / analysis / test / ready
+ *                                            preflight 通れば起動可)
  */
 function deriveRunMode(phase: ProjectPhase, env: ProjectEnvironment): RunMode | null {
   if (env === 'production') {
     return phase === 'ready' ? 'cutover' : null;
   }
-  /* non-prod: ready 以降は全部 block. ready の cutover は production 専用仕様, それより
-     先 (cutover/hypercare/done) は実行できる phase ではない. */
+  /* non-prod: cutover 以降は全部 block (実行中 / 終了後). */
+  if (phase === 'sign-off') return 'rehearsal';
   if (phase === 'rehearsal') return 'rehearsal';
-  if (phase === 'ready' || phase === 'cutover' || phase === 'hypercare' || phase === 'done') return null;
+  if (phase === 'cutover' || phase === 'hypercare' || phase === 'done') return null;
   return 'test';
 }
 
