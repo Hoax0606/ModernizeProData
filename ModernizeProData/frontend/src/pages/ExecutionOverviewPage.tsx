@@ -6,6 +6,7 @@ import { useSnapshotsStore, usePinnedSnapshotsStore, type MappingSnapshot } from
 import { Checkbox } from '../components/Checkbox';
 import {
   buildStages,
+  buildStagesFromStageViews,
   type Stage,
   type StageTone,
 } from '../lib/pipelineStages';
@@ -103,6 +104,8 @@ export function ExecutionOverviewPage() {
   const [warningFilter, setWarningFilter] = useState<'' | 'has' | 'none'>('');
 
   // execution overview 실데이터 — per-project 최신 run 집계 (BE: /sites/{id}/execution-overview).
+  // 5 秒 polling — Execution 画面の 2 秒 polling よりは緩いが、overview なので桁ずれが起きないように
+  // 定期更新する. running 中の project があると bar の進行が反映される.
   const [metrics, setMetrics] = useState<Record<string, ProjectExecMetrics>>({});
   const loadMetrics = useCallback(() => {
     if (!activeSiteId) { setMetrics({}); return; }
@@ -115,6 +118,11 @@ export function ExecutionOverviewPage() {
       .catch(() => setMetrics({}));
   }, [activeSiteId]);
   useEffect(() => { loadMetrics(); }, [loadMetrics]);
+  useEffect(() => {
+    if (!activeSiteId) return;
+    const id = window.setInterval(() => loadMetrics(), 5_000);
+    return () => window.clearInterval(id);
+  }, [activeSiteId, loadMetrics]);
 
   const errorCount = (p: Project) => metrics[p.id]?.errorCount ?? 0;
   const warningCount = (p: Project) => metrics[p.id]?.warningCount ?? 0;
@@ -639,17 +647,24 @@ const styles: Record<string, React.CSSProperties> = {
 
 /**
  * ProjectExecMetrics(BE per-project 최신 run 집계)을 per-row pipeline Stage[] 로 변환.
- * BE 가 per-stage 진행을 따로 안 주므로 overall progressPct 를 7 stage 에 균등 분배.
- *   - success         : 7 stage 모두 ok
- *   - failed/timed_out: progress 비율만큼 ok, 다음 stage err, 이후 idle
- *   - aborted         : progress 만큼 ok, 이후 idle (err 가 아닌 grey)
- *   - running/paused  : progress 만큼 ok, 다음 stage running 부분 채움, 이후 idle
- *   - 없으면 phase 기반 정적 fallback (buildStages)
- * 정밀 stage chip 은 ExecutionPage 의 usePipelineProgress 로 (PoC2 에서 BE 가 stage 상세 metric 추가 시 정밀화 가능).
+ *
+ * 優先: BE が返す per-stage の {@code stages} array をそのまま buildStagesFromStageViews
+ * に流す — Execution 画面と同じレンダラなので「3 success なのに 2 bar しか塗られない」
+ * 桁ずれが原理的に起きない.
+ *
+ * Fallback: stages が空 (古い BE / run 없음) ならば progressPct ベースの近似に切替.
+ * これは旧コードと同じふるまい (success/failed/aborted/running の 4 分岐 + floor()).
  */
 function buildStagesFromMetric(metric: ProjectExecMetrics | undefined, fallbackPhase: Project['phase']): Stage[] {
   const base = buildStages(fallbackPhase);
   if (!metric || !metric.runStatus) return base;
+
+  // 優先パス — per-stage 情報あり.
+  if (metric.stages && metric.stages.length > 0) {
+    return buildStagesFromStageViews(metric.stages);
+  }
+
+  // Fallback — progressPct 近似 (run 직전 / BE 旧版 etc.)
   const total = base.length;
   const pct = Math.max(0, Math.min(100, metric.progressPct ?? 0));
   const completed = Math.floor((pct / 100) * total);

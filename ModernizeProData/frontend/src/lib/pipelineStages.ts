@@ -1,6 +1,21 @@
 import type { ProjectPhase } from '../store/workspace';
 import type { StageView } from '../api/runs';
 
+/**
+ * buildStagesFromStageViews 의 入力型. StageView (Execution 画面) と ExecStageSummary
+ * (ExecutionOverview 画面) を両方受けられる最小スーパーセット. tables 配列等は不要.
+ */
+export type StageProgressInput = Pick<
+  StageView,
+  'stageKey' | 'seq' | 'status' | 'pct' | 'tablesTotal' | 'tablesSuccess'
+> & {
+  tablesFailed?: number;
+  startedAt?: string;
+  finishedAt?: string;
+  durationMs?: number;
+  errorSummary?: string;
+};
+
 export type StageTone = 'idle' | 'running' | 'ok' | 'err';
 
 export interface Stage {
@@ -54,8 +69,8 @@ export function countDoneStages(stages: Stage[]): number {
  *
  * BE response 에 포함되지 않는 stage 는 idle/0 으로 채움 (=미실행. 하이브리드 표시의 "pending" = 회색).
  */
-export function buildStagesFromStageViews(stageViews: StageView[]): Stage[] {
-  const byKey = new Map<string, StageView>();
+export function buildStagesFromStageViews(stageViews: StageProgressInput[]): Stage[] {
+  const byKey = new Map<string, StageProgressInput>();
   for (const sv of stageViews) byKey.set(sv.stageKey, sv);
 
   return BASE_STAGES.map((base) => {
