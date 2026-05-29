@@ -90,7 +90,13 @@ public class SnapshotController {
     }
 
     /** 현재 라이브 mapping working set 을 SnapshotData (rules + codeMaps + bindings) 로 freeze.
-     *  create() 와 has-changes preview endpoint 둘 다 사용 — 일관성 보장. */
+     *  create() 와 has-changes preview endpoint 둘 다 사용 — 일관성 보장.
+     *
+     *  라이브 mapping working set 을 통째로 동결해 JSONB 1개 컬럼에 저장.
+     *  자식 link binding 은 sharedFromProjectId 마커만 freeze — master 의 룰은 복사 안 함.
+     *  실행 시점에 read-time inherit 로 처리. snapshot restore 시 link 마커가 그대로 복원되어
+     *  그 시점의 link 사실만 보존 (master 가 나중에 룰 바꾸면 자식 snapshot 의 read 결과도 변화).
+     *  entity 직접 직렬화 (lazy/circular) 위험을 피하려고 FrozenXxx record 로 변환. */
     private SnapshotData buildCurrentSnapshotData(String projectId) {
         List<MappingTableBinding> ownBindings = mappingTableBindingRepository
                 .findByProjectIdWithSources(projectId);
@@ -429,6 +435,9 @@ public class SnapshotController {
                 e.setCompositionKind(b.compositionKind());
                 e.setWhereFilter(b.whereFilter());
                 e.setBindingOrigin(b.bindingOrigin());
+                e.setSharedFromProjectId(b.sharedFromProjectId());
+                e.setGroupByExpr(b.groupByExpr());
+                e.setExpandExpr(b.expandExpr());
                 e.setCreatedBy(b.createdBy() != null ? b.createdBy() : userId);
                 e.setCreatedAt(b.createdAt() != null ? b.createdAt() : now);
                 e.setUpdatedBy(userId);
@@ -486,6 +495,7 @@ public class SnapshotController {
         return ApiResponse.ok(null);
     }
 
+    /** "{schema}|{table}" key for linkedKeys set. nz() 로 schema null 도 안전하게. */
     private static String keyOf(String schema, String table) {
         return nz(schema) + "|" + table;
     }

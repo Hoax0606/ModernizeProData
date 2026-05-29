@@ -21,12 +21,29 @@ const ROWS: FormatRow[] = [
   { key: 'summary',    label: 'siteExport.format.summary.label',    hint: 'siteExport.format.summary.hint',    section: 'documents' },
 ];
 
+/** 현재 미리보기 중인 포맷 — picker 의 라벨 클릭으로 변경. 체크박스(다운로드 선택) 와 독립. */
+export type PreviewedFormat = keyof SelectedFormats | null;
+
+/** 각 포맷의 사용 가능 여부 — null = 가능, string = 사유 (hint 자리에 표시 + 체크박스 disabled). */
+export interface FormatAvailability {
+  migration:  string | null;
+  mapping:    string | null;
+  validation: string | null;
+  summary:    string | null;
+}
+
 interface Props {
   siteName: string;
   tableCount: number;
   fileCount: number;
   selectedFormats: SelectedFormats;
   onSelectedFormatsChange: (next: SelectedFormats) => void;
+  /** 현재 미리보기 중인 포맷 (행 라벨 클릭으로 변경). 체크 상태와 독립. */
+  previewedFormat: PreviewedFormat;
+  /** 라벨/힌트 클릭 시 호출 — 미리보기 포맷 변경. */
+  onPreviewSelect: (k: PreviewedFormat) => void;
+  /** 각 포맷의 사용 가능 여부 (선택된 프로젝트의 snapshot status 기준). */
+  availability: FormatAvailability;
   busy: boolean;
   onDownload: () => void;
   downloadDisabledReason?: string;
@@ -51,30 +68,65 @@ export function SiteExportPicker(props: Props) {
         </div>
       </div>
 
-      {/* 가운데 — format 체크박스 + bundle 토글 */}
+      {/* 가운데 — format 체크박스. 다중 선택 가능. 체크박스 클릭 = 다운로드 선택, 라벨 클릭 = 미리보기 선택.
+          ARTIFACT FORMATS 첫 행: ALL 체크박스 (가능한 모든 포맷 일괄 토글). */}
       <div style={styles.body}>
         <SectionHead>{t('siteExport.section.formats')}</SectionHead>
-        {formatsRows.map(r => (
-          <CheckRow
-            key={r.key}
-            label={t(r.label)}
-            hint={t(r.hint)}
-            checked={props.selectedFormats[r.key]}
-            onChange={v => props.onSelectedFormatsChange({ ...props.selectedFormats, [r.key]: v })}
-          />
-        ))}
+        {/* ALL 체크박스 — 4 박스 모두 토글. 라벨은 미리보기 동작 없음. */}
+        <AllCheckRow
+          selectedFormats={props.selectedFormats}
+          availability={props.availability}
+          onChange={(v) => {
+            // available 한 것만 토글 — disabled 는 false 유지.
+            props.onSelectedFormatsChange({
+              mapping:    props.availability.mapping    === null ? v : false,
+              migration:  props.availability.migration  === null ? v : false,
+              validation: props.availability.validation === null ? v : false,
+              summary:    props.availability.summary    === null ? v : false,
+            });
+          }}
+        />
+        {formatsRows.map(r => {
+          const reason = props.availability[r.key];
+          const disabled = reason !== null;
+          return (
+            <CheckRow
+              key={r.key}
+              label={t(r.label)}
+              hint={disabled ? reason ?? '' : t(r.hint)}
+              checked={!disabled && props.selectedFormats[r.key]}
+              disabled={disabled}
+              highlighted={props.previewedFormat === r.key}
+              onChange={v => {
+                if (disabled) return;
+                props.onSelectedFormatsChange({ ...props.selectedFormats, [r.key]: v });
+              }}
+              onPreview={() => { if (!disabled) props.onPreviewSelect(r.key); }}
+            />
+          );
+        })}
 
         <div style={{ height: 10 }} />
         <SectionHead>{t('siteExport.section.documents')}</SectionHead>
-        {documentsRows.map(r => (
-          <CheckRow
-            key={r.key}
-            label={t(r.label)}
-            hint={t(r.hint)}
-            checked={props.selectedFormats[r.key]}
-            onChange={v => props.onSelectedFormatsChange({ ...props.selectedFormats, [r.key]: v })}
-          />
-        ))}
+        {documentsRows.map(r => {
+          const reason = props.availability[r.key];
+          const disabled = reason !== null;
+          return (
+            <CheckRow
+              key={r.key}
+              label={t(r.label)}
+              hint={disabled ? reason ?? '' : t(r.hint)}
+              checked={!disabled && props.selectedFormats[r.key]}
+              disabled={disabled}
+              highlighted={props.previewedFormat === r.key}
+              onChange={v => {
+                if (disabled) return;
+                props.onSelectedFormatsChange({ ...props.selectedFormats, [r.key]: v });
+              }}
+              onPreview={() => { if (!disabled) props.onPreviewSelect(r.key); }}
+            />
+          );
+        })}
 
       </div>
 
@@ -107,16 +159,62 @@ interface CheckRowProps {
   label: string;
   hint: string;
   checked: boolean;
+  disabled?: boolean;
+  /** 미리보기 중인 행이면 라벨 영역 강조 — '지금 어느 항목 보고 있는지' 식별. */
+  highlighted?: boolean;
+  /** 체크박스 영역 클릭 시 — 다운로드 선택 토글. */
   onChange: (v: boolean) => void;
+  /** 라벨/힌트 영역 클릭 시 — 미리보기 선택 (체크박스 영향 X). */
+  onPreview?: () => void;
 }
 
-function CheckRow({ label, hint, checked, onChange }: CheckRowProps) {
+function CheckRow({ label, hint, checked, disabled, highlighted, onChange, onPreview }: CheckRowProps) {
   return (
-    <label style={styles.checkRow} onClick={() => onChange(!checked)}>
-      <Checkbox checked={checked} onChange={onChange} />
+    <div
+      style={{
+        ...styles.checkRow,
+        ...(disabled ? styles.checkRowDisabled : {}),
+        ...(highlighted ? styles.checkRowHighlighted : {}),
+      }}
+    >
+      {/* 체크박스 영역 — 클릭 시 다운로드 선택만 토글. disabled 시 무시. */}
+      <span
+        style={{ display: 'flex', alignItems: 'center', cursor: disabled ? 'not-allowed' : 'pointer' }}
+        onClick={(e) => { e.stopPropagation(); if (!disabled) onChange(!checked); }}
+      >
+        <Checkbox checked={checked} onChange={(v) => { if (!disabled) onChange(v); }} />
+      </span>
+      {/* 라벨/힌트 영역 — 클릭 시 미리보기 선택만 변경. disabled 시 무시. */}
+      <div
+        style={{ flex: 1, cursor: disabled ? 'not-allowed' : 'pointer' }}
+        onClick={() => { if (!disabled) onPreview?.(); }}
+      >
+        <div style={{ ...styles.checkLabel, ...(disabled ? styles.checkLabelDisabled : {}) }}>{label}</div>
+        <div style={{ ...styles.checkHint, ...(disabled ? styles.checkHintDisabled : {}) }}>{hint}</div>
+      </div>
+    </div>
+  );
+}
+
+/** ALL 체크박스 — ARTIFACT FORMATS 헤더 바로 아래. available 한 포맷만 일괄 토글. */
+interface AllCheckRowProps {
+  selectedFormats: SelectedFormats;
+  availability: FormatAvailability;
+  onChange: (v: boolean) => void;
+}
+function AllCheckRow({ selectedFormats, availability, onChange }: AllCheckRowProps) {
+  const availableKeys = (['mapping', 'migration', 'validation', 'summary'] as const)
+    .filter((k) => availability[k] === null);
+  // ALL 체크 상태 — 사용 가능한 모든 포맷이 체크됐을 때 true.
+  const allChecked = availableKeys.length > 0 && availableKeys.every((k) => selectedFormats[k]);
+  return (
+    <label
+      style={{ ...styles.checkRow, fontWeight: 600 }}
+      onClick={() => onChange(!allChecked)}
+    >
+      <Checkbox checked={allChecked} onChange={onChange} />
       <div style={{ flex: 1 }}>
-        <div style={styles.checkLabel}>{label}</div>
-        <div style={styles.checkHint}>{hint}</div>
+        <div style={{ ...styles.checkLabel, fontWeight: 700 }}>ALL</div>
       </div>
     </label>
   );
@@ -160,8 +258,19 @@ const styles: Record<string, CSSProperties> = {
     padding: '4px 0',
     cursor: 'pointer',
   },
+  /* 비활성 상태 — 선택 프로젝트의 snapshot status 가 그 포맷을 허용 안 할 때. */
+  checkRowDisabled: { cursor: 'not-allowed', opacity: 0.55 },
+  /* 현재 미리보기 중인 행 — 좌측 navy accent line + 옅은 배경. */
+  checkRowHighlighted: {
+    background: '#eef2fa',
+    borderLeft: '3px solid var(--navy)',
+    marginLeft: -3,
+    paddingLeft: 3,
+  },
   checkLabel: { fontSize: 12, color: 'var(--text)' },
+  checkLabelDisabled: { color: 'var(--text-3)' },
   checkHint: { fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
+  checkHintDisabled: { color: 'var(--text-3)', fontStyle: 'italic' },
 
   cta: {
     padding: '10px 14px',

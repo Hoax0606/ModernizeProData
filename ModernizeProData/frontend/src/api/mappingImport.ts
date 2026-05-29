@@ -23,7 +23,7 @@ export interface MappingStatus {
   codeMapCount: number;
 }
 
-export type MappingReportErrorKind = 'EXPRESSION_FAILED' | 'FROM_FAILED' | 'NO_RULES' | 'UNKNOWN';
+export type MappingReportErrorKind = 'EXPRESSION_FAILED' | 'FROM_FAILED' | 'NO_RULES' | 'NO_RULES_LINKED' | 'UNKNOWN';
 export type MappingReportErrorType = 'SYNTAX' | 'BINDER' | 'CATALOG' | 'CONVERSION' | 'IO' | 'UNKNOWN';
 
 export interface MappingReportResult {
@@ -74,6 +74,10 @@ export interface MappingRuleDto {
   notNullOverride: boolean;
   ruleOrigin: 'imported' | 'manual';
   notes: string | null;
+  /** 백엔드 응답에 timestamp 가 포함됨 (이전엔 FE 인터페이스에서 누락). Dashboard Tables 의
+   *  Last update 컬럼에서 max(updatedAt ?? createdAt) 으로 사용. */
+  createdAt?: string | null;
+  updatedAt?: string | null;
 }
 
 export interface MappingTableBindingDto {
@@ -90,6 +94,10 @@ export interface MappingTableBindingDto {
   sources: MappingTableBindingSourceDto[];
   /** 자식 link 마킹 — null 이면 자체 정의. 값 있으면 master project_id. */
   sharedFromProjectId?: string | null;
+  /** Row N:1 집계 GROUP BY 표현식 — null / blank 이면 GROUP BY 없음. */
+  groupByExpr?: string | null;
+  /** Row 1:N 펼침 free SQL fragment — null / blank 이면 펼침 없음. */
+  expandExpr?: string | null;
 }
 
 /* ── Link candidates ─────────────────────────────── */
@@ -243,6 +251,10 @@ export const mappingImportApi = {
     }>;
     /** 자식 link 마킹 — 값 있으면 sources 무시 + master 의 룰 inherit. null 이면 자체 정의. */
     sharedFromProjectId?: string | null;
+    /** Row N:1 집계 GROUP BY 표현식 — null / blank 이면 GROUP BY 없음. */
+    groupByExpr?: string | null;
+    /** Row 1:N 펼침 free SQL fragment — null / blank 이면 펼침 없음. */
+    expandExpr?: string | null;
   }): Promise<MappingTableBindingDto> =>
     unwrap(api.post<ApiResponse<MappingTableBindingDto>>(
       `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/bindings`,
