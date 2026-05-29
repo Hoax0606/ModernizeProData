@@ -128,6 +128,7 @@ public class MappingImportService {
                 // TO-BE 측도 같은 패턴으로 검증 — DDL 에 없는 tobe_table 행은 skip.
                 // 旧仕様은 unmatched 行도 그대로 binding 化되어 orphan binding 의 主源이었다
                 // (2026-05-29 발견. e.g. CSV 内 `public.orders` / `public.employees` 等).
+                // 이 검증 없으면 Load stage 에서 PG 에 그 table 이 없어서 통째로 fail.
                 // 안 그러면 Load stage 에서 PG 에 그 table 이 없어서 통째로 fail
                 // (UI 가 "N 중 X 실패" 로 표시).
                 java.util.Set<String> projectTobeKeys = ddlTableRepo
@@ -383,6 +384,7 @@ public class MappingImportService {
      * @param projectTobeKeys 이 project 의 TO-BE DDL 에 등록된 (schema_lower|table_lower) set.
      *                       null 이면 검증 안 함. 값 있으면 그 set 에 없는 tobe_table 행은 skip + warn.
      *                       2026-05-29 추가: CSV 内 DDL 不在 table 行이 orphan binding 의 주원인
+     *                       이었던 problem 의 대책. Load stage 통째 fail 방지도 부수효과.
      *                       이었던 problem 의 대책 — Load 단계에서 통째로 fail 되는 케이스 방지.
      */
     private ParsedRules parseColumnCsv(Path csv,

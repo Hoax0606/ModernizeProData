@@ -29,15 +29,17 @@ export interface Stage {
   shortName?: string;
 }
 
-/** 7-stage 메타데이터. 실 진행률은 BE polling(StageView) 또는 phase fallback 으로 채운다. */
+/** 8-stage 메타데이터 (validation 추가 2026-05-30). 실 진행률은 BE polling(StageView)
+ *  또는 phase fallback 으로 채운다. validation 은 non-blocking stage — fail 여도 run 통과. */
 export const BASE_STAGES: Array<Omit<Stage, 'pct' | 'tone'>> = [
-  { id: 'check',     name: 'Check',     sub: 'source format & encoding check', shortName: 'check',     rate: '—', eta: '—' },
-  { id: 'extract',   name: 'Extract',   sub: 'UTF-8 CSV → Parquet (CP1)',      shortName: 'extract',   rate: '—', eta: '—' },
-  { id: 'reconcile', name: 'Reconcile', sub: 'CSV ↔ CP1 parity',               shortName: 'reconcile', rate: '—', eta: '—' },
-  { id: 'transform', name: 'Transform', sub: 'apply rule engine → CP2',        shortName: 'transform', rate: '—', eta: '—' },
-  { id: 'audit',     name: 'Audit',     sub: 'CP1 ↔ CP2 parity',               shortName: 'audit',     rate: '—', eta: '—' },
-  { id: 'load',      name: 'Load',      sub: 'apply to TO-BE',                 shortName: 'load',      rate: '—', eta: '—' },
-  { id: 'verify',    name: 'Verify',    sub: 'CP2 ↔ TO-BE parity',             shortName: 'verify',    rate: '—', eta: '—' },
+  { id: 'check',      name: 'Check',      sub: 'source format & encoding check', shortName: 'check',      rate: '—', eta: '—' },
+  { id: 'extract',    name: 'Extract',    sub: 'UTF-8 CSV → Parquet (CP1)',      shortName: 'extract',    rate: '—', eta: '—' },
+  { id: 'reconcile',  name: 'Reconcile',  sub: 'CSV ↔ CP1 parity',               shortName: 'reconcile',  rate: '—', eta: '—' },
+  { id: 'transform',  name: 'Transform',  sub: 'apply rule engine → CP2',        shortName: 'transform',  rate: '—', eta: '—' },
+  { id: 'audit',      name: 'Audit',      sub: 'CP1 ↔ CP2 parity',               shortName: 'audit',      rate: '—', eta: '—' },
+  { id: 'load',       name: 'Load',       sub: 'apply to TO-BE',                 shortName: 'load',       rate: '—', eta: '—' },
+  { id: 'verify',     name: 'Verify',     sub: 'CP2 ↔ TO-BE parity',             shortName: 'verify',     rate: '—', eta: '—' },
+  { id: 'validation', name: 'Validation', sub: 'SUM / NULL / SHA-256 audit report', shortName: 'validation', rate: '—', eta: '—' },
 ];
 
 /** activeRun 이 없을 때의 fallback. hypercare/done 은 완료, 그 외는 모두 idle. */

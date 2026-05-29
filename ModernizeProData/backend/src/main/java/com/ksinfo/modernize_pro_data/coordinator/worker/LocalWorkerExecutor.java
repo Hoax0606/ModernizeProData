@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -34,6 +35,13 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 @Slf4j
 public class LocalWorkerExecutor implements WorkerExecutor {
+
+    /**
+     * Non-blocking stage 화이트리스트 (2026-05-30) — 이 stage 들은 status=failed 여도 run 을
+     * 실패 처리하지 않는다. validation 은 SUM/MIN/MAX/NULL aggregate 의 정보성 보고서 stage 라
+     * fail 이 자체로 데이터 손상을 의미하지 않음 — pipeline UI 에 빨간 tile 만 띄우고 run 은 통과.
+     */
+    private static final Set<String> NON_BLOCKING_STAGES = Set.of("validation");
 
     private final List<StageRunner> stageRunners;
     private final RunControlRegistry runControlRegistry;
@@ -102,8 +110,10 @@ public class LocalWorkerExecutor implements WorkerExecutor {
         }
         // 게이트 안 났어도 어떤 stage 라도 failed 면 run 도 failed (모든 stage success 일 때만 run.status=success).
         // continue-on-error 로 luna 통과해도 결과를 사용자에게 정확히 알려야 함 — 화면 "COMPLETED" 인데 실제는 0건 적재 같은 혼동 방지.
+        // NON_BLOCKING_STAGES (예: validation) 는 fail 여도 run 을 fail 시키지 않음 — 정보성 stage.
         long failedStages = ctx.getStages().stream()
                 .filter(s -> s.getStatus() == StageStatus.failed)
+                .filter(s -> !NON_BLOCKING_STAGES.contains(s.getStageKey()))
                 .count();
         if (failedStages > 0) {
             String reason = failedStages + " stage(s) failed during run";
