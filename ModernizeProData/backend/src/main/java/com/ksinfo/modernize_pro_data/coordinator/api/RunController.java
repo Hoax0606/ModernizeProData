@@ -11,6 +11,9 @@ import com.ksinfo.modernize_pro_data.coordinator.run.RunHistory;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunHistoryRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunResult;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunService;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunTableResultsService;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunTableResultsService.TableResultDto;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunTableResultsService.TableSummaryDto;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunStartStatus;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunStatus;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunType;
@@ -56,6 +59,7 @@ public class RunController {
     private final ApiCredentialRepository apiCredentialRepo;
     private final SolutionSettingsRepository solutionSettingsRepo;
     private final ProjectRunReadinessService runReadinessService;
+    private final RunTableResultsService tableResultsService;
 
     /* ── DTOs ──────────────────────────────────────── */
 
@@ -116,6 +120,19 @@ public class RunController {
             String snapshotId,
             Long batchJobExecutionId,
             String errorMessage,
+            /**
+             * 実行対象テーブル (TO-BE 物理名). null = 全 binding 対象, 非 null = 部分実行で
+             * 選択された TO-BE テーブル名一覧. metadata.selectedTables の型付き写し.
+             * FE Run History 表でこの値を表示し「どのテーブルを動かした run か」を識別.
+             */
+            List<String> tables,
+            /**
+             * Run History drill-down 用の table 別件数サマリ. {@link StageTableResult} を
+             * tobe_table 単位に集約した success / failed / running の件数.
+             * 一覧画面で 1 行に 「4 tables: 3✓ 1✗」 のような badge を出すための材料.
+             * stage_table_results が一つも無い run (例: 開始直後 / aborted) は 0/0/0/0.
+             */
+            TableSummaryDto tableSummary,
             Map<String, Object> metadata
     ) {}
 
@@ -323,6 +340,19 @@ public class RunController {
         return ApiResponse.ok(runReadinessService.readinessFor(id));
     }
 
+    /**
+     * Run History drill-down — 1 run の per-table 詳細結果.
+     * 行展開時に FE が呼び出して per-table の status / rows / duration / error を表示する.
+     */
+    @GetMapping("/api/v1/runs/{runId}/table-results")
+    public ApiResponse<List<TableResultDto>> tableResults(@PathVariable String runId) {
+        if (!runHistoryRepo.existsById(runId)) {
+            throw new ApiException("RUN_NOT_FOUND",
+                    "run not found: " + runId, HttpStatus.NOT_FOUND);
+        }
+        return ApiResponse.ok(tableResultsService.resultsForRun(runId));
+    }
+
     /* ── DTO 변환 helpers ───────────────────────────── */
 
     /**
@@ -339,6 +369,10 @@ public class RunController {
         Map<String, String> projectNames = projectRepo.findAllById(projectIds).stream()
                 .collect(Collectors.toMap(Project::getId, Project::getName));
 
+        // Per-run の table summary を一括取得 (N+1 回避).
+        List<String> runIds = runs.stream().map(RunHistory::getId).toList();
+        Map<String, TableSummaryDto> summaries = tableResultsService.summariesForRuns(runIds);
+
         return runs.stream()
                 .map(r -> new RunHistoryViewDto(
                         r.getId(), r.getProjectId(),
@@ -348,8 +382,26 @@ public class RunController {
                         r.getWorkerId(),
                         r.getStatus(), r.getStartedAt(), r.getFinishedAt(),
                         r.getDurationMs(), r.getSnapshotId(),
-                        r.getBatchJobExecutionId(), r.getErrorMessage(), r.getMetadata()))
+                        r.getBatchJobExecutionId(), r.getErrorMessage(),
+                        extractSelectedTables(r.getMetadata()),
+                        summaries.getOrDefault(r.getId(), TableSummaryDto.empty()),
+                        r.getMetadata()))
                 .toList();
+    }
+
+    /**
+     * RunHistory.metadata.selectedTables を型付きで取り出す. 非 List / null / 空なら null
+     * (全テーブル run の意味). 型不一致要素は無視.
+     */
+    private static List<String> extractSelectedTables(Map<String, Object> metadata) {
+        if (metadata == null) return null;
+        Object raw = metadata.get("selectedTables");
+        if (!(raw instanceof List<?> list) || list.isEmpty()) return null;
+        List<String> result = new ArrayList<>(list.size());
+        for (Object o : list) {
+            if (o instanceof String s) result.add(s);
+        }
+        return result.isEmpty() ? null : result;
     }
 
     /**

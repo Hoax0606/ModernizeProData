@@ -110,7 +110,48 @@ export interface RunHistoryDto {
   snapshotId: string | null;
   batchJobExecutionId: number | null;
   errorMessage: string | null;
+  /**
+   * 部分実行の TO-BE 物理テーブル名一覧. null = 全 binding 対象 run.
+   * metadata.selectedTables の型付き写し. Run History 表でこの値を表示.
+   */
+  tables: string[] | null;
+  /**
+   * Run History drill-down 用の table 別件数サマリ. stage_table_results を tobe_table
+   * 単位に集約した success / failed / running 件数. まだ stage 結果が無い run は 0/0/0/0.
+   * 一覧行に "4 tables: 3✓ 1✗" のような badge を出す材料.
+   */
+  tableSummary: RunTableSummary;
   metadata: Record<string, unknown>;
+}
+
+/** Run History 一覧用の 1 run の table 件数サマリ. */
+export interface RunTableSummary {
+  total: number;
+  success: number;
+  failed: number;
+  running: number;
+}
+
+/**
+ * Run History drill-down 行展開時に取得する per-table 詳細.
+ * BE: GET /api/v1/runs/{id}/table-results (RunTableResultsService.TableResultDto)
+ *
+ * 時間系は wall-clock per table:
+ *   - startedAt  = 最初に処理した stage の startedAt (= min)
+ *   - finishedAt = 最後に処理した stage の finishedAt (= max). 未完了なら null
+ *   - durationMs = finishedAt - startedAt. その間に他テーブルの処理が挟まる可能性が
+ *                  あるので、合計が run-level duration と一致しないことに注意.
+ *
+ * エラー情報は含まない — Quarantine タブで個別表示するため重複を避ける.
+ */
+export interface RunTableResult {
+  tobeSchema: string;
+  tobeTable: string;
+  status: 'success' | 'failed' | 'running';
+  rows: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
 }
 
 export const runsApi = {
@@ -186,6 +227,12 @@ export const runsApi = {
    */
   runReadiness: (projectId: string) =>
     unwrap(api.get<ApiResponse<ProjectRunReadinessDto>>(`/api/v1/projects/${projectId}/run-readiness`)),
+
+  /**
+   * Run History drill-down — 1 run の per-table 詳細結果. 行展開時に取得.
+   */
+  tableResults: (runId: string) =>
+    unwrap(api.get<ApiResponse<RunTableResult[]>>(`/api/v1/runs/${runId}/table-results`)),
 
   /**
    * DEV: Worker complete callback シミュレーション. PoC dev mode 에서 master/admin 으로 호출 가능.

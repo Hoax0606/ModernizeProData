@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useQuery } from '@tanstack/react-query';
@@ -10,9 +10,9 @@ import {
   type RunLogLevel,
   type RunLogLine,
 } from '../api/runLogs';
-import { runsApi, type RunHistoryDto } from '../api/runs';
+import { runsApi, type RunHistoryDto, type RunTableResult } from '../api/runs';
 import { quarantineApi } from '../api/quarantine';
-import { formatTimestamp, formatDuration } from '../lib/formatters';
+import { formatTimestamp, formatTimeMs, formatDuration } from '../lib/formatters';
 import { stageColor } from './logViewerMock';
 import {
   humanizeQuarantineDetail,
@@ -64,6 +64,15 @@ export function LogViewerPage() {
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
   /** STEP(=stage) 필터. null = 전체, 문자열 = 그 stage 만. */
   const [stepFilter, setStepFilter] = useState<string | null>(null);
+  /** Run History の drill-down 展開行 (複数同時展開可). */
+  const [expandedRunIds, setExpandedRunIds] = useState<Set<string>>(new Set());
+  const toggleExpandedRun = useCallback((runId: string) => {
+    setExpandedRunIds((cur) => {
+      const next = new Set(cur);
+      if (next.has(runId)) next.delete(runId); else next.add(runId);
+      return next;
+    });
+  }, []);
   /** 화면 모드. stream = 전체 로그 tail, quarantine = 규칙 위반 group 카드 뷰, history = run 履歴. */
   const [view, setView] = useState<'stream' | 'quarantine' | 'history'>('stream');
   /** Quarantine 화면의 severity 필터. */
@@ -465,11 +474,14 @@ export function LogViewerPage() {
                 <table style={styles.historyTable}>
                   <thead>
                     <tr>
+                      <th style={{ ...styles.historyTh, width: 22, padding: '6px 4px' }} aria-label="expand"></th>
+                      <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.runId')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.started')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.finished')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.type')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.trigger')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.worker')}</th>
+                      <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.tables')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.status')}</th>
                       <th
                         style={{ ...styles.historyTh, textAlign: 'right' }}
@@ -480,24 +492,51 @@ export function LogViewerPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredHistoryRows.map((h) => (
-                      <tr key={h.id}>
-                        <td style={styles.historyTd}>{formatTimestamp(h.startedAt)}</td>
-                        <td style={styles.historyTd}>{h.finishedAt ? formatTimestamp(h.finishedAt) : '-'}</td>
-                        <td style={styles.historyTd}>{h.runType}</td>
-                        <td style={styles.historyTd}>{h.triggerSource}</td>
-                        <td style={styles.historyTd}>{h.workerId ?? '-'}</td>
-                        <td style={styles.historyTd}>
-                          <span style={historyStatusStyle(h.status)}>{h.status}</span>
-                        </td>
-                        <td
-                          style={{ ...styles.historyTd, textAlign: 'right', fontFamily: 'var(--mono)' }}
-                          title={t('projectSettings.schedule.history.col.duration.tooltip')}
-                        >
-                          {formatDuration(h.durationMs)}
-                        </td>
-                      </tr>
-                    ))}
+                    {filteredHistoryRows.map((h) => {
+                      const expanded = expandedRunIds.has(h.id);
+                      const canExpand = h.tableSummary.total > 0;
+                      return (
+                        <Fragment key={h.id}>
+                          <tr
+                            onClick={canExpand ? () => toggleExpandedRun(h.id) : undefined}
+                            style={{ cursor: canExpand ? 'pointer' : 'default' }}
+                          >
+                            <td style={{ ...styles.historyTd, padding: '4px 4px', textAlign: 'center' }}>
+                              {canExpand && (
+                                <span style={{ color: 'var(--text-3)', fontSize: 11, userSelect: 'none' }}>
+                                  {expanded ? '▾' : '▸'}
+                                </span>
+                              )}
+                            </td>
+                            <td style={styles.historyTd}><code style={{ fontSize: 10, color: 'var(--text-3)' }}>{h.id}</code></td>
+                            <td style={styles.historyTd}>{formatTimestamp(h.startedAt)}</td>
+                            <td style={styles.historyTd}>{h.finishedAt ? formatTimestamp(h.finishedAt) : '-'}</td>
+                            <td style={styles.historyTd}>{h.runType}</td>
+                            <td style={styles.historyTd}>{h.triggerSource}</td>
+                            <td style={styles.historyTd}>{h.workerId ?? '-'}</td>
+                            <td style={styles.historyTd}>
+                              <HistoryTablesCell h={h} t={t} />
+                            </td>
+                            <td style={styles.historyTd}>
+                              <span style={historyStatusStyle(h.status)}>{h.status}</span>
+                            </td>
+                            <td
+                              style={{ ...styles.historyTd, textAlign: 'right', fontFamily: 'var(--mono)' }}
+                              title={t('projectSettings.schedule.history.col.duration.tooltip')}
+                            >
+                              {formatDuration(h.durationMs)}
+                            </td>
+                          </tr>
+                          {expanded && (
+                            <tr>
+                              <td colSpan={10} style={{ padding: 0, background: 'var(--panel-2)' }}>
+                                <HistoryRunDrilldown runId={h.id} t={t} />
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               )}
@@ -903,6 +942,122 @@ function Hl({ text, q }: { text: string; q: string }) {
   }
   return <>{out}</>;
 }
+
+/**
+ * Run history の Tables セル. tableSummary (per-table 結果集計) を badge 表示.
+ * "4 tables: 3✓ 1✗" の形.  partial run (h.tables 設定あり) は tooltip に対象 table 一覧を出す.
+ * stage_table_result がまだ無い (新規/aborted) run は "—" 表示.
+ */
+function HistoryTablesCell({ h, t }: { h: RunHistoryDto; t: (k: string, v?: Record<string, string>) => string }) {
+  const s = h.tableSummary;
+  const tooltipLines: string[] = [];
+  if (h.tables == null) tooltipLines.push(t('projectSettings.schedule.history.tables.all'));
+  else if (h.tables.length > 0) {
+    tooltipLines.push(`partial: ${h.tables.length}`);
+    tooltipLines.push(...h.tables);
+  }
+  const tooltip = tooltipLines.join('\n');
+  if (s.total === 0) {
+    return <span title={tooltip} style={{ color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>—</span>;
+  }
+  return (
+    <span title={tooltip} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--mono)', fontSize: 11 }}>
+      <span style={{ color: 'var(--text-3)' }}>{s.total}</span>
+      {s.success > 0 && (
+        <span style={{ ...summaryBadgeStyle, color: '#166534', background: '#dcfce7', borderColor: '#86efac' }}>
+          {s.success}✓
+        </span>
+      )}
+      {s.failed > 0 && (
+        <span style={{ ...summaryBadgeStyle, color: '#991b1b', background: '#fee2e2', borderColor: '#fca5a5' }}>
+          {s.failed}✗
+        </span>
+      )}
+      {s.running > 0 && (
+        <span style={{ ...summaryBadgeStyle, color: '#92400e', background: '#fef3c7', borderColor: '#fcd34d' }}>
+          {s.running}…
+        </span>
+      )}
+    </span>
+  );
+}
+
+const summaryBadgeStyle: React.CSSProperties = {
+  display: 'inline-block', padding: '0 5px', borderRadius: 3,
+  fontSize: 10, fontWeight: 700, border: '1px solid', lineHeight: '14px',
+};
+
+/**
+ * Run history drill-down sub-row 中身. 展開時に BE から per-table 結果を取得して
+ * status / rows / duration / error を 1 table = 1 行で表示.
+ */
+function HistoryRunDrilldown({ runId, t }: { runId: string; t: (k: string, v?: Record<string, string>) => string }) {
+  const { data, isLoading, isError } = useQuery<RunTableResult[]>({
+    queryKey: ['run-table-results', runId],
+    queryFn: () => runsApi.tableResults(runId),
+    staleTime: 5_000,
+  });
+  if (isLoading) {
+    return <div style={drillStyles.loading}>{t('projectSettings.schedule.history.drilldown.loading')}</div>;
+  }
+  if (isError) {
+    return <div style={drillStyles.error}>{t('projectSettings.schedule.history.drilldown.error')}</div>;
+  }
+  if (!data || data.length === 0) {
+    return <div style={drillStyles.loading}>{t('projectSettings.schedule.history.drilldown.empty')}</div>;
+  }
+  return (
+    <div style={drillStyles.wrap}>
+      <table style={drillStyles.table}>
+        <thead>
+          <tr>
+            <th style={drillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.status')}</th>
+            <th style={drillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.table')}</th>
+            <th style={{ ...drillStyles.th, textAlign: 'right' }}>{t('projectSettings.schedule.history.drilldown.col.rows')}</th>
+            <th style={drillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.started')}</th>
+            <th style={drillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.finished')}</th>
+            <th style={{ ...drillStyles.th, textAlign: 'right' }}>{t('projectSettings.schedule.history.drilldown.col.duration')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.map((r) => {
+            const fullName = r.tobeSchema ? `${r.tobeSchema}.${r.tobeTable}` : r.tobeTable;
+            const statusColor = r.status === 'success' ? '#166534'
+              : r.status === 'failed' ? '#991b1b'
+              : '#92400e';
+            const statusIcon = r.status === 'success' ? '✓'
+              : r.status === 'failed' ? '✗'
+              : '…';
+            return (
+              <tr key={fullName}>
+                <td style={{ ...drillStyles.td, color: statusColor, fontWeight: 700 }}>
+                  {statusIcon} {r.status}
+                </td>
+                <td style={drillStyles.td}>{fullName}</td>
+                <td style={{ ...drillStyles.td, textAlign: 'right' }}>{r.rows.toLocaleString()}</td>
+                <td style={drillStyles.td}>{r.startedAt ? formatTimeMs(r.startedAt) : '—'}</td>
+                <td style={drillStyles.td}>{r.finishedAt ? formatTimeMs(r.finishedAt) : '—'}</td>
+                <td style={{ ...drillStyles.td, textAlign: 'right' }}>{formatDuration(r.durationMs)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+const drillStyles: Record<string, React.CSSProperties> = {
+  wrap: { padding: '8px 12px 12px 36px', background: 'var(--panel-2)' },
+  table: { width: '100%', borderCollapse: 'collapse', fontSize: 11, fontFamily: 'var(--mono)' },
+  th: {
+    textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--border)',
+    color: 'var(--text-3)', fontWeight: 600, fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5,
+  },
+  td: { padding: '3px 8px', borderBottom: '1px dashed var(--border)', color: 'var(--text-2)' },
+  loading: { padding: '8px 12px 8px 36px', color: 'var(--text-3)', fontSize: 11, fontStyle: 'italic' },
+  error: { padding: '8px 12px 8px 36px', color: 'var(--red)', fontSize: 11 },
+};
 
 /* ─────────────────── helpers ────────────────────────── */
 /** Run history 行 status 배지 색 — SettingsPage / PSSchedule 의 historyStatusStyle 그대로 移植. */
