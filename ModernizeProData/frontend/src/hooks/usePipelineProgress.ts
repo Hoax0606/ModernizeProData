@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { IMessage } from '@stomp/stompjs';
 import { runsApi, type RunHistoryDto, type RunStatusStr, type StageView } from '../api/runs';
 import { createWebSocket, subscribe } from '../api/ws';
+import type { SnapshotExecutionContext } from '../store/snapshots';
 
 /**
  * Run の進捗を BE polling + WebSocket 実時間通知 で監視するフック.
@@ -21,7 +22,13 @@ import { createWebSocket, subscribe } from '../api/ws';
  *   const { run, stages } = usePipelineProgress(activeRunId);
  *   // activeRunId が null の間は run / stages も undefined
  */
-export function usePipelineProgress(runId: string | null) {
+export function usePipelineProgress(
+  runId: string | null,
+  /** runId 가 null 일 때 표시할 fallback — 보통 latest mapping snapshot 의 박제된
+   *  execution_context. 사용자가 별도 UI 조작 없이도 run 끝난 직후 그 snapshot 의
+   *  pipeline 이 자연스럽게 보이게 한다. live polling 보다 항상 후순위. */
+  fallback?: SnapshotExecutionContext | null,
+) {
   const queryClient = useQueryClient();
 
   const runQuery = useQuery<RunHistoryDto>({
@@ -72,6 +79,18 @@ export function usePipelineProgress(runId: string | null) {
     };
   }, [runId, queryClient]);
 
+  // runId 가 없고 fallback 만 있으면 frozen snapshot 의 박제본을 RunHistoryDto / StageView[]
+  // shape 으로 변환해 그대로 노출. 호출자는 live 인지 frozen 인지 신경 안 써도 된다.
+  if (!runId && fallback) {
+    return {
+      run: snapshotFallbackRun(fallback),
+      stages: snapshotFallbackStages(fallback),
+      isLoading: false,
+      isError: false,
+      refetch: () => {},
+    };
+  }
+
   return {
     run: runQuery.data,
     stages: stagesQuery.data,
@@ -82,6 +101,54 @@ export function usePipelineProgress(runId: string | null) {
       void stagesQuery.refetch();
     },
   };
+}
+
+/** SnapshotExecutionContext → RunHistoryDto. 미지 필드는 안전한 default. */
+function snapshotFallbackRun(ctx: SnapshotExecutionContext): RunHistoryDto {
+  return {
+    id: ctx.runId,
+    projectId: '',
+    projectName: '',
+    runType: (ctx.runType as RunHistoryDto['runType']),
+    triggerSource: 'external',
+    requestedBy: '',
+    credentialId: null,
+    workerId: null,
+    status: (ctx.status as RunStatusStr),
+    startedAt: ctx.startedAt ?? '',
+    finishedAt: ctx.finishedAt,
+    durationMs: ctx.durationMs,
+    snapshotId: null,
+    batchJobExecutionId: null,
+    errorMessage: null,
+    metadata: {},
+  };
+}
+
+/** SnapshotExecutionContext.stages → StageView[]. */
+function snapshotFallbackStages(ctx: SnapshotExecutionContext): StageView[] {
+  return ctx.stages.map((s) => ({
+    stageKey: s.stageKey,
+    seq: s.seq ?? 0,
+    status: (s.status ?? 'pending') as StageView['status'],
+    pct: s.pct,
+    tablesTotal: s.tablesTotal ?? 0,
+    tablesSuccess: s.tablesSuccess ?? 0,
+    tablesFailed: s.tablesFailed ?? 0,
+    startedAt: s.startedAt ?? undefined,
+    finishedAt: s.finishedAt ?? undefined,
+    durationMs: s.durationMs ?? undefined,
+    errorSummary: s.errorSummary ?? undefined,
+    tables: s.tables.map((t) => ({
+      tobeTable: t.tobeTable,
+      tobeSchema: t.tobeSchema ?? undefined,
+      status: (t.status ?? 'running') as 'running' | 'success' | 'failed',
+      rowCount: t.rowCount ?? undefined,
+      durationMs: t.durationMs ?? undefined,
+      errorDetail: typeof t.errorDetail === 'string' ? t.errorDetail : undefined,
+      compiledSql: t.compiledSql ?? undefined,
+    })),
+  }));
 }
 
 /** Terminal = polling 停止対象の status. BE 의 RunStatus enum 直接対応. */

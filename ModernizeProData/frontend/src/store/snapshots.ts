@@ -17,6 +17,8 @@ export interface SnapshotData {
 
 export interface FrozenRule {
   id: string;
+  /** 이 rule 의 원본 mapping_imports row id. 옛 snapshot (이 필드 추가 전) 은 null. */
+  importId: string | null;
   tobeSchema: string;
   tobeTable: string;
   tobeColumn: string;
@@ -103,6 +105,57 @@ export interface FieldChange {
   after: string;
 }
 
+/**
+ * Snapshot 에 박제된 run 실행 컨텍스트.
+ * BE SnapshotExecutionContext (record) 와 1:1.
+ *
+ * snapshot 으로 실행된 run 이 terminal (success / failed / aborted / timed_out) 상태에 도달하면
+ * RunService.finishRun → SnapshotExecutionContextService 가 이 shape 으로 갱신한다.
+ * 같은 snapshot 으로 여러 번 run 하면 매 run 종료마다 덮어쓴다. 아직 실행 안 된 snapshot 은 null.
+ *
+ * ExecutionPage / LogViewer / ArtifactsPage 가 snapshot view 모드일 때 live run polling 대신
+ * 이 컨텍스트를 source 로 사용해 "그 snapshot 시점" 상태로 시간 여행.
+ */
+export interface SnapshotExecutionContext {
+  runId: string;
+  runType: 'test' | 'rehearsal' | 'cutover' | string;
+  status: 'success' | 'failed' | 'aborted' | 'timed_out' | string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
+  stages: StageSnapshot[];
+}
+
+export interface StageSnapshot {
+  stageKey: string;
+  seq: number | null;
+  status: 'pending' | 'running' | 'success' | 'failed' | string | null;
+  pct: number;
+  tablesTotal: number | null;
+  tablesSuccess: number | null;
+  tablesFailed: number | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
+  errorSummary: string | null;
+  tables: TableSnapshot[];
+}
+
+export interface TableSnapshot {
+  bindingId: string;
+  tobeSchema: string;
+  tobeTable: string;
+  status: 'running' | 'success' | 'failed' | string | null;
+  rowCount: number | null;
+  errorCount: number | null;
+  errorDetail: Record<string, unknown> | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
+  /** Load stage 만 채움 — MIGRATION SQL artifact 의 실데이터. */
+  compiledSql: string | null;
+}
+
 export interface MappingSnapshot {
   id: string;
   projectId: string;
@@ -132,6 +185,8 @@ export interface MappingSnapshot {
   changes?: SnapshotChanges;
   /** changes.previousVersionId 와 같은 값을 entity-level 에서도 노출. */
   previousVersionId?: string;
+  /** 이 snapshot 으로 실행된 가장 최근 run 의 종료 시점 박제. 미실행이면 null. */
+  executionContext?: SnapshotExecutionContext | null;
 }
 
 interface SnapshotsState {

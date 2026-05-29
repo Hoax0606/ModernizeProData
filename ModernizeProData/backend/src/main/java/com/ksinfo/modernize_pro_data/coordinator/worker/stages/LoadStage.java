@@ -40,6 +40,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 /**
  * Load stage — DuckDB 의 tobe_{table} → TO-BE PostgreSQL COPY.
@@ -226,6 +227,19 @@ public class LoadStage implements StageRunner {
                 st.execute("COPY " + fqTobeDuck + " TO '" + escapedCsv + "' (FORMAT CSV, HEADER false)");
             }
 
+            // Artifact 표시용 통합 SQL: Transform 의 SELECT 를 COPY 의 source 로 감싼 형태로
+            // stage_table_results.compiled_sql 에 박제. 실제 실행은 위 2-step (DuckDB COPY OUT
+            // + 아래 PG COPY IN). ArtifactsPage MIGRATION SQL 카테고리가 이 텍스트를 그대로 표시.
+            String transformSql = ctx.getStages().stream()
+                    .filter(s -> "transform".equals(s.getStageKey()))
+                    .findFirst()
+                    .flatMap(s -> stageTableResultRepo.findByStageInstanceIdAndBindingId(s.getId(), binding.getId()))
+                    .map(StageTableResult::getCompiledSql)
+                    .orElse(null);
+            if (transformSql != null) {
+                result.setCompiledSql(buildLoadArtifactSql(tobeSchema, tobeTable, tobeColumns, transformSql));
+            }
+
             // 2. PostgreSQL Connection + (PoC1 부트스트랩) + (FK off) + TRUNCATE + COPY + (FK 복귀)
             String pgQualified = pgTableName(tobeSchema, tobeTable);
             long rows;
@@ -304,6 +318,37 @@ public class LoadStage implements StageRunner {
     }
 
     /** PostgreSQL 의 qualified table 명. schema 가 비면 unquoted (default search_path). */
+    /**
+     * Artifact 표시용 통합 SQL.
+     * Transform 의 박제된 CREATE OR REPLACE TABLE ... AS SELECT ... 에서 SELECT 절을 떼어내고,
+     * 그걸 COPY ... FROM ( ... ) 의 source 로 감싼다. PG 의 실제 COPY syntax 는 아니지만
+     * (PG COPY 는 file/stdin 만), 사용자가 "이 테이블이 어떤 SELECT 로 만들어져 어디로 적재됐는가"
+     * 를 한 화면에서 보게 하기 위한 표시용 합성 SQL.
+     */
+    private static String buildLoadArtifactSql(String tobeSchema, String tobeTable,
+                                               List<String> tobeColumns, String transformSql) {
+        // Transform SQL 형식: "CREATE OR REPLACE TABLE ... AS\nSELECT\n  ...\nFROM ...\n[WHERE ...]"
+        // SELECT 시작부터 끝까지를 잘라낸다.
+        int selectIdx = transformSql.indexOf("\nSELECT\n");
+        String selectPart = selectIdx >= 0 ? transformSql.substring(selectIdx + 1) : transformSql;
+        // SELECT 부분에 2-space 들여쓰기를 추가해 wrap 안에서 보기 좋게.
+        String indented = selectPart.lines().map(l -> "  " + l).collect(Collectors.joining("\n"));
+
+        String fqTobe = (tobeSchema == null || tobeSchema.isBlank() ? "" : quoteIdent(tobeSchema) + ".")
+                + quoteIdent(tobeTable);
+        StringBuilder colsLine = new StringBuilder();
+        for (int i = 0; i < tobeColumns.size(); i++) {
+            if (i > 0) colsLine.append(", ");
+            colsLine.append(quoteIdent(tobeColumns.get(i)));
+        }
+
+        return "COPY " + fqTobe + " (\n"
+                + "  " + colsLine + "\n"
+                + ") FROM (\n"
+                + indented + "\n"
+                + ");";
+    }
+
     private static String pgTableName(String tobeSchema, String tobeTable) {
         if (tobeSchema == null || tobeSchema.isBlank()) {
             return "\"" + tobeTable.replace("\"", "\"\"") + "\"";
