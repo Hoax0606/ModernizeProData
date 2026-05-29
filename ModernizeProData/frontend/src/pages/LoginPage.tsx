@@ -19,6 +19,23 @@ export function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [sessionConflict, setSessionConflict] = useState(false);
   const [evicting, setEvicting] = useState(false);
+  // licenseChecked = false 동안엔 render 가 빈 화면. async probe 가 끝날
+  // 때까지 LoginPage 폼을 *절대* 노출하지 않는다 → 어떤 race 가 있어도
+  // license MISSING 상태에서 user 가 login 폼을 볼 가능성 차단.
+  const [licenseChecked, setLicenseChecked] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/v1/health/info?_=' + Date.now(), { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d?.data?.licenseStatus === 'MISSING') {
+          navigate('/license-setup', { replace: true });
+          return;
+        }
+        setLicenseChecked(true);
+      })
+      .catch(() => setLicenseChecked(true));
+  }, [navigate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -34,6 +51,7 @@ export function LoginPage() {
         if (err.code === 'AUTH_USER_NOT_FOUND')                setError(t('login.error.userNotFound'));
         else if (err.code === 'AUTH_PASSWORD_INVALID')         setError(t('login.error.invalidPassword'));
         else if (err.code === 'AUTH_SESSION_ACTIVE_ELSEWHERE') setSessionConflict(true);
+        else if (err.code === 'AUTH_LICENSE_BLOCKED')          setError(t('login.error.licenseBlocked'));
         else                                                    setError(err.message || t('login.error'));
       } else {
         setError((err as Error).message ?? t('login.error'));
@@ -70,6 +88,13 @@ export function LoginPage() {
     setSessionConflict(false);
     setError(null);
   };
+
+  // License probe 가 끝나기 전엔 form 노출 금지.
+  // backend 가 MISSING 이면 useEffect 가 location.replace('/license-setup')
+  // 으로 이동 시켜버리므로 user 는 LoginPage 폼을 보지 못함.
+  if (!licenseChecked) {
+    return <div style={styles.wrap} />;
+  }
 
   return (
     <div style={styles.wrap}>

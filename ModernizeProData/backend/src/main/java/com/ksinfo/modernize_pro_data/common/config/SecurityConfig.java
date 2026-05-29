@@ -1,5 +1,6 @@
 package com.ksinfo.modernize_pro_data.common.config;
 
+import com.ksinfo.modernize_pro_data.coordinator.auth.ApiTokenAuthFilter;
 import com.ksinfo.modernize_pro_data.coordinator.auth.JwtAuthFilter;
 import com.ksinfo.modernize_pro_data.coordinator.license.LicenseEnforcementFilter;
 import lombok.RequiredArgsConstructor;
@@ -17,11 +18,16 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 /**
  * Spring Security 설정.
  *
- * - Stateless (JWT 토큰 기반, 세션 없음).
- * - JwtAuthFilter 가 UsernamePasswordAuthenticationFilter 전에 동작.
- * - 인증 없이 허용: /api/v1/health, /api/v1/auth/**, WebSocket handshake.
+ * - Stateless (JWT / api_token 모두 Bearer 헤더 기반, 세션 없음).
+ * - 2 개의 token filter 가 chain 으로 동작:
+ *     1. ApiTokenAuthFilter — "Bearer mig_..."  → ROLE_API_CLIENT
+ *     2. JwtAuthFilter      — "Bearer eyJ..."   → ROLE_MASTER / ADMIN / VIEWER
+ *   admin role user (= UI 의 "Worker") 가 JWT 로 인증 후 /workers/self-register
+ *   호출하면 worker_node 가 자동 생성된다. 별도 WK-* token 은 더 이상 없음.
+ * - 인증 없이 허용: /api/v1/health, /api/v1/auth/**, WebSocket handshake,
+ *   SPA shell 정적 자산 (/, /index.html, /favicon, /mpd*, /assets/**).
  * - /api/v1/users/** 는 master 한정 (@PreAuthorize 가 메서드 레벨에서 강제).
- * - 그 외 인증 필요.
+ * - 세부 권한 (ROLE 체크) 는 controller 메서드 @PreAuthorize 가 강제.
  */
 @Configuration
 @EnableMethodSecurity
@@ -29,6 +35,7 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 public class SecurityConfig {
 
     private final JwtAuthFilter jwtAuthFilter;
+    private final ApiTokenAuthFilter apiTokenAuthFilter;
     private final LicenseEnforcementFilter licenseEnforcementFilter;
 
     @Bean
@@ -40,10 +47,22 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/v1/health/**").permitAll()
                         .requestMatchers("/api/v1/auth/**").permitAll()
-                        .requestMatchers("/ws/**").permitAll() // WebSocket handshake
+                        // First-boot license import — anonymous, only succeeds
+                        // while no license is yet loaded (controller-side guard).
+                        .requestMatchers("/api/v1/license/initial-setup").permitAll()
+                        .requestMatchers("/ws/**").permitAll()     // 브라우저 SockJS handshake
+                        .requestMatchers("/ws-raw/**").permitAll() // Worker raw WebSocket handshake
+                        // SPA shell — bundled Vite 산출물 (login 페이지 진입 전 anonymous 로딩).
+                        .requestMatchers("/", "/index.html",
+                                         "/favicon.svg", "/favicon.ico",
+                                         "/mpd.png", "/mpd_lic.png",
+                                         "/assets/**").permitAll()
                         .anyRequest().authenticated()
                 )
+                // Filter 順序: api_token → jwt. addFilterBefore 는 後에 추가된 것이
+                // chain 上 앞쪽에 위치하므로, 의도 順序대로 register.
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(apiTokenAuthFilter, UsernamePasswordAuthenticationFilter.class)
                 .addFilterAfter(licenseEnforcementFilter, JwtAuthFilter.class);
 
         return http.build();

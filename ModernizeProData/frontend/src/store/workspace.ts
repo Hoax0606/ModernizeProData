@@ -13,7 +13,7 @@ export type ProjectPhase =
   | 'hypercare'
   | 'done';
 
-export type RunStatus = 'idle' | 'running' | 'completed';
+export type RunStatus = 'idle' | 'running' | 'paused' | 'completed' | 'failed' | 'aborted';
 
 export type SiteEnv = 'mainframe' | 'midrange' | 'cloud' | 'on-prem' | 'other';
 export type SourceEncoding = 'shift_jis' | 'euc-jp' | 'utf-8' | 'ebcdic';
@@ -50,6 +50,9 @@ export interface Site {
   notes?: string;
   /** 현재 활성 운영 단계 (test/dev/staging/production). TO-BE DB 는 이 단계의 것을 사용. */
   environment: ProjectEnvironment;
+  /** TO-BE DB 연결 범위. 'site' = 모든 Project 가 Site.tobeDbByEnv 공유 (기본, 통합 이행),
+   *  'project' = 각 Project 가 자기 tobeDbByEnv 보유 (업무별 분리 이행). */
+  tobeDbScope?: 'site' | 'project';
   /** 운영 단계별로 따로 저장하는 TO-BE DB 접속 정보. */
   tobeDbByEnv: TobeDbByEnv;
   /**
@@ -68,19 +71,6 @@ export interface DdlFile {
   uploadedAt: string;
 }
 
-export interface CutoverMeta {
-  snapshotId?: string;
-  /** Coordinator 가 지정한 담당자 (username). cutover 책임자 라벨. */
-  assignee?: string;
-  startedAt?: string;
-  startedBy?: string;
-  abortedAt?: string;
-  abortedBy?: string;
-  abortReason?: string;
-  finishedAt?: string;
-  finishedBy?: string;
-}
-
 export interface Project {
   id: string;
   siteId: string;
@@ -97,10 +87,22 @@ export interface Project {
   assignee?: string;
   /** 프로젝트의 실행(run) 담당. Execution Overview 의 dropdown 으로 지정. assignee 와 별개. */
   executionAssignee?: string;
-  /** cutover 실행 메타 (시작·중단·완료 누가 언제). Coordinator 만 수정. */
-  cutover?: CutoverMeta;
   /** 실행 단계(test/rehearsal/cutover)의 sub-status. phase 전환 시 idle 로 초기화. */
   runStatus?: RunStatus;
+  /**
+   * 시작 시각 (HH:mm[:ss]). solution_settings.internal_mode="individual" 시만 의미.
+   * common mode 에서는 solution_settings.internal_common_time 이 사용됨.
+   */
+  scheduleStartTime?: string | null;
+  /** 마지막 run 실행 시각. Misfire 판정 용. */
+  scheduleLastRunAt?: string | null;
+  /** Quartz 가 계산한 다음 발화 시각. UI 표시 용 cache (서버가 갱신). */
+  scheduleNextRunAt?: string | null;
+  /** Per-project TO-BE DB 연결. Site.tobeDbScope === 'project' 일 때만 의미.
+   *  scope === 'site' 중에는 비어 있어도 무방 (Site.tobeDbByEnv 가 권위). */
+  tobeDbByEnv?: TobeDbByEnv;
+  /** Per-project lock 상태. tobeDbByEnv 와 동일 조건으로 사용. */
+  tobeDbLocks?: TobeDbLocks;
   createdAt: string;
 }
 
@@ -141,6 +143,21 @@ interface WorkspaceState {
   setProjectAssignee: (projectId: string, assignee: string | undefined) => Promise<void>;
   /** Project 실행 담당자 지정. undefined = 미배정. */
   setProjectExecutionAssignee: (projectId: string, executionAssignee: string | undefined) => Promise<void>;
+  /** Project phase 전환 (test/sign-off/... 변경). cutover 흐름과 별개의 일반 전환용. */
+  setProjectPhase: (projectId: string, phase: ProjectPhase) => Promise<void>;
+  /** Project runStatus 전환 (running/completed/idle). undefined = 초기화. */
+  setProjectRunStatus: (projectId: string, runStatus: RunStatus | undefined) => Promise<void>;
+  /**
+   * phase + runStatus 를 단일 BE 호출 + 단일 set 으로 atomic 갱신.
+   * Run 起動時に 2 つを分けて呼ぶと 2 BE call + 2 set のレースで一瞬「test + 非 running」
+   * 상태가 보일 수 있다 (sidebar chip が一瞬色なし). このメソッドで両方を 1 リクエスト로 묶어
+   * race 회피.
+   */
+  setProjectPhaseAndRunStatus: (
+    projectId: string,
+    phase: ProjectPhase,
+    runStatus: RunStatus | undefined,
+  ) => Promise<void>;
 }
 
 export const emptyDbConnection = (): SiteDbConnection => ({
@@ -372,6 +389,39 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         set((s) => ({
           projects: s.projects.map((p) => (p.id === projectId ? updated : p)),
         }));
+      },
+
+      setProjectPhase: async (projectId, phase) => {
+        await projectApi.update(projectId, { phase });
+        set((s) => ({
+          projects: s.projects.map((p) =>
+            p.id === projectId ? { ...p, phase } : p
+          ),
+        }));
+      },
+
+      setProjectRunStatus: async (projectId, runStatus) => {
+        await projectApi.update(projectId, { runStatus });
+        set((s) => ({
+          projects: s.projects.map((p) =>
+            p.id === projectId ? { ...p, runStatus } : p
+          ),
+        }));
+      },
+
+      setProjectPhaseAndRunStatus: async (projectId, phase, runStatus) => {
+        /* 楽観 update 를 동기적으로 먼저 — UI 가 즉시 새 색을 보여주도록.
+           BE 호출은 background 로 await, 실패해도 (mock 모드 등) 일단 store 는 유지. */
+        set((s) => ({
+          projects: s.projects.map((p) =>
+            p.id === projectId ? { ...p, phase, runStatus } : p
+          ),
+        }));
+        try {
+          await projectApi.update(projectId, { phase, runStatus });
+        } catch (e) {
+          console.error('[workspace] setProjectPhaseAndRunStatus BE failed:', e);
+        }
       },
     }),
     {

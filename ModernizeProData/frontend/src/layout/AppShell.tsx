@@ -1,5 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react';
-import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
+import { Outlet, NavLink, useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { useAuthStore, roleLabel } from '../store/auth';
 import { authApi } from '../api/auth';
 import { useUsersStore } from '../store/users';
@@ -13,13 +13,19 @@ import { CreateSiteModal } from '../components/CreateSiteModal';
 import { CreateProjectModal } from '../components/CreateProjectModal';
 import { SignOutModal } from '../components/SignOutModal';
 import { ClusterAdminModal } from '../components/ClusterAdminModal';
-import { NotificationToast } from '../components/NotificationToast';
 import { LicenseBanner } from '../components/LicenseBanner';
 import { LockIcon } from '../components/LockIcon';
+import { HourglassHalfIcon } from '../components/HourglassHalfIcon';
 import { useLicenseStore } from '../store/license';
 import { useWorkspaceStore } from '../store/workspace';
+// import { useExecutionPreflightStore } from '../store/executionPreflight';
+// import { TOTAL_RUN_MS, computeElapsedMs } from '../lib/pipelineStages';
+import { effectiveTobeDb, isTobeDbConfigured } from '../lib/effectiveTobeDb';
+import { useUiStore } from '../store/ui';
 import { isProjectReadOnly } from '../store/readOnly';
 import { useSnapshotsStore } from '../store/snapshots';
+import { useAsisDdlStore } from '../store/asisDdl';
+import { useTobeDdlStore } from '../store/tobeDdl';
 import { useAuditLogStore } from '../store/auditLog';
 import { useNotificationStore } from '../store/notifications';
 import { useNotificationPrefsStore, isEventEnabled, actionToEventKey } from '../store/notificationPreferences';
@@ -33,7 +39,32 @@ import { useT } from '../i18n';
 export function AppShell() {
   const navigate = useNavigate();
   const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
   const t = useT();
+
+  // Pre-flight 의 csv-arrived / conn-tobe Fix 가 `?siteSettings=csv|tobe-db` 를 붙이면
+  // SiteSettingsModal 을 자동 open + 해당 섹션을 1초 강조. URL 쿼리는 즉시 정리해서
+  // 다음 navigate 시 또 트리거되지 않도록.
+  //
+  // 주의: highlight set + setSearchParams + setTimeout(reset) 을 한 effect 안에 두면
+  // setSearchParams 가 deps(searchParams) 를 바꿔 effect 재실행 + cleanup 이 setTimeout
+  // 을 취소 → highlight 가 영원히 reset 되지 않는다. 그래서 두 effect 로 분리한다.
+  const [siteSettingsHighlight, setSiteSettingsHighlight] = useState<'csv' | 'tobe-db' | null>(null);
+  useEffect(() => {
+    const h = searchParams.get('siteSettings');
+    if (h !== 'csv' && h !== 'tobe-db') return;
+    setSiteSettingsOpen(true);
+    setSiteSettingsHighlight(h);
+    const next = new URLSearchParams(searchParams);
+    next.delete('siteSettings');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+  useEffect(() => {
+    if (!siteSettingsHighlight) return;
+    const id = window.setTimeout(() => setSiteSettingsHighlight(null), 1000);
+    return () => window.clearTimeout(id);
+  }, [siteSettingsHighlight]);
+
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
   const loadUsers = useUsersStore((s) => s.loadUsers);
@@ -65,6 +96,7 @@ export function AppShell() {
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [clusterAdminOpen, setClusterAdminOpen] = useState(false);
   const [siteSettingsOpen, setSiteSettingsOpen] = useState(false);
+  const [siteSettingsFocus, setSiteSettingsFocus] = useState<import('../store/ui').SiteSettingsFocus>(undefined);
   const [siteMenuOpen, setSiteMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifTab, setNotifTab] = useState<'all' | 'unread'>('all');
@@ -83,12 +115,31 @@ export function AppShell() {
   const fetchSites = useWorkspaceStore((s) => s.fetchSites);
   const fetchProjects = useWorkspaceStore((s) => s.fetchProjects);
 
+  // 외부 페이지(MappingPage 등)에서 site settings 모달 open 요청 감지
+  const siteSettingsRequest = useUiStore((s) => s.siteSettingsRequest);
+  useEffect(() => {
+    if (!siteSettingsRequest) return;
+    setSiteSettingsFocus(siteSettingsRequest.focus);
+    setSiteSettingsOpen(true);
+    useUiStore.getState().consumeSiteSettingsRequest();
+  }, [siteSettingsRequest]);
+
   // 모달이 열려있으면 polling 일시 중지 (편집 중 서버 데이터로 덮어쓰기 방지)
   const isEditing = siteSettingsOpen || createSiteOpen || createProjectOpen;
   const isEditingRef = useRef(isEditing);
   isEditingRef.current = isEditing;
 
   const fetchSnapshots = useSnapshotsStore((s) => s.fetchBySite);
+
+  // 사이드바 project row 옆에 pending snapshot 모래시계 — Versions 에서 Request Review 한 직후 표시.
+  const allSnapshots = useSnapshotsStore((s) => s.snapshots);
+  const pendingProjectIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const s of allSnapshots) {
+      if (s.status === 'pending') ids.add(s.projectId);
+    }
+    return ids;
+  }, [allSnapshots]);
 
   // navigate 시 location.state.activateProjectId 로 전달된 값을 setActiveProject 에 반영.
   // 알림 클릭처럼 라우트 전환 + 프로젝트 변경을 한 번에 해야 하는 경우, 핸들러에서 setActiveProject 를
@@ -105,7 +156,7 @@ export function AppShell() {
     setActiveProject(st.activateProjectId ?? null);
   }, [location.key, setActiveProject]);
 
-  // 10초 간격으로 서버 동기화 (sites → projects → snapshots → audit logs 순서 보장)
+  // 10초 간격으로 서버 동기화 (sites → projects → snapshots → audit logs 순서 보장).
   useEffect(() => {
     const sync = async () => {
       if (isEditingRef.current) return;
@@ -126,14 +177,10 @@ export function AppShell() {
   const activeProject = useMemo(() => allProjects.find((p) => p.id === activeProjectId) ?? null, [allProjects, activeProjectId]);
   const activeProjectReadOnly = isProjectReadOnly(activeProject, user);
 
-  const siteDbConfigured = (s: typeof sites[number]) => {
-    const db = s.tobeDbByEnv?.[s.environment] as Partial<{ type: string; host: string; database: string; username: string }> | undefined;
-    return !!db
-      && !!db.type?.trim()
-      && !!db.host?.trim()
-      && !!db.database?.trim()
-      && !!db.username?.trim();
-  };
+  // scope='project' 인 site 의 active project 가 그 site 면 Project DB 로,
+  // 아니면 Site DB(또는 dormant 복사본)로 판단. helper 가 일원화.
+  const siteDbConfigured = (s: typeof sites[number]) =>
+    isTobeDbConfigured(s, s.id === activeSiteId ? activeProject : null);
 
   const STAGE_SHORT: Record<string, string> = {
     dev: 'DEV',
@@ -142,6 +189,24 @@ export function AppShell() {
     production: 'PROD',
   };
   const stageShort = (env: string) => STAGE_SHORT[env] ?? env.slice(0, 4).toUpperCase();
+
+  // site 의 raw DB type 을 짧은 라벨로. 알 수 없으면 빈 문자열.
+  const dialectLabel = (raw: string | null | undefined): string => {
+    if (!raw) return '';
+    const s = raw.trim().toLowerCase();
+    if (!s) return '';
+    if (s.includes('postgres')) return 'PostgreSQL';
+    if (s.includes('sql server') || s === 'mssql' || s.includes('microsoft')) return 'SQL Server';
+    if (s.includes('mysql') || s.includes('mariadb')) return 'MySQL';
+    if (s.includes('db2')) return 'DB2';
+    if (s.includes('oracle')) return 'Oracle';
+    return raw.trim();
+  };
+  const siteDialects = (s: typeof sites[number]) => {
+    const proj = s.id === activeSiteId ? activeProject : null;
+    const tobeRaw = effectiveTobeDb(s, proj)[s.environment]?.type;
+    return { asis: dialectLabel(s.asisDbType), tobe: dialectLabel(tobeRaw) };
+  };
 
   const projectSort = useSettingsStore((s) => s.projectSort);
   const setProjectSort = useSettingsStore((s) => s.setProjectSort);
@@ -471,6 +536,15 @@ export function AppShell() {
                   >
                     <div style={styles.projectNameRow}>
                       <span style={styles.projectName}>{p.name}</span>
+                      {pendingProjectIds.has(p.id) && p.phase === 'test' && p.runStatus === 'completed' && (
+                        <span
+                          style={styles.projectPendingIcon}
+                          title={t('siteOverview.pendingSnapshotIcon.title')}
+                          aria-label={t('siteOverview.pendingSnapshotIcon.title')}
+                        >
+                          <HourglassHalfIcon size={11} color="var(--amber)" />
+                        </span>
+                      )}
                       {readOnly && (
                         <span style={styles.projectReadOnlyIcon} aria-label={t('shell.readOnly.projectTooltip')}>
                           <LockIcon open={false} color="var(--amber)" size={11} />
@@ -584,7 +658,19 @@ export function AppShell() {
                   })()}
                 </div>
                 <div style={styles.topTitleSub}>
-                  {activeProject.tableCount} tables
+                  {activeSite && (() => {
+                    const d = siteDialects(activeSite);
+                    if (!d.asis && !d.tobe) return null;
+                    return (
+                      <span style={styles.topDialectChip} title={`AS-IS: ${d.asis || '?'}  →  TO-BE: ${d.tobe || '?'}`}>
+                        <span style={styles.topDialectName}>{d.asis || '?'}</span>
+                        <span style={styles.topDialectArrow}>→</span>
+                        <span style={styles.topDialectName}>{d.tobe || '?'}</span>
+                      </span>
+                    );
+                  })()}
+                  <span style={styles.topDialectSep}>·</span>
+                  <span>{activeProject.tableCount} tables</span>
                 </div>
               </>
             ) : activeSite ? (
@@ -772,6 +858,9 @@ export function AppShell() {
             <Tab to="/site/approvals" label={t('tab.approvals')} />
             <Tab to="/site/export" label={t('tab.siteExport')} />
             <Tab to="/site/audit" label={t('tab.auditLog')} />
+            {user?.role === 'master' && (
+              <Tab to="/site/scheduler" label={t('tab.scheduler')} />
+            )}
           </div>
         )}
 
@@ -795,7 +884,15 @@ export function AppShell() {
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
       <AccountProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
       <SolutionSettingsModal open={solutionOpen} onClose={() => setSolutionOpen(false)} />
-      <SiteSettingsModal open={siteSettingsOpen} onClose={() => setSiteSettingsOpen(false)} />
+      <SiteSettingsModal
+        open={siteSettingsOpen}
+        onClose={() => setSiteSettingsOpen(false)}
+        focus={
+          siteSettingsHighlight === 'csv' ? 'asis-csv'
+          : siteSettingsHighlight === 'tobe-db' ? 'tobe-db'
+          : siteSettingsFocus
+        }
+      />
       <ClusterAdminModal open={clusterAdminOpen} onClose={() => setClusterAdminOpen(false)} />
       <CreateSiteModal open={createSiteOpen} onClose={() => setCreateSiteOpen(false)} />
       <CreateProjectModal open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} />
@@ -804,7 +901,6 @@ export function AppShell() {
         onCancel={() => setSignOutOpen(false)}
         onConfirm={() => { setSignOutOpen(false); handleLogout(); }}
       />
-      <NotificationToast />
       </div>
     </div>
   );
@@ -839,10 +935,11 @@ function siteBadge(name: string): string {
 }
 
 /** phase 별 의미색 (badge bg / border / text). 사이드바·탑바 phase badge 공통.
- *  test/rehearsal completed → 흰배경 + 검정글씨 + 검정테두리.
- *  test/rehearsal/cutover 는 running 중에만 고유색, idle 이면 표시 안 됨 (phase 자체가 바뀜). */
+ *  test/rehearsal/cutover 는 running 중에만 고유색 — paused/completed/failed/aborted/idle 은 모두 흰색.
+ *  그 외 phase (planning/analysis/sign-off/ready/hypercare/done) 는 항상 고유색. */
 function phaseColors(phase: string, runStatus?: string): { bg: string; color: string; border: string } {
-  if (runStatus === 'completed' && (phase === 'test' || phase === 'rehearsal')) {
+  const activePhase = phase === 'test' || phase === 'rehearsal' || phase === 'cutover';
+  if (activePhase && runStatus !== 'running') {
     return {
       bg:     'var(--panel)',
       color:  'var(--text)',
@@ -954,7 +1051,12 @@ function Tab({ to, end, label }: { to: string; end?: boolean; label: string }) {
         whiteSpace: 'nowrap',
         textDecoration: 'none',
         transition: 'color .08s',
-        boxShadow: isActive ? 'inset 0 -2px 0 var(--navy)' : 'none',
+        // 밑줄은 border-bottom 으로. (이전 inset box-shadow 는 구형 WebKit/WebView 에서
+        // 좌측으로 누출돼 active 탭 왼쪽에 세로 선이 생기던 원인.)
+        borderBottom: isActive ? '2px solid var(--navy)' : '2px solid transparent',
+        boxSizing: 'border-box',
+        outline: 'none',
+        WebkitTapHighlightColor: 'transparent',
       })}
     >
       {label}
@@ -1189,6 +1291,13 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     flexShrink: 0,
   },
+  projectPendingIcon: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    flexShrink: 0,
+    // flex 기하 중심 → 텍스트 caps 옵티컬 중심 보정 (1px 위)
+    transform: 'translateY(-1px)',
+  },
   readOnlyBanner: {
     display: 'flex',
     alignItems: 'center',
@@ -1323,6 +1432,18 @@ const styles: Record<string, React.CSSProperties> = {
   },
   allProjectsLabel: { fontSize: 11.5, fontWeight: 500, color: 'var(--text)' },
   countMono: { fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-3)' },
+
+  topDialectChip: {
+    display: 'inline-flex', alignItems: 'center', gap: 4,
+    whiteSpace: 'nowrap',
+  },
+  topDialectName: {
+    fontFamily: 'var(--mono)', fontSize: 9.5, fontWeight: 500,
+    color: 'var(--text-4)', letterSpacing: 0.2,
+  },
+  topDialectArrow: {
+    fontSize: 9, color: 'var(--text-4)', fontFamily: 'var(--mono)',
+  },
 
   sectionHeader: {
     padding: '8px 14px 4px',
@@ -1539,7 +1660,11 @@ const styles: Record<string, React.CSSProperties> = {
   },
   topTitle: { display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 },
   topTitleMain: { fontSize: 13, fontWeight: 600, letterSpacing: -0.1 },
-  topTitleSub: { fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
+  topTitleSub: {
+    fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)',
+    display: 'flex', alignItems: 'center', gap: 6,
+  },
+  topDialectSep: { color: 'var(--text-4)' },
 
   bellBtn: {
     position: 'relative',

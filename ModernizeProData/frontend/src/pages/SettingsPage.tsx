@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useWorkspaceStore, type Project, type ProjectPhase, type Site } from '../store/workspace';
+import { useWorkspaceStore, type Project, type ProjectPhase, type Site, type ProjectEnvironment, type TobeDbByEnv, type TobeDbLocks } from '../store/workspace';
 import { useNotificationPrefsStore } from '../store/notificationPreferences';
 import { useSettingsStore } from '../store/settings';
 import { projectApi } from '../api/workspace';
@@ -9,8 +9,9 @@ import { useAuthStore } from '../store/auth';
 import { useActiveProjectReadOnly } from '../store/readOnly';
 import { DdlSchemaPanel } from '../components/DdlSchemaPanel';
 import { LockIcon } from '../components/LockIcon';
-import { Toast } from '../components/Toast';
 import { useT } from '../i18n';
+import { isTobeDbConfigured } from '../lib/effectiveTobeDb';
+import { TobeDbCard } from '../components/TobeDbCard';
 
 /** AppShell 의 AS-IS/TO-BE 램프 클릭 → navigate(..., { state: { highlightSide } }) 로 전달.
  *  'asis-csv' 는 MappingPage 의 "CSV not imported" 배지에서 들어오는 경우에 쓰이며
@@ -20,14 +21,7 @@ interface HighlightState { highlightSide?: HighlightSide }
 
 const ALL_PHASES: ProjectPhase[] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
 
-function isSiteDbConfigured(s: Site | null): boolean {
-  if (!s) return false;
-  const db = s.tobeDbByEnv?.[s.environment];
-  if (!db) return false;
-  return !!db.type?.trim() && !!db.host?.trim() && !!db.database?.trim() && !!db.username?.trim();
-}
-
-type SectionKey = 'general' | 'ddl' | 'schedule' | 'notify' | 'danger';
+type SectionKey = 'general' | 'ddl' | 'tobedb' | 'notify' | 'danger';
 
 /**
  * Project Settings — 프로토타입의 6-section 구조.
@@ -82,7 +76,10 @@ export function SettingsPage() {
   const sections: { k: SectionKey; l: string; d: string; danger?: boolean }[] = [
     { k: 'general',   l: t('projectSettings.section.general.label'),   d: t('projectSettings.sidebar.general.desc') },
     { k: 'ddl',       l: t('projectSettings.section.ddl.label'),       d: t('projectSettings.sidebar.ddl.desc') },
-    { k: 'schedule',  l: t('projectSettings.section.schedule.label'),  d: t('projectSettings.sidebar.schedule.desc') },
+    // 프로젝트별 모드일 때만 TO-BE DB 섹션 노출.
+    ...(site?.tobeDbScope === 'project'
+      ? [{ k: 'tobedb' as const, l: 'TO-BE DB', d: 'Project 별 TO-BE DB 접속 정보' }]
+      : []),
     { k: 'notify',    l: t('projectSettings.section.notify.label'),    d: t('projectSettings.sidebar.notify.desc') },
     { k: 'danger',    l: t('projectSettings.section.danger.label'),    d: t('projectSettings.sidebar.danger.desc'), danger: true },
   ];
@@ -126,7 +123,7 @@ export function SettingsPage() {
       <div style={styles.content}>
         {section === 'general'   && <PSGeneral   project={project} site={site} />}
         {section === 'ddl'       && <PSDdl       project={project} highlightSide={highlightSide} />}
-        {section === 'schedule'  && <PSSchedule  project={project} />}
+        {section === 'tobedb'    && site && <PSTobeDb project={project} site={site} />}
         {section === 'notify'    && <PSNotify    project={project} />}
         {section === 'danger'    && <PSDanger    project={project} />}
       </div>
@@ -210,7 +207,7 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
           <span style={styles.staticText}>{site?.name ?? '—'}</span>
         </PSRow>
         <PSRow label={t('projectSettings.row.env')}>
-          <span style={isSiteDbConfigured(site) ? styles.envChip : styles.envChipOff}>{site?.environment ?? '—'}</span>
+          <span style={isTobeDbConfigured(site, project) ? styles.envChip : styles.envChipOff}>{site?.environment ?? '—'}</span>
         </PSRow>
         <PSRow label={t('projectSettings.row.createdAt')}>
           <span style={styles.staticText}>{new Date(project.createdAt).toLocaleString()}</span>
@@ -255,95 +252,77 @@ function PSDdl({ project, highlightSide }: { project: Project; highlightSide: Hi
   );
 }
 
-/* ─── Schedule ───────────────────────────────────────────── */
+/* ─── TO-BE DB (per-project, scope='project' 일 때만) ─────── */
 
-function PSSchedule({ project }: { project: Project }) {
+function PSTobeDb({ project, site }: { project: Project; site: Site }) {
   const t = useT();
-  /* mock — 실제론 Project 엔티티에 schedule jsonb 추가 필요 */
-  const [rehearsalOn, setRehearsalOn] = useState(true);
-  const [startTime, setStartTime] = useState('22:00 KST');
-  const [maxDuration, setMaxDuration] = useState('240');
-  const [extOpen, setExtOpen] = useState(false);
+  const user = useAuthStore((s) => s.user);
+  const isMaster = user?.role === 'master';
+  const readOnly = useActiveProjectReadOnly();
+  const updateProject = useWorkspaceStore((s) => s.updateProject);
 
-  const cutover = (project.cutover ?? {}) as { dday?: string; freezeHours?: number; rollbackSla?: number };
+  const [stage, setStage] = useState<ProjectEnvironment>(site.environment);
+  const [tobeDbByEnv, setTobeDbByEnv] = useState<TobeDbByEnv>(project.tobeDbByEnv ?? {});
+  const [tobeDbLocks, setTobeDbLocks] = useState<TobeDbLocks>(project.tobeDbLocks ?? {});
+
+  // 다른 프로젝트로 전환되거나 Site 의 environment 가 바뀌면 로컬 draft 재초기화.
+  useEffect(() => {
+    setTobeDbByEnv(project.tobeDbByEnv ?? {});
+    setTobeDbLocks(project.tobeDbLocks ?? {});
+    setStage(site.environment);
+  }, [project.id, site.environment, project.tobeDbByEnv, project.tobeDbLocks]);
+
+  const isDirty =
+    JSON.stringify(tobeDbByEnv) !== JSON.stringify(project.tobeDbByEnv ?? {}) ||
+    JSON.stringify(tobeDbLocks) !== JSON.stringify(project.tobeDbLocks ?? {});
+
+  const handleSave = async () => {
+    if (!isDirty || readOnly) return;
+    // type 이 비어있거나 사용자가 명시적으로 lock 하지 않은 stage 는 저장하지 않음.
+    // lock 시점에 connection test ok 검증 → lock 된 stage = 검증된 stage.
+    // 미검증/실패 stage 의 입력은 backend 로 보내지 않는다.
+    const cleanedByEnv: TobeDbByEnv = {};
+    const finalLocks: TobeDbLocks = {};
+    for (const [k, v] of Object.entries(tobeDbByEnv) as [ProjectEnvironment, TobeDbByEnv[ProjectEnvironment]][]) {
+      if (v && v.type.trim() && tobeDbLocks[k]) {
+        cleanedByEnv[k] = v;
+        finalLocks[k] = true;
+      }
+    }
+    await updateProject(project.id, { tobeDbByEnv: cleanedByEnv, tobeDbLocks: finalLocks });
+  };
 
   return (
     <>
       <PSHead
-        title="Schedule"
-        desc={t('projectSettings.head.schedule.desc')}
-        actions={<button style={styles.btnPrimary} disabled>{t('projectSettings.action.saveChanges')}</button>}
-        mock
+        title="TO-BE Database"
+        desc="프로젝트별 TO-BE DB 접속 정보 (Site Setting 의 'TO-BE DB scope' 가 Per-project 일 때 사용)"
+        actions={
+          <button
+            onClick={handleSave}
+            disabled={!isDirty || readOnly}
+            style={{ ...styles.btnPrimary, ...((!isDirty || readOnly) ? styles.btnDisabled : {}) }}
+          >
+            {t('projectSettings.action.saveChanges')}
+          </button>
+        }
       />
-
-      <PSCard
-        title={t('projectSettings.schedule.nightly.title')}
-        desc={t('projectSettings.schedule.nightly.desc')}
-      >
-        <PSRow label={t('projectSettings.schedule.row.enabled')} hint={rehearsalOn ? t('projectSettings.schedule.row.enabledOn') : t('projectSettings.schedule.row.enabledOff')}>
-          <Toggle on={rehearsalOn} onChange={setRehearsalOn} label={rehearsalOn ? t('projectSettings.schedule.toggle.on') : t('projectSettings.schedule.toggle.off')} />
-        </PSRow>
-        <PSRow label={t('projectSettings.schedule.row.startTime')} hint={t('projectSettings.schedule.row.startTimeHint')}>
-          <PSInput value={startTime} onChange={setStartTime} mono width={140} />
-        </PSRow>
-        <PSRow label={t('projectSettings.schedule.row.maxDuration')} hint={t('projectSettings.schedule.row.maxDurationHint')}>
-          <PSInput value={maxDuration} onChange={setMaxDuration} mono suffix={t('projectSettings.schedule.minutes')} width={120} />
-        </PSRow>
-        <PSRow label={t('projectSettings.schedule.row.next')}>
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: rehearsalOn ? 'var(--text-2)' : 'var(--text-4)' }}>
-            {rehearsalOn ? t('projectSettings.schedule.row.nextRun', { time: startTime }) : t('projectSettings.schedule.row.nextDisabled')}
-          </span>
-        </PSRow>
-      </PSCard>
-
-      <PSCard title={t('projectSettings.schedule.cutover.title')} desc={t('projectSettings.schedule.cutover.desc')}>
-        <PSRow label={t('projectSettings.schedule.cutover.dday')} hint={t('projectSettings.schedule.cutover.ddayHint')}>
-          <PSInput value={cutover.dday ?? 'TBD'} mono />
-        </PSRow>
-        <PSRow label={t('projectSettings.schedule.cutover.freeze')} hint={t('projectSettings.schedule.cutover.freezeHint')}>
-          <PSInput value={String(cutover.freezeHours ?? 24)} mono suffix={t('projectSettings.schedule.hours')} width={120} />
-        </PSRow>
-        <PSRow label={t('projectSettings.schedule.cutover.rollback')} hint={t('projectSettings.schedule.cutover.rollbackHint')}>
-          <PSInput value={String(cutover.rollbackSla ?? 15)} mono suffix={t('projectSettings.schedule.minutes')} width={120} />
-        </PSRow>
-      </PSCard>
-
-      <div style={styles.collapseCard}>
-        <div onClick={() => setExtOpen((o) => !o)} style={{ ...styles.collapseHeader, background: extOpen ? 'var(--panel-2)' : 'var(--panel)' }}>
-          <span style={{ color: 'var(--text-4)', fontSize: 10, width: 10 }}>{extOpen ? '▾' : '▸'}</span>
-          <div style={{ flex: 1 }}>
-            <div style={styles.cardTitle}>{t('projectSettings.schedule.external.title')}</div>
-            <div style={styles.cardDesc}>
-              {t('projectSettings.schedule.external.desc')}
-            </div>
-          </div>
-          <span style={styles.statusBadgeQueued}>{t('projectSettings.schedule.external.optional')}</span>
-        </div>
-        {extOpen && (
-          <div style={{ padding: '14px 16px' }}>
-            <div style={styles.warnBox}>
-              <div style={styles.warnTitle}>{t('projectSettings.schedule.external.warnTitle')}</div>
-              {t('projectSettings.schedule.external.warnBodyBefore')}<b>Solution Settings › External integrations</b>{t('projectSettings.schedule.external.warnBodyAfter')}
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--text-2)', lineHeight: 1.6, marginBottom: 8, marginTop: 10 }}>
-              {t('projectSettings.schedule.external.cliHint')}
-            </div>
-            <pre style={styles.cliBlock}>
-{`# Nightly rehearsal (dry-run · TEST target)
-migrate run --project ${project.id} --mode rehearsal --dry-run
-
-# Cutover (production target · approved snapshot required)
-migrate run --project ${project.id} --mode cutover
-
-# Rollback
-migrate rollback --project ${project.id} --to pre-cutover`}
-            </pre>
-          </div>
-        )}
-      </div>
+      <TobeDbCard
+        stage={stage}
+        onStageChange={setStage}
+        value={tobeDbByEnv}
+        onValueChange={setTobeDbByEnv}
+        locks={tobeDbLocks}
+        onLocksChange={setTobeDbLocks}
+        editDisabled={readOnly}
+        isMaster={isMaster}
+        siteIdForTest={site.id}
+      />
     </>
   );
 }
+
+/* Schedule 탭의 Run history 는 LogViewer 의 'Run history' 탭으로 이동했음. */
 
 /* ─── Notifications ──────────────────────────────────────── */
 
@@ -369,7 +348,6 @@ function PSNotify({ project }: { project: Project }) {
 
   // 로컬 draft — Save 누르기 전까지는 store 에 반영 안 됨
   const [draftSubs, setDraftSubs] = useState<Record<string, boolean>>(savedSubs);
-  const [savedToast, setSavedToast] = useState(false);
 
   // 프로젝트가 바뀌면 draft 를 저장값으로 재초기화
   useEffect(() => {
@@ -395,7 +373,6 @@ function PSNotify({ project }: { project: Project }) {
       const v = draftSubs[e.k] ?? true;
       setSubscription(project.id, e.k, v);
     }
-    setSavedToast(true);
   };
 
   return (
@@ -436,8 +413,6 @@ function PSNotify({ project }: { project: Project }) {
           </div>
         ))}
       </PSCard>
-
-      <Toast visible={savedToast} message={t('projectSettings.action.savedToast')} onHide={() => setSavedToast(false)} />
     </>
   );
 }
@@ -789,7 +764,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '10px 0',
     overflow: 'auto',
     alignSelf: 'stretch',
-    minHeight: 'calc(100vh - 122px)',
+    minHeight: '100%',
   },
   asideHeader: {
     padding: '4px 14px 6px',

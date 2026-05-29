@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal } from './Modal';
 import { useWorkspaceStore } from '../store/workspace';
 import { useAuthStore } from '../store/auth';
@@ -37,6 +37,12 @@ export function CreateProjectModal({ open, onClose }: Props) {
     if (asisInputRef.current) asisInputRef.current.value = '';
     if (tobeInputRef.current) tobeInputRef.current.value = '';
   };
+
+  // 모달을 열 때마다 폼을 초기화한다 (닫았다 다시 열어도 이전 입력값이 남지 않게).
+  useEffect(() => {
+    if (open) reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -109,7 +115,10 @@ export function CreateProjectModal({ open, onClose }: Props) {
           />
         </Field>
 
-        <Field label={t('createProject.ddl')}>
+        {/* DDL 영역은 <label> 로 감싸면 내부 <input type=file> 가 label 클릭마다
+            자동 trigger 되어 파일 다이얼로그가 중복으로 뜬다. div 로 감싼다. */}
+        <div style={styles.field}>
+          <div style={styles.label}>{t('createProject.ddl')}</div>
           <div style={styles.ddlPairs}>
             <DdlPicker
               side="asis"
@@ -138,7 +147,7 @@ export function CreateProjectModal({ open, onClose }: Props) {
               disabled={submitting}
             />
           </div>
-        </Field>
+        </div>
 
         {error && <div style={styles.errorBox}>{error}</div>}
 

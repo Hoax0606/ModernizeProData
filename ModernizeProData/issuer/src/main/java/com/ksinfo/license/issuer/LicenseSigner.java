@@ -29,7 +29,11 @@ public final class LicenseSigner {
             String customer,
             String siteId,
             LocalDate expiresAt,
-            int graceDays
+            int graceDays,
+            /** Optional. When non-null/non-blank the issuer emits a v=2 license
+             *  bound to this hardware id; null/blank yields a v=1 license that
+             *  any PC can import (backward compat for the existing fleet). */
+            String hardwareId
     ) {}
 
     private static final String FIXED_EDITION = "standard";
@@ -43,8 +47,12 @@ public final class LicenseSigner {
 
         // backend Verifier 가 Jackson tree 로 payload 를 다시 직렬화하므로,
         // 여기서도 동일한 LinkedHashMap 순서로 작성해야 서명이 일치.
+        String hw = in.hardwareId() == null ? null : in.hardwareId().trim();
+        if (hw != null && hw.isEmpty()) hw = null;
+        int version = (hw != null) ? 2 : 1;
+
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("v", 1);
+        payload.put("v", version);
         payload.put("licenseId", in.licenseId());
         payload.put("customer", in.customer());
         payload.put("siteId", in.siteId());
@@ -54,6 +62,9 @@ public final class LicenseSigner {
         payload.put("expiresAt", in.expiresAt().toString());
         payload.put("graceDays", in.graceDays());
         payload.put("publicKeyFp", fp);
+        if (hw != null) {
+            payload.put("hardwareId", hw);
+        }
 
         byte[] payloadBytes = MAPPER.writeValueAsBytes(payload);
         Signature sig = Signature.getInstance("Ed25519");
@@ -71,8 +82,8 @@ public final class LicenseSigner {
 
         return new LicenseDocument(
                 new LicenseDocument.Payload(
-                        1, in.licenseId(), in.customer(), in.siteId(), FIXED_EDITION,
-                        NO_FEATURES, LocalDate.now(), in.expiresAt(), in.graceDays(), fp
+                        version, in.licenseId(), in.customer(), in.siteId(), FIXED_EDITION,
+                        NO_FEATURES, LocalDate.now(), in.expiresAt(), in.graceDays(), fp, hw
                 ),
                 signature,
                 "Ed25519"

@@ -58,6 +58,11 @@ public class Site {
     @Column(nullable = false, length = 16)
     private String environment;
 
+    /** TO-BE DB 연결 범위. "site" = 모든 Project 가 Site.tobeDbByEnv 공유,
+     *  "project" = 각 Project 가 자기 tobeDbByEnv 보유. 기본 "site". */
+    @Column(name = "tobe_db_scope", nullable = false, length = 16)
+    private String tobeDbScope;
+
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "tobe_db_by_env", columnDefinition = "jsonb")
     private Map<String, Object> tobeDbByEnv;
@@ -88,10 +93,23 @@ public class Site {
         s.csvPath = csvPath != null ? csvPath : "";
         s.notes = notes;
         s.environment = environment != null ? environment : "dev";
+        s.tobeDbScope = "site";
         s.tobeDbByEnv = tobeDbByEnv != null ? tobeDbByEnv : Map.of();
         s.tobeDbLocks = tobeDbLocks != null ? tobeDbLocks : Map.of();
         s.createdBy = createdBy;
         s.createdAt = OffsetDateTime.now();
         return s;
+    }
+
+    /**
+     * 런타임 활성 TO-BE DB config — {@code environment} 기준으로 {@code tobeDbByEnv} 에서 조회.
+     * FE(SiteSettingsModal 저장 / preflight) · DdlImportService · RunService 와 동일 키 사용.
+     * 설정이 없으면 null.
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> getActiveTobeDbConfig() {
+        if (tobeDbByEnv == null || environment == null) return null;
+        Object cfg = tobeDbByEnv.get(environment);
+        return cfg instanceof Map ? (Map<String, Object>) cfg : null;
     }
 }

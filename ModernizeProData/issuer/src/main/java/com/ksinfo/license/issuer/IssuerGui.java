@@ -71,9 +71,9 @@ public final class IssuerGui {
     private static final Color RED           = new Color(0xc42f2f);
 
     // Java logical font "Dialog" → JRE 의 composite 가 Korean/Japanese/Latin 자동 fallback.
-    private static final Font FONT_BASE  = new Font("Dialog", Font.PLAIN, 12);
-    private static final Font FONT_TITLE = new Font("Dialog", Font.BOLD, 13);
-    private static final Font FONT_LABEL = new Font("Dialog", Font.PLAIN, 12);
+    private static final Font FONT_BASE  = new Font("Hoax Mono JP", Font.PLAIN, 12);
+    private static final Font FONT_TITLE = new Font("Hoax Mono JP", Font.BOLD, 13);
+    private static final Font FONT_LABEL = new Font("Hoax Mono JP", Font.PLAIN, 12);
     public static void launch() {
         // System L&F = Windows native L&F. 글꼴도 Windows 시스템 폰트 (Segoe UI 등) 를
         // 그대로 가져오기 때문에 OS 단의 CJK fallback 이 자동으로 동작 (Korean → Malgun Gothic,
@@ -90,6 +90,7 @@ public final class IssuerGui {
     private JTextField expiresField;
     private JSpinner graceSpinner;
     private JTextField licenseIdField;
+    private JTextField hardwareIdField;
     private JTextField outputField;
     private JButton genBtn;
     private JButton copyFpBtn;
@@ -331,6 +332,10 @@ public final class IssuerGui {
         licenseIdField = styledTextField();
         addRow(grid, c, row++, "License ID", licenseIdField);
 
+        hardwareIdField = styledTextField();
+        hardwareIdField.setToolTipText("Optional. Paste the fingerprint shown in the target tool to bind this license to that PC (v=2). Leave blank for a machine-agnostic license (v=1).");
+        addRow(grid, c, row++, "Hardware ID", hardwareIdField);
+
         outputField = new JTextField();
         outputField.setText(System.getProperty("user.home") + File.separator + "Desktop");
         outputField.setToolTipText("폴더만 선택하세요. 파일 이름은 {License ID}.lic 로 자동.");
@@ -436,9 +441,11 @@ public final class IssuerGui {
             }
 
             File outFile = new File(dir, licId + ".lic");
+            String hwId = hardwareIdField.getText().trim();
             LicenseSigner.Input in = new LicenseSigner.Input(
                     licId, customer, siteId, expires,
-                    (Integer) graceSpinner.getValue()
+                    (Integer) graceSpinner.getValue(),
+                    hwId.isEmpty() ? null : hwId
             );
             LicenseDocument doc = LicenseSigner.signToFile(in, outFile.toPath());
             success("License created",

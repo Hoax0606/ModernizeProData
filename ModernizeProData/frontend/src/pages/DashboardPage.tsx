@@ -1,14 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { tobeDdlApi, type DdlSchema } from '../api/tobeDdl';
+import { mappingImportApi, type MappingRuleDto } from '../api/mappingImport';
 import { useWorkspaceStore, type Project } from '../store/workspace';
 import { useUsersStore } from '../store/users';
 import { useAuthStore } from '../store/auth';
 import { useSnapshotsStore } from '../store/snapshots';
+import { useMappingEditsStore, type RowEdit, type TableBindingEdit } from '../store/mappingEdits';
+import { useQuery } from '@tanstack/react-query';
+import { runsApi, type RunHistoryDto } from '../api/runs';
 import { CreateSiteModal } from '../components/CreateSiteModal';
 import { CreateProjectModal } from '../components/CreateProjectModal';
 import { DdlImportButton } from '../components/DdlImportButton';
-import { Toast } from '../components/Toast';
+import { HourglassHalfIcon } from '../components/HourglassHalfIcon';
 import { useT } from '../i18n';
 
 /**
@@ -30,35 +34,6 @@ export function DashboardPage() {
   const project = useMemo(() => projects.find((p) => p.id === activeProjectId) ?? null, [projects, activeProjectId]);
   const siteProjects = useMemo(() => projects.filter((p) => p.siteId === activeSiteId), [projects, activeSiteId]);
 
-  // 생성 직후 토스트 — sites/projects 수가 늘었을 때만 (삭제·전환 시엔 무음)
-  const prevSitesCount = useRef(sites.length);
-  const prevProjectsCount = useRef(projects.length);
-  const prevTableCount = useRef(project?.tableCount ?? 0);
-  const [toast, setToast] = useState<{ msg: string } | null>(null);
-
-  useEffect(() => {
-    if (sites.length > prevSitesCount.current && site) {
-      setToast({ msg: `${t('dashboard.toast.siteCreated')} · ${site.name}` });
-    }
-    prevSitesCount.current = sites.length;
-  }, [sites.length, site, t]);
-
-  useEffect(() => {
-    if (projects.length > prevProjectsCount.current && project) {
-      setToast({ msg: `${t('dashboard.toast.projectCreated')} · ${project.name}` });
-    }
-    prevProjectsCount.current = projects.length;
-  }, [projects.length, project, t]);
-
-  // AS-IS DDL 인포트 성공 토스트 — tableCount 가 0 → 양수로 바뀐 순간 한 번만.
-  useEffect(() => {
-    const current = project?.tableCount ?? 0;
-    if (prevTableCount.current === 0 && current > 0) {
-      setToast({ msg: `${t('asisDdl.toast.success')} · ${current} tables` });
-    }
-    prevTableCount.current = current;
-  }, [project?.tableCount, t]);
-
   return (
     <>
       {!site ? <SiteOnboarding />
@@ -67,11 +42,6 @@ export function DashboardPage() {
         : (project.tableCount === 0 || project.tobeTableCount === 0)
           ? <MappingOnboarding project={project} />
         : <ProjectDashboard project={project} />}
-      <Toast
-        visible={!!toast}
-        message={toast?.msg ?? ''}
-        onHide={() => setToast(null)}
-      />
     </>
   );
 }
@@ -189,10 +159,12 @@ interface DashboardRow {
   mappedColumns: number;
   issuesCount: number;
   readiness: 'ready' | 'review' | 'unbound';
+  sourceTables: string[];
 }
 
 function ProjectDashboard({ project }: { project: import('../store/workspace').Project }) {
   const t = useT();
+  const navigate = useNavigate();
   const [filter, setFilter] = useState<'all' | 'ready' | 'review' | 'unbound'>('all');
   const [tobeSchema, setTobeSchema] = useState<DdlSchema | null>(null);
   const allSnapshots = useSnapshotsStore((s) => s.snapshots);
@@ -201,6 +173,22 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
     () => allSnapshots.filter((sn) => sn.projectId === project.id),
     [allSnapshots, project.id],
   );
+
+  // RUN STATUS card — BE 의 run_history 최신 1건을 10s polling 으로 가져와 표시.
+  // (이전 demo 모드는 store 의 mock activeRun 참조; 이번 PoC1 real 모드 wiring 으로 교체.)
+  const runsQuery = useQuery({
+    queryKey: ['run-history', project.id],
+    queryFn: () => runsApi.listByProject(project.id),
+    refetchInterval: 10_000,
+    staleTime: 5_000,
+  });
+  const activeRun: RunHistoryDto | null = runsQuery.data?.[0] ?? null;
+
+  // mapping edits store — TO-BE table 別の bindings / row mapping (mapped 数 と AS-IS source の出所).
+  const tableBindings = useMappingEditsStore((s) => s.tableBindingEdits[project.id]) as
+    Record<string, TableBindingEdit> | undefined;
+  const rowEditsByTable = useMappingEditsStore((s) => s.rowEdits[project.id]) as
+    Record<string, Record<string, RowEdit>> | undefined;
 
   useEffect(() => {
     let alive = true;
@@ -224,7 +212,10 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
     if (!tobeSchema) return [];
     return tobeSchema.tables.map((tw) => {
       const total = tw.columns.length;
-      const mapped = 0; // mapping 機能未実装
+      const edits = rowEditsByTable?.[tw.table.id];
+      const mapped = countMapped(edits);
+      const binding = tableBindings?.[tw.table.id];
+      const sourceTables = binding ? uniqueSourceTables(binding) : [];
       let readiness: DashboardRow['readiness'];
       if (mapped === 0) readiness = 'unbound';
       else if (mapped >= total) readiness = 'ready';
@@ -237,9 +228,10 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
         mappedColumns: mapped,
         issuesCount: Math.max(total - mapped, 0),
         readiness,
+        sourceTables,
       };
     });
-  }, [tobeSchema]);
+  }, [tobeSchema, rowEditsByTable, tableBindings]);
 
   const counts = useMemo(() => ({
     total: rows.length,
@@ -249,6 +241,10 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
   }), [rows]);
 
   const filtered = filter === 'all' ? rows : rows.filter((r) => r.readiness === filter);
+
+  const goToMapping = (internalName: string) => {
+    navigate('/mapping', { state: { focusTable: { internalName } } });
+  };
 
   return (
     <div>
@@ -265,7 +261,14 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
           tone={latestApprovedVersion ? 'ok' : 'idle'}
           mono
         />
-        <Stat label="LAST RUN" value="—" sub="no run yet" tone="idle" mono />
+        <Stat
+          label="RUN STATUS"
+          value={activeRun ? activeRunDisplay(activeRun).label : '—'}
+          sub={activeRun ? activeRun.id : 'no active run'}
+          tone={activeRun ? activeRunDisplay(activeRun).tone : 'idle'}
+          mono
+          small={!!activeRun}
+        />
       </div>
 
       {/* Filter */}
@@ -277,6 +280,9 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
           <FilterPill active={filter === 'unbound'} onClick={() => setFilter('unbound')}>Unbound <Cnt>{counts.unbound}</Cnt></FilterPill>
         </div>
         <div style={{ flex: 1 }} />
+        <span style={styles.filterCount}>
+          {filtered.length} of {rows.length} tables
+        </span>
       </div>
 
       {/* Table */}
@@ -287,8 +293,7 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
               <Th width={28} align="center" />
               <Th width={300}>TO-BE TABLE</Th>
               <Th width={280}>AS-IS SOURCE</Th>
-              <Th width={260} align="center">COLUMN COVERAGE</Th>
-              <Th width={150} align="center">ISSUES</Th>
+              <Th width={300} align="center">MAPPING PROGRESS</Th>
               <Th width={130} align="center">READINESS</Th>
               <Th width={36} />
             </tr>
@@ -296,13 +301,13 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
           <tbody>
             {tobeSchema === null ? (
               <tr>
-                <td colSpan={7} style={styles.emptyRow}>
+                <td colSpan={6} style={styles.emptyRow}>
                   <div style={styles.emptyHint}>Loading…</div>
                 </td>
               </tr>
             ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={7} style={styles.emptyRow}>
+                <td colSpan={6} style={styles.emptyRow}>
                   <div style={styles.emptyTitle}>{t('dashboard.empty.title')}</div>
                   <div style={styles.emptyHint}>{t('dashboard.empty.hint')}</div>
                 </td>
@@ -310,8 +315,7 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
             ) : filtered.map((r, i) => (
               <tr
                 key={r.tableId}
-                // TODO: mapping 画面ができたら navigate(`/mapping/${r.tableId}`) などに差し替える
-                onClick={() => { /* mapping 画面 未実装 */ }}
+                onClick={() => goToMapping(r.tableId)}
                 style={{
                   background: i % 2 === 1 ? 'var(--zebra)' : 'var(--panel)',
                   borderBottom: '1px solid var(--border)',
@@ -328,24 +332,17 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
                   {r.physicalName}
                 </td>
                 <td style={{ ...styles.td, fontFamily: 'var(--mono)', fontSize: 11 }}>
-                  <span style={{ color: 'var(--text-4)', fontStyle: 'italic' }}>(no source)</span>
+                  <AsisSourceCell tables={r.sourceTables} />
                 </td>
                 <td style={{ ...styles.td, textAlign: 'center' }}>
-                  {r.mappedColumns === 0 ? (
-                    <span style={{ color: 'var(--text-4)', fontFamily: 'var(--mono)', fontSize: 11 }}>—</span>
-                  ) : (
-                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, width: '100%', maxWidth: 240 }}>
-                      <ProgressBar pct={r.totalColumns > 0 ? (r.mappedColumns / r.totalColumns) * 100 : 0} />
-                      <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-2)', minWidth: 48, textAlign: 'right' }}>
-                        {r.mappedColumns}/{r.totalColumns}
-                      </span>
-                    </div>
-                  )}
-                </td>
-                <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)', fontSize: 11.5 }}>
-                  {r.readiness === 'ready' || r.issuesCount === 0
-                    ? <span style={{ color: 'var(--text-4)' }}>—</span>
-                    : <span style={{ color: 'var(--text-3)' }}>{r.issuesCount} unmapped</span>}
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, width: '100%', maxWidth: 260 }}>
+                    <ProgressBar
+                      pct={r.totalColumns > 0 ? (r.mappedColumns / r.totalColumns) * 100 : 0}
+                    />
+                    <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-2)', minWidth: 56, textAlign: 'right' }}>
+                      {r.mappedColumns}/{r.totalColumns}
+                    </span>
+                  </div>
                 </td>
                 <td style={{ ...styles.td, textAlign: 'center' }}><ReadinessBadge kind={r.readiness} /></td>
                 <td style={{ ...styles.td, textAlign: 'center', color: 'var(--text-4)', fontSize: 16, lineHeight: 1 }}>›</td>
@@ -354,21 +351,80 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
           </tbody>
         </table>
       </div>
-
-      <div style={styles.statusbar}>
-        <div>{filtered.length} of {rows.length} tables</div>
-      </div>
     </div>
   );
 }
 
+/** rowEdits[targetCol] → "mapped" 判定. MappingPage と同じロジック. */
+function countMapped(edits: Record<string, RowEdit> | undefined): number {
+  if (!edits) return 0;
+  let n = 0;
+  for (const re of Object.values(edits)) {
+    if (re.savedStrategy === 'null' || re.savedStrategy === 'default') { n++; continue; }
+    const hasSrc = re.savedSrc?.some((s) => s && s.trim() !== '') ?? false;
+    const hasRule = !!(re.savedRule && re.savedRule.trim());
+    if (hasSrc || hasRule) n++;
+  }
+  return n;
+}
+
+function uniqueSourceTables(binding: TableBindingEdit): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of binding.sources) {
+    const tbl = (s.table ?? '').trim();
+    if (!tbl) continue;
+    if (seen.has(tbl)) continue;
+    seen.add(tbl);
+    out.push(tbl);
+  }
+  return out;
+}
+
+function AsisSourceCell({ tables }: { tables: string[] }) {
+  if (tables.length === 0) {
+    return <span style={{ color: 'var(--text-4)', fontStyle: 'italic' }}>(no source)</span>;
+  }
+  // 一覧では最大 2 個まで, 残りは "+N more".
+  const head = tables.slice(0, 2);
+  const more = tables.length - head.length;
+  return (
+    <span title={tables.join(', ')}>
+      <span style={{ color: 'var(--text)' }}>{head.join(', ')}</span>
+      {more > 0 && (
+        <span style={{ color: 'var(--text-4)' }}>{' '}+{more} more</span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * 최신 run 의 표시 라벨 + 색. ExecutionPage 의 StatusBadge 와 같은 매핑:
+ *   failed/timed_out → err / aborted → warn / success(=completed) → idle / paused → warn / running/pending → ok
+ */
+function activeRunDisplay(run: RunHistoryDto): { label: string; tone: 'ok' | 'warn' | 'err' | 'idle' } {
+  if (run.status === 'failed' || run.status === 'timed_out') return { label: 'failed', tone: 'err' };
+  if (run.status === 'aborted') return { label: 'aborted', tone: 'warn' };
+  if (run.status === 'success') return { label: 'completed', tone: 'idle' };
+  if (run.status === 'paused') return { label: 'paused', tone: 'warn' };
+  return { label: 'running', tone: 'ok' };
+}
+
+/**
+ * Mapping ページの TobeCoverageBar と同じスタイル — mapped 部分は緑, 未 mapped 部分は赤の
+ * 2 セグメント. 全部 mapped → 全部緑 / 何も mapped されてない → 全部赤 / 途中なら緑+赤.
+ */
 function ProgressBar({ pct }: { pct: number }) {
+  const mapped = Math.min(100, Math.max(0, pct));
+  const unmapped = 100 - mapped;
   return (
     <div style={{
-      flex: 1, height: 6, background: 'var(--panel-2)',
+      flex: 1, display: 'flex', height: 6,
       border: '1px solid var(--border)', borderRadius: 3, overflow: 'hidden',
+      background: 'var(--border)',
     }}>
-      <div style={{ width: `${Math.min(100, Math.max(0, pct))}%`, height: '100%', background: 'var(--green)' }} />
+      <div style={{ width: `${mapped}%`, background: 'var(--green)' }} />
+      <div style={{ width: `${unmapped}%`, background: 'var(--red)' }} />
     </div>
   );
 }
@@ -414,16 +470,24 @@ function Step({ n, title, active, done }: { n: number; title: string; active?: b
   );
 }
 
-function Stat({ label, value, sub, tone, mono }: { label: string; value: string; sub?: string; tone?: 'ok' | 'warn' | 'err' | 'idle'; mono?: boolean }) {
+function Stat({ label, value, sub, tone, mono, small }: { label: string; value: React.ReactNode; sub?: string; tone?: 'ok' | 'warn' | 'err' | 'idle'; mono?: boolean; small?: boolean }) {
   const valueColor = tone === 'ok'   ? 'var(--green)'
                    : tone === 'warn' ? 'var(--amber)'
                    : tone === 'err'  ? 'var(--red)'
                    : tone === 'idle' ? 'var(--text-3)'
                    : 'var(--text)';
+  // small: 「test · aborted」みたいに長めの compound 値を 1 行に収めるため.
+  // 上下中央そろえも調整してほかの大きい value と base line を合わせる.
+  const valueStyle: React.CSSProperties = {
+    ...styles.statValue,
+    color: valueColor,
+    ...(mono ? { fontFamily: 'var(--mono)' } : {}),
+    ...(small ? { fontSize: 14, fontWeight: 600, paddingTop: 6, whiteSpace: 'nowrap' } : {}),
+  };
   return (
     <div style={styles.stat}>
       <div style={styles.statLabel}>{label}</div>
-      <div style={{ ...styles.statValue, color: valueColor, ...(mono ? { fontFamily: 'var(--mono)' } : {}) }}>{value}</div>
+      <div style={valueStyle}>{value}</div>
       {sub && <div style={styles.statSub}>{sub}</div>}
     </div>
   );
@@ -479,11 +543,27 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
   const navigate = useNavigate();
   const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
   const setProjectAssignee = useWorkspaceStore((s) => s.setProjectAssignee);
+  const activeSiteId = useWorkspaceStore((s) => s.activeSiteId);
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
   const users = useUsersStore((s) => s.users);
   // Coordinator(master) 만 dropdown 으로 변경 가능. 그 외 사용자는 본인 row 도 text 로 표시.
   const canEditRow = (_p: Project) => isMaster;
+
+  // Snapshot pending 표시 — 프로젝트별로 pending snapshot 이 1개 이상이면 이름 옆에 아이콘.
+  // 사이트 단위 fetch (Approvals 이전에 들렀어도 store 가 비어있을 수 있어서).
+  const allSnapshots = useSnapshotsStore((s) => s.snapshots);
+  const fetchSnapshotsBySite = useSnapshotsStore((s) => s.fetchBySite);
+  useEffect(() => {
+    if (activeSiteId) void fetchSnapshotsBySite(activeSiteId);
+  }, [activeSiteId, fetchSnapshotsBySite]);
+  const pendingProjectIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const s of allSnapshots) {
+      if (s.status === 'pending') ids.add(s.projectId);
+    }
+    return ids;
+  }, [allSnapshots]);
 
   // 담당자 변경 draft — Save 누르기 전까지는 backend / store 에 반영 안 됨.
   const [assigneeDraft, setAssigneeDraft] = useState<Record<string, string>>({});
@@ -512,31 +592,59 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
     setAssigneeDraft({});
   };
 
-  // ProjectDashboard 와 동일한 TO-BE schema 가 source of truth.
-  // 프로젝트마다 tobeDdlApi.get 으로 받아 tables/columns 카운트를 모아둔다.
-  const [schemaCounts, setSchemaCounts] = useState<Record<string, { tables: number; columns: number }>>({});
+  // Per-project mapping stats — TO-BE schema (total) と mapping_rules (mapped) を組み合わせ.
+  // Dashboard と同じ "mapped" 判定 (skip 除外 / null & default 既定 mapped / expression は src or rule あり).
+  const [mappingStats, setMappingStats] = useState<Record<string, ProjectMappingStats>>({});
   const projectIdsKey = useMemo(() => projects.map((p) => p.id).sort().join(','), [projects]);
   useEffect(() => {
     let alive = true;
     Promise.all(
       projects.map(async (p) => {
-        try {
-          const schema = await tobeDdlApi.get(p.id);
-          const tables = schema.tables.length;
-          const columns = schema.tables.reduce((s, tw) => s + tw.columns.length, 0);
-          return [p.id, { tables, columns }] as const;
-        } catch {
-          return [p.id, { tables: 0, columns: 0 }] as const;
+        const [schema, rules] = await Promise.all([
+          tobeDdlApi.get(p.id).catch(() => ({ latestImport: null, tables: [] })),
+          mappingImportApi.listRules(p.id).catch(() => [] as MappingRuleDto[]),
+        ]);
+        // DDL 側を qualified ("schema.table") と short ("table") の 2 索引にしておき,
+        // rules → DDL を MappingPage と同じく qualified-first, short-fallback で解決.
+        // (rules.tobeSchema が null / DDL schemaName が空 のずれを吸収.)
+        const ddlByQualified = new Map<string, string>(); // → tableId
+        const ddlByShort = new Map<string, string>();
+        for (const tw of schema.tables) {
+          const qualified = ((tw.table.schemaName ? tw.table.schemaName + '.' : '') + tw.table.physicalName).toLowerCase();
+          const short = tw.table.physicalName.toLowerCase();
+          ddlByQualified.set(qualified, tw.table.id);
+          if (!ddlByShort.has(short)) ddlByShort.set(short, tw.table.id);
         }
+        const mappedByTableId = new Map<string, number>();
+        for (const r of rules) {
+          if (!isMappingRuleMapped(r)) continue;
+          const qualified = ((r.tobeSchema ? r.tobeSchema + '.' : '') + r.tobeTable).toLowerCase();
+          const short = r.tobeTable.toLowerCase();
+          const tableId = ddlByQualified.get(qualified) ?? ddlByShort.get(short);
+          if (!tableId) continue; // DDL 側に居ない rule は無視 (古い import 残骸など)
+          mappedByTableId.set(tableId, (mappedByTableId.get(tableId) ?? 0) + 1);
+        }
+        let totalColumns = 0;
+        let mappedColumns = 0;
+        let readyTables = 0;
+        for (const tw of schema.tables) {
+          const total = tw.columns.length;
+          const m = Math.min(mappedByTableId.get(tw.table.id) ?? 0, total);
+          totalColumns += total;
+          mappedColumns += m;
+          if (total > 0 && m >= total) readyTables++;
+        }
+        return [p.id, { totalTables: schema.tables.length, totalColumns, mappedColumns, readyTables }] as const;
       }),
     ).then((entries) => {
       if (!alive) return;
-      setSchemaCounts(Object.fromEntries(entries));
+      setMappingStats(Object.fromEntries(entries));
     });
     return () => { alive = false; };
     // projects 객체 reference 가 자주 바뀌므로 id key 만 dep 로.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectIdsKey]);
+
 
   // 필터 — 그리드 위에 표시. KPI · phase mix 는 전체 기준.
   const [phaseFilter, setPhaseFilter] = useState<string>('');
@@ -553,16 +661,13 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
     return true;
   });
 
-  // phase 분포 — 우측 Phase mix 패널에 사용 (전체 기준)
-  const phaseCounts: Record<string, number> = {};
-  for (const p of projects) phaseCounts[p.phase] = (phaseCounts[p.phase] ?? 0) + 1;
-
-  // KPI — TO-BE schema 기준. mapping engine 미연결 → mapped 는 0.
+  // KPI — TO-BE schema (total) + mapping_rules (mapped) を全 project で集計.
+  // mappedTables = 全列 mapped 済 (READY) のテーブル数.
   const doneProjects = projects.filter((p) => p.phase === 'done').length;
-  const totalTables = projects.reduce((a, p) => a + (schemaCounts[p.id]?.tables ?? 0), 0);
-  const mappedTables = 0;
-  const totalColumns = projects.reduce((a, p) => a + (schemaCounts[p.id]?.columns ?? 0), 0);
-  const mappedColumns = 0;
+  const totalTables = projects.reduce((a, p) => a + (mappingStats[p.id]?.totalTables ?? 0), 0);
+  const mappedTables = projects.reduce((a, p) => a + (mappingStats[p.id]?.readyTables ?? 0), 0);
+  const totalColumns = projects.reduce((a, p) => a + (mappingStats[p.id]?.totalColumns ?? 0), 0);
+  const mappedColumns = projects.reduce((a, p) => a + (mappingStats[p.id]?.mappedColumns ?? 0), 0);
   const overallPct = totalColumns > 0 ? (mappedColumns / totalColumns) * 100 : 0;
 
   const openProject = (id: string) => {
@@ -653,22 +758,20 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
                   <Th>{t('siteOverview.col.phase')}</Th>
                   <Th>{t('siteOverview.col.username')}</Th>
                   <Th align="right">{t('siteOverview.col.tables')}</Th>
-                  <Th align="right">{t('siteOverview.col.mappingRows')}</Th>
                   <Th>{t('siteOverview.col.mapping')}</Th>
-                  <Th align="right">{t('siteOverview.col.preflight')}</Th>
                 </tr>
               </thead>
               <tbody>
                 {filteredProjects.length === 0 ? (
-                  <tr><td colSpan={7} style={styles.emptyRow}>{t('siteOverview.empty')}</td></tr>
+                  <tr><td colSpan={5} style={styles.emptyRow}>{t('siteOverview.empty')}</td></tr>
                 ) : (
                   filteredProjects.map((p, i) => {
-                    // TO-BE schema 기준 — Dashboard 와 동일한 source.
-                    const rowTotal = schemaCounts[p.id]?.columns ?? 0;
-                    const rowMapped = 0; // mapping engine 미연결
-                    const rowTableCount = schemaCounts[p.id]?.tables ?? 0;
+                    const stats = mappingStats[p.id];
+                    const rowTotal = stats?.totalColumns ?? 0;
+                    const rowMapped = stats?.mappedColumns ?? 0;
+                    const rowTableTotal = stats?.totalTables ?? 0;
+                    const rowTableReady = stats?.readyTables ?? 0;
                     const pct = rowTotal > 0 ? (rowMapped / rowTotal) * 100 : 0;
-                    const pf = preflightStatus(p);
                     return (
                       <tr
                         key={p.id}
@@ -680,7 +783,18 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
                         }}
                       >
                         <td style={styles.td}>
-                          <span style={{ fontWeight: 500 }}>{p.name}</span>
+                          <span style={styles.projectNameCell}>
+                            <span style={{ fontWeight: 500 }}>{p.name}</span>
+                            {pendingProjectIds.has(p.id) && p.phase === 'test' && p.runStatus === 'completed' && (
+                              <span
+                                style={styles.pendingSnapshotIcon}
+                                title={t('siteOverview.pendingSnapshotIcon.title')}
+                                aria-label={t('siteOverview.pendingSnapshotIcon.title')}
+                              >
+                                <HourglassHalfIcon size={12} />
+                              </span>
+                            )}
+                          </span>
                         </td>
                         <td style={styles.td}>
                           <span style={{ ...styles.phaseChip, ...phaseChipColor(p.phase, p.runStatus) }}>{p.phase}</span>
@@ -711,25 +825,16 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
                             </span>
                           )}
                         </td>
-                        <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--mono)' }}>{rowTableCount}</td>
-                        <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--mono)', color: 'var(--text-4)' }}>
-                          {rowMapped.toLocaleString()} / {rowTotal.toLocaleString()}
+                        <td style={{ ...styles.td, textAlign: 'right', fontFamily: 'var(--mono)' }}>
+                          {rowTableReady} / {rowTableTotal}
                         </td>
                         <td style={styles.td}>
-                          <div style={styles.mappingProgressOuter}>
-                            <div style={{ ...styles.mappingProgressInner, width: `${pct}%` }} />
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 200 }}>
+                            <ProgressBar pct={pct} />
+                            <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-2)', minWidth: 72, textAlign: 'right' }}>
+                              {rowMapped}/{rowTotal}
+                            </span>
                           </div>
-                          <span style={styles.mappingProgressLabel}>{pct.toFixed(0)}%</span>
-                        </td>
-                        <td style={{ ...styles.td, textAlign: 'right' }}>
-                          <span style={{
-                            fontFamily: 'var(--mono)',
-                            fontSize: 11.5,
-                            fontWeight: 700,
-                            color: `var(--${pf.tone})`,
-                          }}>
-                            {pf.passed} / {pf.total}
-                          </span>
                         </td>
                       </tr>
                     );
@@ -743,9 +848,7 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
         {/* Right column — Phase mix only */}
         <div style={styles.overviewRight}>
           <Panel title={t('siteOverview.panel.phaseMix')} last>
-            {projects.length === 0
-              ? <div style={styles.feedEmpty}>—</div>
-              : <PhaseList counts={phaseCounts} total={projects.length} />}
+            <PhaseList projects={projects} />
           </Panel>
         </div>
       </div>
@@ -776,44 +879,74 @@ function Panel({ title, children, last }: { title: string; children: React.React
   );
 }
 
-function PhaseList({ counts, total }: { counts: Record<string, number>; total: number }) {
-  const rows = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  if (rows.length === 0) return <div style={styles.feedEmpty}>—</div>;
+/**
+ * Phase mix — 9 フェーズ全部を CLAUDE.md 既定の順序で表示. 該当 project 0 件でも表示.
+ * test / rehearsal は runStatus===running と それ以外 (idle/completed/failed/aborted) で
+ * 2 行に分割し, 色付き (= 実行中) と 色なし (= 待機) を区別.
+ * cutover は実行中フェーズ専用 (実行前=ready / 実行後=hypercare) なので 1 行のみ.
+ */
+function PhaseList({ projects }: { projects: Project[] }) {
+  // Bar の比率は project 総数で割る. 0 件のときは 0% (空バー) で並ぶ.
+  const total = projects.length;
+  const splitPhases = new Set(['test', 'rehearsal']);
+  const phaseOrder: Project['phase'][] = [
+    'planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done',
+  ];
+  type Row = { key: string; phase: string; variant: 'colored' | 'idle'; count: number };
+  const rows: Row[] = [];
+  for (const ph of phaseOrder) {
+    if (splitPhases.has(ph)) {
+      const running = projects.filter((p) => p.phase === ph && p.runStatus === 'running').length;
+      const idle = projects.filter((p) => p.phase === ph && p.runStatus !== 'running').length;
+      rows.push({ key: `${ph}-idle`,    phase: ph, variant: 'idle',    count: idle });
+      rows.push({ key: `${ph}-running`, phase: ph, variant: 'colored', count: running });
+    } else {
+      const count = projects.filter((p) => p.phase === ph).length;
+      rows.push({ key: ph, phase: ph, variant: 'colored', count });
+    }
+  }
   return (
     <div>
-      {rows.map(([ph, n]) => (
-        <div key={ph} style={styles.mixRow}>
-          <span style={{ ...styles.phaseChip, ...phaseChipColor(ph) }}>{ph}</span>
-          <div style={styles.mixBarOuter}>
-            <div style={{ ...styles.mixBarInner, width: `${total > 0 ? (n / total) * 100 : 0}%`, background: `var(--phase-${phaseSlug(ph)})` }} />
+      {rows.map((r) => {
+        // phaseChipColor は test/rehearsal/cutover で runStatus===running 以外を渡すと
+        // 色なし variant を返すので, colored 側は明示的に 'running' を渡して強制する.
+        const chipStyle = r.variant === 'idle'
+          ? { background: 'var(--panel)', color: 'var(--text)', borderColor: 'var(--border-strong)' }
+          : phaseChipColor(r.phase, 'running');
+        const barColor = r.variant === 'idle'
+          ? 'var(--border-strong)'
+          : `var(--phase-${phaseSlug(r.phase)})`;
+        return (
+          <div key={r.key} style={styles.mixRow}>
+            <span style={{ ...styles.phaseChip, ...chipStyle }}>{r.phase}</span>
+            <div style={styles.mixBarOuter}>
+              <div style={{ ...styles.mixBarInner, width: `${total > 0 ? (r.count / total) * 100 : 0}%`, background: barColor }} />
+            </div>
+            <span style={styles.mixCount}>{r.count}</span>
           </div>
-          <span style={styles.mixCount}>{n}</span>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
-/**
- * 프로젝트별 preflight 체크 통과 현황 (placeholder).
- * - 다 통과 → green
- * - 일부 미통과지만 runnable (rehearsal·cutover) → amber
- * - 못 돌리는 상태 → red
- * 실제 preflight 데이터 연결 전이라 phase 기반 휴리스틱.
- */
-function preflightStatus(p: Project): { passed: number; total: number; tone: 'green' | 'amber' | 'red' } {
-  // placeholder total — 실제는 백엔드 preflight check 개수.
-  const total = 6;
-  if (p.phase === 'done' || p.phase === 'hypercare') {
-    return { passed: total, total, tone: 'green' };
-  }
-  if (p.phase === 'rehearsal' || p.phase === 'cutover') {
-    // 돌릴 수 있지만 미통과 항목 존재한다고 가정.
-    return { passed: Math.max(total - 2, 0), total, tone: 'amber' };
-  }
-  // planning · analysis · sign-off — 아직 실행 불가
-  return { passed: 0, total, tone: 'red' };
+interface ProjectMappingStats {
+  totalTables: number;
+  totalColumns: number;
+  mappedColumns: number;
+  /** 全列 mapped 済 (READY) のテーブル数. */
+  readyTables: number;
 }
+
+/** Dashboard countMapped と同じ判定 — backend MappingRuleDto 版. */
+function isMappingRuleMapped(r: MappingRuleDto): boolean {
+  if (r.strategy === 'skip') return false;
+  if (r.strategy === 'null' || r.strategy === 'default') return true;
+  const hasSrc = (r.asisColumn ?? []).some((c) => c && c.trim() !== '');
+  const hasRule = !!(r.transformRule && r.transformRule.trim());
+  return hasSrc || hasRule;
+}
+
 
 function phaseSlug(phase: string): string {
   const slugMap: Record<string, string> = {
@@ -835,7 +968,8 @@ function statusDotColor(phase: string): React.CSSProperties {
 }
 
 function phaseChipColor(phase: string, runStatus?: string): React.CSSProperties {
-  if (runStatus === 'completed' && (phase === 'test' || phase === 'rehearsal')) {
+  const activePhase = phase === 'test' || phase === 'rehearsal' || phase === 'cutover';
+  if (activePhase && runStatus !== 'running') {
     return {
       background: 'var(--panel)',
       color:      'var(--text)',
@@ -976,13 +1110,6 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--panel)', color: 'var(--text-2)', fontSize: 11.5, cursor: 'pointer',
   },
   btnDisabled: { opacity: 0.45, cursor: 'not-allowed' },
-  mappingProgressOuter: {
-    width: 140, height: 6, background: 'var(--panel-2)',
-    border: '1px solid var(--border)', borderRadius: 3, overflow: 'hidden',
-    display: 'inline-block', verticalAlign: 'middle',
-  },
-  mappingProgressInner: { height: '100%', background: 'var(--navy)' },
-  mappingProgressLabel: { fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginLeft: 8 },
 
   /* Site overview */
   overviewWrap: {
@@ -1289,6 +1416,19 @@ const styles: Record<string, React.CSSProperties> = {
     flexShrink: 0,
   },
   phaseChipCount: { fontWeight: 700, opacity: 0.85 },
+  projectNameCell: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+  },
+  pendingSnapshotIcon: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: 'var(--amber)',
+    // flex 기하 중심 → 텍스트 caps 옵티컬 중심 보정 (1px 위)
+    transform: 'translateY(-1px)',
+  },
   miniBtn: {
     padding: '3px 9px',
     fontSize: 11,

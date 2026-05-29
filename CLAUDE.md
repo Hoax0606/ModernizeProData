@@ -48,6 +48,7 @@ ModernizeProData/
         ├── components/         # 재사용 컴포넌트·모달
         ├── i18n/               # ko/ja/en
         ├── layout/             # AppShell (사이드바·탑바·탭바)
+        ├── lib/                # 공유 유틸 (useDemoMode, pipelineStages, …)
         ├── pages/              # 페이지 컴포넌트
         ├── routes/             # ProtectedRoute
         └── store/              # zustand stores
@@ -95,6 +96,7 @@ Rules:
 
 ### Phase 모델
 - 9 단계: `planning · analysis · test · sign-off · rehearsal · ready · cutover · hypercare · done`
+- run 起動 가능한 phase 는 `test` / `rehearsal` / `ready` (`ready` 에서 cutover 起動). `cutover` 는 **실행 중 phase** = 신규 run reject. 完了 시 `hypercare` 로 전이.
 - `cutover` 는 **production 환경에서만** 실행 가능.
 - 스냅샷은 mapping snapshot 과 cutover snapshot 두 갈래.
 - `runStatus` (`idle | running | completed`) 는 test/rehearsal/cutover 의 sub-status.
@@ -146,6 +148,7 @@ cd ModernizeProData/frontend; npx tsc --noEmit
 | AS-IS DB (도구 내장) | 운영팀 야간 CSV 추출 파일을 도구가 받아 DuckDB 로 적재 — 외부 DB 직접 접속 X. |
 | Artifact | 프로젝트가 생성하는 산출물 (DDL · Migration SQL · Mapping spec · Schema diff · Validation report · Dashboard snapshot). `/artifacts` 페이지에서 Excel-style 워크북 미리보기 + 다운로드. |
 | Site export | All projects 페이지의 `Site export` 탭(`/site/export`). 사이트 단위로 산출물 4 종 (Migration / Mapping / Validation / Site summary) 을 zip 으로 일괄 다운로드. 현재는 client-side (JSZip + ExcelJS), 백엔드 export job 도입 시점에 서버 측 생성으로 교체 예정. |
+| Pre-flight | Execution run 起動 直前의 readiness 게이트 (7 체크: `csv-arrived` / `ddl-asis` / `ddl-tobe` / `conn-tobe` / `tobe-bindings` / `unmapped-cols` / `asis-unmapped`). 상태는 `pass · fail · skip` 3종, **per-table + project-wide** 혼재. 결과는 snapshot 별 캐시 (`executionPreflight.bySnapshot`) 에 보존. Execution startrun 게이트는 「pin + 선택 테이블 × 전 check pass + `runMode !== null`」, Versions Request Review 게이트는 さらに「DDL 全 TO-BE 망라」 추가. 상세는 `docs/ONBOARDING.md` §18. |
 
 ## 세션 시작 시 권장 동작
 

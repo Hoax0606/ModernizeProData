@@ -1,12 +1,19 @@
 package com.ksinfo.modernize_pro_data.coordinator.ddl;
 
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.common.util.HashUtil;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.OracleDdlParser;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.ParsedColumn;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.ParsedDdl;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.ParsedTable;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingCodeMapRepository;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRuleRepository;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
+import com.ksinfo.modernize_pro_data.coordinator.site.Site;
+import com.ksinfo.modernize_pro_data.coordinator.site.SiteRepository;
+import com.ksinfo.modernize_pro_data.coordinator.site.AuditLogService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -14,9 +21,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -42,7 +46,12 @@ public class DdlImportService {
     private final DdlTableRepository ddlTableRepo;
     private final DdlColumnRepository ddlColumnRepo;
     private final ProjectRepository projectRepo;
+    private final SiteRepository siteRepo;
     private final OracleDdlParser parser;
+    private final MappingRuleRepository mappingRuleRepo;
+    private final MappingTableBindingRepository mappingBindingRepo;
+    private final MappingCodeMapRepository mappingCodeMapRepo;
+    private final AuditLogService auditLogService;
 
     @Transactional
     public DdlImport importDdl(String projectId, String side, String filename, byte[] content, String importedBy) {
@@ -68,9 +77,14 @@ public class DdlImportService {
         ddlImportRepo.deleteByProjectIdAndSide(projectId, side);
         ddlImportRepo.flush();
 
+        // Site 의 DB type 정보로 dialect 결정 (없으면 "oracle" 폴백).
+        // AS-IS → site.asisDbType, TO-BE → site.tobeDbByEnv[site.environment].type
+        String dialect = resolveDialect(project, side);
+
         DdlImport ddlImport = DdlImport.create(
                 projectId, side, filename, content.length,
-                sha256Hex(content), "oracle", importedBy);
+                HashUtil.sha256Hex(content), "oracle", importedBy);
+                //sha256Hex(content), dialect, importedBy);
         ddlImport.setTableCount(parsed.getTables().size());
         ddlImport.setColumnCount(parsed.totalColumnCount());
         ddlImportRepo.save(ddlImport);
@@ -101,6 +115,13 @@ public class DdlImportService {
         autoAdvancePhaseIfBothDdlImported(project);
         projectRepo.save(project);
 
+        // DDL import 알림 — toast 대신 audit_log 에 기록해서 알림 벨(Notification)로 노출.
+        String sideLabel = SIDE_ASIS.equals(side) ? "AS-IS" : "TO-BE";
+        auditLogService.record(project, importedBy, "DDL imported")
+                .target(side)
+                .details(sideLabel + " · " + filename + " · " + parsed.getTables().size() + " tables")
+                .save();
+
         log.info("DDL imported: project={}, side={}, file={}, tables={}, columns={}",
                 projectId, side, filename, parsed.getTables().size(), parsed.totalColumnCount());
         return ddlImport;
@@ -117,6 +138,20 @@ public class DdlImportService {
             project.setPhase("analysis");
             log.info("Project {} auto-advanced phase: planning → analysis (both DDLs imported)",
                     project.getId());
+        }
+    }
+
+    /**
+     * AS-IS 또는 TO-BE DDL 중 하나라도 없으면 (둘 다 import 되지 않으면) phase 를 planning 으로
+     * 되돌린다. autoAdvancePhaseIfBothDdlImported 의 역 — DDL 이 불완전하면 무조건 planning.
+     */
+    private void demoteToPlanningIfDdlIncomplete(Project project) {
+        if ((project.getTableCount() == 0 || project.getTobeTableCount() == 0)
+                && !"planning".equals(project.getPhase())) {
+            String prev = project.getPhase();
+            project.setPhase("planning");
+            log.info("Project {} demoted phase: {} → planning (DDL incomplete)",
+                    project.getId(), prev);
         }
     }
 
@@ -155,8 +190,19 @@ public class DdlImportService {
                         "프로젝트를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
         ddlImportRepo.deleteByProjectIdAndSide(projectId, side);
         applyTableCountToProject(project, side, 0);
+        demoteToPlanningIfDdlIncomplete(project);
         projectRepo.save(project);
-        log.info("DDL deleted: project={}, side={}", projectId, side);
+
+        /* DDL 削除는 「やり直し動作」으로 취급 — AS-IS / TO-BE 어느 쪽이든 그 project 의
+           mapping_rules / mapping_table_bindings / mapping_code_maps 를 전체 wipe.
+           이유: 한쪽 DDL 이 없어지면 rule 의 참조가 끊겨 의미가 없고, 도구가 「孤児 rule
+           이 同名 DDL 재 import 시 자동 재연결」 동작은 사용자 의도와 어긋난다는 결정. */
+        int rules = mappingRuleRepo.deleteAllByProjectId(projectId);
+        int bindings = mappingBindingRepo.deleteAllByProjectId(projectId);
+        int codes = mappingCodeMapRepo.deleteAllByProjectId(projectId);
+
+        log.info("DDL deleted: project={}, side={}, mapping wiped (rules={}, bindings={}, codeMaps={})",
+                projectId, side, rules, bindings, codes);
     }
 
     private void applyTableCountToProject(Project project, String side, int count) {
@@ -175,13 +221,46 @@ public class DdlImportService {
         }
     }
 
-    private String sha256Hex(byte[] bytes) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(md.digest(bytes));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 unavailable", e);
+    /**
+     * Project 의 Site 정보로 DDL dialect 를 결정한다.
+     *   side=asis → site.asisDbType
+     *   side=tobe → site.tobeDbByEnv[site.environment].type
+     * Site 가 없거나 type 이 비어있으면 "oracle" 폴백 (기존 동작 유지).
+     */
+    private String resolveDialect(Project project, String side) {
+        if (project.getSiteId() == null) return "oracle";
+        Site site = siteRepo.findById(project.getSiteId()).orElse(null);
+        if (site == null) return "oracle";
+        String raw = null;
+        if (SIDE_ASIS.equals(side)) {
+            raw = site.getAsisDbType();
+        } else if (SIDE_TOBE.equals(side)) {
+            // scope='project' 면 Project.tobeDbByEnv 우선, 아니면 Site.tobeDbByEnv.
+            Map<String, Object> byEnv = "project".equals(site.getTobeDbScope())
+                    ? project.getTobeDbByEnv()
+                    : site.getTobeDbByEnv();
+            if (byEnv != null && site.getEnvironment() != null) {
+                Object envConn = byEnv.get(site.getEnvironment());
+                if (envConn instanceof Map<?, ?> conn) {
+                    Object t = conn.get("type");
+                    if (t != null) raw = t.toString();
+                }
+            }
         }
+        return normalizeDialect(raw);
+    }
+
+    /** UI 표시명을 dialect 코드로 정규화. 알려지지 않은 값은 "oracle" 폴백. */
+    private String normalizeDialect(String raw) {
+        if (raw == null) return "oracle";
+        String s = raw.trim().toLowerCase();
+        if (s.isEmpty()) return "oracle";
+        if (s.contains("postgres")) return "postgresql";
+        if (s.contains("sql server") || s.equals("mssql") || s.contains("microsoft")) return "mssql";
+        if (s.contains("mysql") || s.contains("mariadb")) return "mysql";
+        if (s.contains("db2")) return "db2";
+        if (s.contains("oracle")) return "oracle";
+        return "oracle";  // 모르면 폴백
     }
 
     public record DdlSchema(DdlImport latestImport, List<DdlTableWithColumns> tables) {}

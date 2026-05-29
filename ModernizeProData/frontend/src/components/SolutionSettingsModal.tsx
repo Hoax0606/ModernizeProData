@@ -1,9 +1,9 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Modal } from './Modal';
 import { BrandName } from './BrandName';
 import { Toggle } from './Toggle';
-import { Toast } from './Toast';
-import { useSettingsStore, type Theme, type Language, type ExternalConfig, type NotificationScope } from '../store/settings';
+import { useSettingsStore, type Theme, type Language, type NotificationScope } from '../store/settings';
 import { useAuthStore } from '../store/auth';
 import { LANGUAGE_LABELS, useT } from '../i18n';
 import { licenseApi, type LicenseDto, type LicenseStatus as LicenseStatusEnum } from '../api/license';
@@ -21,19 +21,17 @@ interface Props {
  */
 export function SolutionSettingsModal({ open, onClose }: Props) {
   const t = useT();
+  const navigate = useNavigate();
   const store = useSettingsStore();
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
 
-  // 로컬 드래프트 — Save 전에는 store 에 반영 안 됨
+  // 로컬 드래프트 — Save 전에는 store 에 반영 안 됨.
   const [theme, setTheme] = useState<Theme>(store.theme);
   const [language, setLanguage] = useState<Language>(store.language);
   const [notifications, setNotifications] = useState(store.notifications);
   const [notifScope, setNotifScope] = useState<NotificationScope>(store.notificationScope);
   const [notifRetention, setNotifRetention] = useState(store.notificationRetention);
-  const [externalOn, setExternalOn] = useState(store.externalIntegrations);
-  const [extCfg, setExtCfg] = useState<ExternalConfig>(store.externalConfig);
-  const [saved, setSaved] = useState(false);
 
   // 모달 열릴 때마다 store 의 현재 값으로 리셋
   useEffect(() => {
@@ -43,10 +41,7 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
     setNotifications(store.notifications);
     setNotifScope(store.notificationScope);
     setNotifRetention(store.notificationRetention);
-    setExternalOn(store.externalIntegrations);
-    setExtCfg(store.externalConfig);
-    setSaved(false);
-  }, [open, store.theme, store.language, store.notifications, store.notificationScope, store.notificationRetention, store.externalIntegrations, store.externalConfig]);
+  }, [open, store.theme, store.language, store.notifications, store.notificationScope, store.notificationRetention]);
 
   // 변경 여부 — Save 버튼 활성 조건
   const isDirty = useMemo(() => {
@@ -55,26 +50,16 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
     if (notifications !== store.notifications) return true;
     if (notifScope !== store.notificationScope) return true;
     if (notifRetention !== store.notificationRetention) return true;
-    if (externalOn !== store.externalIntegrations) return true;
-    if (extCfg.scheduler !== store.externalConfig.scheduler) return true;
-    if (extCfg.cliPath !== store.externalConfig.cliPath) return true;
-    if (extCfg.apiEndpoint !== store.externalConfig.apiEndpoint) return true;
-    if (extCfg.apiToken !== store.externalConfig.apiToken) return true;
-    if (extCfg.syslog !== store.externalConfig.syslog) return true;
     return false;
-  }, [theme, language, notifications, notifScope, notifRetention, externalOn, extCfg, store]);
+  }, [theme, language, notifications, notifScope, notifRetention, store]);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!isDirty) return;
     store.setTheme(theme);
     store.setLanguage(language);
     store.setNotifications(notifications);
     store.setNotificationScope(notifScope);
     if (isMaster) store.setNotificationRetention(notifRetention);
-    store.setExternalIntegrations(externalOn);
-    store.setExternalConfig(extCfg);
-    setSaved(true);
-    // Toast 가 durationMs 후 자동으로 onHide 호출
   };
 
   return (
@@ -102,10 +87,12 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
         </button>
       </div>
 
-      <Toast visible={saved} message={t('solution.savedToast')} onHide={() => setSaved(false)} />
 
       {/* License */}
       <LicenseCard isMaster={isMaster} />
+
+      {/* Worker registration UI lives in User Management → Worker Nodes tab
+          (ClusterAdminModal). Don't duplicate it here. */}
 
       {/* Appearance */}
       <Card title={t('solution.appearance')}>
@@ -196,46 +183,7 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
         </div>
       </Card>
 
-      {/* External integrations — master 전용 (admin 은 read-only) */}
-      <Card
-        title={<>{t('solution.external')} {!isMaster && <span style={styles.masterOnlyTag}>{t('solution.external.masterOnly')}</span>}</>}
-        desc={t('solution.external.desc')}
-        right={
-          <Toggle
-            on={externalOn}
-            onChange={() => isMaster && setExternalOn((v) => !v)}
-            ariaLabel={t('solution.external')}
-          />
-        }
-      >
-        <div style={{ opacity: externalOn ? 1 : 0.5, pointerEvents: externalOn && isMaster ? 'auto' : 'none' }}>
-          <Row label={<RowLabel title={t('solution.external.scheduler')} sub={t('solution.external.schedulerSub')} />}>
-            <select
-              value={extCfg.scheduler}
-              onChange={(e) => setExtCfg({ ...extCfg, scheduler: e.target.value })}
-              style={styles.select}
-              disabled={!isMaster}
-            >
-              <option>Control-M</option>
-              <option>Airflow</option>
-              <option>Jenkins</option>
-              <option>cron</option>
-            </select>
-          </Row>
-          <Row label={<RowLabel title={t('solution.external.cliPath')} sub={t('solution.external.cliPathSub')} />}>
-            <input value={extCfg.cliPath} onChange={(e) => setExtCfg({ ...extCfg, cliPath: e.target.value })} style={styles.input} disabled={!isMaster} />
-          </Row>
-          <Row label={<RowLabel title={t('solution.external.apiEndpoint')} sub={t('solution.external.apiEndpointSub')} />}>
-            <input value={extCfg.apiEndpoint} onChange={(e) => setExtCfg({ ...extCfg, apiEndpoint: e.target.value })} style={styles.input} disabled={!isMaster} />
-          </Row>
-          <Row label={<RowLabel title={t('solution.external.apiToken')} sub={t('solution.external.apiTokenSub')} />}>
-            <input value={extCfg.apiToken} onChange={(e) => setExtCfg({ ...extCfg, apiToken: e.target.value })} style={styles.input} disabled={!isMaster} />
-          </Row>
-          <Row label={<RowLabel title={t('solution.external.syslog')} sub={t('solution.external.syslogSub')} />}>
-            <input value={extCfg.syslog} onChange={(e) => setExtCfg({ ...extCfg, syslog: e.target.value })} style={styles.input} disabled={!isMaster} />
-          </Row>
-        </div>
-      </Card>
+      {/* Internal scheduler / External integrations 카드 는 SchedulerPage 로 이동했음 (Phase 3). */}
 
       <div style={styles.footer}>
         © 2024–2026 KS Info System · All rights reserved
@@ -350,17 +298,17 @@ function LicenseCard({ isMaster }: { isMaster: boolean }) {
             style={{ display: 'none' }}
             onChange={onFile}
           />
-          {import.meta.env.DEV && lic?.status && lic.status !== 'MISSING' && (
+          {lic?.status && lic.status !== 'MISSING' && (
             <button
               style={styles.licenseClearBtn}
               onClick={async () => {
                 if (!confirm(t('solution.license.clearDev.confirm'))) return;
                 try {
-                  const next = await licenseApi.clear();
-                  setLic(next);
-                  setUploadOk(false);
-                  setUploadError(null);
-                  void refreshGlobalLicense();
+                  await licenseApi.clear();
+                  // SPA nav, not window.location — JavaFX WebView does not
+                  // actually reload the page on location.replace().
+                  useAuthStore.getState().logout();
+                  navigate('/license-setup', { replace: true });
                 } catch (err) {
                   setUploadError(err instanceof ApiError
                     ? err.message
@@ -418,6 +366,41 @@ function LicenseCard({ isMaster }: { isMaster: boolean }) {
               </span>
             </div>
           </Row>
+          <Row label={t('solution.license.hardwareId')}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <code style={styles.licenseMono} title={lic?.currentHardwareId ?? ''}>
+                {lic?.currentHardwareId ?? '—'}
+              </code>
+              {lic?.currentHardwareId && (
+                <button
+                  style={styles.licenseClearBtn}
+                  onClick={() => {
+                    void navigator.clipboard.writeText(lic.currentHardwareId);
+                  }}
+                  title={t('solution.license.hardwareId.copy')}
+                >
+                  {t('solution.license.hardwareId.copy')}
+                </button>
+              )}
+            </div>
+          </Row>
+          {lic?.boundHardwareId && (
+            <Row label={t('solution.license.boundTo')}>
+              <code style={{
+                ...styles.licenseMono,
+                color: lic.hardwareMismatch ? 'var(--red)' : 'var(--text-3)',
+              }}>
+                {lic.boundHardwareId}
+              </code>
+            </Row>
+          )}
+          {lic?.hardwareMismatch && (
+            <Row label="">
+              <span style={{ fontSize: 12, color: 'var(--red)' }}>
+                {t('solution.license.hardwareMismatch')}
+              </span>
+            </Row>
+          )}
           {uploadOk && (
             <Row label="">
               <span style={{ fontSize: 12, color: 'var(--green)' }}>
@@ -437,7 +420,222 @@ function LicenseCard({ isMaster }: { isMaster: boolean }) {
 }
 
 
+/* (Removed in favor of User Management → Worker Nodes tab.) */
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const _PLACEHOLDER = {
+  REMOVED: 'Worker registration is owned by ClusterAdminModal NodesTab.',
+};
+
+// Old reference left in code path below was deleted -- see ClusterAdminModal.tsx.
+const _UNUSED_TONE_REMOVED: Record<string, { bg: string; color: string; border: string }> = {
+  PROVISIONED: { bg: 'var(--amber-50)', color: 'var(--amber)', border: 'var(--amber)' },
+  REGISTERED:  { bg: 'var(--green-50)', color: 'var(--green)', border: 'var(--green)' },
+  REVOKED:     { bg: 'var(--red-50)',   color: 'var(--red)',   border: 'var(--red)'   },
+};
+
+function WorkerCard() {
+  const t = useT();
+  const [workers, setWorkers] = useState<WorkerSummaryDto[]>([]);
+  const [sites, setSites] = useState<Site[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [adding, setAdding] = useState(false);
+  const [addName, setAddName] = useState('');
+  const [addSiteId, setAddSiteId] = useState<string>('');
+  const [issueErr, setIssueErr] = useState<string | null>(null);
+  // Raw token shown exactly once after issue. Cleared on next list refresh or Close.
+  const [issuedToken, setIssuedToken] = useState<{ name: string; token: string } | null>(null);
+
+  const refresh = async () => {
+    try {
+      const [ws, ss] = await Promise.all([workerApi.list(), siteApi.list()]);
+      setWorkers(ws);
+      setSites(ss);
+    } catch {
+      /* license-blocked or auth — caller's responsibility */
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  const onIssue = async () => {
+    setIssueErr(null);
+    try {
+      const res = await workerApi.issue(addName.trim(), addSiteId || null);
+      setIssuedToken({ name: res.worker.name, token: res.rawToken });
+      setAdding(false);
+      setAddName('');
+      setAddSiteId('');
+      void refresh();
+    } catch (err) {
+      setIssueErr(err instanceof ApiError ? err.message : t('solution.workers.issue.failed'));
+    }
+  };
+
+  const onRevoke = async (workerId: string) => {
+    if (!confirm(t('solution.workers.revoke.confirm'))) return;
+    try {
+      await workerApi.revoke(workerId);
+      void refresh();
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : t('solution.workers.revoke.failed'));
+    }
+  };
+
+  return (
+    <Card
+      title={t('solution.workers')}
+      desc={t('solution.workers.desc')}
+      right={
+        <button
+          style={styles.licenseUpdateBtn}
+          onClick={() => { setAdding((v) => !v); setIssueErr(null); }}
+        >
+          {adding ? t('common.cancel') : t('solution.workers.add')}
+        </button>
+      }
+    >
+      {adding && (
+        <div style={styles.workerAddPanel}>
+          <Row label={t('solution.workers.name')}>
+            <input
+              type="text"
+              style={styles.workerInput}
+              value={addName}
+              onChange={(e) => setAddName(e.target.value)}
+              placeholder={t('solution.workers.name.placeholder')}
+            />
+          </Row>
+          <Row label={t('solution.workers.site')}>
+            <select
+              style={styles.workerInput}
+              value={addSiteId}
+              onChange={(e) => setAddSiteId(e.target.value)}
+            >
+              <option value="">{t('solution.workers.site.none')}</option>
+              {sites.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </Row>
+          <Row label="">
+            <button
+              style={styles.btnPrimary}
+              disabled={!addName.trim()}
+              onClick={() => void onIssue()}
+            >
+              {t('solution.workers.issue')}
+            </button>
+          </Row>
+          {issueErr && (
+            <Row label="">
+              <span style={{ fontSize: 12, color: 'var(--red)' }}>{issueErr}</span>
+            </Row>
+          )}
+        </div>
+      )}
+
+      {issuedToken && (
+        <div style={styles.workerTokenPanel}>
+          <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 6 }}>
+            {t('solution.workers.tokenIssued', { name: issuedToken.name })}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 8 }}>
+            {t('solution.workers.tokenWarning')}
+          </div>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <code style={{ ...styles.licenseMono, padding: '4px 8px', flex: 1 }}>
+              {issuedToken.token}
+            </code>
+            <button
+              style={styles.licenseUpdateBtn}
+              onClick={() => void navigator.clipboard.writeText(issuedToken.token)}
+            >
+              {t('solution.license.hardwareId.copy')}
+            </button>
+            <button
+              style={styles.licenseClearBtn}
+              onClick={() => setIssuedToken(null)}
+            >
+              {t('common.close')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <Row label={t('solution.workers.list')}>
+          <span style={styles.licenseValue}>…</span>
+        </Row>
+      ) : workers.length === 0 ? (
+        <Row label={t('solution.workers.list')}>
+          <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{t('solution.workers.empty')}</span>
+        </Row>
+      ) : (
+        workers.map((w) => {
+          const tone = WORKER_STATUS_TONE[w.status];
+          const siteName = sites.find((s) => s.id === w.siteId)?.name ?? '—';
+          return (
+            <Row key={w.workerId} label={w.name}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span style={{
+                  ...styles.licenseStatusBadge,
+                  background: tone.bg, color: tone.color, borderColor: tone.border,
+                }}>
+                  {t(`solution.workers.status.${w.status}` as const)}
+                </span>
+                <code style={styles.licenseMono}>{w.tokenPrefix}…</code>
+                <span style={{ fontSize: 11, color: 'var(--text-3)' }}>{siteName}</span>
+                <span style={{ fontSize: 11, color: 'var(--text-3)' }}>
+                  {w.lastSeenAt ? new Date(w.lastSeenAt).toLocaleString() : t('solution.workers.lastSeen.never')}
+                </span>
+                {w.status !== 'REVOKED' && (
+                  <button
+                    style={styles.licenseClearBtn}
+                    onClick={() => void onRevoke(w.workerId)}
+                  >
+                    {t('solution.workers.revoke')}
+                  </button>
+                )}
+              </div>
+            </Row>
+          );
+        })
+      )}
+    </Card>
+  );
+}
+
+
 const styles: Record<string, React.CSSProperties> = {
+  workerAddPanel: {
+    background: 'var(--bg)',
+    border: '1px solid var(--border)',
+    borderRadius: 6,
+    padding: '10px 12px',
+    marginBottom: 8,
+  },
+  workerInput: {
+    width: '100%',
+    padding: '4px 8px',
+    fontSize: 12.5,
+    fontFamily: 'var(--mono)',
+    border: '1px solid var(--border)',
+    borderRadius: 4,
+    background: 'var(--panel)',
+    color: 'var(--text)',
+  },
+  workerTokenPanel: {
+    background: 'var(--amber-50)',
+    border: '1px solid var(--amber)',
+    borderRadius: 6,
+    padding: '10px 12px',
+    marginBottom: 8,
+  },
   subtitle: {
     fontSize: 11,
     color: 'var(--text-3)',

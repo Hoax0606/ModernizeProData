@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react';
 import { useT, type TranslationKey } from '../i18n';
 import type { SelectedFormats } from '../lib/siteExportManifest';
+import { Checkbox } from './Checkbox';
 
 /* Site export 좌측 picker — Prototype/src/exporttab.jsx 의 좌측 패널 포트.
  * 300px 고정 폭, 상단 메타, 중간 format 체크박스 + bundle 토글, 하단 CTA 바.
@@ -111,13 +112,8 @@ interface CheckRowProps {
 
 function CheckRow({ label, hint, checked, onChange }: CheckRowProps) {
   return (
-    <label style={styles.checkRow}>
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={e => onChange(e.target.checked)}
-        style={styles.checkbox}
-      />
+    <label style={styles.checkRow} onClick={() => onChange(!checked)}>
+      <Checkbox checked={checked} onChange={onChange} />
       <div style={{ flex: 1 }}>
         <div style={styles.checkLabel}>{label}</div>
         <div style={styles.checkHint}>{hint}</div>
@@ -164,7 +160,6 @@ const styles: Record<string, CSSProperties> = {
     padding: '4px 0',
     cursor: 'pointer',
   },
-  checkbox: { marginTop: 2, accentColor: 'var(--navy)' },
   checkLabel: { fontSize: 12, color: 'var(--text)' },
   checkHint: { fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
 

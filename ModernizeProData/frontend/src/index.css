@@ -1,4 +1,8 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* 한국어·영문 = Pretendard Variable (SF Pro 영감, 가변 가중치, 단일 파일).
+   일본어     = Noto Sans JP (가나·한자 표준).
+   코드      = JetBrains Mono. */
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.css');
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root, [data-theme="light"] {
   --bg: #f9fafb;
@@ -46,7 +50,9 @@
   --phase-done-50:      #f2f4f3;
 
   --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-  --sans: 'Inter', -apple-system, system-ui, sans-serif;
+  /* 본문: Pretendard Variable 이 한·영을 깔끔하게 처리.
+     일본어 글자는 Noto Sans JP 로 fallback (브라우저 자동 코드포인트 매칭). */
+  --sans: 'Pretendard Variable', 'Noto Sans JP', -apple-system, system-ui, sans-serif;
 }
 
 [data-theme="dark"] {
@@ -105,7 +111,9 @@ html, body {
   color: var(--text);
   font-family: var(--sans);
   font-size: 12px;
-  line-height: 1.35;
+  line-height: 1.45;
+  letter-spacing: -0.005em;
+  font-feature-settings: 'ss01', 'cv01', 'cv11', 'tnum';
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
@@ -125,3 +133,53 @@ input, select, textarea { font-family: inherit; }
   border: 2px solid var(--panel);
 }
 *::-webkit-scrollbar-thumb:hover { background: var(--text-4); }
+
+/* Pre-flight Fix 도착지 강조 — DdlSchemaPanel 의 정적 highlight 효과를 className 으로
+   재사용 가능하게. 부모가 className 을 1초간 토글 → 0.4s transition 으로 부드럽게 ON/OFF. */
+.mpd-fix-highlight {
+  background-color: #D0EAEA !important;
+  /* 외곽 2px deep teal (DdlSchemaPanel border 와 동일, layout shift 없음)
+     + 그 바깥 4px glow (DdlSchemaPanel box-shadow 와 동일) → 총 spread 6px. */
+  box-shadow: 0 0 0 2px #0E7C7B, 0 0 0 6px rgba(14, 124, 123, 0.22) !important;
+  border-radius: 4px;
+  transition: background-color 0.4s ease, box-shadow 0.4s ease;
+}
+/* table row 의 td inline background (zebra / isActive) 를 덮기 위한 자식 셀렉터. */
+.mpd-fix-highlight > td {
+  background-color: #D0EAEA !important;
+  transition: background-color 0.4s ease;
+}
+
+/* ── Native form control 통일 (JavaFX WebView 구형 WebKit 호환) ──────────
+   WebView 의 WebKit 은 accent-color / focus-visible 을 지원하지 않아 native
+   checkbox·radio·focus 가 "옛날 윈도우" 룩으로 나온다. appearance:none 으로 끄고
+   체크표시·점·화살표를 직접 그려서 데스크톱(WebView)·브라우저 어디서든 동일하게.
+   select 의 inline `background: var(--panel)` shorthand 가 background-image 를
+   리셋하므로 chevron 은 !important 로 강제(배경색은 inline 값 유지). */
+select {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none' stroke='%23678b86' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 4.5 6 7.5 9 4.5'/%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 9px center !important;
+  padding-right: 28px !important;
+}
+select::-ms-expand { display: none; }
+
+/* checkbox / radio 는 components/Checkbox.tsx 의 custom <span> 컴포넌트로 그린다.
+   (구형 WebKit 이 native checkbox 의 appearance:none 을 완전히 못 먹어 초록 체크가
+   남는 문제 때문에 native input 자체를 쓰지 않음.) */
+
+/* 구형 WebKit 의 dotted focus ring 제거 — 데스크톱(WebView) 앱이라 마우스 위주.
+   (탭 클릭 시 좌우로 보이던 점선이 이것.) -webkit-focus-ring-color 까지 무력화. */
+* { -webkit-tap-highlight-color: transparent; }
+*:focus,
+a:focus,
+button:focus,
+select:focus,
+input:focus,
+textarea:focus,
+[tabindex]:focus {
+  outline: none;
+}

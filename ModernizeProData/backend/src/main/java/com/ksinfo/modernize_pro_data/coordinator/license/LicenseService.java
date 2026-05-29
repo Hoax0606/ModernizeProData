@@ -30,6 +30,7 @@ public class LicenseService {
     private final LicenseVerifier verifier;
     private final AuditLogService auditLogService;
     private final LicenseSealedClock sealedClock;
+    private final HardwareFingerprint hardwareFingerprint;
 
     /** 캐시된 현재 활성 라이선스. startup + upload 시 갱신. */
     private final AtomicReference<License> active = new AtomicReference<>(null);
@@ -68,13 +69,33 @@ public class LicenseService {
         License lic = active.get();
         if (lic == null) return LicenseStatus.MISSING;
         if (Boolean.FALSE.equals(clockSane.get())) return LicenseStatus.INVALID;
+        // v=2 hardware binding: when the license names a specific machine, reject
+        // any other machine even if signature + clock + expiry all pass.
+        String bound = lic.getHardwareId();
+        if (bound != null && !bound.isBlank()
+                && !bound.equalsIgnoreCase(hardwareFingerprint.value())) {
+            return LicenseStatus.INVALID;
+        }
         LicenseDocument.Payload p = toPayload(lic);
         return verifier.statusOf(p, LocalDate.now());
     }
 
+    /** True when the active license is hardware-bound to a different PC than
+     *  this one. Useful for the React banner to distinguish the INVALID cause
+     *  from signature failure / clock tamper. */
+    public boolean isHardwareMismatch() {
+        License lic = active.get();
+        if (lic == null) return false;
+        String bound = lic.getHardwareId();
+        return bound != null && !bound.isBlank()
+                && !bound.equalsIgnoreCase(hardwareFingerprint.value());
+    }
+
     public LicenseDocument.Payload toPayload(License lic) {
+        String bound = lic.getHardwareId();
+        int v = (bound != null && !bound.isBlank()) ? 2 : 1;
         return new LicenseDocument.Payload(
-                1,
+                v,
                 lic.getLicenseId(),
                 lic.getCustomer(),
                 lic.getSiteId(),
@@ -83,7 +104,8 @@ public class LicenseService {
                 lic.getIssuedAt(),
                 lic.getExpiresAt(),
                 lic.getGraceDays(),
-                lic.getPublicKeyFp()
+                lic.getPublicKeyFp(),
+                bound
         );
     }
 

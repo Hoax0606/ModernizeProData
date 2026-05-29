@@ -7,4 +7,5 @@ import java.util.List;
 public interface DdlTableRepository extends JpaRepository<DdlTable, String> {
     List<DdlTable> findByProjectIdAndSideOrderByOrdinalAsc(String projectId, String side);
     List<DdlTable> findByImportId(String importId);
+    List<DdlTable> findByProjectIdInAndSide(List<String> projectIds, String side);
 }

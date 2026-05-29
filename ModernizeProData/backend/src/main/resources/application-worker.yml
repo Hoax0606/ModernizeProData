@@ -1,0 +1,29 @@
+# Worker mode profile — 같은 backend jar 가 사용자 PC 에서 Worker daemon 으로 동작할 때 사용.
+# 활성 방법: java -jar app.jar --spring.profiles.active=worker
+#            또는 SPRING_PROFILES_ACTIVE=worker
+#
+# 정책 메모 (project-coord-worker-model):
+#   - Worker 는 원칙적으로 Coordinator REST/WS 만 통신 (메타 PG 직접 접속 금지) 가 목표.
+#   - 현 단계는 같은 monolith 라 datasource bean 자체는 떠있어야 시작 가능 — application.yml
+#     의 datasource 가 그대로 적용된다 (Worker 가 그 PG 를 어떻게든 reach 해야 함).
+#     무 PG Worker 분리는 후속 conditioning 작업.
+
+modernize:
+  # Coordinator 가 아닌 Worker 모드로 동작.
+  mode: worker
+
+  # 이 Worker 가 어떤 Coordinator 를 바라보는지. 인스톨 시 사용자 입력으로 override.
+  coordinator:
+    url: ${COORDINATOR_URL:http://localhost:8080}
+
+  # 이 Worker 가 Coordinator 에 로그인할 때 쓰는 admin user 자격 + hostname.
+  # WorkerBootstrap 이 이 값을 읽어 /auth/login + /workers/self-register + heartbeat.
+  worker:
+    username: ${WORKER_USERNAME:}
+    password: ${WORKER_PASSWORD:}
+    hostname: ${WORKER_HOSTNAME:}
+
+# Worker 는 master 화면을 띄울 일이 없으니 server port 는 다른 값 (Coordinator 와 같은
+# PC 에서 동시에 띄울 때 충돌 회피).
+server:
+  port: ${WORKER_PORT:8081}

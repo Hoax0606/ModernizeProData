@@ -16,5 +16,25 @@ services:
       timeout: 3s
       retries: 10
 
+  # TO-BE 데이터베이스 (이행 대상). Load stage 의 PgCopyManager 가 적재.
+  # 메타 DB 와 분리해 충돌 방지 + cutover 시뮬레이션 안전.
+  postgres-tobe:
+    image: postgres:16-alpine
+    container_name: mpd-tobe-pg
+    environment:
+      POSTGRES_DB: mpd_tobe
+      POSTGRES_USER: mpd
+      POSTGRES_PASSWORD: mpd
+    ports:
+      - "5434:5432"
+    volumes:
+      - mpd_tobe_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mpd -d mpd_tobe"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   mpd_pgdata:
+  mpd_tobe_pgdata:

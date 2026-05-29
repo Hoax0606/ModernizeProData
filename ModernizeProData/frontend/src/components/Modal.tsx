@@ -1,4 +1,3 @@
-import { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 
 interface Props {
@@ -15,23 +14,12 @@ interface Props {
  * 공통 모달 — Prototype 의 OverlayShell 패턴.
  */
 export function Modal({ open, onClose, title, children, width = 440, headerRight }: Props) {
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
-
   if (!open) return null;
 
+  // 닫기는 헤더의 X 버튼(또는 headerRight 의 명시적 액션)으로만. backdrop 클릭/ESC 로는 닫지 않는다.
   return createPortal(
-    <div onClick={onClose} style={styles.backdrop}>
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{ ...styles.shell, width }}
-      >
+    <div style={styles.backdrop}>
+      <div style={{ ...styles.shell, width }}>
         {title && (
           <div style={styles.header}>
             <div style={styles.title}>{title}</div>

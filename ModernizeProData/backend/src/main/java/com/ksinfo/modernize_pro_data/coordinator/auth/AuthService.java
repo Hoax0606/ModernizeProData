@@ -1,9 +1,12 @@
 package com.ksinfo.modernize_pro_data.coordinator.auth;
 
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.coordinator.license.LicenseService;
+import com.ksinfo.modernize_pro_data.coordinator.license.LicenseStatus;
 import com.ksinfo.modernize_pro_data.coordinator.site.AuditLogService;
 import com.ksinfo.modernize_pro_data.coordinator.user.User;
 import com.ksinfo.modernize_pro_data.coordinator.user.UserRepository;
+import com.ksinfo.modernize_pro_data.coordinator.user.UserRole;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -32,6 +35,7 @@ public class AuthService {
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
     private final AuditLogService auditLogService;
+    private final LicenseService licenseService;
 
     public record LoginResult(String token, String username, String role,
                               OffsetDateTime expiresAt, OffsetDateTime lastSignInAt) {}
@@ -66,6 +70,35 @@ public class AuthService {
                     "AUTH_SESSION_ACTIVE_ELSEWHERE",
                     "다른 곳에서 이미 로그인되어 있습니다",
                     HttpStatus.CONFLICT);
+        }
+
+        // license gate — master 는 항상 통과. 그 외는 isFullyBlocked (MISSING/INVALID/EXPIRED) 면 거부.
+        // 위치: session-conflict 검사 후, JWT 발급 / session_id 갱신 전 — 차단된 로그인이
+        // user 행을 변경하거나 토큰을 burn 하지 않도록.
+        if (user.getRole() != UserRole.master) {
+            LicenseStatus lic;
+            try {
+                lic = licenseService.currentStatus();
+            } catch (Exception e) {
+                log.error("License status check failed for {}: {}", username, e.getMessage(), e);
+                auditLogService.record(null, null, username, "LOGIN_REJECTED_LICENSE")
+                        .details("status check threw: " + e.getClass().getSimpleName())
+                        .save();
+                throw new ApiException(
+                        "AUTH_LICENSE_BLOCKED",
+                        "license status check failed",
+                        HttpStatus.FORBIDDEN);
+            }
+            if (lic.isFullyBlocked()) {
+                auditLogService.record(null, null, username, "LOGIN_REJECTED_LICENSE")
+                        .details("status=" + lic.name())
+                        .save();
+                log.info("Login rejected (license {}): {}", lic, username);
+                throw new ApiException(
+                        "AUTH_LICENSE_BLOCKED",
+                        "license " + lic.name(),
+                        HttpStatus.FORBIDDEN);
+            }
         }
 
         // 이전 로그인 시각 캡처 후 갱신

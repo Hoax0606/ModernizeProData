@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Modal } from './Modal';
 import {
   useWorkspaceStore,
@@ -65,6 +65,8 @@ export function CreateSiteModal({ open, onClose }: Props) {
 
   // 운영 단계 + 단계별 DB drafts.
   const [stage, setStage] = useState<ProjectEnvironment>('dev');
+  /** TO-BE DB 연결 범위 — 'site' = 모든 Project 공유 (기본), 'project' = 각 Project 별. */
+  const [tobeDbScope, setTobeDbScope] = useState<'site' | 'project'>('site');
   const [tobeDbByEnv, setTobeDbByEnv] = useState<TobeDbByEnv>({});
   const [error, setError] = useState<string | null>(null);
   const [testStatus, setTestStatus] = useState<TestStatus>('idle');
@@ -111,11 +113,18 @@ export function CreateSiteModal({ open, onClose }: Props) {
     setAsisDbType('');
     setAsisDbVersion('');
     setStage('dev');
+    setTobeDbScope('site');
     setTobeDbByEnv({});
     setError(null);
     setTestStatus('idle');
     setTestMessage(null);
   };
+
+  // 모달을 열 때마다 폼을 초기화한다 (닫았다 다시 열어도 이전 입력값이 남지 않게).
+  useEffect(() => {
+    if (open) reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const blockedByProd = stage === 'production' && !isMaster;
 
@@ -145,6 +154,7 @@ export function CreateSiteModal({ open, onClose }: Props) {
         asisDbType: asisDbType.trim() || undefined,
         asisDbVersion: asisDbVersion.trim() || undefined,
         environment: stage,
+        tobeDbScope,
         tobeDbByEnv: finalByEnv,
         tobeDbLocks: finalLocks,
       });
@@ -228,11 +238,35 @@ export function CreateSiteModal({ open, onClose }: Props) {
           <CsvPathField value={csvPath} onChange={setCsvPath} />
         </Field>
 
+        {isMaster && (
+          <Field label="TO-BE DB scope">
+            <div style={{ display: 'inline-flex', gap: 4 }}>
+              <button
+                type="button"
+                onClick={() => setTobeDbScope('site')}
+                style={{ ...styles.btnGhost, ...(tobeDbScope === 'site' ? styles.btnTestActive : {}) }}
+              >
+                Site shared
+              </button>
+              <button
+                type="button"
+                onClick={() => setTobeDbScope('project')}
+                style={{ ...styles.btnGhost, ...(tobeDbScope === 'project' ? styles.btnTestActive : {}) }}
+              >
+                Per-project
+              </button>
+            </div>
+          </Field>
+        )}
+
+        {tobeDbScope === 'site' && (
         <Field label={t('siteSettings.stage')}>
           <StagePills value={stage} onChange={setStage} byEnv={tobeDbByEnv} t={t} />
         </Field>
+        )}
 
-        {/* TO-BE Target DB connection — 선택된 stage 에 묶여 있음 */}
+        {/* TO-BE Target DB connection — 선택된 stage 에 묶여 있음. scope='project' 면 카드 자체를 띄우지 않고 안내만. */}
+        {tobeDbScope === 'site' && (
         <div style={styles.dbCard}>
           <div style={styles.dbHeader}>
             {t('siteSettings.tobeDb')}
@@ -279,6 +313,20 @@ export function CreateSiteModal({ open, onClose }: Props) {
             </button>
           </div>
         </div>
+        )}
+
+        {tobeDbScope === 'project' && (
+          <div style={{
+            padding: '12px 14px',
+            fontSize: 12,
+            color: 'var(--text-3)',
+            background: 'var(--panel-2)',
+            border: '1px solid var(--border)',
+            borderRadius: 4,
+          }}>
+            프로젝트별 모드 — 사이트 생성 후 각 프로젝트의 Settings 페이지(TO-BE DB 섹션)에서 입력하세요.
+          </div>
+        )}
 
         {error && <div style={styles.errorBox}>{error}</div>}
 
