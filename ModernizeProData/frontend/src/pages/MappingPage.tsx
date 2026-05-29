@@ -923,12 +923,20 @@ function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, eff
 async function findUncoveredDdlColumns(projectId: string, tableFilter: string | null = null): Promise<string[]> {
   if (TOBE_TABLES.length === 0) return [];
   try {
-    const rules = await mappingImportApi.listRules(projectId);
+    const [rules, bindings] = await Promise.all([
+      mappingImportApi.listRules(projectId),
+      mappingImportApi.listBindings(projectId).catch(() => []),
+    ]);
     const ruleCols = new Map<string, Set<string>>();  // `${schema}|${table}` → Set<column>
     for (const r of rules) {
       const key = (r.tobeSchema || '') + '|' + r.tobeTable;
       if (!ruleCols.has(key)) ruleCols.set(key, new Set());
       ruleCols.get(key)!.add(r.tobeColumn);
+    }
+    // 자식 link 테이블은 master 에서 정의되므로 임포트 검증에서 제외.
+    const linkedKeys = new Set<string>();
+    for (const b of bindings) {
+      if (b.sharedFromProjectId) linkedKeys.add((b.tobeSchema || '') + '|' + b.tobeTable);
     }
     const targets = tableFilter
       ? TOBE_TABLES.filter((t) => (t.name.split('.').pop() || t.name) === tableFilter)
@@ -938,6 +946,7 @@ async function findUncoveredDdlColumns(projectId: string, tableFilter: string | 
       const i = tobe.name.indexOf('.');
       const schema = i > 0 ? tobe.name.slice(0, i) : '';
       const table = i > 0 ? tobe.name.slice(i + 1) : tobe.name;
+      if (linkedKeys.has(schema + '|' + table)) continue;  // 자식 link 테이블 — skip
       const haveCols = ruleCols.get(schema + '|' + table) || new Set();
       const ddlCols = MAPPING_BY_TOBE[tobe.internalName] || [];
       for (const c of ddlCols) {
