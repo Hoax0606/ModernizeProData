@@ -527,7 +527,7 @@ function DisabledOverlay({ disabled, children }: { disabled: boolean; children: 
 
 function RunHeader({
   t, project, site, runMode, activeRun, runs, preflightPassed, hasPinnedSnapshot,
-  selectedTablesCount, onStart, onStop, onRetry, onDiscard,
+  selectedTablesCount, onStart, onStop, canStop, onRetry, onDiscard,
 }: {
   t: T;
   project: Project;
@@ -659,7 +659,7 @@ function RunHeader({
         )}
         {/* 2026-05-29: 버튼 set 단순화 — Pause/Resume / Start over / Reset 제거.
             Halted = Discard + ↻ Retry (failed/aborted 만). Running = ⏹ Stop. */}
-        {!isHalted && (
+        {!isHalted && canStop && (
           <button type="button" onClick={onStop} style={styles.btnDanger}>
             ⏹ {t('execution.run.stop')}
           </button>

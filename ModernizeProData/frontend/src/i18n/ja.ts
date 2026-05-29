@@ -1354,6 +1354,7 @@ export const ja: Record<TranslationKey, string> = {
   'logs.quarantine.act.openMapping':   'マッピングを開く',
   'logs.quarantine.act.openInspector': 'ストリームで表示',
   'logs.quarantine.act.downloadParquet': '⬇ 違反行のダウンロード',
+  'logs.quarantine.act.downloadFailed':  '違反行ファイルがまだ生成されていません。(Audit stage が完了した run でのみダウンロード可能です。)',
 
   'siteQuarantine.eyebrow':         'SITE QUARANTINE',
   'siteQuarantine.empty.noSite':    'サイトを先に選択してください。',

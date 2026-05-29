@@ -150,6 +150,27 @@ input, select, textarea { font-family: inherit; }
   transition: background-color 0.4s ease;
 }
 
+/* Quarantine 매핑 열기 도착지 강조 — 빨간 펄스 무한 반복. 사용자가 어떤 source field 가
+   문제인지 확인할 충분한 시간을 갖도록. cleanup 트리거: 다른 navigation / 컴포넌트 unmount /
+   사용자가 row 클릭 — useEffect cleanup 또는 setSelected 시 클래스 제거. */
+@keyframes mpd-quarantine-pulse {
+  0%, 100% { background-color: transparent;
+             box-shadow: 0 0 0 0 rgba(201, 42, 63, 0); }
+  50%      { background-color: #FFD9D9;
+             box-shadow: 0 0 0 2px #C92A3F, 0 0 0 6px rgba(201, 42, 63, 0.25); }
+}
+@keyframes mpd-quarantine-pulse-td {
+  0%, 100% { background-color: transparent; }
+  50%      { background-color: #FFD9D9; }
+}
+.mpd-quarantine-highlight {
+  animation: mpd-quarantine-pulse 0.8s ease-in-out infinite;
+  border-radius: 4px;
+}
+.mpd-quarantine-highlight > td {
+  animation: mpd-quarantine-pulse-td 0.8s ease-in-out infinite;
+}
+
 /* ── Native form control 통일 (JavaFX WebView 구형 WebKit 호환) ──────────
    WebView 의 WebKit 은 accent-color / focus-visible 을 지원하지 않아 native
    checkbox·radio·focus 가 "옛날 윈도우" 룩으로 나온다. appearance:none 으로 끄고
