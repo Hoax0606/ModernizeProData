@@ -164,7 +164,7 @@ export const ja: Record<TranslationKey, string> = {
   'solution.notifications.enable': 'Enable notifications',
   'solution.notifications.enableDesc': 'オフにすると全プロジェクトのアプリ内通知が一括無効化されます。',
   'solution.internal': 'Internal scheduler',
-  'solution.internal.desc': 'Coordinator 内蔵の Quartz スケジューラが、対象プロジェクトの run を毎日 1 回自動起動します。Mode = Common なら全プロジェクトを同じ時刻に、Mode = Individual なら Project ごとに設定した時刻に発火。起動される run の種類はその時点の phase により決まります (test → test run / rehearsal → rehearsal run / ready → cutover run)。External integrations と同時には ON にできません (片方を ON にするともう片方は自動 OFF)。',
+  'solution.internal.desc': 'Coordinator 内蔵の Quartz スケジューラが、対象プロジェクトの run を毎日 1 回自動起動します。Mode = Common なら全プロジェクトを同じ時刻に、Mode = Individual なら Project ごとに設定した時刻に発火。対象は sign-off / ready phase の project のみ (sign-off → rehearsal run / ready → cutover run)。他 phase は mapping 未承認のため skip。External integrations と同時には ON にできません (片方を ON にするともう片方は自動 OFF)。',
   'solution.internal.activeHint':   '有効 — Mode の設定に従って全プロジェクト (Common) または Project ごと (Individual) に日次自動起動',
   'solution.internal.inactiveHint': '無効 — Quartz Nightly trigger は発火しない',
   'solution.external': 'External integrations',

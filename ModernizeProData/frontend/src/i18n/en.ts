@@ -158,7 +158,7 @@ export const en: Record<TranslationKey, string> = {
   'solution.notifications.enable': 'Enable notifications',
   'solution.notifications.enableDesc': 'Turning off disables in-app notifications across all projects.',
   'solution.internal': 'Internal scheduler',
-  'solution.internal.desc': 'The Coordinator-embedded Quartz scheduler fires a run for eligible projects once a day. With Mode = Common, all projects fire at the same time; with Mode = Individual, each project fires at its own configured time. The run type is decided by the current phase (test → test run, rehearsal → rehearsal run, ready → cutover run). Cannot be ON at the same time as External integrations (turning one on automatically turns the other off).',
+  'solution.internal.desc': 'The Coordinator-embedded Quartz scheduler fires a run for eligible projects once a day. With Mode = Common, all projects fire at the same time; with Mode = Individual, each project fires at its own configured time. Only projects in sign-off or ready phase are eligible (sign-off → rehearsal run, ready → cutover run); other phases are skipped because their mapping has not yet been approved. Cannot be ON at the same time as External integrations (turning one on automatically turns the other off).',
   'solution.internal.activeHint':   'Enabled — projects fire daily, either all at once (Common) or per project (Individual)',
   'solution.internal.inactiveHint': 'Disabled — Quartz nightly triggers will not fire',
   'solution.external': 'External integrations',

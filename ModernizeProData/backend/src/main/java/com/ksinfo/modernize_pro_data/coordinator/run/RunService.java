@@ -365,33 +365,30 @@ public class RunService {
     }
 
     /**
-     * Project phase 로부터 scheduler 가 起動해야 할 runType 을 결정.
-     * 스케줄러 (내부 Quartz / 외부 bulk / 외부 single runType 省略時) 가 사용.
+     * Project phase 로부터 scheduler / 외부 trigger 가 起動해야 할 runType 결정.
+     * 스케줄러 (내부 Quartz / 외부 /runs/all / 외부 /runs (runType 省略時)) 가 사용.
      *
-     * Phase semantics (2026-05-24 update):
-     *   - test       → RunType.test       (dry-run test 実行可)
-     *   - rehearsal  → RunType.rehearsal  (dry-run rehearsal 実行可)
-     *   - ready      → RunType.cutover    (cutover 実行準備完了 — 本番切替を起動)
-     *   - cutover    → empty              (= 既に cutover 実行中、新 run は受け付けない)
-     *   - その他 (planning / analysis / sign-off / hypercare / done) → empty
+     * 設計 (2026-05-29 update): scheduler / 외부 trigger 는 sign-off + ready phase
+     * 限定으로 絞る. 이유는 두 phase 모두「snapshot Request Review 가 通過한 後」 =
+     * mapping 이 検証済み の状態. 따라서 별도의 preflight DB 영속화 없이도 「FE
+     * preflight 通っている前提」 が phase 自体で保証된다.
+     *   - sign-off → RunType.rehearsal — mapping approved 後 dry-run.  起動 後
+     *                  maybeAdvancePhase 가 phase 를 sign-off → rehearsal 로 自動 前進.
+     *   - ready    → RunType.cutover — cutover snapshot approved 後 production 切替.
+     *   - 其他 (planning / analysis / test / rehearsal / cutover / hypercare / done)
+     *                → empty.  REJECTED 로 결과 표시.  사용자가 UI 에서 explicit runType
+     *                指定 하면 /runs 経由로 起動 可能 (= 手動 path 는 制限 없음).
      *
-     * cutover 終了後は phase が hypercare に遷移する想定.
-     */
-    /**
-     * Project phase 로부터 default runType 결정.
-     *   - rehearsal → RunType.rehearsal
-     *   - ready     → RunType.cutover (단 prod 환경 가드 통과 필요)
-     *   - 그 외 (planning/analysis/test/sign-off/cutover/hypercare/done) → RunType.test
-     *
-     * Env-based 정책: non-prod 모든 phase 에서 default=test runType 으로 trigger 가능.
-     * Pre-flight 가 frontend 에서 미준비 상태 막음.
+     * 旧 仕様 (default → test) 은 planning / analysis 等 mapping 未準備 의 project 도
+     * scheduler 가 fire 시킬 수 있어 사고 リスク 있었다.  본 結束로 「phase eligibility =
+     * preflight 통과의 暗黙の保証」 으로 統合.
      */
     public static Optional<RunType> resolveRunTypeFromPhase(String phase) {
         if (phase == null) return Optional.empty();
         return switch (phase) {
-            case "rehearsal" -> Optional.of(RunType.rehearsal);
-            case "ready"     -> Optional.of(RunType.cutover);
-            default          -> Optional.of(RunType.test);
+            case "sign-off" -> Optional.of(RunType.rehearsal);
+            case "ready"    -> Optional.of(RunType.cutover);
+            default         -> Optional.empty();
         };
     }
 

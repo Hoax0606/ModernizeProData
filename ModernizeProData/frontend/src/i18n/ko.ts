@@ -162,7 +162,7 @@ export const ko = {
   'solution.notifications.enable': 'Enable notifications',
   'solution.notifications.enableDesc': '끄면 모든 프로젝트의 인앱 알림이 일괄 비활성화됩니다.',
   'solution.internal': 'Internal scheduler',
-  'solution.internal.desc': 'Coordinator 내장 Quartz 스케줄러가 대상 프로젝트의 run 을 매일 1 회 자동 기동합니다. Mode = Common 이면 전체 프로젝트를 같은 시각에, Mode = Individual 이면 Project 별로 설정한 시각에 발화. 기동되는 run 의 종류는 그 시점의 phase 에 따라 결정됩니다 (test → test run / rehearsal → rehearsal run / ready → cutover run). External integrations 와 동시에 ON 으로 둘 수 없습니다 (한쪽 켜면 다른 쪽이 자동 OFF).',
+  'solution.internal.desc': 'Coordinator 내장 Quartz 스케줄러가 대상 프로젝트의 run 을 매일 1 회 자동 기동합니다. Mode = Common 이면 전체 프로젝트를 같은 시각에, Mode = Individual 이면 Project 별로 설정한 시각에 발화. 대상은 sign-off / ready phase 의 project 만 (sign-off → rehearsal run / ready → cutover run). 그 외 phase 는 mapping 미승인 상태이므로 skip. External integrations 와 동시에 ON 으로 둘 수 없습니다 (한쪽 켜면 다른 쪽이 자동 OFF).',
   'solution.internal.activeHint':   '활성화됨 — Mode 설정에 따라 전체 프로젝트 (Common) 또는 Project 별 (Individual) 로 일일 자동 기동',
   'solution.internal.inactiveHint': '비활성화 — Quartz Nightly trigger 는 발화되지 않음',
   'solution.external': 'External integrations',
