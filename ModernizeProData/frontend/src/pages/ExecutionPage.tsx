@@ -130,6 +130,13 @@ export function ExecutionPage() {
     const projectMapping = projectSnapshots.filter((s) => s.type === 'mapping');
     return [...projectMapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
   }, [pinnedSnapshot, projectSnapshots]);
+  /* "Discard" 한 snapshot id — 사용자가 활성 snapshot 의 fallback 표시를 명시적으로 끈 상태.
+     pinned 가 다른 snapshot 으로 옮겨가면 자동 reset (그 새 snapshot 은 Discard 적용 안 됨). */
+  const [discardedSnapshotId, setDiscardedSnapshotId] = useState<string | null>(null);
+  useEffect(() => {
+    setDiscardedSnapshotId((cur) => (cur && cur !== fallbackSnapshot?.id ? null : cur));
+  }, [fallbackSnapshot?.id]);
+  const effectiveFallback = fallbackSnapshot?.id === discardedSnapshotId ? null : fallbackSnapshot;
   /* pinned snapshot 의 id 가 변경되면 stale activeRunId 는 clear.
      예: Test 1 run → activeRunId=run1, pin 을 Test 2(아직 run X)로 옮기면 run1 은 더 이상
      이 snapshot 의 것이 아님 → clear 하면 fallback(빈 또는 그 snapshot 박제) 으로 자동 전환.
@@ -146,7 +153,7 @@ export function ExecutionPage() {
   }, [pinnedSnapshot?.id, project?.id]);
   const { run, stages: stageViews } = usePipelineProgress(
     activeRunId,
-    fallbackSnapshot?.executionContext ?? null,
+    effectiveFallback?.executionContext ?? null,
   );
 
   const entrySelected = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.selectedTables : undefined);
@@ -420,8 +427,11 @@ export function ExecutionPage() {
   };
 
   const handleDiscard = () => {
-    /* polling 停止 + UI から「현재 run」을 외す. BE 의 run 자체는 履歴에 남音. */
+    /* polling 停止 + UI 의 「현재 run」 제거. BE 의 run 자체는 history 에 남음.
+       추가로 fallback snapshot 의 executionContext 도 화면에서 끄기 — 안 그러면 activeRunId
+       가 null 되자마자 fallback 으로 다시 그려진다 (Discard 가 무효화돼 보임). */
     setActiveRunId(null);
+    if (fallbackSnapshot) setDiscardedSnapshotId(fallbackSnapshot.id);
   };
 
   const handleStopRun = async () => {
