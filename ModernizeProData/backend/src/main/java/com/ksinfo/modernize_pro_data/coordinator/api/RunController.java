@@ -15,6 +15,7 @@ import com.ksinfo.modernize_pro_data.coordinator.run.RunType;
 import com.ksinfo.modernize_pro_data.coordinator.run.TriggerSource;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
+import com.ksinfo.modernize_pro_data.coordinator.site.SiteRepository;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import lombok.RequiredArgsConstructor;
@@ -49,6 +50,7 @@ public class RunController {
     private final RunService runService;
     private final RunHistoryRepository runHistoryRepo;
     private final ProjectRepository projectRepo;
+    private final SiteRepository siteRepo;
     private final ApiCredentialRepository apiCredentialRepo;
     private final SolutionSettingsRepository solutionSettingsRepo;
 
@@ -170,9 +172,17 @@ public class RunController {
     }
 
     /**
-     * 全 project 를 一斉 起動 (외부 스케줄러로부터의 /runs/all entry).
-     *   - 対象: 全 project (旧設計은 schedule_start_time set 만이었으나, common mode 에서는
-     *     start_time 가 不要 — 결과적으로 무관한 필터가 되어 廃止)
+     * /runs/all 의 request body. siteId は必須 — 1 Coordinator が複数 site をホストしていても
+     * 意図せず別 site の project まで発火しないよう、必ず明示する.
+     */
+    public record StartAllRequest(
+            @NotBlank String siteId
+    ) {}
+
+    /**
+     * 指定 site の全 project 을 一斉 起動 (외부 스케줄러로부터의 /runs/all entry).
+     *   - 対象: siteId が指定する site の全 project (旧設計은 schedule_start_time set 만이었으나,
+     *     common mode 에서는 start_time 가 不要 — 결과적으로 무관한 필터가 되어 廃止)
      *   - 각 project 의 phase 로부터 runType (test/rehearsal/cutover) 자동 결정
      *   - eligible 하지 않은 phase (planning/analysis/sign-off/ready/hypercare/done) 의
      *     project 는 결과에 REJECTED 로 포함 — 추적 용
@@ -182,10 +192,15 @@ public class RunController {
      *
      * 외부 스케줄러 ↔ master/admin UI 双方 호출 가능. triggerSource 는 호출자에 따라
      * external / manual 자동 판별.
+     *
+     * siteId 必須化 (2026-05-29): 旧仕様은 projectRepo.findAll() 로 全 site 의 全 project
+     * 을 対象으로 했으나、1 Coordinator 가 複数 site 을 ホスト する dev / 多 customer 構成
+     * では PROD/TEST 同時発火等 의 事故 リスク가 大. body 의 siteId 로 明示 scope 限定 必須.
      */
     @PostMapping("/api/v1/runs/all")
     @PreAuthorize("hasAnyRole('API_CLIENT', 'MASTER', 'ADMIN')")
-    public ApiResponse<BulkRunResultDto> startAll(Authentication auth) {
+    public ApiResponse<BulkRunResultDto> startAll(@Valid @RequestBody StartAllRequest req,
+                                                  Authentication auth) {
         // External 모드 비활성 시 host 종류 (api_token / JWT 모두) 에 관계없이 503.
         // /runs/all 은 외부 trigger pattern 의 entry 이므로, master/admin UI 가 호출해도
         // external_enabled = false 면 끄는 일관 정책.
@@ -195,13 +210,20 @@ public class RunController {
                     HttpStatus.SERVICE_UNAVAILABLE);
         }
 
+        // siteId が指す site が存在しなければ 404. 空 project list が「site 不在」と「site あり
+        // だが project 0」で区別つかなくなるのを防ぐ.
+        if (!siteRepo.existsById(req.siteId())) {
+            throw new ApiException("SITE_NOT_FOUND",
+                    "site not found: " + req.siteId(), HttpStatus.NOT_FOUND);
+        }
+
         boolean isApiClient = auth.getAuthorities().stream()
                 .anyMatch(a -> "ROLE_API_CLIENT".equals(a.getAuthority()));
         TriggerSource source = isApiClient ? TriggerSource.external : TriggerSource.manual;
         String credentialId = isApiClient ? auth.getName() : null;
         String requestedBy = resolveRequestedBy(isApiClient, auth);
 
-        List<Project> targets = projectRepo.findAll();
+        List<Project> targets = projectRepo.findBySiteId(req.siteId());
         List<RunResultDto> results = new ArrayList<>();
         int started = 0, rejected = 0, locked = 0;
         for (Project p : targets) {

@@ -385,7 +385,13 @@ export function SchedulerPage() {
   //   windows      : curl ... -d "{\"...\"}"
   //   powershell   : curl.exe --% ... -d "{\"...\"}"   (--% で PowerShell の引数加工を停止)
   const curlCmd = shellMode === 'powershell' ? 'curl.exe --%' : 'curl';
-  const bulkCommand = `${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs/all -H "Authorization: Bearer ${tokenForDocs}"`;
+  // /runs/all は 2026-05-29 から siteId 必須. site が 1 個しかない時はその id を埋めて
+  // コピペで動くようにし、複数 site 持ちの Coordinator では <YOUR_SITE_ID> placeholder.
+  const bulkSiteIdSample = sites.length === 1 ? sites[0].id : '<YOUR_SITE_ID>';
+  const bulkBody = shellMode === 'bash'
+    ? `'{"siteId":"${bulkSiteIdSample}"}'`
+    : `"{\\"siteId\\":\\"${bulkSiteIdSample}\\"}"`;
+  const bulkCommand = `${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs/all -H "Authorization: Bearer ${tokenForDocs}" -H "Content-Type: application/json" -d ${bulkBody}`;
   const singleProjectCommands = projects.length === 0
     ? '# (project 未作成 — All Projects 画面で project を作成すると単発実行コマンドがここに表示されます)'
     : projects.map((p) => {

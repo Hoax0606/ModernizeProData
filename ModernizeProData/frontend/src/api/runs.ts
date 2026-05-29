@@ -4,7 +4,7 @@ import { api, unwrap, type ApiResponse } from './client';
  * Run 起動 / 状態取得 / 履歴閲覧 의 API client.
  *
  * - start          : POST /api/v1/runs           (REST 認証 = api_token, master/admin JWT 도 가능)
- * - startAll       : POST /api/v1/runs/all       (schedule_enabled 全 project 일괄)
+ * - startAll       : POST /api/v1/runs/all       (siteId 必須 — その site 의 全 project 일괄)
  * - get            : GET  /api/v1/runs/{id}      (user session)
  * - listByProject  : GET  /api/v1/projects/{id}/runs (user session)
  * - devComplete/devFail : Worker callback シミュレーション (master/admin/worker)
@@ -146,8 +146,12 @@ export const runsApi = {
   resume: (runId: string) =>
     unwrap(api.post<ApiResponse<RunHistoryDto>>(`/api/v1/runs/${runId}/resume`, {})),
 
-  startAll: () =>
-    unwrap(api.post<ApiResponse<BulkRunResultDto>>('/api/v1/runs/all')),
+  /**
+   * 指定 site の全 project 一斉起動. siteId 必須 (2026-05-29 仕様変更で必須化).
+   * 旧仕様の「全 site 横断 findAll」は誤発火事故防止のため廃止.
+   */
+  startAll: (siteId: string) =>
+    unwrap(api.post<ApiResponse<BulkRunResultDto>>('/api/v1/runs/all', { siteId })),
 
   get: (runId: string) =>
     unwrap(api.get<ApiResponse<RunHistoryDto>>(`/api/v1/runs/${runId}`)),
