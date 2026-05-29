@@ -297,7 +297,7 @@ public class MappingReportService {
         StringBuilder sql = new StringBuilder(select.toString()).append(fromClause);
         // Row N:1 집계 — binding 의 group_by_expr 이 있으면 WHERE 뒤 LIMIT 앞에 그대로 인젝션.
         if (binding != null && binding.getGroupByExpr() != null && !binding.getGroupByExpr().isBlank()) {
-            sql.append(" GROUP BY ").append(binding.getGroupByExpr());
+            sql.append(" GROUP BY ").append(stripLeadingKeyword(binding.getGroupByExpr(), "GROUP BY"));
         }
         sql.append(" LIMIT ").append(limit);
         return sql.toString();
@@ -347,9 +347,24 @@ public class MappingReportService {
             from.append(" ").append(binding.getExpandExpr());
         }
         if (binding.getWhereFilter() != null && !binding.getWhereFilter().isBlank()) {
-            from.append(" WHERE ").append(binding.getWhereFilter());
+            from.append(" WHERE ").append(stripLeadingKeyword(binding.getWhereFilter(), "WHERE"));
         }
         return from.toString();
+    }
+
+    /**
+     * 사용자가 binding 입력 칸에 "WHERE col = 'x'" / "GROUP BY col" 처럼 키워드 포함해서 적어도
+     * 도구가 중복 키워드 박지 않게 strip. 키워드는 case-insensitive 매칭.
+     */
+    private static String stripLeadingKeyword(String expr, String keyword) {
+        if (expr == null) return null;
+        String trimmed = expr.trim();
+        String upper = trimmed.toUpperCase();
+        String kwUp = keyword.toUpperCase();
+        if (upper.startsWith(kwUp + " ") || upper.startsWith(kwUp + "\t") || upper.startsWith(kwUp + "\n")) {
+            return trimmed.substring(keyword.length()).trim();
+        }
+        return trimmed;
     }
 
     private String exprForRule(MappingRule r) {

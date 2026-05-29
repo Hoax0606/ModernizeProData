@@ -361,12 +361,13 @@ public class MappingImportService {
         LinkedHashMap<String, RuleRow> grouped = new LinkedHashMap<>();
 
         // read_csv (not _auto) 으로 delimiter / quote / escape 모두 명시.
-        // RFC 4180 dialect 명시 + auto_detect 끔 — sniffer 가 셀 안의 따옴표/콤마 (SQL fragment
-        // 같은 복잡한 notes) 로 실패하지 않도록. all_varchar 로 type 추론도 우회.
-        // strict_mode=false — RFC 외 변종 (CRLF 혼합 등) 도 받아들임.
+        // RFC 4180 dialect 명시 + 관대한 옵션 — sniffer 가 셀 안의 따옴표/콤마 (SQL fragment
+        // 같은 복잡한 notes) 로 실패하지 않도록. strict_mode=false / ignore_errors=true /
+        // max_line_size 확장으로 RFC 외 변종도 수용.
         String sql = "SELECT * FROM read_csv('" + escape(csv.toString())
                 + "', header=true, delim=',', quote='\"', escape='\"', all_varchar=true, "
-                + "null_padding=true, auto_detect=false, strict_mode=false)";
+                + "null_padding=true, strict_mode=false, ignore_errors=true, "
+                + "max_line_size=10000000)";
 
         try (Statement st = duckDbService.statement();
              ResultSet rs = st.executeQuery(sql)) {
@@ -486,12 +487,13 @@ public class MappingImportService {
         List<CodeRow> out = new ArrayList<>();
         Set<String> seen = new HashSet<>();
 
-        // RFC 4180 dialect 명시 + auto_detect 끔 — sniffer 가 셀 안의 따옴표/콤마 (SQL fragment
-        // 같은 복잡한 notes) 로 실패하지 않도록. all_varchar 로 type 추론도 우회.
-        // strict_mode=false — RFC 외 변종 (CRLF 혼합 등) 도 받아들임.
+        // RFC 4180 dialect 명시 + 관대한 옵션 — sniffer 가 셀 안의 따옴표/콤마 (SQL fragment
+        // 같은 복잡한 notes) 로 실패하지 않도록. strict_mode=false / ignore_errors=true /
+        // max_line_size 확장으로 RFC 외 변종도 수용.
         String sql = "SELECT * FROM read_csv('" + escape(csv.toString())
                 + "', header=true, delim=',', quote='\"', escape='\"', all_varchar=true, "
-                + "null_padding=true, auto_detect=false, strict_mode=false)";
+                + "null_padding=true, strict_mode=false, ignore_errors=true, "
+                + "max_line_size=10000000)";
 
         try (Statement st = duckDbService.statement();
              ResultSet rs = st.executeQuery(sql)) {

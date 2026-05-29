@@ -1205,9 +1205,15 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
       ]);
       // alias 룩업 — key: `{tobeSchema}|{tobeTable}|{asisTable}` → alias
       const aliasMap = new Map<string, string>();
+      // expand alias 룩업 — key: `{tobeSchema}|{tobeTable}` → [{alias, columns}]
+      // expand_expr 의 AS u(col1, col2) 같은 펼침 alias 도 hydrate 시 보존.
+      const expandMap = new Map<string, { alias: string; columns: string[] }[]>();
       for (const b of bindings) {
         for (const s of b.sources) {
           aliasMap.set(`${b.tobeSchema}|${b.tobeTable}|${s.asisTable}`, s.alias);
+        }
+        if (b.expandExpr) {
+          expandMap.set(`${b.tobeSchema}|${b.tobeTable}`, parseExpandAliases(b.expandExpr));
         }
       }
       // rules 를 internalName / tgtColumn 으로 그룹화
@@ -1222,15 +1228,22 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
         const internalName = tobe.internalName;
         if (!edits[internalName]) edits[internalName] = {};
 
-        // savedSrc: 가능하면 `{alias}.{column}`, alias 못 찾으면 column 만.
+        // savedSrc: 가능하면 `{alias}.{column}`. asisTable 매칭이 우선, 못 찾으면 expand alias 매칭
+        // (CROSS JOIN LATERAL 같이 펼친 컬럼들), 둘 다 없으면 column 만.
         // r.asisColumn 은 PG TEXT[] 매핑 string[] — combine 시 여러 원소.
         let savedSrc: string[] | undefined;
         if (r.asisColumn && r.asisColumn.length > 0) {
-          const alias = r.asisTable
+          const sourceAlias = r.asisTable
             ? aliasMap.get(`${r.tobeSchema}|${r.tobeTable}|${r.asisTable}`)
             : undefined;
+          const expandAliases = expandMap.get(`${r.tobeSchema}|${r.tobeTable}`) ?? [];
           const cols = r.asisColumn.map((c) => c.trim()).filter((c) => c);
-          savedSrc = cols.map((c) => alias ? `${alias}.${c}` : c);
+          savedSrc = cols.map((c) => {
+            if (sourceAlias) return `${sourceAlias}.${c}`;
+            // asisTable 매칭 실패 → expand alias 의 column 매칭 시도
+            const exp = expandAliases.find((e) => e.columns.includes(c));
+            return exp ? `${exp.alias}.${c}` : c;
+          });
         }
 
         const strat = r.strategy === 'skip' ? undefined
@@ -1766,7 +1779,10 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                       {(() => {
                         const eff = rowEdits[r.tgt]?.savedSrc;
                         if (eff?.length) {
-                          const alias = eff[0].slice(0, eff[0].indexOf('.')) || undefined;
+                          // dot 없는 source (alias 미포함) 의 경우 alias undefined — slice(0,-1) 로
+                          // column 명 앞 글자가 잘리는 표시 버그 회피.
+                          const di = eff[0].indexOf('.');
+                          const alias = di >= 0 ? eff[0].slice(0, di) : undefined;
                           return <SourceAliasTag alias={alias} composition={table.compositionKind} />;
                         }
                         return <SourceAliasTag alias={r.sourceAlias} composition={table.compositionKind} />;
@@ -1776,7 +1792,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                       {(() => {
                         const savedSrcs = rowEdits[r.tgt]?.savedSrc;
                         if (savedSrcs?.length) {
-                          const types = savedSrcs.map((s) => resolveSrcType(s, bindingSources)).filter((t) => t && t !== '—');
+                          const types = savedSrcs.map((s) => resolveSrcType(s, bindingSources, bindingExpand)).filter((t) => t && t !== '—');
                           return types.length
                             ? <TypeBadge>{types.join(', ')}</TypeBadge>
                             : <span style={{ color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>—</span>;
@@ -2345,7 +2361,7 @@ function parseExpandAliases(expr: string | undefined | null): { alias: string; c
   return out;
 }
 
-function resolveSrcType(s: string, sources: TobeTable['sources']): string {
+function resolveSrcType(s: string, sources: TobeTable['sources'], expandExpr?: string): string {
   if (!s) return '—';
   const di = s.indexOf('.');
   if (di < 0) {
@@ -2359,7 +2375,16 @@ function resolveSrcType(s: string, sources: TobeTable['sources']): string {
   const alias = s.slice(0, di);
   const col = s.slice(di + 1);
   const entry = sources.find((e) => e.alias === alias);
-  return (entry ? (ASIS_COLUMNS[entry.table] || []).find((c) => c.name === col)?.type : undefined) ?? '—';
+  if (entry) {
+    return (ASIS_COLUMNS[entry.table] || []).find((c) => c.name === col)?.type ?? '—';
+  }
+  // expand_expr 의 AS u(col1, col2) 같은 펼침 alias 면 type = VARCHAR fallback
+  // (expand 의 값은 SQL fragment 라 정확한 type 추론 불가; all_varchar input 의 일관 fallback).
+  if (expandExpr) {
+    const exp = parseExpandAliases(expandExpr).find((e) => e.alias === alias);
+    if (exp && exp.columns.includes(col)) return 'VARCHAR';
+  }
+  return '—';
 }
 
 function validateRule(code: string): string | null {
@@ -2742,20 +2767,29 @@ function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, 
   if (!active) return null;
   const initSrc: string[] = active.src === '—' ? [] : [active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src];
   const resolveType = (s: string) => resolveSrcType(s, sources);
-  const validAliases = new Set(sources.map((s) => s.alias));
+  // binding sources 의 alias + expand_expr 의 AS u(...) 의 alias 모두 valid 로 인정.
+  // expand alias 가 invalid 로 잡히면 row editor 의 cleanedSrc filter 에서 제거되어 사용자가
+  // 선택한 u.channel 같은 source 가 사라짐.
+  const validAliases = new Set([
+    ...sources.map((s) => s.alias),
+    ...parseExpandAliases(expandExpr).map((e) => e.alias),
+  ]);
   const prevAutoCastRef = useRef('');
 
   // 슬롯 i 의 source 값을 새 값으로 바꾸고, 첫 번째 슬롯이면 CAST 자동 입력 갱신.
   // editValue 가 비어있거나 이전 자동 CAST 와 같을 때만 덮어써서 사용자 수동 입력은 보존.
   const computeAutoCast = (firstSrc: string | undefined): string => {
     if (!firstSrc || !active) return '';
-    const srcCol = firstSrc.includes('.') ? firstSrc.slice(firstSrc.indexOf('.') + 1) : firstSrc;
-    const srcT = resolveSrcType(firstSrc, sources);
-    if (!srcT || srcT === '—' || active.tgtType === '—') return '';
-    // AS-IS type 을 TO-BE dialect 로 정규화한 결과가 TO-BE 컬럼 type 과 같으면 단순 컬럼.
-    const translatedSrcT = translateTypeToTobe(srcT, TOBE_DIALECT);
-    const same = translatedSrcT.toUpperCase() === active.tgtType.toUpperCase();
-    return same ? srcCol : `CAST(${srcCol} AS ${active.tgtType})`;
+    // alias 포함된 형태 그대로 사용 (예: "u.channel", "c.CUST_ID"). SQL 안전상 alias 필수.
+    if (!active.tgtType || active.tgtType === '—') return firstSrc;
+    // ExtractStage 의 all_varchar=true 로 실데이터 input 이 모두 VARCHAR. asis_type 무시 —
+    // tgtType 만 보고 결정 (backend MappingImportService 의 자동 생성 logic 과 일관).
+    //   tgtType 이 string 카테고리 → src 그대로 (VARCHAR → VARCHAR no-op)
+    //   그 외 → CAST 박음 (VARCHAR → tgtType 변환 필요)
+    const tt = active.tgtType.toUpperCase().trim();
+    const isString = tt.startsWith('VARCHAR') || tt.startsWith('CHAR')
+      || tt === 'TEXT' || tt === 'CLOB' || tt.startsWith('NVARCHAR');
+    return isString ? firstSrc : `CAST(${firstSrc} AS ${active.tgtType})`;
   };
 
   const handleEdit = () => {

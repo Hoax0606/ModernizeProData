@@ -211,13 +211,25 @@ public class TransformStage implements StageRunner {
             sb.append("\n").append(binding.getExpandExpr());
         }
         if (binding.getWhereFilter() != null && !binding.getWhereFilter().isBlank()) {
-            sb.append("\nWHERE ").append(binding.getWhereFilter());
+            sb.append("\nWHERE ").append(stripLeadingKw(binding.getWhereFilter(), "WHERE"));
         }
         // Row N:1 집계 — GROUP BY 표현식이 있으면 인젝션.
         if (binding.getGroupByExpr() != null && !binding.getGroupByExpr().isBlank()) {
-            sb.append("\nGROUP BY ").append(binding.getGroupByExpr());
+            sb.append("\nGROUP BY ").append(stripLeadingKw(binding.getGroupByExpr(), "GROUP BY"));
         }
         return sb.toString();
+    }
+
+    /** "WHERE col=x" / "GROUP BY col" 처럼 사용자가 키워드 포함 입력해도 중복 안 박히게 strip. */
+    private static String stripLeadingKw(String expr, String keyword) {
+        if (expr == null) return null;
+        String trimmed = expr.trim();
+        String upper = trimmed.toUpperCase();
+        String kwUp = keyword.toUpperCase();
+        if (upper.startsWith(kwUp + " ") || upper.startsWith(kwUp + "\t") || upper.startsWith(kwUp + "\n")) {
+            return trimmed.substring(keyword.length()).trim();
+        }
+        return trimmed;
     }
 
     /**
