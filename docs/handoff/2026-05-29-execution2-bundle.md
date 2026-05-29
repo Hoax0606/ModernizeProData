@@ -27,6 +27,15 @@
   `resolveRunTypeFromPhase` の default = test を廃止して empty (REJECTED) に。
   両 phase とも snapshot Request Review 通過後なので、preflight 永続化なしで
   「mapping 検証済み」を phase 自体で暗黙保証。
+- `fix(history)`: SchedulerPage の Tables 列で「all」literal が出るのを LogViewerPage と
+  同じ「—」表示に統一。「all」 텍스트는 i18n value のみで保持し tooltip 専用に
+  (실제 의미: scheduler / bulk run 의 binding 全件指定なし状態).
+- `fix(mapping-import)`: MappingImportService 의 column CSV 取り込み에 TO-BE DDL
+  検証 추가. CSV 内의 `tobe_table` 가 project 의 현재 TO-BE DDL 에 없는 경우는
+  skip + warn 로그. 旧仕様은 unmatched 行도 그대로 binding 化되어 orphan binding
+  의 주원인이었다 (e.g. CSV 内 `public.orders` / `public.employees` 가 banksys
+  schema 만 가진 project 에 binding 化되어 scheduler 起動 시 stage 가 5 행
+  처리하는 사고로 표면화). AS-IS 측엔 동일 검증이 既에 있었음 — 그것을 TO-BE 측에도 대칭 적용.
 
 ## 次のひとがやること
 
@@ -66,3 +75,18 @@
 - `SnapshotController.setBaseline` の current DDL 互換性 ガード (orphan 再流入経路)
 - cutover ライフサイクル (ready → cutover 自動進行 / hypercare 遷移)
 - handoff 以外の docs (ONBOARDING / CLAUDE.md) はこの PR では触らず、別 update で
+
+## Orphan binding — 残課題メモ (担当別人, 状況共有用)
+
+mapping_table_bindings の orphan (= DDL に裏付け無し binding) 防止の階層整理:
+
+| Layer | 状態 | 防ぐ流入経路 | 残す経路 |
+|---|---|---|---|
+| **(a) MappingImportService TO-BE validation** | ✅ 今 PR で実装済 | CSV import で DDL 不在 tobe_table 行 | snapshot restore, 手動 SQL |
+| **(b) `SnapshotController.setBaseline` で current DDL 互換性 check** | ⚠️ 未対応 | snapshot restore | 手動 SQL, FK 不在故の構造的脆さ |
+| **(c) 3 mapping テーブルへ FK + cascade** (`mapping_table_bindings.tobe_ddl_table_id`, `mapping_table_binding_sources.asis_ddl_table_id`, `mapping_rules.tobe_ddl_column_id`) | ⚠️ 未対応 | 全経路 (DB 構造的) | なし |
+
+(b) は半日, (c) は 2〜3 日工数. (c) を取れば (a) の lookup ロジックは自動的に内包される
+(FK 埋めるのに ddl_tables.id 引き必須). 担当が「他ブランチで preflight 関連 작업」
+と聞いてた人と被ると思うので、引継ぎ時に「orphan binding 構造的問題」も併せて
+処理判断してほしい. PoC 5/31 までは (a) 만 で運用可能.

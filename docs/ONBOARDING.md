@@ -466,6 +466,18 @@ That said, keep 12-factor habits so a future move is cheap:
 4. **`compile-preview` endpoint (DuckDB `EXPLAIN` for design-time check)** — include in PoC scope?
 5. **`drop` / `ignore` strategies vs. `unmapped`** — keep them distinct?
 6. **PG version mismatch across docs** — `CLAUDE.md` says "PG 18 bundled", memory and `compose.yaml` say PG 16. Current guess: dev local = PG 18, installer-bundled = PG 16 (stability). Needs cleanup.
+7. **`mapping_table_bindings` orphan integrity** (added 2026-05-29) — TO-BE side has
+   no FK to `ddl_tables`, so bindings can drift from current DDL. Mitigations layered:
+   (a) **DDL re-import / delete wipes mapping** (`DdlImportService`, commit `cb67d45`);
+   (b) **MappingImportService TO-BE validation** — skip rows whose `tobe_table` is
+   absent in current TO-BE DDL (current PR);
+   (c) **`SnapshotController.setBaseline` current-DDL compat guard** — DEFERRED.
+   Restored bindings whose `tobe_table` no longer exists in DDL can re-introduce orphans;
+   (d) **FK + cascade on `mapping_table_bindings.tobe_ddl_table_id` (and the two
+   sibling tables)** — DEFERRED. The only structural fix that makes orphans impossible
+   at DB level. ~2–3 days; should also constrain `mapping_table_binding_sources.
+   asis_ddl_table_id` and `mapping_rules.tobe_ddl_column_id`. See
+   `docs/handoff/2026-05-29-execution2-bundle.md` for the layer table.
 
 ---
 
