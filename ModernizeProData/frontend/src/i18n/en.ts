@@ -1329,6 +1329,7 @@ export const en: Record<TranslationKey, string> = {
   'logs.quarantine.act.openMapping':   'Open mapping',
   'logs.quarantine.act.openInspector': 'View in stream',
   'logs.quarantine.act.downloadParquet': '⬇ Download violating rows',
+  'logs.quarantine.act.downloadFailed':  'The violating-row file has not been generated yet. (Download is available only after the Audit stage completes.)',
 
   'siteQuarantine.eyebrow':         'SITE QUARANTINE',
   'siteQuarantine.empty.noSite':    'Select a site first.',

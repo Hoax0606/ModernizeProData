@@ -1335,6 +1335,7 @@ export const ko = {
   'logs.quarantine.act.openMapping':   '매핑 열기',
   'logs.quarantine.act.openInspector': '스트림에서 보기',
   'logs.quarantine.act.downloadParquet': '⬇ 위반 row 다운로드',
+  'logs.quarantine.act.downloadFailed':  '위반 row 파일이 아직 생성되지 않았습니다. (Audit stage 가 완료된 run 이어야 다운로드 가능합니다.)',
 
   'siteQuarantine.eyebrow':         'SITE QUARANTINE',
   'siteQuarantine.empty.noSite':    '사이트를 먼저 선택하세요.',

@@ -113,13 +113,15 @@ export function LogViewerPage() {
       .catch((e) => { console.error('runLog fetch failed', e); setAllLines([]); });
   }, [runId]);
 
-  /** Stream 모드 라인 — 검색/level/step 필터 적용. Quarantine 모드는 별도 데이터 소스(아래 groups)로 동작. */
+  /** Stream 모드 라인 — 검색/level/step 필터 적용. Quarantine 모드는 별도 데이터 소스(아래 groups)로 동작.
+   *  stepFilter 매치는 정확 일치 또는 family prefix (예: 'validate' → 'validate.notnull') 둘 다 허용 —
+   *  quarantine 점프 시 그룹의 dotted stage 가 stream 의 family 라인과 매칭되지 않는 문제 회피. */
   const lines = useMemo(() => {
     const q = debouncedSearch.trim().toLowerCase();
     return allLines.filter((l) => {
       const name: RunLogLevel = l.level === 2 ? 'ERROR' : l.level === 1 ? 'WARN' : 'INFO';
       if (!levelFilter[name]) return false;
-      if (stepFilter && l.stage !== stepFilter) return false;
+      if (stepFilter && l.stage !== stepFilter && !l.stage.startsWith(stepFilter + '.')) return false;
       if (!q) return true;
       return l.message.toLowerCase().includes(q) || l.stage.toLowerCase().includes(q);
     });
@@ -584,17 +586,18 @@ export function LogViewerPage() {
                     onToggle={() => setOpenGroupId((cur) => (cur === g.id ? null : g.id))}
                     onOpenMapping={() => navigate('/mapping')}
                     onOpenInspector={() => {
-                      // Quarantine group → Stream 모드로 점프. 그 group 의 stage 와 severity 로
-                      // 필터를 좁혀 해당 라인들만 보인다. ERROR 자동 선택 effect 가 동작.
+                      // Quarantine group → Stream 모드로 점프.
+                      //
+                      // 자동 stage/severity 좁힘은 폐기 — quarantine group 의 stage (validate.type 등)
+                      // 와 실제 RunLog 라인의 stage 가 매치된다는 보장이 없음 (백엔드/데이터에 따라 다름).
+                      // 좁힌 결과가 0 라인이면 "필터 조건에 맞는 로그가 없습니다" 만 떠서 빈 화면.
+                      // 그래서 stepFilter / search 는 풀고 level 만 모두 켠 채 stream 으로 전환 —
+                      // 그 run 의 전체 라인을 그대로 보여주고, 사용자가 STEP dropdown 으로 직접 좁힘.
                       setView('stream');
-                      setStepFilter(g.stage);
+                      setStepFilter(null);
                       setSearch('');
                       setDebouncedSearch('');
-                      setLevelFilter({
-                        INFO:  false,
-                        WARN:  g.severity === 'warning',
-                        ERROR: g.severity === 'error',
-                      });
+                      setLevelFilter({ INFO: true, WARN: true, ERROR: true });
                       setOpenGroupId(null);
                     }}
                   />
@@ -868,17 +871,32 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, 
               >
                 {t('logs.quarantine.act.openMapping')}
               </button>
-              {/* 위반 row 전수 parquet 다운로드 — BE 가 bindingId 채운 경우만 노출. */}
+              {/* 위반 row 전수 parquet 다운로드 — BE 가 bindingId 채운 경우만 노출.
+                  fetch 로 blob 받아 직접 다운로드 — 4xx 응답이 새 탭의 빈 페이지로
+                  표시되던 문제 회피. 파일 미생성 / audit stage 미실행 등은 alert 으로 안내. */}
               {runId && g.bindingId && (
-                <a
-                  href={`/api/v1/runs/${runId}/quarantine/${g.bindingId}/download`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  download
-                  style={{ ...styles.actLink, textDecoration: 'none' }}
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const { blob, filename } = await quarantineApi.downloadBinding(runId, g.bindingId!);
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = filename;
+                      document.body.appendChild(a);
+                      a.click();
+                      a.remove();
+                      URL.revokeObjectURL(url);
+                    } catch (e: unknown) {
+                      console.error('quarantine parquet download failed', e);
+                      alert(t('logs.quarantine.act.downloadFailed'));
+                    }
+                  }}
+                  style={{ ...styles.actLink, background: 'transparent', border: 'none', cursor: 'pointer' }}
                 >
                   {t('logs.quarantine.act.downloadParquet')}
-                </a>
+                </button>
               )}
               <div style={{ flex: 1 }} />
               <button
