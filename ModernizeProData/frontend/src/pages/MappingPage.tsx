@@ -50,6 +50,8 @@ type TobeTable = {
   compositionKind: 'single' | 'join' | 'union' | 'none';
   sources: { alias: string; table: string; role: 'primary' | 'join' | 'union'; joinType?: string; joinOn?: string; rows: number }[];
   whereFilter?: string;
+  groupByExpr?: string;
+  expandExpr?: string;
   /** 부모 project_id — null/undef 면 자체 정의, 값 있으면 자식 link */
   linkedFromProjectId?: string;
   /** 다른 project 의 자식들이 자기를 link 한 부모인지 */
@@ -346,7 +348,7 @@ export function MappingPage() {
   useEffect(() => {
     const state = location.state as {
       fixTarget?: { kind: 'unmapped-tobe' | 'unmapped-asis' | 'unbound-tobe'; table?: string };
-      focusTable?: { internalName: string };
+      focusTable?: { internalName?: string; tobeSchema?: string; tobeTable?: string };
       focusRule?: { tobeTable: string; tobeColumns: string[] };
     } | null;
 
@@ -415,15 +417,24 @@ export function MappingPage() {
 
     // Dashboard row → focus a specific TO-BE table.
     if (state?.focusTable) {
-      const id = state.focusTable.internalName;
-      if (consumedFocusKeyRef.current === id) return;  // 既に処理済み
-      if (TOBE_TABLES.length === 0) return;            // hydrate 待ち
-      const target = TOBE_TABLES.find((t) => t.internalName === id);
+      const ft = state.focusTable;
+      const key = ft.internalName ?? `${ft.tobeSchema ?? ''}|${ft.tobeTable ?? ''}`;
+      if (consumedFocusKeyRef.current === key) return;  // 既に処理済み
+      if (TOBE_TABLES.length === 0) return;             // hydrate 待ち
+      const target = ft.internalName
+        ? TOBE_TABLES.find((t) => t.internalName === ft.internalName)
+        : TOBE_TABLES.find((t) => {
+            const i = t.name.indexOf('.');
+            const sch = (i > 0 ? t.name.slice(0, i) : '').toLowerCase();
+            const tbl = (i > 0 ? t.name.slice(i + 1) : t.name).toLowerCase();
+            return sch === (ft.tobeSchema ?? '').toLowerCase()
+                && tbl === (ft.tobeTable ?? '').toLowerCase();
+          });
       if (target) {
         setSelected({ side: 'tobe', name: target.name, internalName: target.internalName });
         // 自動初期選択を抑止 — 既に欲しい行を選んだ.
         didInitialSelectRef.current = true;
-        consumedFocusKeyRef.current = id;
+        consumedFocusKeyRef.current = key;
         // React Router の location.state を実際にクリア (history.replaceState だけでは不足).
         routerNavigate(location.pathname, { replace: true });
       }
@@ -582,6 +593,8 @@ export function MappingPage() {
       whereFilter: edit.whereFilter ?? null,
       sources,
       sharedFromProjectId: edit.sharedFromProjectId ?? null,
+      groupByExpr: edit.groupByExpr ?? null,
+      expandExpr: edit.expandExpr ?? null,
     }).catch((e) => console.warn('[mapping] upsertBinding failed', e));
     demoteToAnalysisOnEdit(activeProjectId);
   }, [activeProjectId, readOnly]);
@@ -608,6 +621,8 @@ export function MappingPage() {
         unrouted: !edit.sharedFromProjectId && srcs.length === 0,
         compositionKind: (srcs.length === 0 ? 'none' : srcs.length === 1 ? 'single' : edit.mode) as TobeTable['compositionKind'],
         whereFilter: edit.whereFilter ?? t.whereFilter,
+        groupByExpr: edit.groupByExpr ?? t.groupByExpr,
+        expandExpr: edit.expandExpr ?? t.expandExpr,
         linkedFromProjectId: edit.sharedFromProjectId,
         isParent,
       };
@@ -891,6 +906,7 @@ function InventoryItem({
   let badgeText = '';
   let badgeIcon: string | null = null;
   let badgeTone: 'ok' | 'warn' | 'info' | null = null;
+  let showParentIcon = false;  // 부모 테이블 — chip 밖 왼쪽에 별도 표시
   if (side === 'tobe') {
     const tt = table as TobeTable;
     if (tt.linkedFromProjectId)                { badgeText = 'linked'; badgeIcon = 'fa-link'; badgeTone = 'info'; }
@@ -898,8 +914,7 @@ function InventoryItem({
     else if (tt.compositionKind === 'join')    { badgeText = `⋈ ${tt.sources.length}`; badgeTone = 'info'; }
     else if (tt.compositionKind === 'union')   { badgeText = `∪ ${tt.sources.length}`; badgeTone = 'info'; }
     else                                       { badgeText = '← 1'; badgeTone = 'ok'; }
-    // 부모 테이블이면 fa-link 아이콘 추가 (badgeText 는 유지)
-    if (tt.isParent && !tt.linkedFromProjectId) badgeIcon = 'fa-link';
+    if (tt.isParent && !tt.linkedFromProjectId) showParentIcon = true;
   } else {
     const at = table as AsisTable;
     if (unrouted) { badgeText = 'unrouted'; badgeTone = 'warn'; }
@@ -925,6 +940,7 @@ function InventoryItem({
         fontWeight: isSelected ? 600 : 500,
       }}>
         <span style={styles.invItemName}>{(table as TobeTable).short || table.name}</span>
+        {showParentIcon && <i className="fa-solid fa-link" style={{ fontSize: 10, color: 'var(--navy)' }} />}
         <span style={{ ...styles.invItemBadge, color: toneColor, background: toneBg, borderColor: toneColor, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
           {badgeIcon && <i className={`fa-solid ${badgeIcon}`} style={{ fontSize: 9 }} />}
           {badgeText}
@@ -990,12 +1006,20 @@ function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, eff
 async function findUncoveredDdlColumns(projectId: string, tableFilter: string | null = null): Promise<string[]> {
   if (TOBE_TABLES.length === 0) return [];
   try {
-    const rules = await mappingImportApi.listRules(projectId);
+    const [rules, bindings] = await Promise.all([
+      mappingImportApi.listRules(projectId),
+      mappingImportApi.listBindings(projectId).catch(() => []),
+    ]);
     const ruleCols = new Map<string, Set<string>>();  // `${schema}|${table}` → Set<column>
     for (const r of rules) {
       const key = (r.tobeSchema || '') + '|' + r.tobeTable;
       if (!ruleCols.has(key)) ruleCols.set(key, new Set());
       ruleCols.get(key)!.add(r.tobeColumn);
+    }
+    // 자식 link 테이블은 master 에서 정의되므로 임포트 검증에서 제외.
+    const linkedKeys = new Set<string>();
+    for (const b of bindings) {
+      if (b.sharedFromProjectId) linkedKeys.add((b.tobeSchema || '') + '|' + b.tobeTable);
     }
     const targets = tableFilter
       ? TOBE_TABLES.filter((t) => (t.name.split('.').pop() || t.name) === tableFilter)
@@ -1005,6 +1029,7 @@ async function findUncoveredDdlColumns(projectId: string, tableFilter: string | 
       const i = tobe.name.indexOf('.');
       const schema = i > 0 ? tobe.name.slice(0, i) : '';
       const table = i > 0 ? tobe.name.slice(i + 1) : tobe.name;
+      if (linkedKeys.has(schema + '|' + table)) continue;  // 자식 link 테이블 — skip
       const haveCols = ruleCols.get(schema + '|' + table) || new Set();
       const ddlCols = MAPPING_BY_TOBE[tobe.internalName] || [];
       for (const c of ddlCols) {
@@ -1028,6 +1053,18 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
   hydrationTick: number;
 }) {
   const navigate = useNavigate();
+  const t = useT();
+  // Banner 의 프로젝트명을 클릭 가능한 텍스트 버튼으로 — 다른 project 의 같은 테이블 매핑 화면으로 이동.
+  const projectLinkStyle: React.CSSProperties = {
+    background: 'transparent',
+    border: 'none',
+    padding: 0,
+    cursor: 'pointer',
+    fontFamily: 'var(--mono)',
+    fontSize: 12,
+    fontWeight: 600,
+    color: 'var(--navy)',
+  };
   // 자식 link 면 binding 패널 closed. 자체 정의 + sources 비어 있으면 열림 (사용자 알림).
   const [bindingOpen, setBindingOpen] = useState(
     !bindingEdit?.sharedFromProjectId
@@ -1088,6 +1125,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
       table: i > 0 ? table.name.slice(i + 1) : table.name,
     };
   }, [table.name]);
+
   const parentInfo = useMemo(
     () => linkCandidates?.parentOf.find(
       (p) => p.tobeSchema.toLowerCase() === tobeSplitForBanner.schema.toLowerCase()
@@ -1132,12 +1170,16 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
           };
         }),
         sharedFromProjectId: newSharedFromProjectId,
+        groupByExpr: newSharedFromProjectId ? null : (bindingGroupBy || null),
+        expandExpr: newSharedFromProjectId ? null : (bindingExpand || null),
       });
       // store 의 binding edit 도 갱신
       onBindingChange({
         sources: newSharedFromProjectId ? [] : bindingSources,
         mode: bindingMode,
         whereFilter: bindingWhere,
+        groupByExpr: newSharedFromProjectId ? undefined : bindingGroupBy,
+        expandExpr: newSharedFromProjectId ? undefined : bindingExpand,
         sharedFromProjectId: newSharedFromProjectId ?? undefined,
       });
       setLinkModalOpen(false);
@@ -1195,6 +1237,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
         edits[tobe.internalName] = {
           mode,
           whereFilter: b.whereFilter ?? undefined,
+          groupByExpr: b.groupByExpr ?? undefined,
+          expandExpr: b.expandExpr ?? undefined,
           sharedFromProjectId: b.sharedFromProjectId ?? undefined,
           sources: b.sources.map((s) => ({
             alias: s.alias,
@@ -1225,9 +1269,15 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
       ]);
       // alias 룩업 — key: `{tobeSchema}|{tobeTable}|{asisTable}` → alias
       const aliasMap = new Map<string, string>();
+      // expand alias 룩업 — key: `{tobeSchema}|{tobeTable}` → [{alias, columns}]
+      // expand_expr 의 AS u(col1, col2) 같은 펼침 alias 도 hydrate 시 보존.
+      const expandMap = new Map<string, { alias: string; columns: string[] }[]>();
       for (const b of bindings) {
         for (const s of b.sources) {
           aliasMap.set(`${b.tobeSchema}|${b.tobeTable}|${s.asisTable}`, s.alias);
+        }
+        if (b.expandExpr) {
+          expandMap.set(`${b.tobeSchema}|${b.tobeTable}`, parseExpandAliases(b.expandExpr));
         }
       }
       // rules 를 internalName / tgtColumn 으로 그룹화
@@ -1242,15 +1292,22 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
         const internalName = tobe.internalName;
         if (!edits[internalName]) edits[internalName] = {};
 
-        // savedSrc: 가능하면 `{alias}.{column}`, alias 못 찾으면 column 만.
+        // savedSrc: 가능하면 `{alias}.{column}`. asisTable 매칭이 우선, 못 찾으면 expand alias 매칭
+        // (CROSS JOIN LATERAL 같이 펼친 컬럼들), 둘 다 없으면 column 만.
         // r.asisColumn 은 PG TEXT[] 매핑 string[] — combine 시 여러 원소.
         let savedSrc: string[] | undefined;
         if (r.asisColumn && r.asisColumn.length > 0) {
-          const alias = r.asisTable
+          const sourceAlias = r.asisTable
             ? aliasMap.get(`${r.tobeSchema}|${r.tobeTable}|${r.asisTable}`)
             : undefined;
+          const expandAliases = expandMap.get(`${r.tobeSchema}|${r.tobeTable}`) ?? [];
           const cols = r.asisColumn.map((c) => c.trim()).filter((c) => c);
-          savedSrc = cols.map((c) => alias ? `${alias}.${c}` : c);
+          savedSrc = cols.map((c) => {
+            if (sourceAlias) return `${sourceAlias}.${c}`;
+            // asisTable 매칭 실패 → expand alias 의 column 매칭 시도
+            const exp = expandAliases.find((e) => e.columns.includes(c));
+            return exp ? `${exp.alias}.${c}` : c;
+          });
         }
 
         const strat = r.strategy === 'skip' ? undefined
@@ -1392,15 +1449,20 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     bindingEdit?.mode ?? (table.compositionKind === 'union' ? 'union' : 'join'),
   );
   const [bindingWhere, setBindingWhere] = useState(bindingEdit?.whereFilter ?? table.whereFilter ?? '');
+  const [bindingGroupBy, setBindingGroupBy] = useState(bindingEdit?.groupByExpr ?? table.groupByExpr ?? '');
+  const [bindingExpand, setBindingExpand] = useState(bindingEdit?.expandExpr ?? table.expandExpr ?? '');
   // Apply/hydrate 등으로 외부에서 bindingEdit 가 갱신되면 로컬 state 도 따라가게.
   // (useState 는 첫 렌더의 prop 으로만 초기화되어 이후 prop 변경을 못 받음)
   useEffect(() => {
     setBindingSources(bindingEdit?.sources ?? table.sources);
     setBindingMode(bindingEdit?.mode ?? (table.compositionKind === 'union' ? 'union' : 'join'));
     setBindingWhere(bindingEdit?.whereFilter ?? table.whereFilter ?? '');
-  }, [bindingEdit, table.internalName, table.sources, table.compositionKind, table.whereFilter]);
+    setBindingGroupBy(bindingEdit?.groupByExpr ?? table.groupByExpr ?? '');
+    setBindingExpand(bindingEdit?.expandExpr ?? table.expandExpr ?? '');
+  }, [bindingEdit, table.internalName, table.sources, table.compositionKind, table.whereFilter, table.groupByExpr, table.expandExpr]);
   const allRows = useMemo(() => rows.map((r) => {
-    // 자식 link 테이블은 모든 컬럼이 'link' state — master 에서 inherit 함을 표시.
+    // 자식 link 테이블 — 모든 컬럼이 'link' state. master 룰은 실행 시점에 read-time inherit
+    // 되므로 자식 화면 자체는 단순 'Linked' 단일 표시.
     if (isLinkedChild) return { ...r, rule: 'link' as const };
     const re = rowEdits[r.tgt];
     if (!re) return r;
@@ -1556,20 +1618,49 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
           {isLinkedChild ? (
             <>
               <i className="fa-solid fa-link" style={{ fontSize: 11, color: 'var(--text-2)' }} />
-              <span style={{ fontSize: 11, color: 'var(--text-2)' }}>Inherited from</span>
-              <span style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 600 }}>
+              <span style={{ fontSize: 11, color: 'var(--text-2)' }}>{t('mapping.link.inheritedFrom')}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  const masterId = bindingEdit?.sharedFromProjectId;
+                  if (!masterId) return;
+                  navigate('/mapping', {
+                    state: {
+                      activateProjectId: masterId,
+                      focusTable: { tobeSchema: tobeSplitForBanner.schema, tobeTable: tobeSplitForBanner.table },
+                    },
+                  });
+                }}
+                style={projectLinkStyle}
+                title={t('mapping.link.openInMaster')}
+              >
                 {masterProject?.name ?? bindingEdit?.sharedFromProjectId}
-              </span>
+              </button>
               <div style={{ flex: 1 }} />
-              <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>Change / Unlink</button>
+              <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>{t('mapping.link.button.changeUnlink')}</button>
             </>
           ) : isParentTable && parentInfo ? (
             <>
               <i className="fa-solid fa-link" style={{ fontSize: 11, color: 'var(--text-2)' }} />
-              <span style={{ fontSize: 11, color: 'var(--text-2)' }}>Parent of</span>
+              <span style={{ fontSize: 11, color: 'var(--text-2)' }}>{t('mapping.link.parentOf')}</span>
               {parentInfo.children.map((c, i) => (
-                <span key={c.projectId + '|' + c.tobeTable + '|' + i} style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 600 }}>
-                  {c.projectName}{i < parentInfo.children.length - 1 ? ',' : ''}
+                <span key={c.projectId + '|' + c.tobeTable + '|' + i}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigate('/mapping', {
+                        state: {
+                          activateProjectId: c.projectId,
+                          focusTable: { tobeSchema: c.tobeSchema, tobeTable: c.tobeTable },
+                        },
+                      });
+                    }}
+                    style={projectLinkStyle}
+                    title={t('mapping.link.openInChild')}
+                  >
+                    {c.projectName}
+                  </button>
+                  {i < parentInfo.children.length - 1 ? <span style={{ marginRight: 2 }}>,</span> : null}
                 </span>
               ))}
               <div style={{ flex: 1 }} />
@@ -1577,9 +1668,9 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
           ) : (
             <>
               <i className="fa-solid fa-unlink" style={{ fontSize: 11, color: 'var(--text-3)' }} />
-              <span style={{ fontSize: 11, color: 'var(--text-3)' }}>자체 정의된 테이블입니다.</span>
+              <span style={{ fontSize: 11, color: 'var(--text-3)' }}>{t('mapping.link.standalone')}</span>
               <div style={{ flex: 1 }} />
-              <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>Link to parent...</button>
+              <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>{t('mapping.link.button.link')}</button>
             </>
           )}
         </div>
@@ -1589,11 +1680,15 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
           <CollapsibleBinding
             table={table} open={bindingOpen} pulse={bindingPulse} onToggle={() => setBindingOpen((o) => !o)}
             sources={bindingSources}
-            onSourcesChange={(s) => { if (isLinkedChild) return; setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode, whereFilter: bindingWhere }); }}
+            onSourcesChange={(s) => { if (isLinkedChild) return; setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode, whereFilter: bindingWhere, groupByExpr: bindingGroupBy, expandExpr: bindingExpand }); }}
             compositionMode={bindingMode}
-            onCompositionModeChange={(m) => { if (isLinkedChild) return; setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m, whereFilter: bindingWhere }); }}
+            onCompositionModeChange={(m) => { if (isLinkedChild) return; setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m, whereFilter: bindingWhere, groupByExpr: bindingGroupBy, expandExpr: bindingExpand }); }}
             whereFilter={bindingWhere}
-            onWhereChange={(v) => { if (isLinkedChild) return; setBindingWhere(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: v }); }}
+            onWhereChange={(v) => { if (isLinkedChild) return; setBindingWhere(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: v, groupByExpr: bindingGroupBy, expandExpr: bindingExpand }); }}
+            groupByExpr={bindingGroupBy}
+            onGroupByChange={(v) => { if (isLinkedChild) return; setBindingGroupBy(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: bindingWhere, groupByExpr: v, expandExpr: bindingExpand }); }}
+            expandExpr={bindingExpand}
+            onExpandChange={(v) => { if (isLinkedChild) return; setBindingExpand(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: bindingWhere, groupByExpr: bindingGroupBy, expandExpr: v }); }}
           />
         </div>
       )}
@@ -1750,7 +1845,10 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                       {(() => {
                         const eff = rowEdits[r.tgt]?.savedSrc;
                         if (eff?.length) {
-                          const alias = eff[0].slice(0, eff[0].indexOf('.')) || undefined;
+                          // dot 없는 source (alias 미포함) 의 경우 alias undefined — slice(0,-1) 로
+                          // column 명 앞 글자가 잘리는 표시 버그 회피.
+                          const di = eff[0].indexOf('.');
+                          const alias = di >= 0 ? eff[0].slice(0, di) : undefined;
                           return <SourceAliasTag alias={alias} composition={table.compositionKind} />;
                         }
                         return <SourceAliasTag alias={r.sourceAlias} composition={table.compositionKind} />;
@@ -1760,7 +1858,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                       {(() => {
                         const savedSrcs = rowEdits[r.tgt]?.savedSrc;
                         if (savedSrcs?.length) {
-                          const types = savedSrcs.map((s) => resolveSrcType(s, bindingSources)).filter((t) => t && t !== '—');
+                          const types = savedSrcs.map((s) => resolveSrcType(s, bindingSources, bindingExpand)).filter((t) => t && t !== '—');
                           return types.length
                             ? <TypeBadge>{types.join(', ')}</TypeBadge>
                             : <span style={{ color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>—</span>;
@@ -1797,6 +1895,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
             active={active}
             composition={table.compositionKind}
             sources={bindingSources}
+            expandExpr={bindingExpand}
             rowEdit={rowEdits[active?.tgt ?? '']}
             onSave={(edit) => handleSaveEdit(active, edit)}
             onClose={() => setInspectorOpen(false)}
@@ -2009,11 +2108,13 @@ function AutocompleteInput({
   );
 }
 
-function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesChange, compositionMode, onCompositionModeChange, whereFilter, onWhereChange }: {
+function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesChange, compositionMode, onCompositionModeChange, whereFilter, onWhereChange, groupByExpr, onGroupByChange, expandExpr, onExpandChange }: {
   table: TobeTable; open: boolean; pulse?: boolean; onToggle: () => void;
   sources: TobeTable['sources']; onSourcesChange: (s: TobeTable['sources']) => void;
   compositionMode: 'join' | 'union'; onCompositionModeChange: (m: 'join' | 'union') => void;
   whereFilter: string; onWhereChange: (v: string) => void;
+  groupByExpr: string; onGroupByChange: (v: string) => void;
+  expandExpr: string; onExpandChange: (v: string) => void;
 }) {
   const t = useT();
   const readOnly = useActiveProjectReadOnly();
@@ -2032,7 +2133,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
   const usedTables = new Set(sources.map((s) => s.table));
   const availableTables = ASIS_TABLES.filter((t) => !usedTables.has(t.name));
 
-  // {alias}.{column} 자동완성 후보 — 현재 binding 의 모든 source 의 컬럼들.
+  // {alias}.{column} 자동완성 후보 — sources 의 컬럼들 + expand_expr 의 AS u(...) 컬럼들.
   const datalistId = `mpd-cols-${table.internalName}`;
   const aliasColumnOptions = useMemo(() => {
     const opts: string[] = [];
@@ -2040,8 +2141,11 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
       const cols = ASIS_COLUMNS[s.table] || [];
       for (const c of cols) opts.push(`${s.alias}.${c.name}`);
     }
+    for (const e of parseExpandAliases(expandExpr)) {
+      for (const c of e.columns) opts.push(`${e.alias}.${c}`);
+    }
     return opts;
-  }, [sources, table.internalName]);
+  }, [sources, expandExpr, table.internalName]);
 
   const startAdd = () => {
     if (readOnly) return;
@@ -2244,6 +2348,30 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
 
           {sources.length > 0 && (
             <div style={{ marginTop: 12 }}>
+              <div style={{ ...styles.whereLabel, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span>EXPAND (row 1:N)</span>
+                <span style={styles.whereHint}>{t('mapping.binding.expandHint')}</span>
+                <div style={{ flex: 1 }} />
+                <ExpandTemplateMenu
+                  onPick={(kind) => {
+                    const alias = sources[0]?.alias || 't';
+                    onExpandChange(kind === null ? '' : generateExpandTemplate(kind, alias));
+                  }}
+                  disabled={readOnly}
+                />
+              </div>
+              <AutocompleteInput
+                completions={aliasColumnOptions}
+                value={expandExpr}
+                onChange={onExpandChange}
+                placeholder={`예: CROSS JOIN LATERAL (VALUES ('phone', ${sources[0].alias}.PHONE), ('email', ${sources[0].alias}.EMAIL)) AS u(channel, value)`}
+                style={styles.whereInput}
+                disabled={readOnly}
+              />
+            </div>
+          )}
+          {sources.length > 0 && (
+            <div style={{ marginTop: 12 }}>
               <div style={styles.whereLabel}>
                 <span>WHERE filter</span>
                 <span style={styles.whereHint}>{t('mapping.binding.whereHint')}</span>
@@ -2253,6 +2381,22 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
                 value={whereFilter}
                 onChange={onWhereChange}
                 placeholder={`예: ${sources[0].alias}.party_type = 'P'`}
+                style={styles.whereInput}
+                disabled={readOnly}
+              />
+            </div>
+          )}
+          {sources.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={styles.whereLabel}>
+                <span>GROUP BY</span>
+                <span style={styles.whereHint}>{t('mapping.binding.groupByHint')}</span>
+              </div>
+              <AutocompleteInput
+                completions={aliasColumnOptions}
+                value={groupByExpr}
+                onChange={onGroupByChange}
+                placeholder={`예: EXTRACT(MONTH FROM ${sources[0].alias}.txn_date), ${sources[0].alias}.account`}
                 style={styles.whereInput}
                 disabled={readOnly}
               />
@@ -2274,7 +2418,254 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
 type RowEdit = { savedSrc?: string[]; savedRule?: string; savedDefault?: string; savedNotNull?: boolean; savedStrategy?: 'expression' | 'null' | 'default'; ruleOrigin?: 'imported' | 'manual'; savedNotes?: string };
 
 // Module-level helper so it can be called from useEffect closures
-function resolveSrcType(s: string, sources: TobeTable['sources']): string {
+/**
+ * binding 의 expand_expr 안에서 `AS alias(col1, col2, ...)` 패턴을 모두 추출.
+ * row editor / 자동완성이 expand alias.column 도 source 후보로 보여줄 수 있게 한다.
+ * type 정보는 expand_expr 에 없으므로 VARCHAR fallback.
+ */
+/** Inspector 의 RULE 칸 aggregate template 종류 — Row N:1 집계 시점에 자주 쓰는 패턴들. */
+type AggregateTemplateKind = 'count_star' | 'sum' | 'avg' | 'min' | 'max' | 'cond_sum';
+
+/**
+ * Row N:1 집계용 aggregate SQL boilerplate 생성. alias / column 자동 인식 — 없으면 marker.
+ * 사용자 수정 부분은 {...} 마커로 표시.
+ */
+function generateAggregateTemplate(kind: AggregateTemplateKind, sourceAlias: string, sourceCol?: string): string {
+  const a = sourceAlias || 't';
+  const col = sourceCol || '{col}';
+  switch (kind) {
+    case 'count_star': return 'COUNT(*)';
+    case 'sum':        return `SUM(CAST(${a}.${col} AS DECIMAL(20,2)))`;
+    case 'avg':        return `AVG(CAST(${a}.${col} AS DECIMAL(20,2)))`;
+    case 'min':        return `MIN(${a}.${col})`;
+    case 'max':        return `MAX(${a}.${col})`;
+    case 'cond_sum':   return `SUM(CASE WHEN ${a}.{cond_col} = '{cond_val}' THEN CAST(${a}.${col} AS DECIMAL(20,2)) ELSE 0 END)`;
+  }
+}
+
+/** EXPAND template kind — dropdown 의 선택 항목. null = Clear. */
+type ExpandTemplateKind = 'wide_to_long' | 'array_unnest';
+
+/**
+ * binding 의 첫 source alias 를 받아 expand_expr 의 boilerplate SQL 을 생성.
+ * 사용자가 dropdown 에서 template 선택 시 호출. -- TODO: 주석으로 수정 위치 안내.
+ */
+function generateExpandTemplate(kind: ExpandTemplateKind, sourceAlias: string): string {
+  const a = sourceAlias || 't';
+  // 사용자 수정 부분은 {...} 마커로 표시 — input 안에서 부분 색/이탤릭은 native 로 안 되므로
+  // 시각적 구분은 마커 syntax 로. 사용자가 {...} 모두 교체하지 않으면 SQL invalid 라
+  // Trial 에서 즉시 피드백.
+  if (kind === 'wide_to_long') {
+    return `CROSS JOIN LATERAL (VALUES
+  ('{label1}', ${a}.{COLUMN_A}),
+  ('{label2}', ${a}.{COLUMN_B})
+) AS {alias}({label_col}, {value_col})`;
+  }
+  // array_unnest
+  return `, UNNEST([{'A','B','C'}], [${a}.{VAL_A}, ${a}.{VAL_B}, ${a}.{VAL_C}]) AS {alias}({code_col}, {val_col})`;
+}
+
+function parseExpandAliases(expr: string | undefined | null): { alias: string; columns: string[] }[] {
+  if (!expr) return [];
+  const out: { alias: string; columns: string[] }[] = [];
+  const re = /\bAS\s+(\w+)\s*\(\s*([^)]+)\s*\)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(expr)) !== null) {
+    const cols = m[2].split(',').map((c) => c.trim()).filter(Boolean);
+    if (cols.length > 0) out.push({ alias: m[1], columns: cols });
+  }
+  return out;
+}
+
+/**
+ * EXPAND template dropdown — binding 패널의 EXPAND label 우측에 표시.
+ * 사용자가 항목 선택 → onPick callback. kind=null 은 Clear (EXPAND 칸 비우기).
+ */
+function ExpandTemplateMenu({ onPick, disabled }: {
+  onPick: (kind: ExpandTemplateKind | null) => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener('mousedown', onDocClick);
+    return () => window.removeEventListener('mousedown', onDocClick);
+  }, [open]);
+  const pick = (kind: ExpandTemplateKind | null) => {
+    onPick(kind);
+    setOpen(false);
+  };
+  return (
+    <div ref={wrapRef} style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          background: 'transparent',
+          border: '1px solid var(--border)',
+          padding: '2px 8px',
+          fontSize: 10.5,
+          fontFamily: 'var(--mono)',
+          color: 'var(--text-2)',
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          opacity: disabled ? 0.5 : 1,
+          borderRadius: 2,
+        }}
+      >
+        {t('mapping.binding.expandTemplate.button')}
+      </button>
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '100%',
+            right: 0,
+            marginTop: 2,
+            background: 'var(--panel)',
+            border: '1px solid var(--border)',
+            borderRadius: 2,
+            boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
+            zIndex: 100,
+            minWidth: 200,
+            padding: '4px 0',
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => pick('wide_to_long')}
+            style={menuItemStyle}
+          >
+            {t('mapping.binding.expandTemplate.wideToLong')}
+          </button>
+          <button
+            type="button"
+            onClick={() => pick('array_unnest')}
+            style={menuItemStyle}
+          >
+            {t('mapping.binding.expandTemplate.arrayUnnest')}
+          </button>
+          <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+          <button
+            type="button"
+            onClick={() => pick(null)}
+            style={{ ...menuItemStyle, color: 'var(--text-3)' }}
+          >
+            {t('mapping.binding.expandTemplate.clear')}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const menuItemStyle: React.CSSProperties = {
+  display: 'block',
+  width: '100%',
+  textAlign: 'left',
+  background: 'transparent',
+  border: 'none',
+  padding: '6px 12px',
+  fontSize: 11,
+  fontFamily: 'var(--mono)',
+  color: 'var(--text)',
+  cursor: 'pointer',
+};
+
+/**
+ * Row N:1 aggregate template dropdown — Inspector 의 RULE 입력 칸 위에 표시.
+ * COUNT / SUM / AVG / MIN / MAX / SUM with CASE. kind=null 은 Clear.
+ */
+function AggregateTemplateMenu({ onPick, disabled }: {
+  onPick: (kind: AggregateTemplateKind | null) => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener('mousedown', onDocClick);
+    return () => window.removeEventListener('mousedown', onDocClick);
+  }, [open]);
+  const pick = (kind: AggregateTemplateKind | null) => {
+    onPick(kind);
+    setOpen(false);
+  };
+  return (
+    <div ref={wrapRef} style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          background: 'transparent',
+          border: '1px solid var(--border)',
+          padding: '2px 8px',
+          fontSize: 10.5,
+          fontFamily: 'var(--mono)',
+          color: 'var(--text-2)',
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          opacity: disabled ? 0.5 : 1,
+          borderRadius: 2,
+        }}
+      >
+        {t('mapping.inspector.aggregate.button')}
+      </button>
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '100%',
+            right: 0,
+            marginTop: 2,
+            background: 'var(--panel)',
+            border: '1px solid var(--border)',
+            borderRadius: 2,
+            boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
+            zIndex: 100,
+            minWidth: 220,
+            padding: '4px 0',
+          }}
+        >
+          <button type="button" onClick={() => pick('count_star')} style={menuItemStyle}>
+            {t('mapping.inspector.aggregate.count')}
+          </button>
+          <button type="button" onClick={() => pick('sum')} style={menuItemStyle}>
+            {t('mapping.inspector.aggregate.sum')}
+          </button>
+          <button type="button" onClick={() => pick('avg')} style={menuItemStyle}>
+            {t('mapping.inspector.aggregate.avg')}
+          </button>
+          <button type="button" onClick={() => pick('min')} style={menuItemStyle}>
+            {t('mapping.inspector.aggregate.min')}
+          </button>
+          <button type="button" onClick={() => pick('max')} style={menuItemStyle}>
+            {t('mapping.inspector.aggregate.max')}
+          </button>
+          <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+          <button type="button" onClick={() => pick('cond_sum')} style={menuItemStyle}>
+            {t('mapping.inspector.aggregate.condSum')}
+          </button>
+          <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+          <button type="button" onClick={() => pick(null)} style={{ ...menuItemStyle, color: 'var(--text-3)' }}>
+            {t('mapping.inspector.aggregate.clear')}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function resolveSrcType(s: string, sources: TobeTable['sources'], expandExpr?: string): string {
   if (!s) return '—';
   const di = s.indexOf('.');
   if (di < 0) {
@@ -2288,7 +2679,16 @@ function resolveSrcType(s: string, sources: TobeTable['sources']): string {
   const alias = s.slice(0, di);
   const col = s.slice(di + 1);
   const entry = sources.find((e) => e.alias === alias);
-  return (entry ? (ASIS_COLUMNS[entry.table] || []).find((c) => c.name === col)?.type : undefined) ?? '—';
+  if (entry) {
+    return (ASIS_COLUMNS[entry.table] || []).find((c) => c.name === col)?.type ?? '—';
+  }
+  // expand_expr 의 AS u(col1, col2) 같은 펼침 alias 면 type = VARCHAR fallback
+  // (expand 의 값은 SQL fragment 라 정확한 type 추론 불가; all_varchar input 의 일관 fallback).
+  if (expandExpr) {
+    const exp = parseExpandAliases(expandExpr).find((e) => e.alias === alias);
+    if (exp && exp.columns.includes(col)) return 'VARCHAR';
+  }
+  return '—';
 }
 
 function validateRule(code: string): string | null {
@@ -2628,10 +3028,11 @@ function HighlightEditor({
 
 // ── Inspector ────────────────────────────────────────────────
 
-function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
+function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, onClose }: {
   active: MappingRow | undefined;
   composition: TobeTable['compositionKind'];
   sources: TobeTable['sources'];
+  expandExpr?: string;
   rowEdit?: RowEdit;
   onSave: (edit: RowEdit) => void;
   onClose: () => void;
@@ -2670,20 +3071,34 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   if (!active) return null;
   const initSrc: string[] = active.src === '—' ? [] : [active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src];
   const resolveType = (s: string) => resolveSrcType(s, sources);
-  const validAliases = new Set(sources.map((s) => s.alias));
+  // binding sources 의 alias + expand_expr 의 AS u(...) 의 alias 모두 valid 로 인정.
+  // expand alias 가 invalid 로 잡히면 row editor 의 cleanedSrc filter 에서 제거되어 사용자가
+  // 선택한 u.channel 같은 source 가 사라짐.
+  const validAliases = new Set([
+    ...sources.map((s) => s.alias),
+    ...parseExpandAliases(expandExpr).map((e) => e.alias),
+  ]);
   const prevAutoCastRef = useRef('');
 
   // 슬롯 i 의 source 값을 새 값으로 바꾸고, 첫 번째 슬롯이면 CAST 자동 입력 갱신.
   // editValue 가 비어있거나 이전 자동 CAST 와 같을 때만 덮어써서 사용자 수동 입력은 보존.
-  const computeAutoCast = (firstSrc: string | undefined): string => {
-    if (!firstSrc || !active) return '';
-    const srcCol = firstSrc.includes('.') ? firstSrc.slice(firstSrc.indexOf('.') + 1) : firstSrc;
-    const srcT = resolveSrcType(firstSrc, sources);
-    if (!srcT || srcT === '—' || active.tgtType === '—') return '';
-    // AS-IS type 을 TO-BE dialect 로 정규화한 결과가 TO-BE 컬럼 type 과 같으면 단순 컬럼.
-    const translatedSrcT = translateTypeToTobe(srcT, TOBE_DIALECT);
-    const same = translatedSrcT.toUpperCase() === active.tgtType.toUpperCase();
-    return same ? srcCol : `CAST(${srcCol} AS ${active.tgtType})`;
+  const computeAutoCast = (srcs: string | string[] | undefined): string => {
+    if (!active) return '';
+    // 단일 source 면 그대로, multi-source 면 || (concat) 로 합침.
+    // 사용자가 row editor 에서 의도에 맞게 수정 (MAKE_DATE / CONCAT with delimiter 등).
+    const arr = Array.isArray(srcs) ? srcs : (srcs ? [srcs] : []);
+    const filtered = arr.filter((s) => s && s.trim());
+    if (!filtered.length) return '';
+    const expr = filtered.length === 1 ? filtered[0] : filtered.join(' || ');
+    if (!active.tgtType || active.tgtType === '—') return expr;
+    // ExtractStage 의 all_varchar=true 로 실데이터 input 이 모두 VARCHAR. asis_type 무시 —
+    // tgtType 만 보고 결정 (backend MappingImportService 의 자동 생성 logic 과 일관).
+    //   tgtType 이 string 카테고리 → expr 그대로 (VARCHAR → VARCHAR no-op)
+    //   그 외 → CAST 박음 (VARCHAR → tgtType 변환 필요)
+    const tt = active.tgtType.toUpperCase().trim();
+    const isString = tt.startsWith('VARCHAR') || tt.startsWith('CHAR')
+      || tt === 'TEXT' || tt === 'CLOB' || tt.startsWith('NVARCHAR');
+    return isString ? expr : `CAST(${expr} AS ${active.tgtType})`;
   };
 
   const handleEdit = () => {
@@ -2702,18 +3117,19 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     });
     const filledSrcs = cleanedSrc.filter((s) => s && s.trim() !== '');
 
-    // 자동 CAST 생성:
-    //   - source 가 2개 이상 (combine) → editValue 는 빈 칸. placeholder 가 '-- combine' 안내 표시.
-    //     클릭 시 placeholder 사라지고 사용자가 바로 입력 가능.
-    //   - source 1개 → computeAutoCast 로 dialect 변환표 적용한 CAST 를 editValue 에 채움 (편집 시작점)
-    //   - source 0개 → 빈 자동값 (computeAutoCast 가 '' 반환)
+    // 자동 CAST 생성: computeAutoCast 가 single / multi-source 모두 처리
+    //   - source ≥ 2 → 모든 source 를 || 로 concat 후 tobe_type 으로 CAST. 사용자가 row editor
+    //     에서 의도에 맞게 수정 (MAKE_DATE 같은 specific 함수로)
+    //   - source 1 → 단일 src 로 CAST
+    //   - source 0 → 빈 자동값
     let initialAutoCast: string;
-    if (filledSrcs.length > 1) {
-      initialAutoCast = '';
+    if (filledSrcs.length > 0) {
+      initialAutoCast = computeAutoCast(filledSrcs);
+    } else if (active.src !== '—') {
+      const fallback = active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src;
+      initialAutoCast = computeAutoCast(fallback);
     } else {
-      const firstSrcForCast = filledSrcs[0]
-        || (active.src !== '—' ? (active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src) : undefined);
-      initialAutoCast = computeAutoCast(firstSrcForCast);
+      initialAutoCast = '';
     }
     prevAutoCastRef.current = initialAutoCast;
     setEditValue(savedRule ?? initialAutoCast);
@@ -2757,15 +3173,8 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     // 어느 슬롯 변경이든 자동 식을 다시 평가 (combine 추가/제거 시점 캐치).
     // 단, editValue 가 이전 자동값과 다르면 = 사용자가 손댄 식이므로 보존.
     const filledSrcs = nextEditSrc.filter((s) => s && s.trim() !== '');
-    let newAutoCast: string;
-    if (filledSrcs.length > 1) {
-      // combine — 빈 칸으로 두고 placeholder 가 '-- combine' 안내 표시.
-      newAutoCast = '';
-    } else if (filledSrcs.length === 1) {
-      newAutoCast = computeAutoCast(filledSrcs[0]);
-    } else {
-      newAutoCast = '';
-    }
+    // single / multi-source 모두 computeAutoCast 가 처리 (multi 면 || concat 후 CAST)
+    const newAutoCast = filledSrcs.length > 0 ? computeAutoCast(filledSrcs) : '';
     if (editValue === prevAutoCastRef.current) {
       setEditValue(newAutoCast);
     }
@@ -2835,6 +3244,13 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
                       (ASIS_COLUMNS[src.table] || []).map((c) => (
                         <option key={`${src.alias}.${c.name}`} value={`${src.alias}.${c.name}`}>
                           [{src.alias}] {c.name}  ({c.type})
+                        </option>
+                      ))
+                    )}
+                    {parseExpandAliases(expandExpr).flatMap((e) =>
+                      e.columns.map((c) => (
+                        <option key={`${e.alias}.${c}`} value={`${e.alias}.${c}`}>
+                          [{e.alias}] {c}  (expand)
                         </option>
                       ))
                     )}
@@ -2987,6 +3403,24 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
               })();
               return (
                 <>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4 }}>
+                    <AggregateTemplateMenu
+                      onPick={(kind) => {
+                        if (kind === null) {
+                          setEditValue('');
+                          return;
+                        }
+                        // 첫 source 의 alias / column 자동 인식.
+                        const firstSrc = editSrc.find((s) => s && s.trim());
+                        const di = firstSrc?.indexOf('.') ?? -1;
+                        const alias = di >= 0 ? firstSrc!.slice(0, di) : '';
+                        const col = di >= 0 ? firstSrc!.slice(di + 1) : firstSrc || '';
+                        setEditValue(generateAggregateTemplate(kind, alias, col));
+                        if (ruleError) setRuleError(null);
+                      }}
+                      disabled={readOnly}
+                    />
+                  </div>
                   <HighlightEditor
                     value={editValue}
                     onChange={(v) => { setEditValue(upperSqlKeywords(v)); if (ruleError) setRuleError(null); }}
@@ -3962,6 +4396,12 @@ function buildReportErrorMessage(
   if (report.errorKind === 'NO_RULES') {
     return t('mapping.report.error.noRules');
   }
+  if (report.errorKind === 'NO_RULES_LINKED') {
+    // backend 가 errorColumn 자리에 master project_id 를 실어보냄 — name 으로 lookup.
+    const masterId = report.errorColumn ?? '';
+    const master = useWorkspaceStore.getState().projects.find((p) => p.id === masterId);
+    return t('mapping.report.error.noRulesLinked', { project: master?.name ?? masterId });
+  }
   // UNKNOWN 또는 누락 — 일반 메시지 + 분류 라벨 + 힌트
   return `${t('mapping.report.error.unknown')}\n${typeLine}${hintLine}`;
 }
@@ -4420,7 +4860,7 @@ function RuleTag({ rule, status }: { rule: MappingRow['rule']; status?: MappingR
     auto: 'Pass', rule: 'Rule', null: 'Null', default: 'Default',
     unmapped: 'Unmapped', added: 'New', skip: 'Skip', link: 'Link',
   };
-  if (rule === 'link') return <StatusBadge tone="info">Link</StatusBadge>;
+  if (rule === 'link') return <StatusBadge tone="info">Linked</StatusBadge>;
   // status err/warn 은 색을 덮어쓴다 (룰과 무관하게 위험 신호 우선).
   if (status === 'err') return <StatusBadge tone="err">{labels[rule]}</StatusBadge>;
   if (status === 'warn') return <StatusBadge tone="warn">{labels[rule]}</StatusBadge>;

@@ -2,6 +2,7 @@ package com.ksinfo.modernize_pro_data.coordinator.worker;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunControlRegistry;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunExecutionListener;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
@@ -79,6 +80,10 @@ public class WorkerBootstrap {
     /** Run dispatch 핸들러 — Coordinator → Worker WS push 받았을 때 호출. */
     @Autowired
     private RunExecutionListener runExecutionListener;
+
+    /** RUN_CANCEL 수신 시 worker process 의 stage runner 를 깨우기 위해 사용. */
+    @Autowired
+    private RunControlRegistry runControlRegistry;
 
     public record Status(
             String coordinatorUrl,
@@ -270,30 +275,51 @@ public class WorkerBootstrap {
         }
     }
 
-    /** RUN_START envelope 만 처리 — runId 추출 후 별 thread 로 dispatch. RUN_CANCEL / PING 은 후속. */
+    /**
+     * RUN_START / RUN_CANCEL 처리. PING 은 향후. 그 외 type 은 debug log 만.
+     *
+     * RUN_START: worker process 안에서 별 thread 로 executeRun.
+     * RUN_CANCEL: worker process 의 RunControlRegistry.cancel(runId) — running 중인 stage
+     *             runner 가 깨어나 중단. DB 상태 변경은 Coordinator 가 finishRun 에서 수행.
+     */
     @SuppressWarnings("unchecked")
     private void handleStompMessage(Object payload) {
         if (!(payload instanceof Map)) return;
         Map<String, Object> envelope = (Map<String, Object>) payload;
         String type = String.valueOf(envelope.get("type"));
-        if (!"RUN_START".equals(type)) {
-            log.debug("Worker ignoring envelope type={}", type);
+        Object p = envelope.get("payload");
+        if (!(p instanceof Map)) {
+            log.debug("Worker ignoring envelope type={} (no payload)", type);
             return;
         }
-        Object p = envelope.get("payload");
-        if (!(p instanceof Map)) return;
-        String runId = String.valueOf(((Map<String, Object>) p).get("runId"));
-        // STOMP 콜백 thread 는 stage runner 의 긴 작업으로 막아두면 안 된다 — 별 thread 로.
-        Thread t = new Thread(() -> {
-            log.info("Worker received RUN_START runId={}", runId);
-            try {
-                runExecutionListener.executeRun(runId);
-            } catch (Exception e) {
-                log.error("Worker run execution failed runId={}", runId, e);
+        Map<String, Object> body = (Map<String, Object>) p;
+        String runId = String.valueOf(body.get("runId"));
+
+        switch (type) {
+            case "RUN_START" -> {
+                // STOMP 콜백 thread 는 stage runner 의 긴 작업으로 막아두면 안 된다 — 별 thread 로.
+                Thread t = new Thread(() -> {
+                    log.info("Worker received RUN_START runId={}", runId);
+                    try {
+                        runExecutionListener.executeRun(runId);
+                    } catch (Exception e) {
+                        log.error("Worker run execution failed runId={}", runId, e);
+                    }
+                }, "worker-run-" + runId);
+                t.setDaemon(true);
+                t.start();
             }
-        }, "worker-run-" + runId);
-        t.setDaemon(true);
-        t.start();
+            case "RUN_CANCEL" -> {
+                String reason = String.valueOf(body.getOrDefault("reason", ""));
+                log.info("Worker received RUN_CANCEL runId={} reason={}", runId, reason);
+                try {
+                    runControlRegistry.cancel(runId);
+                } catch (Exception e) {
+                    log.error("Worker cancel failed runId={}", runId, e);
+                }
+            }
+            default -> log.debug("Worker ignoring envelope type={}", type);
+        }
     }
 
     /** Marker exception so the heartbeat loop knows to re-login. */

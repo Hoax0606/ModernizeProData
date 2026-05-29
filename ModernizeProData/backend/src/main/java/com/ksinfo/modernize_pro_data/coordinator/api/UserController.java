@@ -3,6 +3,7 @@ package com.ksinfo.modernize_pro_data.coordinator.api;
 import com.ksinfo.modernize_pro_data.common.dto.ApiResponse;
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
 import com.ksinfo.modernize_pro_data.coordinator.auth.AuthService;
+import com.ksinfo.modernize_pro_data.coordinator.user.PgRoleService;
 import com.ksinfo.modernize_pro_data.coordinator.user.User;
 import com.ksinfo.modernize_pro_data.coordinator.user.UserRepository;
 import com.ksinfo.modernize_pro_data.coordinator.user.UserRole;
@@ -45,6 +46,7 @@ public class UserController {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
     private final AuthService authService;
+    private final PgRoleService pgRoleService;
 
     /* ── DTOs ─────────────────────────────────────────────────────── */
 
@@ -116,6 +118,17 @@ public class UserController {
         }
         userRepository.save(u);
         log.info("User created: {} ({})", u.getUsername(), u.getRole());
+
+        // admin = Worker daemon login 계정. 같은 username/password 로 메타 PG role 도 발급해서
+        // Worker process 가 메타 DB 에 분리 계정으로 직접 connect 할 수 있게 한다.
+        if (req.role() == UserRole.admin) {
+            try {
+                pgRoleService.createWorkerRole(u.getUsername(), req.password());
+            } catch (IllegalArgumentException e) {
+                throw new ApiException("USER_INVALID_USERNAME_FOR_PG_ROLE",
+                        e.getMessage(), HttpStatus.BAD_REQUEST);
+            }
+        }
         return ApiResponse.ok(UserDto.from(u));
     }
 
@@ -136,8 +149,16 @@ public class UserController {
                     "자기 자신은 삭제할 수 없습니다",
                     HttpStatus.BAD_REQUEST);
         }
+        boolean wasAdmin = target.getRole() == UserRole.admin;
+        String username = target.getUsername();
         userRepository.delete(target);
-        log.info("User deleted: {} ({})", target.getUsername(), target.getRole());
+        log.info("User deleted: {} ({})", username, target.getRole());
+
+        // Worker 였다면 메타 PG role 도 같이 정리. 운영 중 worker session 은 자체 종료 안 되지만
+        // 다음 heartbeat 시 PG 인증 실패하면서 자연 종료.
+        if (wasAdmin) {
+            pgRoleService.dropWorkerRole(username);
+        }
         return ApiResponse.ok(null);
     }
 
@@ -169,6 +190,11 @@ public class UserController {
         u.setPasswordHash(passwordEncoder.encode(req.newPassword()));
         userRepository.save(u);
         log.info("Password changed: {}", u.getUsername());
+
+        // admin = Worker. app password 와 PG role password 를 동일하게 유지.
+        if (u.getRole() == UserRole.admin) {
+            pgRoleService.changeWorkerPassword(u.getUsername(), req.newPassword());
+        }
         return ApiResponse.ok(null);
     }
 
@@ -201,6 +227,11 @@ public class UserController {
 
         log.info("Password reset by admin: {} (by {})", target.getUsername(),
                 auth != null ? auth.getName() : "system");
+
+        // admin = Worker. PG role password 도 같이 갱신.
+        if (target.getRole() == UserRole.admin) {
+            pgRoleService.changeWorkerPassword(target.getUsername(), req.newPassword());
+        }
         return ApiResponse.ok(null);
     }
 
@@ -244,6 +275,18 @@ public class UserController {
                     "자기 자신의 master 권한을 해제할 수 없습니다",
                     HttpStatus.BAD_REQUEST);
         }
+
+        // admin ↔ 다른 role 변경 거절. admin promote 시 PG role 신규 발급에 평문 password 가
+        // 필요하고, demote 시 worker daemon 의 PG 접속이 끊겨야 한다. 운영 흐름이 복잡해서
+        // PoC 1차에는 신규 user 발급 + 기존 삭제 로 처리하도록 닫는다.
+        boolean adminInvolved = target.getRole() == UserRole.admin || req.role() == UserRole.admin;
+        if (adminInvolved && target.getRole() != req.role()) {
+            throw new ApiException(
+                    "USER_ROLE_CHANGE_NOT_SUPPORTED",
+                    "admin (Worker) 권한은 발급/삭제로만 관리합니다. 신규 user 를 만들고 기존을 삭제하세요.",
+                    HttpStatus.BAD_REQUEST);
+        }
+
         target.setRole(req.role());
         userRepository.save(target);
         log.info("User role updated: {} → {}", target.getUsername(), req.role());

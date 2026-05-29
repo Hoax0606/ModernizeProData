@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect } from 'react';
 import ExcelJS from 'exceljs';
 import { useWorkspaceStore } from '../store/workspace';
 import { snapshotApi } from '../api/workspace';
-import { useSnapshotsStore, usePinnedSnapshotsStore, type FrozenRule } from '../store/snapshots';
+import { useSnapshotsStore, usePinnedSnapshotsStore, type FrozenRule, type SnapshotData, type MappingSnapshot } from '../store/snapshots';
 import { asisDdlApi, type DdlSchema, type DdlColumn } from '../api/asisDdl';
 import { tobeDdlApi } from '../api/tobeDdl';
 import { mappingImportApi } from '../api/mappingImport';
@@ -70,27 +70,24 @@ export interface SheetSchema {
 
 export const SHEETS: Record<CategoryKey, SheetSchema[]> = {
   dashboard: [
-    { name: 'Overview', columns: [
+    /* Overview 는 free-form — 컬럼명/타입 헤더 생략. row 1 부터 'Dashboard snapshot' 제목,
+       Captured/Run/Author 메타 행, blank, 그 다음 inline 'Metric/Value/Unit/Note' 헤더 + 값 행. */
+    { name: 'Overview', freeForm: true, columns: [
       { name: 'Item',  type: 'TEXT' },
       { name: 'Value', type: 'TEXT' },
       { name: 'Unit',  type: 'TEXT' },
       { name: 'Note',  type: 'TEXT' },
     ]},
     { name: 'Tables', columns: [
-      { name: 'Table',      type: 'VARCHAR' },
-      { name: 'Schema',     type: 'VARCHAR' },
-      { name: 'Columns',    type: 'INT' },
-      { name: 'Mapped',     type: 'INT' },
-      { name: 'Mapping %',  type: 'DECIMAL' },
-      { name: 'Rules',      type: 'INT' },
-      { name: 'Status',     type: 'ENUM' },
+      { name: 'Table',       type: 'VARCHAR' },
+      { name: 'Schema',      type: 'VARCHAR' },
+      { name: 'Rules',       type: 'INT' },
+      { name: 'Issues',      type: 'INT' },
+      { name: 'Status',      type: 'ENUM' },
+      { name: 'Last update', type: 'TIMESTAMP' },
     ]},
-    { name: 'Issues', columns: [
-      { name: 'Table',    type: 'VARCHAR' },
-      { name: 'Status',   type: 'ENUM' },
-      { name: 'Unmapped', type: 'INT' },
-      { name: 'Note',     type: 'TEXT' },
-    ]},
+    /* Issues 시트는 의도적으로 없음 — Overview Issues/Errors 카운트 + Tables Issues column 으로
+       수만 노출하고, 상세 진단/수정은 Mapping 페이지에서 진행. */
   ],
   diff: [
     { name: 'Diff', columns: [
@@ -648,7 +645,9 @@ function formatCell(v: Cell | undefined): string {
 type StrategyKind = 'rule' | 'default' | 'null' | 'passed';
 
 /** buildDiff 가 받는 rule 의 최소 형태 — FrozenRule(snapshot) 과 MappingRuleDto(live) 양쪽이 만족.
- *  데이터 소스가 snapshot 이든 live mapping_rules 든 같은 코드로 처리하기 위한 구조적 타입. */
+ *  데이터 소스가 snapshot 이든 live mapping_rules 든 같은 코드로 처리하기 위한 구조적 타입.
+ *  codeDomain / notNullOverride / timestamps 는 Dashboard issue 검출 + Last update 산출에 사용 —
+ *  MappingRuleDto 가 안 가질 수도 있어서 optional. */
 export type DiffRule = Pick<
   FrozenRule,
   | 'strategy'
@@ -661,7 +660,12 @@ export type DiffRule = Pick<
   | 'tobeTable'
   | 'tobeColumn'
   | 'defaultValue'
->;
+> & {
+  codeDomain?: string | null;
+  notNullOverride?: boolean;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
 
 function diffStatusKind(r: DiffRule): StrategyKind | null {
   if (r.strategy === 'skip') return null;
@@ -922,9 +926,10 @@ export function reconstructDdl(schema: DdlSchema | null): string {
   return blocks.join('\n\n-- ───────────────────────────────────────────────\n\n');
 }
 
-/** Dashboard(coverage) 산출물 — DDL + mapping 으로 계산. run 데이터 없음 → 이행 행 수는 N/A. */
+/** Dashboard 산출물 — DDL + mapping (+ snapshot 의 bindings/codeMaps 있으면 더 풍부한 issue 검출).
+ *  시트: Overview / Tables (Issues 별도 시트 없음 — 카운트만 노출, 상세는 Mapping 페이지). */
 interface DashboardBuild {
-  /** 시트명(Overview/Tables/Issues) → rows. */
+  /** 시트명(Overview/Tables) → rows. */
   sheets: Record<string, Cell[][]>;
   /** fx 수식바용 — TO-BE 테이블 수 + 전체 매핑 커버리지 %. */
   tableCount: number;
@@ -940,70 +945,283 @@ function dashRuleMapped(r: DiffRule): boolean {
   return hasSrc || hasRule;
 }
 
-function buildDashboard(tobeSchema: DdlSchema | null, rules: DiffRule[]): DashboardBuild {
+/** Issue 검출 신호 — Overview 의 Errors/Issues 카운트, Tables 의 Issues 컬럼에 반영.
+ *  blocker = 실행 막힘 (Errors), warning = 검토 권장 (Issues). */
+type DashIssueSignal =
+  | 'unmapped-table'              // blocker — 테이블 전체 rule 0
+  | 'unmapped-column'             // warning — 일부 컬럼 rule 없음
+  | 'not-null-conflict'           // blocker — notNullOverride + (null strategy or empty default)
+  | 'not-null-vs-nullable-ddl'    // warning — notNullOverride 인데 TOBE DDL 은 nullable
+  | 'unresolved-codeDomain'       // blocker — codeDomain 참조하는 데 snapshot 에 없음
+  | 'multi-source-missing-joinOn' // blocker — join binding 인데 joinOn 없음
+  | 'missing-pk-mapping'          // blocker — PK 컬럼 rule 없거나 skip
+  | 'type-shrinkage'              // warning — VARCHAR/NUMERIC 축소 → truncate 위험
+  | 'empty-mapping';              // warning — expression 인데 source/transform/default 모두 빈 룰
+
+interface DashIssue {
+  severity: 'blocker' | 'warning';
+  signal: DashIssueSignal;
+  table: string;     // TOBE table physical name
+  column: string;    // TOBE column physical name (없으면 '')
+}
+
+/* ddlColumnMap 은 buildDiff 영역에 이미 정의돼 있음 (line ~697) — 재사용. */
+
+function buildDashboard(
+  tobeSchema: DdlSchema | null,
+  asisSchema: DdlSchema | null,
+  rules: DiffRule[],
+  snapshotData: SnapshotData | null,
+  snapshot: MappingSnapshot | null,
+): DashboardBuild {
   const tables = tobeSchema
     ? [...tobeSchema.tables].sort((a, b) => a.table.ordinal - b.table.ordinal)
     : [];
-  // rule → TOBE DDL table 매칭 (qualified-first, short-fallback) — MAPPING/Dashboard 와 동일 규약.
+  // rule → TOBE DDL table 매칭 (qualified-first, short-fallback) — MAPPING/Dashboard 동일 규약.
   const byQualified = new Map<string, string>();
   const byShort = new Map<string, string>();
+  const ddlColByQ = new Map<string, DdlColumn>();
   for (const tw of tables) {
     const q = `${tw.table.schemaName ? tw.table.schemaName + '.' : ''}${tw.table.physicalName}`.toLowerCase();
     byQualified.set(q, tw.table.id);
     const s = tw.table.physicalName.toLowerCase();
     if (!byShort.has(s)) byShort.set(s, tw.table.id);
+    for (const col of tw.columns) {
+      ddlColByQ.set(`${tw.table.physicalName}.${col.physicalName}`.toLowerCase(), col);
+    }
   }
+
+  // matched rules / per-table 집계.
   const mappedByTable = new Map<string, number>();
   const rulesByTable = new Map<string, number>();
+  const tableRulesById = new Map<string, DiffRule[]>();
+  const matchedRules: DiffRule[] = [];
   for (const r of rules) {
     const q = `${r.tobeSchema ? r.tobeSchema + '.' : ''}${r.tobeTable}`.toLowerCase();
     const tid = byQualified.get(q) ?? byShort.get(r.tobeTable.toLowerCase());
-    if (!tid) continue; // 현재 TOBE DDL 에 없는 rule 은 제외.
+    if (!tid) continue;
+    matchedRules.push(r);
     if (r.strategy !== 'skip') rulesByTable.set(tid, (rulesByTable.get(tid) ?? 0) + 1);
     if (dashRuleMapped(r)) mappedByTable.set(tid, (mappedByTable.get(tid) ?? 0) + 1);
+    if (!tableRulesById.has(tid)) tableRulesById.set(tid, []);
+    tableRulesById.get(tid)!.push(r);
   }
-  let totalCols = 0, mappedCols = 0, readyTables = 0, totalRules = 0;
+
+  // bindings / codeMaps — snapshotData 있으면 사용. 없으면 빈 배열 (해당 issue 검출 skip).
+  const bindings = snapshotData?.bindings ?? [];
+  const codeMaps = snapshotData?.codeMaps ?? [];
+  const matchedBindings = bindings.filter((b) => {
+    const q = `${b.tobeSchema ? b.tobeSchema + '.' : ''}${b.tobeTable}`.toLowerCase();
+    return byQualified.has(q) || byShort.has(b.tobeTable.toLowerCase());
+  });
+  const domains = new Set(codeMaps.map((m) => m.domain));
+
+  // rule by tobe column — 'table.column' → rule.
+  const ruleByCol = new Map<string, DiffRule>();
+  for (const r of matchedRules) ruleByCol.set(`${r.tobeTable}.${r.tobeColumn}`.toLowerCase(), r);
+
+  // === Issue 검출 ===
+  const issues: DashIssue[] = [];
+
+  // unmapped-table / unmapped-column
+  for (const tw of tables) {
+    const unmappedCols = tw.columns.filter((c) =>
+      !ruleByCol.has(`${tw.table.physicalName}.${c.physicalName}`.toLowerCase()),
+    );
+    if (tw.columns.length > 0 && unmappedCols.length === tw.columns.length) {
+      issues.push({ severity: 'blocker', signal: 'unmapped-table', table: tw.table.physicalName, column: '' });
+    } else {
+      for (const c of unmappedCols) {
+        issues.push({ severity: 'warning', signal: 'unmapped-column', table: tw.table.physicalName, column: c.physicalName });
+      }
+    }
+  }
+
+  // not-null-conflict / not-null-vs-nullable-ddl
+  const isNotNullConflict = (r: DiffRule): boolean =>
+    !!r.notNullOverride && (r.strategy === 'null' || (r.strategy === 'default' && !r.defaultValue?.trim()));
+  for (const r of matchedRules) {
+    if (!r.notNullOverride) continue;
+    if (isNotNullConflict(r)) {
+      issues.push({ severity: 'blocker', signal: 'not-null-conflict', table: r.tobeTable, column: r.tobeColumn });
+      continue;
+    }
+    const ddlCol = ddlColByQ.get(`${r.tobeTable}.${r.tobeColumn}`.toLowerCase());
+    if (ddlCol?.nullable === true) {
+      issues.push({ severity: 'warning', signal: 'not-null-vs-nullable-ddl', table: r.tobeTable, column: r.tobeColumn });
+    }
+  }
+
+  // unresolved-codeDomain
+  for (const r of matchedRules) {
+    if (r.codeDomain && !domains.has(r.codeDomain)) {
+      issues.push({ severity: 'blocker', signal: 'unresolved-codeDomain', table: r.tobeTable, column: r.tobeColumn });
+    }
+  }
+
+  // multi-source-missing-joinOn
+  for (const b of matchedBindings) {
+    if (b.compositionKind !== 'join') continue;
+    for (const s of b.sources) {
+      if (s.role === 'join' && !s.joinOn?.trim()) {
+        issues.push({ severity: 'blocker', signal: 'multi-source-missing-joinOn', table: b.tobeTable, column: '' });
+      }
+    }
+  }
+
+  // missing-pk-mapping — TOBE PK 컬럼이 rule 없거나 skip
+  for (const tw of tables) {
+    const pkCols = tw.columns.filter((c) => c.pkOrder != null);
+    for (const c of pkCols) {
+      const key = `${tw.table.physicalName}.${c.physicalName}`.toLowerCase();
+      const rule = ruleByCol.get(key);
+      if (!rule || rule.strategy === 'skip') {
+        issues.push({ severity: 'blocker', signal: 'missing-pk-mapping', table: tw.table.physicalName, column: c.physicalName });
+      }
+    }
+  }
+
+  // type-shrinkage — AS-IS → TOBE 타입 축소 (length / precision)
+  const asisColMap = ddlColumnMap(asisSchema);
+  for (const r of matchedRules) {
+    if (r.strategy !== 'expression') continue;
+    const asisCols = (r.asisColumn ?? []).filter((c) => c && c.trim());
+    if (asisCols.length === 0) continue;
+    const asisTbl = r.asisTable ?? '';
+    const tobeCol = ddlColByQ.get(`${r.tobeTable}.${r.tobeColumn}`.toLowerCase());
+    if (!tobeCol) continue;
+    for (const ac of asisCols) {
+      const asisCol = asisColMap.get(`${asisTbl}.${ac}`.toLowerCase());
+      if (!asisCol) continue;
+      const aLen = asisCol.length ?? null;
+      const tLen = tobeCol.length ?? null;
+      if (aLen != null && tLen != null && tLen < aLen) {
+        issues.push({ severity: 'warning', signal: 'type-shrinkage', table: r.tobeTable, column: r.tobeColumn });
+        continue;
+      }
+      const aPrec = asisCol.precision ?? null;
+      const tPrec = tobeCol.precision ?? null;
+      if (aPrec != null && tPrec != null && tPrec < aPrec) {
+        issues.push({ severity: 'warning', signal: 'type-shrinkage', table: r.tobeTable, column: r.tobeColumn });
+      }
+    }
+  }
+
+  // empty-mapping — expression strategy 인데 source/transform/default 모두 빈 룰
+  for (const r of matchedRules) {
+    if (r.strategy !== 'expression') continue;
+    const hasSrc = (r.asisColumn ?? []).some((c) => c && c.trim() !== '');
+    const hasRule = !!(r.transformRule && r.transformRule.trim());
+    const hasSql = !!(r.transformSql && r.transformSql.trim());
+    if (!hasSrc && !hasRule && !hasSql) {
+      issues.push({ severity: 'warning', signal: 'empty-mapping', table: r.tobeTable, column: r.tobeColumn });
+    }
+  }
+
+  // === issue 카운트 per-table + total ===
+  const issueCountByTable = new Map<string, number>();
+  for (const it of issues) {
+    issueCountByTable.set(it.table, (issueCountByTable.get(it.table) ?? 0) + 1);
+  }
+  const blockerCount = issues.filter((it) => it.severity === 'blocker').length;
+  const warningCount = issues.filter((it) => it.severity === 'warning').length;
+
+  // === per-table rows ===
+  let totalCols = 0, mappedCols = 0;
   const tableRows: Cell[][] = [];
-  const issueRows: Cell[][] = [];
   for (const tw of tables) {
     const id = tw.table.id;
     const total = tw.columns.length;
     const mapped = Math.min(mappedByTable.get(id) ?? 0, total);
     const rcount = rulesByTable.get(id) ?? 0;
-    const pct = total > 0 ? Math.round((mapped / total) * 1000) / 10 : 0;
-    const status = total > 0 && mapped >= total ? 'done' : mapped > 0 ? 'running' : 'blocked';
-    totalCols += total; mappedCols += mapped; totalRules += rcount;
-    if (status === 'done') readyTables++;
-    tableRows.push([tw.table.physicalName, tw.table.schemaName || '—', total, mapped, `${pct}%`, rcount, status]);
-    const unmapped = total - mapped;
-    if (unmapped > 0) issueRows.push([tw.table.physicalName, status, unmapped, `${unmapped} column(s) not mapped`]);
+    const issueN = issueCountByTable.get(tw.table.physicalName) ?? 0;
+    let status: string;
+    if (total === 0 || mapped === 0) status = 'unmapped';
+    else if (mapped < total) status = 'partial';
+    else if (issueN > 0) status = 'review';
+    else status = 'ready';
+    totalCols += total; mappedCols += mapped;
+
+    // Last update — 이 테이블의 rule 들 중 max(updatedAt ?? createdAt). 0개면 '—'.
+    const tableRules = tableRulesById.get(id) ?? [];
+    let lastTs: string | null = null;
+    for (const r of tableRules) {
+      const ts = r.updatedAt ?? r.createdAt ?? null;
+      if (ts && (!lastTs || ts > lastTs)) lastTs = ts;
+    }
+    const lastUpdate = lastTs ? fmtJst(lastTs) : '—';
+
+    tableRows.push([
+      tw.table.physicalName,
+      tw.table.schemaName || '—',
+      rcount,
+      issueN,
+      status,
+      lastUpdate,
+    ]);
   }
   const overallPct = totalCols > 0 ? Math.round((mappedCols / totalCols) * 1000) / 10 : 0;
+
+  // === Overview header (title + Captured/Run/Author) + Metric 5 rows ===
+  // 사진 레이아웃: 'Dashboard snapshot' 제목 + Captured / Run / Author KV + blank + Metric 표.
+  // 값은 snapshot 실데이터 (snapshot 없으면 live view 안내).
+  const capturedLine = snapshot?.createdAt
+    ? fmtJst(snapshot.createdAt)
+    : `${fmtJst(new Date())} (live view — no snapshot)`;
+  const runLine = snapshot
+    ? `${snapshot.name} · ${snapshot.version}${snapshot.baseline ? ' · baseline' : ''}`
+    : '— (live view — mapping not yet frozen)';
   const overview: Cell[][] = [
-    ['Mapping coverage snapshot', null, null, null],
-    ['Source',   'TO-BE DDL + mapping rules',                    null, null],
-    ['Note',     'Migration run not executed — row counts N/A',  null, null],
-    ['Metric',           'Value',           'Unit',    'Note'],
-    ['TO-BE tables',     tables.length,     'count',   `${readyTables} fully mapped`],
-    ['TO-BE columns',    totalCols,         'count',   'across all tables'],
-    ['Mapped columns',   mappedCols,        'count',   `${overallPct}% of columns`],
-    ['Mapping coverage', `${overallPct}%`,  'percent', 'mapped ÷ total columns'],
-    ['Mapping rules',    totalRules,        'count',   'non-skip rules'],
-    ['Rows migrated',    '—',               'rows',    'requires a migration run'],
+    ['Dashboard snapshot', null, null, null],
+    ['', '', '', ''],
+    ['Captured', capturedLine, '', ''],
+    ['Run',      runLine,      '', ''],
+    ['Author',   'KS Info System', '', ''],
+    ['', '', '', ''],
+    ['Metric',  'Value', 'Unit', 'Note'],
+    ['Tables',  tables.length, 'count', 'in TO-BE schema'],
+    ['Columns', totalCols,     'count', 'across all tables'],
+    ['Mapped',  mappedCols,    'columns', totalCols > 0 ? `${overallPct}% of total` : '—'],
+    ['Errors',  blockerCount,  'count', blockerCount === 0 ? 'no errors — execution unblocked' : 'must fix before execution'],
+    ['Issues',  warningCount,  'count', warningCount === 0 ? 'no issues — mapping is clean' : 'should review (advisory)'],
   ];
+
   return {
-    sheets: { Overview: overview, Tables: tableRows, Issues: issueRows },
+    sheets: { Overview: overview, Tables: tableRows },
     tableCount: tables.length,
     mappingPct: overallPct,
   };
 }
 
-/** Status 컬럼 값별 배지 색상 — 프로토타입의 running/blocked/warn/done 매칭. */
+/** ISO 문자열 또는 Date → 'YYYY-MM-DD HH:mm JST' 포맷. Asia/Tokyo 변환. */
+function fmtJst(input: string | Date | null | undefined): string {
+  if (!input) return '—';
+  const d = typeof input === 'string' ? new Date(input) : input;
+  if (Number.isNaN(d.getTime())) return '—';
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(d);
+  const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')} JST`;
+}
+
+/** Status 컬럼 값별 배지 색상.
+ *  실행 컨텍스트 (Validation 등 다른 페이지) : running / blocked / warn / done
+ *  매핑 컨텍스트 (Dashboard snapshot Tables) : ready / review / partial / unmapped
+ *  같은 색 팔레트 재사용 — 실행 / 매핑 둘 다 비슷한 의미 매핑. */
 const STATUS_BADGE: Record<string, React.CSSProperties> = {
+  // 실행 컨텍스트
   running: { background: '#fff4d4', color: '#7a5a00' },
   blocked: { background: '#ffd9d9', color: '#a00000' },
   warn:    { background: '#ffe6c2', color: '#8a4c00' },
   done:    { background: '#dff5e1', color: '#0a5a1f' },
+  // 매핑 컨텍스트 (Dashboard snapshot 전용)
+  ready:    { background: '#dff5e1', color: '#0a5a1f' },     // = done
+  review:   { background: '#ffe6c2', color: '#8a4c00' },     // = warn
+  partial:  { background: '#fff4d4', color: '#7a5a00' },     // = running
+  unmapped: { background: '#ffd9d9', color: '#a00000' },     // = blocked
 };
 
 /** Rule 컬럼 값별 배지 색상 — Mapping(구 Schema diff) Rules 시트에서 사용.
@@ -1062,7 +1280,7 @@ interface OverviewRowStyle {
 
 function classifyOverviewRow(row: Cell[]): OverviewRowStyle {
   const first = typeof row[0] === 'string' ? row[0] : '';
-  if (first.startsWith('Validation report')) {
+  if (first.startsWith('Validation report') || first === 'Dashboard snapshot') {
     return { titleStyle: { fontWeight: 700, fontSize: 14, color: '#1d4d2e' } };
   }
   if (first === 'Check' || first === 'Item' || first === 'Metric') {
@@ -1158,10 +1376,16 @@ const ARGB_STRATEGY_ROW_TINT: Record<string, string> = {
   'type mismatch': 'FFFBEAEA',
 };
 const ARGB_BY_STATUS: Record<string, { bg: string; fg: string }> = {
+  // 실행 컨텍스트
   running: { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
   blocked: { bg: 'FFFFD9D9', fg: 'FFA00000' },
   warn:    { bg: 'FFFFE6C2', fg: 'FF8A4C00' },
   done:    { bg: 'FFDFF5E1', fg: 'FF0A5A1F' },
+  // 매핑 컨텍스트 (Dashboard snapshot Tables)
+  ready:    { bg: 'FFDFF5E1', fg: 'FF0A5A1F' },
+  review:   { bg: 'FFFFE6C2', fg: 'FF8A4C00' },
+  partial:  { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  unmapped: { bg: 'FFFFD9D9', fg: 'FFA00000' },
 };
 const ARGB_BY_VERDICT: Record<string, { bg: string; fg: string }> = {
   '✓ PASS': { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
@@ -1439,27 +1663,36 @@ export function ArtifactsPage() {
     return [...projectMapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
   }, [snapshots, activeProjectId, pinnedIds]);
   const [mappingRules, setMappingRules] = useState<DiffRule[]>([]);
+  const [snapshotData, setSnapshotData] = useState<SnapshotData | null>(null);
   const [asisSchema, setAsisSchema] = useState<DdlSchema | null>(null);
   const [tobeSchema, setTobeSchema] = useState<DdlSchema | null>(null);
   /* 데이터 소스: 최신 mapping snapshot 의 frozen rules 우선 (= 승인/동결된 산출물).
      스냅샷이 없는 프로젝트는 현재 live mapping_rules 로 폴백 — 그래야 스냅샷 전 단계에서도
-     매핑 산출물 미리보기가 가능. 어느 쪽이든 buildDiff 가 TOBE DDL 기준으로 필터한다. */
+     매핑 산출물 미리보기가 가능. 어느 쪽이든 buildDiff 가 TOBE DDL 기준으로 필터한다.
+     snapshotData (rules+bindings+codeMaps) 도 별도 보관 — Dashboard issue 검출에 사용. */
   useEffect(() => {
     if (!activeProjectId) {
       setMappingRules([]);
+      setSnapshotData(null);
       return;
     }
     let cancelled = false;
     if (latestMappingSnapshot) {
       snapshotApi
         .getMapping(latestMappingSnapshot.id)
-        .then((d) => { if (!cancelled) setMappingRules(d.rules); })
-        .catch(() => { if (!cancelled) setMappingRules([]); });
+        .then((d) => {
+          if (cancelled) return;
+          setMappingRules(d.rules);
+          setSnapshotData(d);
+        })
+        .catch(() => {
+          if (!cancelled) { setMappingRules([]); setSnapshotData(null); }
+        });
     } else {
       mappingImportApi
         .listRules(activeProjectId)
-        .then((rs) => { if (!cancelled) setMappingRules(rs); })
-        .catch(() => { if (!cancelled) setMappingRules([]); });
+        .then((rs) => { if (!cancelled) { setMappingRules(rs); setSnapshotData(null); } })
+        .catch(() => { if (!cancelled) { setMappingRules([]); setSnapshotData(null); } });
     }
     return () => { cancelled = true; };
   }, [activeProjectId, latestMappingSnapshot]);
@@ -1512,10 +1745,11 @@ export function ArtifactsPage() {
     () => ({ 'AS-IS': reconstructDdl(asisSchema), 'TO-BE': reconstructDdl(tobeSchema) }),
     [asisSchema, tobeSchema],
   );
-  // DASHBOARD — TOBE DDL + mapping rules 로 커버리지 계산 (run 데이터 없음 → 이행 행 수는 N/A).
+  // DASHBOARD — TOBE/AS-IS DDL + mapping rules + snapshotData(bindings/codeMaps) 로 9 종 issue 검출.
+  //   snapshot 도 전달 → Overview header 의 Captured/Run 표시에 사용.
   const dashboard = useMemo(
-    () => buildDashboard(tobeSchema, mappingRules),
-    [tobeSchema, mappingRules],
+    () => buildDashboard(tobeSchema, asisSchema, mappingRules, snapshotData, latestMappingSnapshot),
+    [tobeSchema, asisSchema, mappingRules, snapshotData, latestMappingSnapshot],
   );
 
   const [openCats, setOpenCats] = useState<Record<CategoryKey, boolean>>({
@@ -2098,9 +2332,11 @@ function ExcelWorkbook({
                   ? (row[0] as string)
                   : undefined;
               const mappingRowTint = mappingStatusKind ? STRATEGY_ROW_TINT[mappingStatusKind] : undefined;
-              /* freeForm Overview 행 분류 (validation Overview 만). */
+              /* freeForm Overview 행 분류 — validation / dashboard Overview 공용. */
               const isOverviewFreeForm =
-                currentSheet.freeForm === true && category.key === 'validation' && activeSheet === 'Overview';
+                currentSheet.freeForm === true
+                && (category.key === 'validation' || category.key === 'dashboard')
+                && activeSheet === 'Overview';
               const ovStyle: OverviewRowStyle | null = isOverviewFreeForm ? classifyOverviewRow(row) : null;
               const rowTint = ovStyle?.rowTint ?? mappingRowTint;
               /* row 번호 오프셋: freeForm = 헤더 0행 (데이터 row 1부터),

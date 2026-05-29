@@ -16,6 +16,7 @@ import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.Snapshot;
 import com.ksinfo.modernize_pro_data.coordinator.site.SnapshotDiffService;
 import com.ksinfo.modernize_pro_data.coordinator.site.SnapshotRepository;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunHistoryRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenBinding;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenCodeMap;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenRule;
@@ -62,6 +63,7 @@ public class SnapshotController {
     private final MappingCodeMapRepository mappingCodeMapRepository;
     private final MappingTableBindingRepository mappingTableBindingRepository;
     private final SnapshotDiffService snapshotDiffService;
+    private final RunHistoryRepository runHistoryRepository;
 
     /* ── DTOs ──────────────────────────────────── */
 
@@ -87,24 +89,15 @@ public class SnapshotController {
         return ApiResponse.ok(snapshotRepository.findByProjectIdIn(projectIds));
     }
 
-    @PostMapping("/api/v1/projects/{projectId}/snapshots")
-    @Transactional
-    public ApiResponse<Snapshot> create(
-            @PathVariable String projectId,
-            @Valid @RequestBody CreateSnapshotRequest req,
-            Authentication auth
-    ) {
-        Project project = projectRepository.findById(projectId)
-                .orElseThrow(() -> new ApiException("PROJECT_NOT_FOUND", "프로젝트를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
-
-        String nextVersion = snapshotRepository.findLatestByProjectId(projectId)
-                .map(latest -> Snapshot.generateNextVersion(latest.getVersion(), latest.getStatus()))
-                .orElse("v1.0");
-
-        // 라이브 mapping working set 을 통째로 동결해 JSONB 1개 컬럼에 저장.
-        // 자식 link binding 만나면 master 의 frozen rules / bindings 를 복제해서 넣음
-        // — snapshot 은 immutable 시점 사본이라 master 가 나중에 바뀌어도 그 시점 보존.
-        // entity 직접 직렬화 (lazy/circular) 위험을 피하려고 FrozenXxx record 로 변환.
+    /** 현재 라이브 mapping working set 을 SnapshotData (rules + codeMaps + bindings) 로 freeze.
+     *  create() 와 has-changes preview endpoint 둘 다 사용 — 일관성 보장.
+     *
+     *  라이브 mapping working set 을 통째로 동결해 JSONB 1개 컬럼에 저장.
+     *  자식 link binding 은 sharedFromProjectId 마커만 freeze — master 의 룰은 복사 안 함.
+     *  실행 시점에 read-time inherit 로 처리. snapshot restore 시 link 마커가 그대로 복원되어
+     *  그 시점의 link 사실만 보존 (master 가 나중에 룰 바꾸면 자식 snapshot 의 read 결과도 변화).
+     *  entity 직접 직렬화 (lazy/circular) 위험을 피하려고 FrozenXxx record 로 변환. */
+    private SnapshotData buildCurrentSnapshotData(String projectId) {
         List<MappingTableBinding> ownBindings = mappingTableBindingRepository
                 .findByProjectIdWithSources(projectId);
         List<MappingRule> ownRules = mappingRuleRepository.findByProjectId(projectId);
@@ -114,7 +107,7 @@ public class SnapshotController {
 
         List<FrozenBinding> bindings = new java.util.ArrayList<>();
         List<FrozenRule> rules = new java.util.ArrayList<>();
-        java.util.Set<String> linkedKeys = new java.util.HashSet<>();  // (schema|table) of 자식 binding
+        java.util.Set<String> linkedKeys = new java.util.HashSet<>();
 
         for (MappingTableBinding b : ownBindings) {
             String masterPid = b.getSharedFromProjectId();
@@ -130,21 +123,68 @@ public class SnapshotController {
                             .map(FrozenRule::fromEntity)
                             .forEach(rules::add);
                 }
-                // master 가 사라진 경우 (link orphan 직전) — 자식 binding 만 freeze, rules 비움
             } else {
                 bindings.add(FrozenBinding.fromEntity(b));
             }
         }
-        // 자체 rules — 자식 binding 키와 겹치는 row 는 제외 (이미 master 복제로 들어감)
         for (MappingRule r : ownRules) {
             if (!linkedKeys.contains(keyOf(r.getTobeSchema(), r.getTobeTable()))) {
                 rules.add(FrozenRule.fromEntity(r));
             }
         }
+        return new SnapshotData(rules, codeMaps, bindings);
+    }
+
+    /** + New snapshot / + Cutover snapshot 버튼 활성화 판단용.
+     *  - hasChanges: 직전 snapshot 대비 mapping 변경이 있는지. mapping snapshot 활성 기준.
+     *  - hasRun:     이 project 에 run 이력이 한 번이라도 있는지. cutover snapshot 활성 기준
+     *                (cutover 는 mapping 변경 없이도 한 run 결과를 새 cutover 로 박을 수 있음).
+     *  - added/modified/removed: 사용자 안내 카운트. */
+    public record HasChangesView(boolean hasChanges, boolean hasRun,
+                                 int added, int modified, int removed) {}
+
+    @GetMapping("/api/v1/projects/{projectId}/snapshots/has-changes")
+    public ApiResponse<HasChangesView> hasChangesSinceLatest(@PathVariable String projectId) {
+        projectRepository.findById(projectId)
+                .orElseThrow(() -> new ApiException("PROJECT_NOT_FOUND",
+                        "프로젝트를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
+        boolean hasRun = runHistoryRepository.countByProjectId(projectId) > 0;
+        Snapshot previous = snapshotRepository.findByProjectIdAndBaselineTrue(projectId)
+                .or(() -> snapshotRepository.findLatestByProjectId(projectId))
+                .orElse(null);
+        if (previous == null) {
+            // 첫 snapshot — 항상 만들 수 있다.
+            return ApiResponse.ok(new HasChangesView(true, hasRun, 0, 0, 0));
+        }
+        SnapshotData currentData = buildCurrentSnapshotData(projectId);
+        SnapshotChanges ch = snapshotDiffService.diff(
+                previous.getSnapshotData(), currentData,
+                previous.getId(), previous.getVersion());
+        int a = ch.summary().added(), m = ch.summary().modified(), r = ch.summary().removed();
+        return ApiResponse.ok(new HasChangesView(a + m + r > 0, hasRun, a, m, r));
+    }
+
+    @PostMapping("/api/v1/projects/{projectId}/snapshots")
+    @Transactional
+    public ApiResponse<Snapshot> create(
+            @PathVariable String projectId,
+            @Valid @RequestBody CreateSnapshotRequest req,
+            Authentication auth
+    ) {
+        Project project = projectRepository.findById(projectId)
+                .orElseThrow(() -> new ApiException("PROJECT_NOT_FOUND", "프로젝트를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
+
+        String nextVersion = snapshotRepository.findLatestByProjectId(projectId)
+                .map(latest -> Snapshot.generateNextVersion(latest.getVersion(), latest.getStatus()))
+                .orElse("v1.0");
+
+        SnapshotData currentData = buildCurrentSnapshotData(projectId);
+        List<FrozenRule> rules = currentData.rules();
+        List<FrozenCodeMap> codeMaps = currentData.codeMaps();
+        List<FrozenBinding> bindings = currentData.bindings();
 
         Snapshot s = Snapshot.create(projectId, req.name(), req.description(),
                 req.type(), auth.getName(), nextVersion);
-        SnapshotData currentData = new SnapshotData(rules, codeMaps, bindings);
         s.setSnapshotData(currentData);
         s.setRuleCount(rules.size());
         s.setTableCount(bindings.size());
@@ -161,6 +201,19 @@ public class SnapshotController {
                 previous == null ? null : previous.getId(),
                 previous == null ? null : previous.getVersion()
         );
+        // 직전 snapshot 과 비교해 변경이 하나도 없으면 새 mapping snapshot 생성을 막는다.
+        // (첫 snapshot 은 previous == null 이라 이 가드에 안 걸린다.)
+        // Cutover snapshot 은 mapping 변경 무관 — 한 run 결과를 박는 의미라 통과.
+        if (!"cutover".equalsIgnoreCase(req.type())
+                && previous != null
+                && changes.summary().added() == 0
+                && changes.summary().modified() == 0
+                && changes.summary().removed() == 0) {
+            throw new ApiException("SNAPSHOT_NO_CHANGES",
+                    "변경된 매핑이 없어 새 snapshot 을 만들지 않았어요. " +
+                    "직전 snapshot (" + previous.getVersion() + ") 과 동일해요.",
+                    HttpStatus.CONFLICT);
+        }
         s.setChanges(changes);
         s.setPreviousVersionId(previous == null ? null : previous.getId());
 
@@ -382,6 +435,9 @@ public class SnapshotController {
                 e.setCompositionKind(b.compositionKind());
                 e.setWhereFilter(b.whereFilter());
                 e.setBindingOrigin(b.bindingOrigin());
+                e.setSharedFromProjectId(b.sharedFromProjectId());
+                e.setGroupByExpr(b.groupByExpr());
+                e.setExpandExpr(b.expandExpr());
                 e.setCreatedBy(b.createdBy() != null ? b.createdBy() : userId);
                 e.setCreatedAt(b.createdAt() != null ? b.createdAt() : now);
                 e.setUpdatedBy(userId);
@@ -439,6 +495,7 @@ public class SnapshotController {
         return ApiResponse.ok(null);
     }
 
+    /** "{schema}|{table}" key for linkedKeys set. nz() 로 schema null 도 안전하게. */
     private static String keyOf(String schema, String table) {
         return nz(schema) + "|" + table;
     }

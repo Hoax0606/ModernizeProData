@@ -492,6 +492,11 @@ public class Launcher {
          *  logout 을 보내거나 React Sign out 후 credentials 화면으로 돌아갈 때 쓴다. */
         private volatile String coordUrl;
         private volatile String username;
+        /** Spring 은 한 프로세스에서 한 번만 부팅. React Sign out 후 재 login 으로
+         *  swapToWebView 가 다시 불려도 Spring 컨텍스트는 그대로 재사용. credentials 가
+         *  바뀌었으면 사용자가 앱 재시작해야 새 credentials 가 datasource / WorkerBootstrap 에 적용. */
+        private final java.util.concurrent.atomic.AtomicBoolean springStarted =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
 
         /** backend 세션 정리 — currentSessionId 를 null 로. 실패해도 무시 (best-effort). */
         private void serverLogout() {
@@ -842,10 +847,57 @@ public class Launcher {
         }
 
         /** Swap the form for a WebView pointed at the Coordinator UI + start
-         *  the self-register / heartbeat loop. */
+         *  the Spring worker backend (분산 실행).
+         *
+         *  <p>2026-05-29 변경: 기존엔 Spring 안 띄우고 JavaFX-side 의 selfRegister/heartbeat
+         *  만 돌렸다. 분산 실행 (RUN_START WS push → executeRun) 을 위해서는 Spring
+         *  컨텍스트가 떠 있어야 WorkerBootstrap + STOMP subscribe + RunExecutionListener 가
+         *  살아난다. 그래서 credentials 확정 후 SpringApplicationBuilder 로 backend 시작.
+         *  selfRegister/heartbeat 은 Spring WorkerBootstrap 이 담당. */
         private void swapToWebView(String coordUrl, String username, String password) {
             this.coordUrl = coordUrl;
             this.username = username;
+
+            // ── Spring 부팅 전: wizard 입력값을 system property 로 박아 application-worker.yml
+            //    의 ${COORDINATOR_URL} / ${WORKER_USERNAME} / ${WORKER_PASSWORD} /
+            //    ${COORDINATOR_DB_URL} / ${WORKER_HOSTNAME} placeholder 가 채워지게 한다.
+            String host = "localhost";
+            try {
+                java.net.URI u = new java.net.URI(coordUrl);
+                if (u.getHost() != null) host = u.getHost();
+            } catch (Exception ignored) {}
+            String hostname = "worker-pc";
+            try { hostname = InetAddress.getLocalHost().getHostName(); }
+            catch (Exception ignored) {}
+
+            System.setProperty("modernize.coordinator.url", coordUrl);
+            System.setProperty("COORDINATOR_URL",     coordUrl);
+            System.setProperty("WORKER_USERNAME",     username);
+            System.setProperty("WORKER_PASSWORD",     password);
+            System.setProperty("WORKER_HOSTNAME",     hostname);
+            // Coordinator app 과 메타 PG 가 같은 host 라는 가정 — 다른 host 면 운영자가
+            // 환경 변수 COORDINATOR_DB_URL 으로 override (Launcher 가 set 한 뒤라도
+            // Spring 의 -D > 환경 변수 우선순위 따라 envvar 가 이김).
+            System.setProperty("COORDINATOR_DB_URL",
+                    "jdbc:postgresql://" + host + ":5432/mpd_meta");
+            // spring.profiles.active 는 jpackage args 의 --java-options 에서 prod,worker 로
+            // 이미 박혔다. 추가 설정 불요.
+
+            // ── Spring 시작 (background thread). PG 접속 실패 등은 launcher.log 에서 확인.
+            //    프로세스 수명 동안 1회만 — 재 login 시 Spring 재시작은 사용자 manual.
+            if (springStarted.compareAndSet(false, true)) {
+                new Thread(() -> {
+                    try {
+                        new SpringApplicationBuilder(ModernizeProDataApplication.class)
+                                .headless(false)
+                                .run();
+                    } catch (Exception e) {
+                        System.err.println("Worker Spring boot failed: " + e.getMessage());
+                        e.printStackTrace();
+                    }
+                }, "worker-spring-boot").start();
+            }
+
             WebView webView = new WebView();
             wireFreshUserData(webView);
             wireJsDialogs(webView.getEngine(), stage);
@@ -901,50 +953,9 @@ public class Launcher {
             String bootstrap = buildBootstrapQuery();
             webView.getEngine().load(coordUrl + sep + "_=" + System.currentTimeMillis() + bootstrap);
 
-            // Background: self-register once, then 60s heartbeat. On 401 we
-            // fall back to the URL step so the user can fix things.
-            heartbeatThread = new Thread(() -> {
-                try {
-                    selfRegister();
-                    while (true) {
-                        Thread.sleep(60_000);
-                        try { heartbeat(coordUrl); }
-                        catch (Exception e) {
-                            jwt = null;
-                            String err = tryLogin(coordUrl, username, password);
-                            if (err != null) {
-                                Platform.runLater(() -> showCredentialsStep(coordUrl, username, err));
-                                return;
-                            }
-                            selfRegister();
-                        }
-                    }
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
-                }
-            }, "worker-daemon");
-            heartbeatThread.setDaemon(true);
-            heartbeatThread.start();
-        }
-
-        private void selfRegister() {
-            try {
-                String hostname;
-                try { hostname = InetAddress.getLocalHost().getHostName(); }
-                catch (Exception e) { hostname = "unknown-host"; }
-                String body = "{\"hostname\":\"" + esc(hostname) + "\"}";
-                post(System.getProperty("modernize.coordinator.url", ""), "/api/v1/workers/self-register", body, true);
-            } catch (Exception e) {
-                System.err.println("self-register failed: " + e.getMessage());
-            }
-        }
-
-        private void heartbeat(String coordUrl) throws Exception {
-            String hostname;
-            try { hostname = InetAddress.getLocalHost().getHostName(); }
-            catch (Exception e) { hostname = "unknown-host"; }
-            String body = "{\"hostname\":\"" + esc(hostname) + "\"}";
-            post(coordUrl, "/api/v1/workers/heartbeat", body, true);
+            // selfRegister / heartbeat 은 Spring WorkerBootstrap 이 담당 (분산 실행 모드).
+            // 401 시 자동 재로그인도 WorkerBootstrap 의 heartbeat loop 에서 처리.
+            // 영구 credential 변경 같은 hard-fail 케이스는 운영자가 manual restart.
         }
 
         private JsonNode post(String coordUrl, String path, String body, boolean authed) throws Exception {

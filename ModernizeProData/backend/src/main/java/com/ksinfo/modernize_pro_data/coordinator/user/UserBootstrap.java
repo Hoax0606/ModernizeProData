@@ -17,9 +17,13 @@ public class UserBootstrap implements CommandLineRunner {
 
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
+    private final PgRoleService pgRoleService;
 
     @Override
     public void run(String... args) {
+        // 부팅 시 1회 — 메타 PG owner 가 admin user 발급에 필요한 CREATEROLE 권한을 가졌는지 확인.
+        pgRoleService.ensureMasterCanCreateRoles();
+
         if (userRepository.existsByUsername("master")) {
             log.info("master 계정 이미 존재 — 시드 건너뜀");
             return;
