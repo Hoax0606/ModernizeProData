@@ -130,6 +130,27 @@ export function ExecutionOverviewPage() {
     return () => window.clearInterval(id);
   }, [activeSiteId, loadMetrics, fetchProjects]);
 
+  // Run 종료 시 그 행만 selected 에서 자동 해제 — 사용자가 매번 직접 체크 해제할 필요 없게.
+  // running / paused / pending / null (run 시작 전) 은 유지 — Abort 활성화를 위해.
+  // success / failed / aborted / timed_out 으로 떨어지면 자동 해제.
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set(prev);
+      let changed = false;
+      for (const id of prev) {
+        const m = apiMetrics[id];
+        if (!m) continue;
+        const s = m.runStatus;
+        if (s === 'success' || s === 'failed' || s === 'aborted' || s === 'timed_out') {
+          next.delete(id);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [apiMetrics]);
+
   // worker_nodes — master 만 fetch (endpoint 가 master only). assignee 별 online dot 용.
   // 90s heartbeat timeout. 동일 5초 polling.
   const [workers, setWorkers] = useState<WorkerSummaryDto[]>([]);
@@ -287,7 +308,8 @@ export function ExecutionOverviewPage() {
       // TODO(toast): 페이지에 inline 토스트 도입 후 alert 제거.
       window.alert(rejected.join('\n'));
     }
-    setSelected(new Set());
+    // 선택 유지 — Run 직후 Abort 활성화를 위해 selectedRunningCount 가 살아 있어야 함.
+    // 사용자가 명시적으로 체크 해제하기 전까지는 그대로.
     loadMetrics();
     // Run 起動と同時に backend が phase advance (sign-off→rehearsal, ready→cutover) +
     // run_status='running' に変えるので、projects も refetch して chip / 行状態を即反映.

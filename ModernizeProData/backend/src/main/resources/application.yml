@@ -92,11 +92,16 @@ modernize:
     # 실행한다 (자기는 Worker daemon 으로 self-register 할 일이 없으니).
     self-username: ${COORDINATOR_SELF_USERNAME:master}
 
-  # DuckDB
+  # DuckDB — 각 노드의 local 디스크 (Coordinator·Worker 각자 사용). envvar override 가능.
   duckdb:
     memory-mode: true # false 면 파일 모드 (사이트=prod 는 application-prod.yml 에서 false)
-    file-path: ./data/duckdb.db
-    temp-directory: ./data/duckdb-tmp # 대용량 spill 위치 (operator/파일모드 테이블 RAM 초과분)
+    file-path:      ${MPD_DUCKDB_PATH:./data/duckdb.db}
+    temp-directory: ${MPD_DUCKDB_TEMP:./data/duckdb-tmp} # 대용량 spill 위치
+
+  # Run 산출물 (parquet1 / parquet2 / quarantine) — 각 노드의 local 디스크.
+  # 4대 분산 시 각 PC 마다 SSD 위치 등을 다르게 잡고 싶으면 MPD_OUTPUT_BASE_PATH 환경 변수로 override.
+  output:
+    base-path: ${MPD_OUTPUT_BASE_PATH:#{systemProperties['user.home']}/.modernize/output}
 
 # ── 로깅 ────────────────────────────────────────────────────────────────
 logging:

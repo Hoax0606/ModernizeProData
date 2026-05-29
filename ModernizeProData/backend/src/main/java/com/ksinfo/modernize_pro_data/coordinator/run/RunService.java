@@ -244,10 +244,15 @@ public class RunService {
      * 中断 — run_history.status='aborted' + projects.run_status='idle' 复귀.
      * 使い道: 사용자가 명시적으로 취소 / 시간 초과 sweep / dev 환경에서 stuck 解除.
      * fail 와의 차이: 시스템 에러가 아니라 의도된 중단 (audit 上 구별).
+     *
+     * Worker dispatch 가 걸렸던 run 이면 그 worker 에도 RUN_CANCEL envelope 을 보내 worker
+     * process 의 in-memory RunControlRegistry 가 stage runner 를 깨우게 한다.
+     * (Coordinator 의 runControlRegistry.cancel 만 호출해서는 Worker JVM 에 신호가 안 간다.)
      */
     @Transactional
     public RunHistory abortRun(String runId, String reason) {
         runControlRegistry.cancel(runId);   // paused 로 대기 중인 executor 깨워서 중단
+        dispatchCancelToWorkerIfRemote(runId, reason);
         return finishRun(runId, RunStatus.aborted, null, null, reason);
     }
 
@@ -258,7 +263,32 @@ public class RunService {
     @Transactional
     public RunHistory timeoutRun(String runId, String reason) {
         runControlRegistry.cancel(runId);
+        dispatchCancelToWorkerIfRemote(runId, reason);
         return finishRun(runId, RunStatus.timed_out, null, null, reason);
+    }
+
+    /**
+     * RunHistory.workerId 가 가리키는 worker 가 Coordinator self 가 아니고 현재 online 이면
+     * 그 worker 에 RUN_CANCEL WS push. offline / self / 미할당 인 경우 no-op.
+     * 호출자 (abortRun/timeoutRun) 가 finishRun 전에 부르는 게 의도 — worker stage runner
+     * 가 cancel signal 받는 시점이 DB 상태 변경보다 약간 앞서도 무방.
+     */
+    private void dispatchCancelToWorkerIfRemote(String runId, String reason) {
+        RunHistory rh = runHistoryRepo.findById(runId).orElse(null);
+        if (rh == null) return;
+        String assignee = rh.getWorkerId();
+        if (assignee == null || assignee.isBlank()) return;
+        if (assignee.equals(coordinatorSelfUsername)) return;
+        if (workerNodeService.findOnlineForUsername(assignee).isEmpty()) {
+            log.info("RUN_CANCEL skipped — worker offline runId={} workerId={}", runId, assignee);
+            return;
+        }
+        try {
+            workerDispatcher.dispatchRunCancel(assignee, runId, reason);
+            log.info("RUN_CANCEL dispatched runId={} workerId={} reason={}", runId, assignee, reason);
+        } catch (Exception e) {
+            log.error("RUN_CANCEL dispatch failed runId={} workerId={}", runId, assignee, e);
+        }
     }
 
     /** 실행 중 run 일시정지 — running 일 때만. projects.run_status='paused' 로 잠금 유지. */
