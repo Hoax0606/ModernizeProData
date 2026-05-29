@@ -65,8 +65,7 @@ public class LocalWorkerExecutor implements WorkerExecutor {
                 log.info("Stage '{}' already done (stage-cache) — skip runId={}", stage.getStageKey(), runId);
                 continue;
             }
-            // 일시정지 대기 (stage 경계). abort/timeout 으로 cancel 되면 이후 stage 중단.
-            runControlRegistry.awaitWhilePaused(runId);
+            // abort/timeout 으로 cancel 되면 이후 stage 중단 (stage 경계 반응).
             if (runControlRegistry.isCancelled(runId)) {
                 log.warn("Run cancelled — stopping before stage '{}' runId={}", stage.getStageKey(), runId);
                 break;

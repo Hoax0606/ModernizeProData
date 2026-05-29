@@ -30,14 +30,14 @@ import { useT, type TranslationKey } from '../i18n';
 
 type T = (key: TranslationKey, vars?: Record<string, string | number>) => string;
 
-/** BE run + stageViews 를 한 묶음의 표시용 shape 로 합성. RunHeader · banner 등 UI 가 사용. */
+/** BE run + stageViews 를 한 묶음의 표시용 shape 로 합성. RunHeader · banner 등 UI 가 사용.
+ *  2026-05-29: paused / pauseAccumMs 제거 — Pause 영구 제거 결정.
+ */
 type ActiveRunStatus = 'running' | 'completed' | 'failed' | 'aborted';
 interface ActiveRunState {
   runId: string;
   selectedTables: string[];
   startedAt: number;
-  pausedAt: number | null;
-  pauseAccumMs: number;
   runStatus: ActiveRunStatus;
   failedStageIndex: number | null;
   failureReason: string | null;
@@ -196,11 +196,6 @@ export function ExecutionPage() {
       runId: run.id,
       selectedTables: [],            // BE は run 単位で記録しない (tables[] は per-stage 配下)
       startedAt: startedAtMs,
-      /* paused 中は pausedAt≠null → isPaused=true (status chip=paused / 버튼=Resume).
-         demo の様な正確な pause 時刻/pauseAccumMs は FE で追跡しないため Date.now() で近似
-         (elapsed ラベルは wall-clock; 実 progress は stageViews=BE 真値が描く). */
-      pausedAt: run.status === 'paused' ? Date.now() : null,
-      pauseAccumMs: 0,
       runStatus: mapBeRunStatus(run.status),
       failedStageIndex: failedIdx,
       failureReason: run.errorMessage ?? null,
@@ -410,18 +405,7 @@ export function ExecutionPage() {
     await startRealRun(tables, runMode);
   };
 
-  const handlePauseToggle = async () => {
-    /* BE pause/resume endpoint 호출. 상태 전이는 usePipelineProgress polling이
-       다음 tick에서 캐치 — 수동 갱신 불필요 (paused는 non-terminal → polling 계속). */
-    if (!activeRunId || !run) return;
-    try {
-      if (run.status === 'running')     await runsApi.pause(activeRunId);
-      else if (run.status === 'paused') await runsApi.resume(activeRunId);
-    } catch (e) {
-      console.error('[execution] pause/resume failed:', e);
-      alert(`Pause/Resume failed: ${e instanceof Error ? e.message : 'unknown error'}`);
-    }
-  };
+  // handlePauseToggle 제거 (2026-05-29) — Pause 영구 제거. Stop + Retry 가 기능 동치.
 
   const handleRetry = async () => {
     /* Retry = 실패한 run 의 **마지막 success stage 이후부터** 재개. BE 가 정합성 검증
@@ -466,11 +450,9 @@ export function ExecutionPage() {
         hasPinnedSnapshot={hasPinnedSnapshot}
         selectedTablesCount={selectedTables.size}
         onStart={handleStartRun}
-        onPauseToggle={handlePauseToggle}
         onStop={handleStopRun}
         onRetry={handleRetry}
         onDiscard={handleDiscard}
-        onReset={() => useExecutionPreflightStore.getState().resetForProject(project.id)}
       />
       <DisabledOverlay disabled={controlsLocked}>
         <TableSelector
@@ -488,7 +470,6 @@ export function ExecutionPage() {
           canStart={selectedTables.size > 0 && hasPinnedSnapshot}
           startDisabledReason={!hasPinnedSnapshot ? t('execution.preflight.trigger.disabledNoPin') : t('execution.preflight.trigger.disabled')}
           onStart={startPreflight}
-          onReset={() => useExecutionPreflightStore.getState().resetForProject(project.id)}
         />
       </DisabledOverlay>
       <OverallProgress t={t} stages={stages} />
@@ -511,7 +492,7 @@ function DisabledOverlay({ disabled, children }: { disabled: boolean; children: 
 
 function RunHeader({
   t, project, site, runMode, activeRun, runs, preflightPassed, hasPinnedSnapshot,
-  selectedTablesCount, onStart, onPauseToggle, onStop, onRetry, onDiscard, onReset,
+  selectedTablesCount, onStart, onStop, onRetry, onDiscard,
 }: {
   t: T;
   project: Project;
@@ -523,12 +504,9 @@ function RunHeader({
   hasPinnedSnapshot: boolean;
   selectedTablesCount: number;
   onStart: () => void;
-  onPauseToggle: () => void;
   onStop: () => void;
   onRetry: () => void;
   onDiscard: () => void;
-  /** 테스트용 — preflight 캐시 / selectedTables / activeRunId 한꺼번에 비움. */
-  onReset: () => void;
 }) {
   const canStart = preflightPassed && selectedTablesCount > 0 && hasPinnedSnapshot && runMode !== null;
   const isDone = project.phase === 'done';
@@ -568,14 +546,13 @@ function RunHeader({
     );
   }
 
-  const isPaused = activeRun.pausedAt !== null;
   const isCompleted = activeRun.runStatus === 'completed';
   const isFailed = activeRun.runStatus === 'failed';
   const isAborted = activeRun.runStatus === 'aborted';
   const isHalted = isCompleted || isFailed || isAborted;
-  const running = activeRun.runStatus === 'running' && !isPaused;
+  const running = activeRun.runStatus === 'running';
   /* elapsed: BE 真値 기반 wall-clock(시작~정지/현재). 신뢰할 ETA 없으므로 미표시. */
-  const elapsedMs = Math.max(0, (activeRun.haltedAt ?? activeRun.pausedAt ?? Date.now()) - activeRun.startedAt);
+  const elapsedMs = Math.max(0, (activeRun.haltedAt ?? Date.now()) - activeRun.startedAt);
   const elapsedLabel = t('execution.run.elapsed', {
     time: formatTimeOfDay(activeRun.startedAt),
     elapsed: formatDuration(elapsedMs),
@@ -585,14 +562,12 @@ function RunHeader({
     isFailed ? 'err'
     : isAborted ? 'warn'
     : isCompleted ? 'queued'
-    : running ? 'ok'
-    : 'warn';
+    : 'ok';
   const statusChipText =
     isFailed ? t('execution.run.status.failed')
     : isAborted ? t('execution.run.status.aborted')
     : isCompleted ? t('execution.run.status.completed')
-    : running ? t('execution.run.status.running')
-    : t('execution.run.status.paused');
+    : t('execution.run.status.running');
 
   const failedStageName = activeRun.failedStageIndex != null
     ? BASE_STAGES[activeRun.failedStageIndex]?.name ?? '?'
@@ -645,41 +620,12 @@ function RunHeader({
             ↻ {t('execution.run.retry')}
           </button>
         )}
-        {isHalted && (
-          <button
-            type="button"
-            onClick={() => { if (canStart) onStart(); }}
-            disabled={!canStart}
-            style={canStart ? { ...styles.btnPrimary, minWidth: 80 } : { ...styles.btnDisabled, minWidth: 80 }}
-            title={startTooltip}
-          >
-            ▶ {t('execution.run.startOver')}
-          </button>
-        )}
-        {isHalted && (
-          /* 테스트용 한방 리셋 — preflight + 테이블 선택 + 활성 run 표시 모두 비움.
-             PreflightPanel 의 Reset 은 DisabledOverlay 안이라 halted 중엔 접근 불가 →
-             여기에서 노출. 활성 run(=running) 중엔 보이지 않음 (orphan 방지). */
-          <button
-            type="button"
-            onClick={onReset}
-            style={{ ...styles.btnGhost, minWidth: 80 }}
-            title={t('execution.preflight.trigger.reset')}
-          >
-            ↺ {t('execution.preflight.trigger.reset')}
-          </button>
-        )}
+        {/* 2026-05-29: 버튼 set 단순화 — Pause/Resume / Start over / Reset 제거.
+            Halted = Discard + ↻ Retry (failed/aborted 만). Running = ⏹ Stop. */}
         {!isHalted && (
-          <>
-            {/* Pause/Resume — real/demo 両対応. real は BE pause/resume endpoint へ
-               (同期実行のため停止は次 stage 境界で反応). */}
-            <button type="button" onClick={onPauseToggle} style={styles.btnSecondary}>
-              {running ? `⏸ ${t('execution.run.pause')}` : `▶ ${t('execution.run.resume')}`}
-            </button>
-            <button type="button" onClick={onStop} style={styles.btnDanger}>
-              ⏹ {t('execution.run.stop')}
-            </button>
-          </>
+          <button type="button" onClick={onStop} style={styles.btnDanger}>
+            ⏹ {t('execution.run.stop')}
+          </button>
         )}
       </section>
       {showBanner && (
@@ -811,7 +757,7 @@ function SnapshotDisplay({ t, pinned }: { t: T; pinned: MappingSnapshot | null }
 /* ───────────────────────── Pre-flight panel ────────────────────── */
 
 function PreflightPanel({
-  t, checks, phase, isStale, canStart, startDisabledReason, onStart, onReset,
+  t, checks, phase, isStale, canStart, startDisabledReason, onStart,
 }: {
   t: T;
   checks: PreflightCheck[];
@@ -820,7 +766,6 @@ function PreflightPanel({
   canStart: boolean;
   startDisabledReason: string;
   onStart: () => void;
-  onReset: () => void;
 }) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -891,14 +836,7 @@ function PreflightPanel({
         >
           ▶ {t('execution.preflight.trigger.start')}
         </button>
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onReset(); }}
-          title={t('execution.preflight.trigger.reset')}
-          style={styles.btnGhost}
-        >
-          ↺ {t('execution.preflight.trigger.reset')}
-        </button>
+        {/* Reset 버튼 제거 (2026-05-29). Pre-flight 검사 자체가 idempotent — 재실행 가능. */}
       </div>
 
       {open && (
@@ -1078,7 +1016,6 @@ function mapBeRunStatus(s: RunHistoryDto['status']): ActiveRunState['runStatus']
     case 'failed':    return 'failed';
     case 'aborted':   return 'aborted';
     case 'timed_out': return 'failed';   // UX 上は failed 扱い
-    case 'paused':                        // paused は runStatus='running' + pausedAt≠null で表現
     case 'pending':                       // queued state → 視覚的には running 扱い
     case 'running':
     default:          return 'running';

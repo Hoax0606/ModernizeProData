@@ -20,7 +20,7 @@ export type RunTypeStr = 'test' | 'rehearsal' | 'cutover';
 export type TriggerSourceStr =
   | 'internal' | 'cli' | 'external' | 'manual'
   | 'nightly' | 'rest' | 'manual_ui';
-export type RunStatusStr = 'pending' | 'running' | 'paused' | 'success' | 'failed' | 'aborted' | 'timed_out';
+export type RunStatusStr = 'pending' | 'running' | 'success' | 'failed' | 'aborted' | 'timed_out';
 
 export interface RunResultDto {
   runId: string | null;
@@ -141,16 +141,7 @@ export const runsApi = {
       reason ? { reason } : {},
     )),
 
-  /**
-   * run 一時停止. status=running 일 때만 paused 로 遷移 (BE: RunControlRegistry 가 executor 를
-   * 次 stage 境界 で停止). 同期実行のため実行中 stage 中間では止まらず次の境界で反応.
-   */
-  pause: (runId: string) =>
-    unwrap(api.post<ApiResponse<RunHistoryDto>>(`/api/v1/runs/${runId}/pause`, {})),
-
-  /** run 再開. status=paused 일 때만 running 으로 復帰 (BE 가 executor 깨움). */
-  resume: (runId: string) =>
-    unwrap(api.post<ApiResponse<RunHistoryDto>>(`/api/v1/runs/${runId}/resume`, {})),
+  // pause / resume 제거 (2026-05-29). Stop + Retry (resume-from-failed-stage) 가 기능 동치.
 
   startAll: () =>
     unwrap(api.post<ApiResponse<BulkRunResultDto>>('/api/v1/runs/all')),

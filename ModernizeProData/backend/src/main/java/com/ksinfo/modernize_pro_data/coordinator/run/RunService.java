@@ -173,11 +173,11 @@ public class RunService {
             }
         }
 
-        // 2. Lock check — 실행 중 (running / paused) 만 LOCKED.
+        // 2. Lock check — running 만 LOCKED.
         // idle / null / completed 는 새 run trigger 허용.
-        // completed = 이전 run 결과 (frontend mock simulation 잔재 포함) — 새 run 막을 이유 없음.
+        // (paused 는 2026-05-29 제거 — Stop + Retry 가 대체.)
         String currentStatus = project.getRunStatus();
-        boolean isActuallyRunning = STATUS_RUNNING.equals(currentStatus) || "paused".equals(currentStatus);
+        boolean isActuallyRunning = STATUS_RUNNING.equals(currentStatus);
         if (isActuallyRunning) {
             log.info("startRun locked: projectId={} run_status={}", projectId, currentStatus);
             return RunResult.locked("project already in run_status: " + currentStatus);
@@ -307,7 +307,7 @@ public class RunService {
      */
     @Transactional
     public RunHistory abortRun(String runId, String reason) {
-        runControlRegistry.cancel(runId);   // paused 로 대기 중인 executor 깨워서 중단
+        runControlRegistry.cancel(runId);   // 다음 stage 경계 진입 전 break.
         return finishRun(runId, RunStatus.aborted, null, null, reason);
     }
 
@@ -321,45 +321,9 @@ public class RunService {
         return finishRun(runId, RunStatus.timed_out, null, null, reason);
     }
 
-    /** 실행 중 run 일시정지 — running 일 때만. projects.run_status='paused' 로 잠금 유지. */
-    @Transactional
-    public RunHistory pauseRun(String runId) {
-        RunHistory rh = runHistoryRepo.findById(runId)
-                .orElseThrow(() -> new IllegalArgumentException("run not found: " + runId));
-        if (rh.getStatus() != RunStatus.running) {
-            log.info("pauseRun ignored — runId={} status={}", runId, rh.getStatus());
-            return rh;
-        }
-        rh.setStatus(RunStatus.paused);
-        runHistoryRepo.save(rh);
-        Project project = projectRepo.findByIdForUpdate(rh.getProjectId())
-                .orElseThrow(() -> new IllegalStateException("project disappeared: " + rh.getProjectId()));
-        project.setRunStatus("paused");
-        projectRepo.save(project);
-        runControlRegistry.pause(runId);
-        log.info("pauseRun runId={}", runId);
-        return rh;
-    }
-
-    /** 일시정지된 run 재개 — paused 일 때만. */
-    @Transactional
-    public RunHistory resumeRun(String runId) {
-        RunHistory rh = runHistoryRepo.findById(runId)
-                .orElseThrow(() -> new IllegalArgumentException("run not found: " + runId));
-        if (rh.getStatus() != RunStatus.paused) {
-            log.info("resumeRun ignored — runId={} status={}", runId, rh.getStatus());
-            return rh;
-        }
-        rh.setStatus(RunStatus.running);
-        runHistoryRepo.save(rh);
-        Project project = projectRepo.findByIdForUpdate(rh.getProjectId())
-                .orElseThrow(() -> new IllegalStateException("project disappeared: " + rh.getProjectId()));
-        project.setRunStatus(STATUS_RUNNING);
-        projectRepo.save(project);
-        runControlRegistry.resume(runId);
-        log.info("resumeRun runId={}", runId);
-        return rh;
-    }
+    // pauseRun / resumeRun 제거 (2026-05-29). Stop + Retry (resume-from-failed-stage) 가
+    // 기능 동치이고 paused 의 잠재 버그 4 가지 (CHECK / partial commit / race / 사용자 혼란)
+    // 모두 제거됨. project_pause_removed 메모리 참조.
 
     private RunHistory finishRun(String runId,
                                  RunStatus finalStatus,
