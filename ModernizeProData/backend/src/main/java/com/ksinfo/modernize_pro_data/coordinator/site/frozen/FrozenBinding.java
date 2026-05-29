@@ -16,7 +16,9 @@ public record FrozenBinding(
         OffsetDateTime createdAt,
         String updatedBy,
         OffsetDateTime updatedAt,
-        List<FrozenBindingSource> sources
+        List<FrozenBindingSource> sources,
+        /** 자식 link 마커 — null 이면 자체 정의. 값 있으면 master project_id. */
+        String sharedFromProjectId
 ) {
     public static FrozenBinding fromEntity(MappingTableBinding b) {
         return new FrozenBinding(
@@ -30,7 +32,8 @@ public record FrozenBinding(
                 b.getCreatedAt(),
                 b.getUpdatedBy(),
                 b.getUpdatedAt(),
-                b.getSources().stream().map(FrozenBindingSource::fromEntity).toList()
+                b.getSources().stream().map(FrozenBindingSource::fromEntity).toList(),
+                b.getSharedFromProjectId()
         );
     }
 }

@@ -102,8 +102,9 @@ public class SnapshotController {
                 .orElse("v1.0");
 
         // 라이브 mapping working set 을 통째로 동결해 JSONB 1개 컬럼에 저장.
-        // 자식 link binding 만나면 master 의 frozen rules / bindings 를 복제해서 넣음
-        // — snapshot 은 immutable 시점 사본이라 master 가 나중에 바뀌어도 그 시점 보존.
+        // 자식 link binding 은 sharedFromProjectId 마커만 freeze — master 의 룰은 복사 안 함.
+        // 실행 시점에 read-time inherit 로 처리. snapshot restore 시 link 마커가 그대로 복원되어
+        // 그 시점의 link 사실만 보존 (master 가 나중에 룰 바꾸면 자식 snapshot 의 read 결과도 변화).
         // entity 직접 직렬화 (lazy/circular) 위험을 피하려고 FrozenXxx record 로 변환.
         List<MappingTableBinding> ownBindings = mappingTableBindingRepository
                 .findByProjectIdWithSources(projectId);
@@ -112,35 +113,12 @@ public class SnapshotController {
                 .findByProjectIdOrderByDomainAscOrdinalAsc(projectId).stream()
                 .map(FrozenCodeMap::fromEntity).toList();
 
-        List<FrozenBinding> bindings = new java.util.ArrayList<>();
-        List<FrozenRule> rules = new java.util.ArrayList<>();
-        java.util.Set<String> linkedKeys = new java.util.HashSet<>();  // (schema|table) of 자식 binding
-
-        for (MappingTableBinding b : ownBindings) {
-            String masterPid = b.getSharedFromProjectId();
-            if (masterPid != null) {
-                linkedKeys.add(keyOf(b.getTobeSchema(), b.getTobeTable()));
-                MappingTableBinding masterBinding = mappingTableBindingRepository
-                        .findByProjectIdAndTobeSchemaAndTobeTable(masterPid, b.getTobeSchema(), b.getTobeTable())
-                        .orElse(null);
-                if (masterBinding != null) {
-                    bindings.add(FrozenBinding.fromEntity(masterBinding));
-                    mappingRuleRepository.findByProjectIdAndTobeTable(masterPid, b.getTobeTable()).stream()
-                            .filter(r -> nz(r.getTobeSchema()).equals(nz(b.getTobeSchema())))
-                            .map(FrozenRule::fromEntity)
-                            .forEach(rules::add);
-                }
-                // master 가 사라진 경우 (link orphan 직전) — 자식 binding 만 freeze, rules 비움
-            } else {
-                bindings.add(FrozenBinding.fromEntity(b));
-            }
-        }
-        // 자체 rules — 자식 binding 키와 겹치는 row 는 제외 (이미 master 복제로 들어감)
-        for (MappingRule r : ownRules) {
-            if (!linkedKeys.contains(keyOf(r.getTobeSchema(), r.getTobeTable()))) {
-                rules.add(FrozenRule.fromEntity(r));
-            }
-        }
+        List<FrozenBinding> bindings = ownBindings.stream()
+                .map(FrozenBinding::fromEntity)
+                .toList();
+        List<FrozenRule> rules = ownRules.stream()
+                .map(FrozenRule::fromEntity)
+                .collect(java.util.stream.Collectors.toCollection(java.util.ArrayList::new));
 
         Snapshot s = Snapshot.create(projectId, req.name(), req.description(),
                 req.type(), auth.getName(), nextVersion);
@@ -379,6 +357,7 @@ public class SnapshotController {
                 e.setCompositionKind(b.compositionKind());
                 e.setWhereFilter(b.whereFilter());
                 e.setBindingOrigin(b.bindingOrigin());
+                e.setSharedFromProjectId(b.sharedFromProjectId());
                 e.setCreatedBy(b.createdBy() != null ? b.createdBy() : userId);
                 e.setCreatedAt(b.createdAt() != null ? b.createdAt() : now);
                 e.setUpdatedBy(userId);
@@ -434,14 +413,6 @@ public class SnapshotController {
                         .snapshot(id, snapshotName)
                         .save());
         return ApiResponse.ok(null);
-    }
-
-    private static String keyOf(String schema, String table) {
-        return nz(schema) + "|" + table;
-    }
-
-    private static String nz(String s) {
-        return s == null ? "" : s;
     }
 
     private Snapshot findOrThrow(String id) {

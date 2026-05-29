@@ -200,14 +200,52 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
     return approved.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0].version;
   }, [snapshots]);
 
+  // 자식 link 테이블의 mapped 카운트를 master 의 server-side rules 로 계산하기 위해
+  // 자식 binding 이 가리키는 master project 들의 rules 를 fetch.
+  const masterIdsKey = useMemo(() => {
+    const ids = new Set<string>();
+    for (const b of Object.values(tableBindings ?? {})) {
+      if (b?.sharedFromProjectId) ids.add(b.sharedFromProjectId);
+    }
+    return [...ids].sort().join(',');
+  }, [tableBindings]);
+  const [masterRulesByProject, setMasterRulesByProject] = useState<Map<string, MappingRuleDto[]>>(new Map());
+  useEffect(() => {
+    if (!masterIdsKey) { setMasterRulesByProject(new Map()); return; }
+    const masterIds = masterIdsKey.split(',');
+    let alive = true;
+    (async () => {
+      const m = new Map<string, MappingRuleDto[]>();
+      await Promise.all(masterIds.map(async (id) => {
+        const rs = await mappingImportApi.listRules(id).catch(() => [] as MappingRuleDto[]);
+        m.set(id, rs);
+      }));
+      if (alive) setMasterRulesByProject(m);
+    })();
+    return () => { alive = false; };
+  }, [masterIdsKey]);
+
   const rows: DashboardRow[] = useMemo(() => {
     if (!tobeSchema) return [];
     return tobeSchema.tables.map((tw) => {
       const total = tw.columns.length;
-      const edits = rowEditsByTable?.[tw.table.id];
-      const mapped = countMapped(edits);
       const binding = tableBindings?.[tw.table.id];
       const sourceTables = binding ? uniqueSourceTables(binding) : [];
+      // 자식 link 테이블 — master 의 server-side rules 로 mapped 카운트.
+      // 자체 정의 — 기존대로 store 의 rowEdits 로 즉시 반응.
+      let mapped: number;
+      if (binding?.sharedFromProjectId) {
+        const masterRules = masterRulesByProject.get(binding.sharedFromProjectId) ?? [];
+        const tobeTable = tw.table.physicalName.toLowerCase();
+        const tobeSchemaLc = (tw.table.schemaName ?? '').toLowerCase();
+        mapped = masterRules.filter((r) =>
+          r.tobeTable.toLowerCase() === tobeTable
+          && (r.tobeSchema ?? '').toLowerCase() === tobeSchemaLc
+          && isMappingRuleMapped(r),
+        ).length;
+      } else {
+        mapped = countMapped(rowEditsByTable?.[tw.table.id]);
+      }
       let readiness: DashboardRow['readiness'];
       if (mapped === 0) readiness = 'unbound';
       else if (mapped >= total) readiness = 'ready';
@@ -223,7 +261,7 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
         sourceTables,
       };
     });
-  }, [tobeSchema, rowEditsByTable, tableBindings]);
+  }, [tobeSchema, rowEditsByTable, tableBindings, masterRulesByProject]);
 
   const counts = useMemo(() => ({
     total: rows.length,
@@ -590,12 +628,34 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
   const projectIdsKey = useMemo(() => projects.map((p) => p.id).sort().join(','), [projects]);
   useEffect(() => {
     let alive = true;
-    Promise.all(
-      projects.map(async (p) => {
-        const [schema, rules] = await Promise.all([
+    (async () => {
+      // 같은 site 의 모든 project 의 rules 를 미리 fetch — 자식 binding 의 master 룰 lookup 용.
+      const allRulesByProject = new Map<string, MappingRuleDto[]>();
+      await Promise.all(projects.map(async (p) => {
+        const rs = await mappingImportApi.listRules(p.id).catch(() => [] as MappingRuleDto[]);
+        allRulesByProject.set(p.id, rs);
+      }));
+
+      const entries = await Promise.all(projects.map(async (p) => {
+        const [schema, bindings] = await Promise.all([
           tobeDdlApi.get(p.id).catch(() => ({ latestImport: null, tables: [] })),
-          mappingImportApi.listRules(p.id).catch(() => [] as MappingRuleDto[]),
+          mappingImportApi.listBindings(p.id).catch(() => []),
         ]);
+        const ownRules = allRulesByProject.get(p.id) ?? [];
+        // 자식 binding 의 master 룰을 effective rules 에 합산 — 자식 mapping_rules 는 link 시
+        // wipe 되어 비어있으므로 master 룰만 카운트되며, dashboard 가 master 진행도 자동 반영.
+        const effectiveRules: MappingRuleDto[] = [...ownRules];
+        for (const b of bindings) {
+          if (!b.sharedFromProjectId) continue;
+          const masterRules = allRulesByProject.get(b.sharedFromProjectId) ?? [];
+          for (const mr of masterRules) {
+            if (mr.tobeTable.toLowerCase() === b.tobeTable.toLowerCase()
+                && (mr.tobeSchema ?? '').toLowerCase() === (b.tobeSchema ?? '').toLowerCase()) {
+              effectiveRules.push(mr);
+            }
+          }
+        }
+
         // DDL 側を qualified ("schema.table") と short ("table") の 2 索引にしておき,
         // rules → DDL を MappingPage と同じく qualified-first, short-fallback で解決.
         // (rules.tobeSchema が null / DDL schemaName が空 のずれを吸収.)
@@ -608,7 +668,7 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
           if (!ddlByShort.has(short)) ddlByShort.set(short, tw.table.id);
         }
         const mappedByTableId = new Map<string, number>();
-        for (const r of rules) {
+        for (const r of effectiveRules) {
           if (!isMappingRuleMapped(r)) continue;
           const qualified = ((r.tobeSchema ? r.tobeSchema + '.' : '') + r.tobeTable).toLowerCase();
           const short = r.tobeTable.toLowerCase();
@@ -627,11 +687,11 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
           if (total > 0 && m >= total) readyTables++;
         }
         return [p.id, { totalTables: schema.tables.length, totalColumns, mappedColumns, readyTables }] as const;
-      }),
-    ).then((entries) => {
+      }));
+
       if (!alive) return;
       setMappingStats(Object.fromEntries(entries));
-    });
+    })();
     return () => { alive = false; };
     // projects 객체 reference 가 자주 바뀌므로 id key 만 dep 로.
     // eslint-disable-next-line react-hooks/exhaustive-deps

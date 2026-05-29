@@ -349,20 +349,29 @@ export function MappingPage() {
   useEffect(() => {
     const state = location.state as {
       fixTarget?: { kind: 'unmapped-tobe' | 'unmapped-asis' | 'unbound-tobe' };
-      focusTable?: { internalName: string };
+      focusTable?: { internalName?: string; tobeSchema?: string; tobeTable?: string };
     } | null;
 
     // Dashboard row → focus a specific TO-BE table.
     if (state?.focusTable) {
-      const id = state.focusTable.internalName;
-      if (consumedFocusKeyRef.current === id) return;  // 既に処理済み
-      if (TOBE_TABLES.length === 0) return;            // hydrate 待ち
-      const target = TOBE_TABLES.find((t) => t.internalName === id);
+      const ft = state.focusTable;
+      const key = ft.internalName ?? `${ft.tobeSchema ?? ''}|${ft.tobeTable ?? ''}`;
+      if (consumedFocusKeyRef.current === key) return;  // 既に処理済み
+      if (TOBE_TABLES.length === 0) return;             // hydrate 待ち
+      const target = ft.internalName
+        ? TOBE_TABLES.find((t) => t.internalName === ft.internalName)
+        : TOBE_TABLES.find((t) => {
+            const i = t.name.indexOf('.');
+            const sch = (i > 0 ? t.name.slice(0, i) : '').toLowerCase();
+            const tbl = (i > 0 ? t.name.slice(i + 1) : t.name).toLowerCase();
+            return sch === (ft.tobeSchema ?? '').toLowerCase()
+                && tbl === (ft.tobeTable ?? '').toLowerCase();
+          });
       if (target) {
         setSelected({ side: 'tobe', name: target.name, internalName: target.internalName });
         // 自動初期選択を抑止 — 既に欲しい行を選んだ.
         didInitialSelectRef.current = true;
-        consumedFocusKeyRef.current = id;
+        consumedFocusKeyRef.current = key;
         // React Router の location.state を実際にクリア (history.replaceState だけでは不足).
         routerNavigate(location.pathname, { replace: true });
       }
@@ -814,6 +823,7 @@ function InventoryItem({
   let badgeText = '';
   let badgeIcon: string | null = null;
   let badgeTone: 'ok' | 'warn' | 'info' | null = null;
+  let showParentIcon = false;  // 부모 테이블 — chip 밖 왼쪽에 별도 표시
   if (side === 'tobe') {
     const tt = table as TobeTable;
     if (tt.linkedFromProjectId)                { badgeText = 'linked'; badgeIcon = 'fa-link'; badgeTone = 'info'; }
@@ -821,8 +831,7 @@ function InventoryItem({
     else if (tt.compositionKind === 'join')    { badgeText = `⋈ ${tt.sources.length}`; badgeTone = 'info'; }
     else if (tt.compositionKind === 'union')   { badgeText = `∪ ${tt.sources.length}`; badgeTone = 'info'; }
     else                                       { badgeText = '← 1'; badgeTone = 'ok'; }
-    // 부모 테이블이면 fa-link 아이콘 추가 (badgeText 는 유지)
-    if (tt.isParent && !tt.linkedFromProjectId) badgeIcon = 'fa-link';
+    if (tt.isParent && !tt.linkedFromProjectId) showParentIcon = true;
   } else {
     const at = table as AsisTable;
     if (unrouted) { badgeText = 'unrouted'; badgeTone = 'warn'; }
@@ -848,6 +857,7 @@ function InventoryItem({
         fontWeight: isSelected ? 600 : 500,
       }}>
         <span style={styles.invItemName}>{(table as TobeTable).short || table.name}</span>
+        {showParentIcon && <i className="fa-solid fa-link" style={{ fontSize: 10, color: 'var(--navy)' }} />}
         <span style={{ ...styles.invItemBadge, color: toneColor, background: toneBg, borderColor: toneColor, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
           {badgeIcon && <i className={`fa-solid ${badgeIcon}`} style={{ fontSize: 9 }} />}
           {badgeText}
@@ -951,6 +961,18 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
   hydrationTick: number;
 }) {
   const navigate = useNavigate();
+  const t = useT();
+  // Banner 의 프로젝트명을 클릭 가능한 텍스트 버튼으로 — 다른 project 의 같은 테이블 매핑 화면으로 이동.
+  const projectLinkStyle: React.CSSProperties = {
+    background: 'transparent',
+    border: 'none',
+    padding: 0,
+    cursor: 'pointer',
+    fontFamily: 'var(--mono)',
+    fontSize: 12,
+    fontWeight: 600,
+    color: 'var(--navy)',
+  };
   // 자식 link 면 binding 패널 closed. 자체 정의 + sources 비어 있으면 열림 (사용자 알림).
   const [bindingOpen, setBindingOpen] = useState(
     !bindingEdit?.sharedFromProjectId
@@ -1011,6 +1033,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
       table: i > 0 ? table.name.slice(i + 1) : table.name,
     };
   }, [table.name]);
+
   const parentInfo = useMemo(
     () => linkCandidates?.parentOf.find(
       (p) => p.tobeSchema.toLowerCase() === tobeSplitForBanner.schema.toLowerCase()
@@ -1323,7 +1346,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     setBindingWhere(bindingEdit?.whereFilter ?? table.whereFilter ?? '');
   }, [bindingEdit, table.internalName, table.sources, table.compositionKind, table.whereFilter]);
   const allRows = useMemo(() => rows.map((r) => {
-    // 자식 link 테이블은 모든 컬럼이 'link' state — master 에서 inherit 함을 표시.
+    // 자식 link 테이블 — 모든 컬럼이 'link' state. master 룰은 실행 시점에 read-time inherit
+    // 되므로 자식 화면 자체는 단순 'Linked' 단일 표시.
     if (isLinkedChild) return { ...r, rule: 'link' as const };
     const re = rowEdits[r.tgt];
     if (!re) return r;
@@ -1479,20 +1503,49 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
           {isLinkedChild ? (
             <>
               <i className="fa-solid fa-link" style={{ fontSize: 11, color: 'var(--text-2)' }} />
-              <span style={{ fontSize: 11, color: 'var(--text-2)' }}>Inherited from</span>
-              <span style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 600 }}>
+              <span style={{ fontSize: 11, color: 'var(--text-2)' }}>{t('mapping.link.inheritedFrom')}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  const masterId = bindingEdit?.sharedFromProjectId;
+                  if (!masterId) return;
+                  navigate('/mapping', {
+                    state: {
+                      activateProjectId: masterId,
+                      focusTable: { tobeSchema: tobeSplitForBanner.schema, tobeTable: tobeSplitForBanner.table },
+                    },
+                  });
+                }}
+                style={projectLinkStyle}
+                title={t('mapping.link.openInMaster')}
+              >
                 {masterProject?.name ?? bindingEdit?.sharedFromProjectId}
-              </span>
+              </button>
               <div style={{ flex: 1 }} />
-              <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>Change / Unlink</button>
+              <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>{t('mapping.link.button.changeUnlink')}</button>
             </>
           ) : isParentTable && parentInfo ? (
             <>
               <i className="fa-solid fa-link" style={{ fontSize: 11, color: 'var(--text-2)' }} />
-              <span style={{ fontSize: 11, color: 'var(--text-2)' }}>Parent of</span>
+              <span style={{ fontSize: 11, color: 'var(--text-2)' }}>{t('mapping.link.parentOf')}</span>
               {parentInfo.children.map((c, i) => (
-                <span key={c.projectId + '|' + c.tobeTable + '|' + i} style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 600 }}>
-                  {c.projectName}{i < parentInfo.children.length - 1 ? ',' : ''}
+                <span key={c.projectId + '|' + c.tobeTable + '|' + i}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigate('/mapping', {
+                        state: {
+                          activateProjectId: c.projectId,
+                          focusTable: { tobeSchema: c.tobeSchema, tobeTable: c.tobeTable },
+                        },
+                      });
+                    }}
+                    style={projectLinkStyle}
+                    title={t('mapping.link.openInChild')}
+                  >
+                    {c.projectName}
+                  </button>
+                  {i < parentInfo.children.length - 1 ? <span style={{ marginRight: 2 }}>,</span> : null}
                 </span>
               ))}
               <div style={{ flex: 1 }} />
@@ -1500,9 +1553,9 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
           ) : (
             <>
               <i className="fa-solid fa-unlink" style={{ fontSize: 11, color: 'var(--text-3)' }} />
-              <span style={{ fontSize: 11, color: 'var(--text-3)' }}>자체 정의된 테이블입니다.</span>
+              <span style={{ fontSize: 11, color: 'var(--text-3)' }}>{t('mapping.link.standalone')}</span>
               <div style={{ flex: 1 }} />
-              <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>Link to parent...</button>
+              <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>{t('mapping.link.button.link')}</button>
             </>
           )}
         </div>
@@ -3883,6 +3936,12 @@ function buildReportErrorMessage(
   if (report.errorKind === 'NO_RULES') {
     return t('mapping.report.error.noRules');
   }
+  if (report.errorKind === 'NO_RULES_LINKED') {
+    // backend 가 errorColumn 자리에 master project_id 를 실어보냄 — name 으로 lookup.
+    const masterId = report.errorColumn ?? '';
+    const master = useWorkspaceStore.getState().projects.find((p) => p.id === masterId);
+    return t('mapping.report.error.noRulesLinked', { project: master?.name ?? masterId });
+  }
   // UNKNOWN 또는 누락 — 일반 메시지 + 분류 라벨 + 힌트
   return `${t('mapping.report.error.unknown')}\n${typeLine}${hintLine}`;
 }
@@ -4341,7 +4400,7 @@ function RuleTag({ rule, status }: { rule: MappingRow['rule']; status?: MappingR
     auto: 'Pass', rule: 'Rule', null: 'Null', default: 'Default',
     unmapped: 'Unmapped', added: 'New', skip: 'Skip', link: 'Link',
   };
-  if (rule === 'link') return <StatusBadge tone="info">Link</StatusBadge>;
+  if (rule === 'link') return <StatusBadge tone="info">Linked</StatusBadge>;
   // status err/warn 은 색을 덮어쓴다 (룰과 무관하게 위험 신호 우선).
   if (status === 'err') return <StatusBadge tone="err">{labels[rule]}</StatusBadge>;
   if (status === 'warn') return <StatusBadge tone="warn">{labels[rule]}</StatusBadge>;

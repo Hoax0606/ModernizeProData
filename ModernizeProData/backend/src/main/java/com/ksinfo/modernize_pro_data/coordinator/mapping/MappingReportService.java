@@ -119,9 +119,16 @@ public class MappingReportService {
                 .toList();
 
         if (rules.isEmpty()) {
-            return new ReportResult(schema, tobeTable, List.of(), List.of(), 0, false, null,
-                    "이 TO-BE 테이블에 적용된 mapping_rules 가 없습니다. Mapping definition 임포트 후 다시 시도하세요.",
-                    "NO_RULES", null, null, null, null);
+            boolean linkedChild = !projectId.equals(effRuleSourceProjectId);
+            // errorColumn 자리에 master project_id 를 실어보냄 (i18n 합성 시 frontend 가 project 이름 lookup).
+            String kind = linkedChild ? "NO_RULES_LINKED" : "NO_RULES";
+            String msg = linkedChild
+                    ? "Master project '" + effRuleSourceProjectId
+                      + "' has not defined rules for this table yet."
+                    : "이 TO-BE 테이블에 적용된 mapping_rules 가 없습니다. Mapping definition 임포트 후 다시 시도하세요.";
+            String masterIdSlot = linkedChild ? effRuleSourceProjectId : null;
+            return new ReportResult(schema, tobeTable, List.of(), List.of(), 0, false, null, msg,
+                    kind, masterIdSlot, null, null, null);
         }
 
         String sql = buildSql(binding, rules, baseDir, effLimit);

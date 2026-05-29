@@ -1327,7 +1327,15 @@ export const ko = {
   'mapping.report.error.type.IO':          '파일 읽기 실패',
   'mapping.report.error.type.UNKNOWN':     '실행 오류',
   'mapping.report.error.hintLabel':        '힌트',
+  'mapping.report.error.noRulesLinked':    'Master 프로젝트 "{project}" 에 이 테이블의 mapping rules 가 아직 정의되지 않았습니다.',
   'mapping.inspector.combineHint':         '-- combine: 변환식을 직접 입력하세요 (예: MAKE_DATE / CONCAT)',
+  'mapping.link.inheritedFrom':            'Inherited from',
+  'mapping.link.parentOf':                 'Parent of',
+  'mapping.link.standalone':               '자체 정의된 테이블입니다.',
+  'mapping.link.openInMaster':             '부모 프로젝트의 이 테이블 열기',
+  'mapping.link.openInChild':              '자식 프로젝트의 이 테이블 열기',
+  'mapping.link.button.link':              'Link to parent...',
+  'mapping.link.button.changeUnlink':      'Change / Unlink',
 } as const;
 
 export type TranslationKey = keyof typeof ko;

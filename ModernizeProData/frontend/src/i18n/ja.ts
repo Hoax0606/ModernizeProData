@@ -1327,5 +1327,13 @@ export const ja: Record<TranslationKey, string> = {
   'mapping.report.error.type.IO':          'ファイル読み込み失敗',
   'mapping.report.error.type.UNKNOWN':     '実行エラー',
   'mapping.report.error.hintLabel':        'ヒント',
+  'mapping.report.error.noRulesLinked':    'マスタープロジェクト「{project}」にこのテーブルの mapping rules がまだ定義されていません。',
   'mapping.inspector.combineHint':         '-- combine: 変換式を直接入力してください (例: MAKE_DATE / CONCAT)',
+  'mapping.link.inheritedFrom':            'Inherited from',
+  'mapping.link.parentOf':                 'Parent of',
+  'mapping.link.standalone':               '独自定義のテーブルです。',
+  'mapping.link.openInMaster':             '親プロジェクトのこのテーブルを開く',
+  'mapping.link.openInChild':              '子プロジェクトのこのテーブルを開く',
+  'mapping.link.button.link':              'Link to parent...',
+  'mapping.link.button.changeUnlink':      'Change / Unlink',
 };

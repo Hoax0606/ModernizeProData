@@ -23,7 +23,7 @@ export interface MappingStatus {
   codeMapCount: number;
 }
 
-export type MappingReportErrorKind = 'EXPRESSION_FAILED' | 'FROM_FAILED' | 'NO_RULES' | 'UNKNOWN';
+export type MappingReportErrorKind = 'EXPRESSION_FAILED' | 'FROM_FAILED' | 'NO_RULES' | 'NO_RULES_LINKED' | 'UNKNOWN';
 export type MappingReportErrorType = 'SYNTAX' | 'BINDER' | 'CATALOG' | 'CONVERSION' | 'IO' | 'UNKNOWN';
 
 export interface MappingReportResult {

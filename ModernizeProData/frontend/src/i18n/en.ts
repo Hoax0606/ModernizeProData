@@ -1321,5 +1321,13 @@ export const en: Record<TranslationKey, string> = {
   'mapping.report.error.type.IO':          'File read failed',
   'mapping.report.error.type.UNKNOWN':     'Runtime error',
   'mapping.report.error.hintLabel':        'Hint',
+  'mapping.report.error.noRulesLinked':    'Master project "{project}" has not defined rules for this table yet.',
   'mapping.inspector.combineHint':         '-- combine: enter your own expression (e.g. MAKE_DATE / CONCAT)',
+  'mapping.link.inheritedFrom':            'Inherited from',
+  'mapping.link.parentOf':                 'Parent of',
+  'mapping.link.standalone':               'Stand-alone table.',
+  'mapping.link.openInMaster':             'Open this table in the master project',
+  'mapping.link.openInChild':              'Open this table in the child project',
+  'mapping.link.button.link':              'Link to parent...',
+  'mapping.link.button.changeUnlink':      'Change / Unlink',
 };
