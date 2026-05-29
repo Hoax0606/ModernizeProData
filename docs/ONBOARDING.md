@@ -679,20 +679,29 @@ them via UI paste. The tool never generates tokens.
 - 3-segment dotted (`x.y.z`) → defer to `JwtAuthFilter` (heuristic)
 - Otherwise: SHA-256 the token, look up by hash. Hit → `ROLE_API_CLIENT`.
 
-### 17.4 Phase semantics for runs
+### 17.4 Phase semantics for runs (tightened 2026-05-29)
 
-`RunService.resolveRunTypeFromPhase()` maps phase → runType:
+`RunService.resolveRunTypeFromPhase()` is used by the **scheduler / auto-trigger
+paths** (Quartz nightly, `/runs/all`, and `/runs` when `runType` is omitted).
+Manual UI runs through `/runs` with an explicit `runType` are not affected.
 
 | Phase | runType | Notes |
 |---|---|---|
-| `test` | `test` | dry-run test |
-| `rehearsal` | `rehearsal` | dry-run rehearsal |
-| `ready` | `cutover` | **production cut-over fires here** |
-| `cutover` | _(empty)_ | already running — new runs rejected |
-| others | _(empty)_ | not eligible |
+| `sign-off` | `rehearsal` | mapping snapshot approved → dry-run rehearsal. `maybeAdvancePhase` then auto-advances `sign-off → rehearsal`. |
+| `ready` | `cutover` | cutover snapshot approved → production cut-over fires here. |
+| all others (`planning` / `analysis` / `test` / `rehearsal` / `cutover` / `hypercare` / `done`) | _(empty)_ | not eligible — REJECTED with `phase 'xxx' is not eligible for scheduled run`. |
+
+Rationale: both `sign-off` and `ready` are reached **only after** a snapshot
+Request Review approval, so the mapping is verified at the phase transition.
+This makes preflight pass an implicit guarantee of the phase itself — no
+separate preflight persistence is needed for scheduler/auto-trigger gating.
+The pre-2026-05-29 design used a `default → RunType.test` fallback that let
+`planning` / `analysis` projects fire scheduled runs even before their mapping
+was prepared; that hole is now closed.
 
 The `cutover` phase represents an **in-progress** cut-over (not a
 "ready-to-cut" state). On completion, the project transitions to `hypercare`.
+Auto-transition `cutover → hypercare` is still a TODO.
 
 ### 17.5 Trigger source enum
 
@@ -888,12 +897,17 @@ The two gates share the same check engine but apply different thresholds.
 
 | Gate | Where | Threshold |
 |---|---|---|
-| **Start run** | `ExecutionPage` → RunHeader | pin pinned snapshot + selected tables × every check pass + `runMode !== null` |
-| **Request Review** | `VersionsPage` → SnapshotDetailView | cached result exists + **selectedTables covers all DDL TO-BE tables** + every check pass |
+| **Start run** | `ExecutionPage` → RunHeader | pin pinned snapshot + selected tables × every check pass + `runMode !== null`. Uses `executionPreflight.bySnapshot` cache (FE localStorage). |
+| **Request Review** (rewritten 2026-05-28) | `VersionsPage` → SnapshotDetailView | every TO-BE table of the project has its latest `stage_table_results` row = `success`. Evaluated by BE `ProjectRunReadinessService` via `GET /api/v1/projects/{id}/run-readiness`. **No longer uses the FE preflight cache.** |
 
-Selection can be a subset (partial migration is a real requirement). startrun
-allows running that subset. Request Review demands the snapshot proven
-end-to-end clean → coverage of the entire DDL is required.
+Selection can be a subset (partial migration is a real requirement). Start run
+allows running that subset. Request Review used to demand "preflight pass on
+every DDL TO-BE table"; the new model demands "every TO-BE table actually
+finished running successfully", which is a strictly stronger guarantee (the
+table truly produced output, not just that the preflight checks passed). The
+gate is per-binding (`stage_table_results.status`) not per-run — so a partial-
+failure run leaves the successful tables in `success` state, and only the
+failed tables need to be re-run.
 
 ### 18.2 The seven checks
 
@@ -986,12 +1000,65 @@ of `Promise.all`. See handoff `2026-05-27-execution-preflight-real.md`.
 
 - BE `POST /api/v1/projects/{id}/preflight/run` — preflight still runs on
   the frontend; only `csv-preview` and `tobe-db/test-connection` call BE.
+  Note: the **scheduler / auto-trigger paths no longer need this** (they are
+  gated by phase eligibility per §17.4, which implicitly guarantees a
+  Request Review approval — see also §18A). BE preflight persistence is now a
+  P2 cleanup item, not a blocker.
 - `CheckStage` / `ExtractStage` (in dev merge but stubs) — once they write
   to `stage_instances`, preflight can read authoritative completion flags.
 - BE `DuckDbService` concurrency safety / connection pool — required to
   drop the FE sequential workaround.
 - React style warning (`border` / `borderColor` shorthand mix) in the
   Preflight panel — cosmetic.
+
+---
+
+## 18A. Run History — table summary + per-table drill-down (added 2026-05-29)
+
+Run History UI (`LogViewerPage` history tab and `SchedulerPage` run history
+section) shows one row per run, with an inline **table summary badge**
+(`{total} {success}✓ {failed}✗ {running}…`) and an expandable per-table
+drill-down (▸/▾).
+
+### 18A.1 Data model
+
+- `RunHistoryViewDto.tableSummary` (`{ total, success, failed, running }`) —
+  aggregated from `stage_table_results` grouped by `tobe_table` for each run.
+  Computed in batch via `RunTableResultsService.summariesForRuns(runIds)` to
+  avoid N+1 over the history list.
+- `RunHistoryViewDto.tables` — the typed mirror of `metadata.selectedTables`
+  (null = full-binding run, e.g. scheduler / `/runs/all`; non-null = partial
+  run from UI).
+
+### 18A.2 Drill-down endpoint
+
+`GET /api/v1/runs/{id}/table-results` returns
+`List<RunTableResultsService.TableResultDto>`:
+
+```
+tobeSchema, tobeTable, status (success/failed/running),
+rows (= load-stage rowCount),
+startedAt (min stage start), finishedAt (max stage finish),
+durationMs (wall-clock = finishedAt - startedAt; can be null while running)
+```
+
+Timestamps are returned at millisecond precision; the FE renders them via
+`formatTimeMs(iso)` (`HH:mm:ss.SSS`) inside the drill-down so that
+`finishedAt − startedAt == durationMs` is visibly consistent.
+
+### 18A.3 Why per-table wall-clock != sum
+
+A run's `durationMs` (= `run.finishedAt − run.startedAt`) is wall-clock for
+the whole run. Per-table `durationMs` is wall-clock per table (first stage
+start to last stage finish). When tables run in parallel within a stage, the
+sum of per-table durations overshoots the run wall-clock; the run-level
+Duration cell carries a tooltip explaining this.
+
+### 18A.4 Error info intentionally omitted
+
+The drill-down does **not** include error message or failed stage. Quarantine
+tab already surfaces per-row violations + stage failure context with deeper
+detail; duplicating it here was visual noise.
 
 ---
 

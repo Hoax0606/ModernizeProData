@@ -96,7 +96,8 @@ Rules:
 
 ### Phase 모델
 - 9 단계: `planning · analysis · test · sign-off · rehearsal · ready · cutover · hypercare · done`
-- run 起動 가능한 phase 는 `test` / `rehearsal` / `ready` (`ready` 에서 cutover 起動). `cutover` 는 **실행 중 phase** = 신규 run reject. 完了 시 `hypercare` 로 전이.
+- **UI 手動 run** (runType 明示) 起動 可能 phase: `test` / `rehearsal` / `ready` (`ready` 에서 cutover 起動). `cutover` 는 **실행 중 phase** = 신규 run reject. 完了 시 `hypercare` 로 전이.
+- **Scheduler / 외부 trigger** (Quartz / `/runs/all` / `/runs` runType 省略時) 起動 可能 phase: `sign-off` (→ rehearsal run, phase 自動 advance) / `ready` (→ cutover run) 限定 (2026-05-29 制限化). 他 phase 는 REJECTED. `sign-off` 와 `ready` 는 snapshot Request Review 通過 後 = mapping 検証 済이라는 暗黙 保証.
 - `cutover` 는 **production 환경에서만** 실행 가능.
 - 스냅샷은 mapping snapshot 과 cutover snapshot 두 갈래.
 - `runStatus` (`idle | running | completed`) 는 test/rehearsal/cutover 의 sub-status.
@@ -148,7 +149,9 @@ cd ModernizeProData/frontend; npx tsc --noEmit
 | AS-IS DB (도구 내장) | 운영팀 야간 CSV 추출 파일을 도구가 받아 DuckDB 로 적재 — 외부 DB 직접 접속 X. |
 | Artifact | 프로젝트가 생성하는 산출물 (DDL · Migration SQL · Mapping spec · Schema diff · Validation report · Dashboard snapshot). `/artifacts` 페이지에서 Excel-style 워크북 미리보기 + 다운로드. |
 | Site export | All projects 페이지의 `Site export` 탭(`/site/export`). 사이트 단위로 산출물 4 종 (Migration / Mapping / Validation / Site summary) 을 zip 으로 일괄 다운로드. 현재는 client-side (JSZip + ExcelJS), 백엔드 export job 도입 시점에 서버 측 생성으로 교체 예정. |
-| Pre-flight | Execution run 起動 直前의 readiness 게이트 (7 체크: `csv-arrived` / `ddl-asis` / `ddl-tobe` / `conn-tobe` / `tobe-bindings` / `unmapped-cols` / `asis-unmapped`). 상태는 `pass · fail · skip` 3종, **per-table + project-wide** 혼재. 결과는 snapshot 별 캐시 (`executionPreflight.bySnapshot`) 에 보존. Execution startrun 게이트는 「pin + 선택 테이블 × 전 check pass + `runMode !== null`」, Versions Request Review 게이트는 さらに「DDL 全 TO-BE 망라」 추가. 상세는 `docs/ONBOARDING.md` §18. |
+| Pre-flight | Execution run 起動 直前의 readiness 게이트 (7 체크: `csv-arrived` / `ddl-asis` / `ddl-tobe` / `conn-tobe` / `tobe-bindings` / `unmapped-cols` / `asis-unmapped`). 상태는 `pass · fail · skip` 3종, **per-table + project-wide** 혼재. 결과는 snapshot 별 캐시 (`executionPreflight.bySnapshot`, FE localStorage). Execution startrun 게이트는 「pin + 선택 테이블 × 전 check pass + `runMode !== null`」. 상세는 `docs/ONBOARDING.md` §18. |
+| Request Review gate | Versions 画面 Request Review 게이트 (2026-05-28 변경). 旧 preflight cache 기반에서 「project 의 全 TO-BE 테이블의 최신 run 이 success」 기준으로. 判定 粒度는 `stage_table_results` 의 per-binding status (run-level status 가 아님 — partial failure 後도 정상 table 은 success 유지). BE: `ProjectRunReadinessService` + `GET /api/v1/projects/{id}/run-readiness`. |
+| Run History drill-down | Run History 行展開で per-table 詳細 (status/rows/started/finished/duration) 表示 (2026-05-29 추가). BE: `RunTableResultsService` + `GET /api/v1/runs/{id}/table-results`. 一覧 行에는 `tableSummary` (success/failed/running 件数) badge 表示. 時刻은 ms 精度. |
 
 ## 세션 시작 시 권장 동작
 
