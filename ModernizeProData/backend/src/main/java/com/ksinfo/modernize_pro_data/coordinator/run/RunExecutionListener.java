@@ -86,7 +86,8 @@ public class RunExecutionListener {
             List<StageInstance> stages = stageRepo.findByRunIdOrderBySeqAsc(runId);
 
             long runIndex = runRepo.countByProjectId(projectId);   // 이 run 까지 포함 = 1..N
-            Path outputDir = outputResolver.resolveAndCreate(projectId, runIndex, rh.getStartedAt());
+            // hybrid 폴더명 (2026-05-29 부터) — '{sanitizedName}__{projectId}'. file explorer 가독성.
+            Path outputDir = outputResolver.resolveAndCreate(projectId, project.getName(), runIndex, rh.getStartedAt());
             String duckdbSchema = "run_" + runId.replace("-", "_");
 
             ctx = StageContext.builder()
