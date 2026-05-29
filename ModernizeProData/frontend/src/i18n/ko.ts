@@ -1187,6 +1187,8 @@ export const ko = {
 
   'siteExport.preview.summary':     'Site summary',
   'siteExport.preview.manifest':    'Manifest ({n})',
+  'siteExport.preview.copyToast':   '✓ 복사되었습니다',
+  'siteExport.preview.resetTitle':  'Site summary 로 돌아가기',
 
   'siteExport.empty.title':         'No projects',
   'siteExport.empty.desc':          '이 사이트에 프로젝트가 없습니다. 먼저 프로젝트를 만들어주세요.',
@@ -1233,7 +1235,12 @@ export const ko = {
   'executionOverview.kpi.errors':   'Errors',
   'executionOverview.kpi.warnings': 'Warnings',
   'executionOverview.empty':        '프로젝트가 없습니다.',
-  'executionOverview.noRunYet':     'run 엔진 연결 전',
+  'executionOverview.noRunYet':     '아직 실행된 run 이 없어요',
+  'executionOverview.statusRunning':'{n} 개 run 진행 중',
+  'executionOverview.statusFailed': '{n} 개 run 이 실패로 끝났어요',
+  'executionOverview.statusAllDone':'모든 run 완료',
+  'executionOverview.worker.online': '{name} 의 Worker 가 연결돼있어요',
+  'executionOverview.worker.offline':'{name} 의 Worker 가 미연결 / 미등록 — Run 시 거부돼요',
   'executionOverview.overall':      'Overall progress',
   'executionOverview.notSelectable':'rehearsal / cutover 단계의 프로젝트만 선택 가능 (현재: {phase})',
 

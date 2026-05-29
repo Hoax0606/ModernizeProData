@@ -130,6 +130,13 @@ export function ExecutionPage() {
     const projectMapping = projectSnapshots.filter((s) => s.type === 'mapping');
     return [...projectMapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
   }, [pinnedSnapshot, projectSnapshots]);
+  /* "Discard" 한 snapshot id — 사용자가 활성 snapshot 의 fallback 표시를 명시적으로 끈 상태.
+     pinned 가 다른 snapshot 으로 옮겨가면 자동 reset (그 새 snapshot 은 Discard 적용 안 됨). */
+  const [discardedSnapshotId, setDiscardedSnapshotId] = useState<string | null>(null);
+  useEffect(() => {
+    setDiscardedSnapshotId((cur) => (cur && cur !== fallbackSnapshot?.id ? null : cur));
+  }, [fallbackSnapshot?.id]);
+  const effectiveFallback = fallbackSnapshot?.id === discardedSnapshotId ? null : fallbackSnapshot;
   /* pinned snapshot 의 id 가 변경되면 stale activeRunId 는 clear.
      예: Test 1 run → activeRunId=run1, pin 을 Test 2(아직 run X)로 옮기면 run1 은 더 이상
      이 snapshot 의 것이 아님 → clear 하면 fallback(빈 또는 그 snapshot 박제) 으로 자동 전환.
@@ -146,7 +153,7 @@ export function ExecutionPage() {
   }, [pinnedSnapshot?.id, project?.id]);
   const { run, stages: stageViews } = usePipelineProgress(
     activeRunId,
-    fallbackSnapshot?.executionContext ?? null,
+    effectiveFallback?.executionContext ?? null,
   );
 
   const entrySelected = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.selectedTables : undefined);
@@ -157,6 +164,30 @@ export function ExecutionPage() {
   const selectedTables = useMemo(() => new Set(entrySelected ?? []), [entrySelected]);
   const preflightPhase: PreflightPhase = entryPhase ?? 'idle';
   const isStale: boolean = entryStale ?? false;
+
+  /* pinned snapshot 이 바뀔 때 그 snapshot 의 박제된 tables 로 selectedTables 동기.
+     - 박제 있음 → 그 run 에서 실제로 처리된 tobeTable 들로 set (1개면 1개, 3개면 3개).
+     - 박제 없음 (= 새 snapshot 이라 아직 한 번도 run 안 됨) → 빈 set.
+     deps 는 pinnedSnapshot.id + executionContext.runId — id 만 보면 같은 snapshot 으로
+     재실행 후 갱신된 executionContext 가 반영 안 됨. runId 가 바뀐 경우는 갱신.
+     사용자가 그 사이에 수동으로 체크박스 건드린 건 다음 pin 변경까지 보존되지만,
+     pin 변경 자체가 사용자 의도(= 그 시점으로 돌아간다)니까 그 시점에 덮어쓰는 게 맞다. */
+  useEffect(() => {
+    if (!project) return;
+    if (!pinnedSnapshot) return; // pin 없으면 그대로 (test ad-hoc 등).
+    const ctx = pinnedSnapshot.executionContext;
+    if (!ctx) {
+      useExecutionPreflightStore.getState().setSelected(project.id, []);
+      return;
+    }
+    // 박제된 stages 의 모든 tobeTable union — 한 run 에서 실제 처리된 테이블 집합.
+    const tables = new Set<string>();
+    for (const st of ctx.stages) {
+      for (const t of st.tables) if (t.tobeTable) tables.add(t.tobeTable);
+    }
+    useExecutionPreflightStore.getState().setSelected(project.id, [...tables]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinnedSnapshot?.id, pinnedSnapshot?.executionContext?.runId, project?.id]);
 
   const setSelectedTables = (next: Set<string>) => {
     if (!project) return;
@@ -420,8 +451,11 @@ export function ExecutionPage() {
   };
 
   const handleDiscard = () => {
-    /* polling 停止 + UI から「현재 run」을 외す. BE 의 run 자체는 履歴에 남音. */
+    /* polling 停止 + UI 의 「현재 run」 제거. BE 의 run 자체는 history 에 남음.
+       추가로 fallback snapshot 의 executionContext 도 화면에서 끄기 — 안 그러면 activeRunId
+       가 null 되자마자 fallback 으로 다시 그려진다 (Discard 가 무효화돼 보임). */
     setActiveRunId(null);
+    if (fallbackSnapshot) setDiscardedSnapshotId(fallbackSnapshot.id);
   };
 
   const handleStopRun = async () => {

@@ -1,6 +1,7 @@
 package com.ksinfo.modernize_pro_data.coordinator.run;
 
 import com.ksinfo.modernize_pro_data.coordinator.dispatch.WorkerDispatcher;
+import com.ksinfo.modernize_pro_data.coordinator.worker.WorkerNodeService;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageCatalog;
@@ -67,6 +68,10 @@ public class RunService {
     private final SnapshotRepository snapshotRepo;
     private final SiteRepository siteRepo;
     private final WorkerDispatcher workerDispatcher;
+    private final WorkerNodeService workerNodeService;
+
+    @org.springframework.beans.factory.annotation.Value("${modernize.coordinator.self-username:master}")
+    private String coordinatorSelfUsername;
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
     private final MappingTableBindingRepository bindingRepo;
@@ -170,6 +175,12 @@ public class RunService {
             return RunResult.rejected("no approved cutover snapshot for project " + projectId);
         }
 
+        // 3.5. Worker dispatch decision — assignee 의 Worker daemon 이 등록 + heartbeat 살아있으면
+        //   그 worker 로 WS push (RunExecutionListener 가 Coordinator local 실행 skip).
+        //   offline / 미등록 / 미할당 / Coordinator self 면 그냥 Coordinator 가 local 실행 fallback.
+        //   (REJECT 정책은 운영 부담이 커서 fallback 으로 통일 — Worker 안 켜져있어도 일이 멈추지 않게.)
+        String resolvedWorker = resolveWorkerForProject(project);
+
         // 4. 状態遷移 — run_history INSERT + project.run_status='running'
         List<String> selectedTables = (tables == null || tables.isEmpty()) ? null : tables;
         RunHistory rh = RunHistory.create(projectId, runType, triggerSource,
@@ -179,10 +190,7 @@ public class RunService {
         if (selectedTables != null) meta.put("selectedTables", selectedTables);
         if (useCache) meta.put("useCache", true);
         if (!meta.isEmpty()) rh.setMetadata(meta);
-        // worker = 이 project 의 실행 담당 (admin user = ROLE_WORKER 의 username).
-        // executionAssignee 가 미할당이면 일반 assignee 를 fallback, 둘 다 없으면 null.
-        // (실제 분산 실행은 아직 미구현이지만, audit 로서 "이 run 의 책임자" 를 기록.)
-        rh.setWorkerId(resolveWorkerForProject(project));
+        rh.setWorkerId(resolvedWorker);
         runHistoryRepo.save(rh);
 
         project.setRunStatus(STATUS_RUNNING);

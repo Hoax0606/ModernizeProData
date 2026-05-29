@@ -220,6 +220,7 @@ function WorkbookFrame({
   children,
 }: WorkbookFrameProps) {
   const t = useT();
+  const resetTitle = t('siteExport.preview.resetTitle');
   return (
     <div style={styles.workbookWrap}>
       <div style={styles.workbook}>
@@ -252,8 +253,8 @@ function WorkbookFrame({
                 type="button"
                 onClick={onReset}
                 disabled={resetDisabled}
-                title="Reset to Site Summary"
-                aria-label="Reset to Site Summary"
+                title={resetTitle}
+                aria-label={resetTitle}
                 style={{
                   ...styles.ribbonResetBtn,
                   ...(resetDisabled ? styles.ribbonResetBtnDisabled : {}),
@@ -764,6 +765,7 @@ function VsCodeShell({
   projects, viewProjectId, onViewProjectChange, onReset,
   tables, isEmpty, emptyMsg,
 }: VsCodeShellProps) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
   // 표시할 SQL — 최대 3 테이블 합쳐 분리선 코멘트로 구분.
   const shown = tables.slice(0, 3);
@@ -824,7 +826,8 @@ function VsCodeShell({
             <button
               type="button"
               onClick={onReset}
-              title="Reset to Site Summary"
+              title={t('siteExport.preview.resetTitle')}
+              aria-label={t('siteExport.preview.resetTitle')}
               style={styles.vsRibbonResetBtn}
             >↺</button>
           )}
@@ -852,7 +855,7 @@ function VsCodeShell({
               pointerEvents: copied ? 'auto' : 'none',
             }}
           >
-            ✓ 복사되었습니다
+            {t('siteExport.preview.copyToast')}
           </div>
         </div>
       )}

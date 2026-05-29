@@ -34,25 +34,32 @@ import java.util.List;
 public class WorkerController {
 
     private final WorkerNodeService workerNodeService;
+    private final com.ksinfo.modernize_pro_data.coordinator.user.UserRepository userRepository;
 
     public record WorkerSummaryDto(
             String workerId,
             String name,
             String siteId,
             String userId,
+            /** worker_node.userId 의 username — FE 가 executionAssignee (username) 와 매칭할 때 사용. */
+            String username,
             WorkerStatus status,
             OffsetDateTime registeredAt,
             OffsetDateTime lastSeenAt,
             OffsetDateTime createdAt,
             String createdBy
-    ) {
-        static WorkerSummaryDto from(WorkerNode w) {
-            return new WorkerSummaryDto(
-                    w.getWorkerId(), w.getName(), w.getSiteId(), w.getUserId(),
-                    w.getStatus(),
-                    w.getRegisteredAt(), w.getLastSeenAt(),
-                    w.getCreatedAt(), w.getCreatedBy());
-        }
+    ) {}
+
+    private WorkerSummaryDto toDto(WorkerNode w) {
+        String username = w.getUserId() == null ? null
+                : userRepository.findById(w.getUserId())
+                        .map(com.ksinfo.modernize_pro_data.coordinator.user.User::getUsername)
+                        .orElse(null);
+        return new WorkerSummaryDto(
+                w.getWorkerId(), w.getName(), w.getSiteId(), w.getUserId(), username,
+                w.getStatus(),
+                w.getRegisteredAt(), w.getLastSeenAt(),
+                w.getCreatedAt(), w.getCreatedBy());
     }
 
     public record RegisterRequest(String hostname) {}
@@ -61,7 +68,7 @@ public class WorkerController {
     @PreAuthorize("hasRole('MASTER')")
     public ApiResponse<List<WorkerSummaryDto>> list() {
         return ApiResponse.ok(workerNodeService.list().stream()
-                .map(WorkerSummaryDto::from)
+                .map(this::toDto)
                 .toList());
     }
 
@@ -83,7 +90,7 @@ public class WorkerController {
             Authentication auth
     ) {
         WorkerNode w = workerNodeService.selfRegister(auth.getName(), req.hostname());
-        return ApiResponse.ok(WorkerSummaryDto.from(w));
+        return ApiResponse.ok(toDto(w));
     }
 
     @PostMapping("/heartbeat")

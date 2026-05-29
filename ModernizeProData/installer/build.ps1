@@ -27,8 +27,15 @@
 
 param(
     [ValidateSet('en','ko','ja','all')]
-    [string]$Language = 'ko'
+    [string]$Language = 'ko',
+    # coordinator | worker | all (둘 다). 같은 jar 를 두 가지 모드로 굽는다 — Coordinator 는
+    # 사용자님 PC(메타 DB 소유), Worker 는 팀원 PC 에 설치.
+    [ValidateSet('coordinator','worker','all')]
+    [string]$Role = 'coordinator'
 )
+
+$BuildRoles = if ($Role -eq 'all') { @('coordinator','worker') } else { @($Role) }
+Write-Host "Target role(s): $($BuildRoles -join ', ')" -ForegroundColor Magenta
 
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
@@ -230,7 +237,10 @@ if ($LASTEXITCODE -ne 0) { throw "jlink failed (exit $LASTEXITCODE)" }
 
 # === [8] jpackage with per-language resource override ===
 function Invoke-JpackageForLang {
-    param([string]$Lang)
+    param(
+        [string]$Lang,
+        [string]$RoleForBuild = 'coordinator'
+    )
 
     # Force cwd back to the installer directory in case an earlier step
     # (Push/Pop in npm/mvn paths, or a background-tool quirk) left it
@@ -295,12 +305,20 @@ function Invoke-JpackageForLang {
         Copy-Item -Force $localizedWxl $resDir
     }
 
+    # Role-별 jpackage args. Coordinator 는 메타 PG 와 master GUI 를 함께 띄우는 본진.
+    # Worker 는 같은 jar 를 --spring.profiles.active=worker 로 띄워 application-worker.yml 이
+    # 적용되도록 하고, 표시명 / app name 만 분리한다 (Win-menu / install dir 충돌 회피).
+    $isWorker  = ($RoleForBuild -eq 'worker')
+    $appName   = if ($isWorker) { 'ModernizeProData-Worker' } else { 'ModernizeProData' }
+    $appDesc   = if ($isWorker) { 'Modernize Pro Data - Worker' } else { 'Modernize Pro Data - Coordinator' }
+    $profiles  = if ($isWorker) { 'prod,worker' } else { 'prod' }
+
     $jpackageArgs = @(
         '--type',         'msi'
-        '--name',         'ModernizeProData'
+        '--name',         $appName
         '--app-version',  $Version
         '--vendor',       $Vendor
-        '--description',  'Modernize Pro Data - Coordinator'
+        '--description',  $appDesc
         '--input',        $StagingApp
         '--main-jar',     $JarName
         '--dest',         $Dest
@@ -308,14 +326,14 @@ function Invoke-JpackageForLang {
         '--runtime-image', (Resolve-Path $RuntimeDir).Path
         '--resource-dir', (Resolve-Path $resDir).Path
         '--java-options', '-Dfile.encoding=UTF-8'
-        '--java-options', '-Dspring.profiles.active=prod'
+        '--java-options', "-Dspring.profiles.active=$profiles"
         '--java-options', '-Dmpd.gui.enabled=true'
         '--java-options', "-Dmpd.default-lang=$Lang"
         # JavaFX native DLLs live alongside the fat jar inside $APPDIR.
         '--java-options', '-Djava.library.path=$APPDIR'
         '--win-per-user-install'
         '--win-menu'
-        '--win-menu-group', 'ModernizeProData'
+        '--win-menu-group', $appName
         '--win-shortcut'
         '--win-dir-chooser'
     )
@@ -334,13 +352,13 @@ function Invoke-JpackageForLang {
     } finally {
         $env:JAVA_TOOL_OPTIONS = $prevJto
     }
-    if ($LASTEXITCODE -ne 0) { throw "jpackage($Lang) failed (exit $LASTEXITCODE)" }
+    if ($LASTEXITCODE -ne 0) { throw "jpackage($RoleForBuild/$Lang) failed (exit $LASTEXITCODE)" }
 
-    # jpackage writes ModernizeProData-1.0.0.msi each time; rename so multiple
-    # languages can coexist in dist/.
-    $produced = Get-ChildItem $Dest -Filter '*.msi' | Where-Object { $_.Name -notmatch '-(en|ko|ja)-' } | Select-Object -First 1
+    # jpackage writes <appName>-<version>.msi each time; rename to include role + lang
+    # so coordinator/worker × en/ko/ja 가 한 dist/ 안에 공존 가능.
+    $produced = Get-ChildItem $Dest -Filter "$appName-$Version.msi" | Select-Object -First 1
     if ($produced) {
-        $newName = "ModernizeProData-$Lang-$Version.msi"
+        $newName = "$appName-$Lang-$Version.msi"
         $newPath = Join-Path $Dest $newName
         if (Test-Path $newPath) { Remove-Item -Force $newPath }
         Rename-Item -Path $produced.FullName -NewName $newName
@@ -348,8 +366,10 @@ function Invoke-JpackageForLang {
     }
 }
 
-foreach ($lang in $BuildLangs) {
-    Invoke-JpackageForLang -Lang $lang
+foreach ($role in $BuildRoles) {
+    foreach ($lang in $BuildLangs) {
+        Invoke-JpackageForLang -Lang $lang -RoleForBuild $role
+    }
 }
 
 Write-Host ""
