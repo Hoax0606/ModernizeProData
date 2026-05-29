@@ -347,7 +347,71 @@ export function MappingPage() {
     const state = location.state as {
       fixTarget?: { kind: 'unmapped-tobe' | 'unmapped-asis' | 'unbound-tobe'; table?: string };
       focusTable?: { internalName: string };
+      focusRule?: { tobeTable: string; tobeColumns: string[] };
     } | null;
+
+    // LogViewer Quarantine → "매핑 열기" → 위반 컬럼의 매핑 row 로 점프 + 빨간 펄스 (무한).
+    // fixTarget 분기와 동일한 단순 패턴 — 매 effect 호출에 setTimeout 새로 등록, cleanup 에서
+    // clear. hydrationTick 안정화 후 마지막 effect 의 setTimeout 만 발화 → highlight 적용.
+    // 색상/시간만 다름: mpd-quarantine-highlight (빨강, infinite). 사용자가 row 클릭 또는
+    // 다른 페이지로 navigation 할 때 자동 종료.
+    if (state?.focusRule?.tobeTable) {
+      const fr = state.focusRule;
+      const safeCols = fr.tobeColumns ?? [];
+
+      // case-insensitive table 매칭 + 선택. effectiveTobe 비어있으면 이번 effect 에선 skip,
+      // hydrationTick 변동 후 재진입 때 잡힘.
+      if (effectiveTobe.length > 0) {
+        const tobeKey = fr.tobeTable.toLowerCase();
+        const target = effectiveTobe.find((tt) =>
+          tt.name.toLowerCase() === tobeKey
+          || tt.internalName.toLowerCase() === tobeKey
+          || tt.short.toLowerCase() === tobeKey,
+        );
+        if (target) {
+          setSelected({ side: 'tobe', name: target.name, internalName: target.internalName });
+          didInitialSelectRef.current = true;
+        }
+      }
+
+      const targetCols = new Set(safeCols.map((c) => c.toLowerCase()));
+      const id = window.setTimeout(() => {
+        const allRows = document.querySelectorAll<HTMLElement>('tr[data-mpd-tobe-column]');
+        let els: HTMLElement[] = [];
+
+        // 1차 — TOBE 컬럼명 매치.
+        allRows.forEach((row) => {
+          const col = row.getAttribute('data-mpd-tobe-column');
+          if (col && targetCols.has(col.toLowerCase())) els.push(row);
+        });
+        // 2차 — ASIS 컬럼명 매치 (TOBE 실패 시). BE 가 보내는 위반 컬럼은 ASIS 측인 경우가 많음.
+        // src 가 'alias.column' 또는 'column' 형태 → 마지막 . 뒷부분만 비교.
+        if (els.length === 0) {
+          allRows.forEach((row) => {
+            const src = row.getAttribute('data-mpd-asis-column');
+            if (!src) return;
+            const colPart = src.split('.').pop()?.toLowerCase() ?? '';
+            if (colPart && targetCols.has(colPart)) els.push(row);
+          });
+        }
+        // 3차 — 매칭 0 (BE placeholder 등). 첫 row 라도 깜빡 → "도착했다" 시각 신호.
+        if (els.length === 0 && allRows.length > 0) els = [allRows[0]];
+        if (els.length === 0) return;
+
+        els[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        els.forEach((el) => el.classList.add('mpd-quarantine-highlight'));
+        // 사용자가 강조된 row 를 클릭하면 깜빡 종료 — row 가 active 화되는 인터랙션과 일체화.
+        const onceClickToStop = () => {
+          els.forEach((el) => {
+            el.classList.remove('mpd-quarantine-highlight');
+            el.removeEventListener('click', onceClickToStop);
+          });
+        };
+        els.forEach((el) => el.addEventListener('click', onceClickToStop));
+      }, 200);
+      window.history.replaceState({}, '');
+      return () => window.clearTimeout(id);
+    }
 
     // Dashboard row → focus a specific TO-BE table.
     if (state?.focusTable) {
@@ -1646,6 +1710,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                   <tr
                     key={`${r.src}>${r.tgt}-${i}`}
                     data-fix-row={r.rule === 'unmapped' ? 'tobe-unmapped' : undefined}
+                    data-mpd-tobe-column={r.tgt || undefined}
+                    data-mpd-asis-column={r.src || undefined}
                     onClick={() => {
                       // 자식 link 테이블은 master 에서만 수정 가능 — Inspector 안 열림.
                       if (isLinkedChild) return;

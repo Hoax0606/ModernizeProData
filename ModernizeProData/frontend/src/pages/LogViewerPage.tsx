@@ -629,7 +629,38 @@ export function LogViewerPage() {
                     open={openGroupId === g.id}
                     runId={runId}
                     onToggle={() => setOpenGroupId((cur) => (cur === g.id ? null : g.id))}
-                    onOpenMapping={() => navigate('/mapping')}
+                    onOpenMapping={() => {
+                      // 매핑 row highlight 대상 컬럼명 추출 — 3 단계로 robust 하게 시도.
+                      // 1) 'violated' role 컬럼 우선 (정상 BE 응답)
+                      // 2) 그게 placeholder ('error'/'unknown'/빈값) 면 g.columns 전체에서 다시 필터
+                      // 3) 그래도 없으면 g.detail / g.reason 텍스트에서 'source column XXX' / 't.XXX' / 'OF XXX' 같은
+                      //    SQL 에러 패턴으로 컬럼명 보충 (예: 'casting from source column TXN_DTTM').
+                      const PLACEHOLDER = new Set(['error', 'unknown', '']);
+                      const isReal = (c: string) => c && !PLACEHOLDER.has(c.toLowerCase());
+
+                      let cols = g.columns
+                        .filter((_, i) => g.columnRoles[i] === 'violated')
+                        .filter(isReal);
+                      if (cols.length === 0) {
+                        cols = g.columns.filter(isReal);
+                      }
+                      if (cols.length === 0) {
+                        const text = `${g.detail || ''} ${g.reason || ''}`;
+                        const found = new Set<string>();
+                        // 'source column XXX' / 'column XXX' (대소문자 무관).
+                        for (const m of text.matchAll(/\b(?:source\s+)?column\s+([A-Za-z_][A-Za-z0-9_]*)/gi)) {
+                          found.add(m[1]);
+                        }
+                        // 't.XXX' / 'a.XXX' / 'src.XXX' alias 패턴 (SQL CAST/SELECT 안에 자주 등장).
+                        for (const m of text.matchAll(/\b[a-z]\w*\.([A-Z_][A-Z0-9_]+)\b/g)) {
+                          found.add(m[1]);
+                        }
+                        cols = [...found];
+                      }
+                      navigate('/mapping', {
+                        state: { focusRule: { tobeTable: g.table, tobeColumns: cols } },
+                      });
+                    }}
                     onOpenInspector={() => {
                       // Quarantine group → Stream 모드로 점프.
                       //
