@@ -6,6 +6,7 @@ import { useSnapshotsStore, usePinnedSnapshotsStore, type FrozenRule } from '../
 import { asisDdlApi, type DdlSchema, type DdlColumn } from '../api/asisDdl';
 import { tobeDdlApi } from '../api/tobeDdl';
 import { mappingImportApi } from '../api/mappingImport';
+import { validationApi, type ValidationReportDto } from '../api/validation';
 import { useT, type TranslationKey } from '../i18n';
 
 /**
@@ -151,6 +152,15 @@ export const SHEETS: Record<CategoryKey, SheetSchema[]> = {
       { name: 'NULLS TOBE', type: 'BIGINT' },
       { name: 'Δ',          type: 'BIGINT' },
       { name: 'Verdict',    type: 'TEXT' },
+    ]},
+    { name: 'Min Max', columns: [
+      { name: 'Column',   type: 'VARCHAR' },
+      { name: 'Type',     type: 'VARCHAR' },
+      { name: 'MIN ASIS', type: 'TEXT' },
+      { name: 'MAX ASIS', type: 'TEXT' },
+      { name: 'MIN TOBE', type: 'TEXT' },
+      { name: 'MAX TOBE', type: 'TEXT' },
+      { name: 'Verdict',  type: 'TEXT' },
     ]},
     { name: 'Range', columns: [
       { name: 'Column',        type: 'VARCHAR' },
@@ -394,201 +404,7 @@ const MOCK_ROWS_BY_TABLE: Record<'diff' | 'validation', Record<string, Record<st
       ],
     },
   },
-  validation: {
-    acct_master: {
-      Overview: [
-        ['Validation report · ACCT_MASTER', null, null, null],
-        ['ASIS table', 'legacy.acct_master',   null, null],
-        ['TOBE table', 'public.account',       null, null],
-        ['Generated',  '2026-04-21 09:41 JST', null, null],
-        ['Check',                       'ASIS',             'TOBE',             'Verdict'],
-        ['Row count',                   '38,400,000',       '38,400,000',       '✓ PASS'],
-        ['SHA-256 checksum',            'sha256:9b1d…2c01', 'sha256:9b1d…2c01', '✓ PASS'],
-        ['Sum reconciliation (2 cols)', '—',                '—',                '✓ PASS'],
-        ['NULL count parity (5 cols)',  '—',                '—',                '✓ PASS'],
-        ['Range/overflow (1 cols)',     '—',                '—',                '✓ PASS'],
-        ['Total',                       '7',                '7 pass',           '0 fail'],
-      ],
-      'Sum recon': [
-        ['balance_amount', 'NUMERIC(15,2)', '4,580,219,402,150', '4,580,219,402,150', '0.000000%', '✓ PASS'],
-        ['risk_score',     'SMALLINT',      '47,329,008',        '47,329,008',        '0.000000%', '✓ PASS'],
-      ],
-      'NULL parity': [
-        ['account_id',        'VARCHAR(20)',  0,      0,      0, '✓ PASS'],
-        ['account_name',      'VARCHAR(80)',  12_400, 12_400, 0, '✓ PASS'],
-        ['account_name_kana', 'VARCHAR(120)', 18_200, 18_200, 0, '✓ PASS'],
-        ['risk_score',        'SMALLINT',     5_002,  5_002,  0, '✓ PASS'],
-        ['updated_by',        'VARCHAR(20)',  812,    812,    0, '✓ PASS'],
-      ],
-      Range: [
-        ['kyc_level', 'SMALLINT', '±32767', '12', 0, '✓ PASS'],
-      ],
-    },
-    cust_profile: {
-      Overview: [
-        ['Validation report · CUST_PROFILE', null, null, null],
-        ['ASIS table', 'CORE.CUST_PROFILE ⋈ CORE.CUST_CONTACT', null, null],
-        ['TOBE table', 'public.customer',                       null, null],
-        ['Generated',  '2026-04-21 09:41 JST',                  null, null],
-        ['Check',                        'ASIS',             'TOBE',             'Verdict'],
-        ['Row count',                    '22,488,541',       '22,488,541',       '✓ PASS'],
-        ['SHA-256 checksum',             'sha256:8a2c…e109', 'sha256:8a2c…e109', '✓ PASS'],
-        ['Sum reconciliation (1 cols)',  '—',                '—',                '✓ PASS'],
-        ['NULL count parity (14 cols)',  '—',                '—',                '✓ PASS'],
-        ['Range/overflow (1 cols)',      '—',                '—',                '✓ PASS'],
-        ['Total',                        '18',               '18 pass',          '0 fail'],
-      ],
-      'Sum recon': [
-        ['risk_tier', 'SMALLINT', '741,312,166,603', '741,312,166,603', '0.000000%', '✓ PASS'],
-      ],
-      'NULL parity': [
-        ['customer_id',       'VARCHAR(20)',  0,       0,       0, '✓ PASS'],
-        ['customer_name',     'VARCHAR(120)', 0,       0,       0, '✓ PASS'],
-        ['birth_date',        'DATE',         1_502,   1_502,   0, '✓ PASS'],
-        ['gender',            'CHAR(1)',      5_124,   5_124,   0, '✓ PASS'],
-        ['email',             'VARCHAR(120)', 1_290,   1_290,   0, '✓ PASS'],
-        ['phone',             'VARCHAR(20)',  830,     830,     0, '✓ PASS'],
-        ['nationality',       'CHAR(3)',      500,     500,     0, '✓ PASS'],
-        ['city_code',         'VARCHAR(8)',   215,     215,     0, '✓ PASS'],
-        ['open_branch',       'VARCHAR(8)',   0,       0,       0, '✓ PASS'],
-        ['risk_tier',         'SMALLINT',     1_018,   1_018,   0, '✓ PASS'],
-        ['preferred_channel', 'VARCHAR(8)',   2_560,   2_560,   0, '✓ PASS'],
-        ['marketing_opt_in',  'BOOLEAN',      0,       0,       0, '✓ PASS'],
-        ['created_at',        'TIMESTAMP',    0,       0,       0, '✓ PASS'],
-        ['updated_at',        'TIMESTAMP',    0,       0,       0, '✓ PASS'],
-        ['status',            'VARCHAR(8)',   0,       0,       0, '✓ PASS'],
-      ],
-      Range: [
-        ['risk_tier', 'SMALLINT', '±32767', '4', 0, '✓ PASS'],
-      ],
-    },
-    txn_journal_2024: {
-      Overview: [
-        ['Validation report · TXN_JOURNAL_2024', null, null, null],
-        ['ASIS table', 'legacy.txn_journal_2024',  null, null],
-        ['TOBE table', 'public.transaction_2024',  null, null],
-        ['Generated',  '2026-04-21 09:41 JST',     null, null],
-        ['Check',                        'ASIS',             'TOBE',             'Verdict'],
-        ['Row count',                    '185,300,000',      '185,300,000',      '✓ PASS'],
-        ['SHA-256 checksum',             'sha256:1f8e…ca04', 'sha256:1f8e…ca04', '✓ PASS'],
-        ['Sum reconciliation (1 cols)',  '—',                '—',                '✓ PASS'],
-        ['NULL count parity (4 cols)',   '—',                '—',                '✓ PASS'],
-        ['Range/overflow (1 cols)',      '—',                '—',                '✓ PASS'],
-        ['Total',                        '6',                '6 pass',           '0 fail'],
-      ],
-      'Sum recon': [
-        ['amount', 'NUMERIC(18,2)', '6,809,238,400,158.32', '6,809,238,400,158.32', '0.000000%', '✓ PASS'],
-      ],
-      'NULL parity': [
-        ['transaction_id', 'VARCHAR(32)', 0,         0,         0, '✓ PASS'],
-        ['account_id',     'VARCHAR(20)', 0,         0,         0, '✓ PASS'],
-        ['OPR_ID',         'VARCHAR(12)', 2_840_182, 2_840_182, 0, '✓ PASS'],
-        ['reference_no',   'VARCHAR(40)', 510_038,   510_038,   0, '✓ PASS'],
-      ],
-      Range: [
-        ['amount', 'NUMERIC(18,2)', '±9999999999999999.99', '9.99e+9', 0, '✓ PASS'],
-      ],
-    },
-    transaction_unified: {
-      Overview: [
-        ['Validation report · TRANSACTION_UNIFIED', null, null, null],
-        ['ASIS table', 'legacy.txn_journal_2023 ∪ legacy.txn_journal_2024', null, null],
-        ['TOBE table', 'public.transaction',                                null, null],
-        ['Generated',  '2026-04-21 09:41 JST',                              null, null],
-        ['Check',                        'ASIS',             'TOBE',             'Verdict'],
-        ['Row count',                    '405,810,000',      '405,810,000',      '✓ PASS'],
-        ['SHA-256 checksum',             'sha256:c702…b14d', 'sha256:c702…b14d', '✓ PASS'],
-        ['Sum reconciliation (1 cols)',  '—',                '—',                '✓ PASS'],
-        ['NULL count parity (3 cols)',   '—',                '—',                '✓ PASS'],
-        ['Range/overflow (1 cols)',      '—',                '—',                '✓ PASS'],
-        ['Total',                        '6',                '6 pass',           '0 fail'],
-      ],
-      'Sum recon': [
-        ['amount', 'NUMERIC(18,2)', '14,802,310,558,200', '14,802,310,558,200', '0.000000%', '✓ PASS'],
-      ],
-      'NULL parity': [
-        ['reference_no', 'VARCHAR(40)', 920_412, 920_412, 0, '✓ PASS'],
-        ['status',       'VARCHAR(8)',  0,       0,       0, '✓ PASS'],
-        ['source_year',  'SMALLINT',    0,       0,       0, '✓ PASS'],
-      ],
-      Range: [
-        ['source_year', 'SMALLINT', '±32767', '2024', 0, '✓ PASS'],
-      ],
-    },
-    loan: {
-      Overview: [
-        ['Validation report · LOAN', null, null, null],
-        ['ASIS table', 'legacy.loan',          null, null],
-        ['TOBE table', 'public.loan',          null, null],
-        ['Generated',  '2026-04-21 09:41 JST', null, null],
-        ['Check',                        'ASIS',             'TOBE',             'Verdict'],
-        ['Row count',                    '2,300,000',        '2,300,000',        '✓ PASS'],
-        ['SHA-256 checksum',             'sha256:5f1e…a832', 'sha256:5f1e…a832', '✓ PASS'],
-        ['Sum reconciliation (2 cols)',  '—',                '—',                '✓ PASS'],
-        ['NULL count parity (1 cols)',   '—',                '—',                '✓ PASS'],
-        ['Range/overflow (1 cols)',      '—',                '—',                '✓ PASS'],
-        ['Total',                        '6',                '6 pass',           '0 fail'],
-      ],
-      'Sum recon': [
-        ['principal',     'NUMERIC(15,2)', '385,420,180,003', '385,420,180,003', '0.000000%', '✓ PASS'],
-        ['interest_rate', 'NUMERIC(5,3)',  '8,752.245',       '8,752.245',       '0.000000%', '✓ PASS'],
-      ],
-      'NULL parity': [
-        ['status', 'VARCHAR(8)', 0, 0, 0, '✓ PASS'],
-      ],
-      Range: [
-        ['term_months', 'SMALLINT', '±32767', '360', 0, '✓ PASS'],
-      ],
-    },
-    card: {
-      Overview: [
-        ['Validation report · CARD', null, null, null],
-        ['ASIS table', 'legacy.card',          null, null],
-        ['TOBE table', 'public.card',          null, null],
-        ['Generated',  '2026-04-21 09:41 JST', null, null],
-        ['Check',                        'ASIS',             'TOBE',             'Verdict'],
-        ['Row count',                    '3,200,000',        '3,200,000',        '✓ PASS'],
-        ['SHA-256 checksum',             'sha256:7d4a…f018', 'sha256:7d4a…f018', '✓ PASS'],
-        ['Sum reconciliation (0 cols)',  '—',                '—',                'n/a'],
-        ['NULL count parity (1 cols)',   '—',                '—',                '✓ PASS'],
-        ['Range/overflow (1 cols)',      '—',                '—',                '✓ PASS'],
-        ['Total',                        '4',                '4 pass',           '0 fail'],
-      ],
-      'Sum recon': [
-        ['(no numeric columns)', 'n/a', 'n/a', 'n/a', 'n/a', 'n/a'],
-      ],
-      'NULL parity': [
-        ['status', 'VARCHAR(8)', 0, 0, 0, '✓ PASS'],
-      ],
-      Range: [
-        ['expires_at', 'DATE', 'within issue+10y', '2049-12-31', 0, '✓ PASS'],
-      ],
-    },
-    fx_position: {
-      Overview: [
-        ['Validation report · FX_POSITION', null, null, null],
-        ['ASIS table', 'legacy.fx_position',   null, null],
-        ['TOBE table', 'public.fx_position',   null, null],
-        ['Generated',  '2026-04-21 09:41 JST', null, null],
-        ['Check',                        'ASIS',             'TOBE',             'Verdict'],
-        ['Row count',                    '120,000',          '120,000',          '✓ PASS'],
-        ['SHA-256 checksum',             'sha256:e201…7ab9', 'sha256:e201…7ab9', '✓ PASS'],
-        ['Sum reconciliation (1 cols)',  '—',                '—',                '✓ PASS'],
-        ['NULL count parity (1 cols)',   '—',                '—',                '✓ PASS'],
-        ['Range/overflow (1 cols)',      '—',                '—',                '✓ PASS'],
-        ['Total',                        '5',                '5 pass',           '0 fail'],
-      ],
-      'Sum recon': [
-        ['position_amount', 'NUMERIC(18,4)', '1,420,800,250.5400', '1,420,800,250.5400', '0.000000%', '✓ PASS'],
-      ],
-      'NULL parity': [
-        ['position_amount', 'NUMERIC(18,4)', 0, 0, 0, '✓ PASS'],
-      ],
-      Range: [
-        ['position_amount', 'NUMERIC(18,4)', '±9,999,999,999.9999', '4.8e+8', 0, '✓ PASS'],
-      ],
-    },
-  },
+  validation: {},
 };
 
 /* 사이드바 트리에서 카테고리 펼쳤을 때 보일 mock 테이블 목록.
@@ -1129,17 +945,89 @@ function highlightSqlLine(line: string, lineKey: number): React.ReactNode {
   return parts;
 }
 
-/* validation 카테고리의 fx 수식바 `{n}` 자리 — 테이블별 총 check 수 (Overview 시트의 Total 값과 동일).
-   사이드바에서 테이블 바꾸면 수식바의 'X checks' 가 따라서 바뀐다. */
-const VALIDATION_CHECK_COUNT: Record<string, number> = {
-  acct_master:         7,
-  cust_profile:        18,
-  txn_journal_2024:    6,
-  transaction_unified: 6,
-  loan:                6,
-  card:                4,
-  fx_position:         5,
-};
+/* Validation report DTO → 시트별 Cell[][] 변환. BE 의 ValidationReportService 가 만든 raw
+   shape 를 mock 과 동일한 헤더 + 행 구조의 ExcelJS-호환 Cell 표 로 펼친다.
+
+   Cell verdict 텍스트는 mock 과 동일하게 '✓ PASS' / '✗ FAIL' / '⚠ WARN' — ARGB_BY_VERDICT 가
+   이 텍스트를 보고 색상 배지를 매긴다. */
+function verdictText(v: 'PASS' | 'FAIL' | 'WARN' | string): string {
+  if (v === 'PASS') return '✓ PASS';
+  if (v === 'FAIL') return '✗ FAIL';
+  if (v === 'WARN') return '⚠ WARN';
+  return String(v ?? '');
+}
+
+function fmtCell(v: unknown): Cell {
+  if (v == null) return null;
+  if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'string') return v;
+  return String(v);
+}
+
+function validationOverviewRows(dto: ValidationReportDto): Cell[][] {
+  const meta: Cell[][] = [
+    [`Validation report · ${dto.tobeTable}`, null, null, null],
+    ['TOBE table', dto.tobeSchema ? `${dto.tobeSchema}.${dto.tobeTable}` : dto.tobeTable, null, null],
+    ['Generated', dto.generatedAt ?? '', null, null],
+    ['Check', 'ASIS', 'TOBE', 'Verdict'],
+  ];
+  const items: Cell[][] = (dto.overview ?? []).map((r) => [
+    fmtCell(r.item), fmtCell(r.asis), fmtCell(r.tobe), verdictText(r.verdict),
+  ]);
+  const total: Cell[][] = [
+    ['Total', String(dto.totalChecks),
+     `${dto.passedChecks} pass`,
+     `${dto.totalChecks - dto.passedChecks} fail`],
+  ];
+  return [...meta, ...items, ...total];
+}
+
+function validationSumReconRows(dto: ValidationReportDto): Cell[][] {
+  return (dto.sumRecon ?? []).map((r) => [
+    fmtCell(r.column), fmtCell(r.type),
+    fmtCell(r.asisSum), fmtCell(r.tobeSum),
+    r.deltaPercent == null ? '' : `${fmtCell(r.deltaPercent)}%`,
+    verdictText(r.verdict),
+  ]);
+}
+
+function validationNullParityRows(dto: ValidationReportDto): Cell[][] {
+  return (dto.nullParity ?? []).map((r) => [
+    fmtCell(r.column), fmtCell(r.type),
+    r.asisNulls, r.tobeNulls, r.delta,
+    verdictText(r.verdict),
+  ]);
+}
+
+function validationMinMaxRows(dto: ValidationReportDto): Cell[][] {
+  return (dto.minMax ?? []).map((r) => [
+    fmtCell(r.column), fmtCell(r.type),
+    fmtCell(r.asisMin), fmtCell(r.asisMax),
+    fmtCell(r.tobeMin), fmtCell(r.tobeMax),
+    verdictText(r.verdict),
+  ]);
+}
+
+function validationRangeRows(dto: ValidationReportDto): Cell[][] {
+  return (dto.typeValid ?? []).map((r) => [
+    fmtCell(r.column), fmtCell(r.type),
+    fmtCell(r.bound), fmtCell(r.observedMax),
+    r.overflowRows ?? 0,
+    verdictText(r.verdict),
+  ]);
+}
+
+/** Sheet 이름 → 해당 시트의 Cell[][] 행. dto null 또는 sheet 매칭 없으면 빈 배열. */
+function validationRowsFor(dto: ValidationReportDto | null | undefined, sheetName: string): Cell[][] {
+  if (!dto) return [];
+  switch (sheetName) {
+    case 'Overview':    return validationOverviewRows(dto);
+    case 'Sum recon':   return validationSumReconRows(dto);
+    case 'NULL parity': return validationNullParityRows(dto);
+    case 'Min Max':     return validationMinMaxRows(dto);
+    case 'Range':       return validationRangeRows(dto);
+    default: return [];
+  }
+}
 
 /* xlsx 셀 색상 팔레트 — 화면(in-app) 배지 색과 동일한 ARGB 형태.
    화면 CSS hex (#rrggbb) → ARGB (FFRRGGBB) 로 0xFF alpha prefix 만 붙임. */
@@ -1507,6 +1395,26 @@ export function ArtifactsPage() {
     () => buildDiff(mappingRules, asisSchema, tobeSchema, successTables),
     [mappingRules, asisSchema, tobeSchema, successTables],
   );
+
+  /* VALIDATION — pinned snapshot 의 박제된 run 의 validation_reports 를 일괄 prefetch.
+     snapshot 의 executionContext.runId 가 source (= "그 시점의" 검증 결과). pin 변경 시 자동 swap.
+     키는 tobe_table. 값이 undefined = 그 테이블에 대한 report 없음 (run 안 됐거나 binding 미포함). */
+  const validationRunId = latestMappingSnapshot?.executionContext?.runId ?? null;
+  const [validationByTable, setValidationByTable] =
+    useState<Record<string, ValidationReportDto>>({});
+  useEffect(() => {
+    if (!validationRunId) { setValidationByTable({}); return; }
+    let cancelled = false;
+    validationApi.listByRun(validationRunId)
+      .then((list) => {
+        if (cancelled) return;
+        const m: Record<string, ValidationReportDto> = {};
+        for (const r of list) m[r.tobeTable] = r;
+        setValidationByTable(m);
+      })
+      .catch(() => { if (!cancelled) setValidationByTable({}); });
+    return () => { cancelled = true; };
+  }, [validationRunId]);
   // DDL SCRIPTS — 임포트한 ASIS/TOBE DDL 을 CREATE TABLE 로 재구성 (AS-IS / TO-BE 탭).
   const ddlText = useMemo<Record<string, string>>(
     () => ({ 'AS-IS': reconstructDdl(asisSchema), 'TO-BE': reconstructDdl(tobeSchema) }),
@@ -1542,8 +1450,16 @@ export function ArtifactsPage() {
     const base = childTablesFor(project?.name ?? '');
     // MAPPING(diff) / MIGRATION SQL 둘 다 — 현재 TOBE DDL 에 있고 rule 이 매칭된 테이블.
     // SQL 도 사이드바에 같은 list 가 뜨고 성공 외 테이블은 disabled.
-    return { ...base, diff: diff.tables, sql: diff.tables };
-  }, [project?.name, diff.tables]);
+    // VALIDATION — pinned snapshot 의 박제 run 으로부터 prefetch 한 report 가 있는 테이블만.
+    //   report 없는 테이블은 트리에서도 안 보임 (run 안 됐거나 binding 미포함).
+    const validationTables = Object.keys(validationByTable).sort();
+    return {
+      ...base,
+      diff: diff.tables,
+      sql: diff.tables,
+      validation: validationTables.length > 0 ? validationTables : base.validation,
+    };
+  }, [project?.name, diff.tables, validationByTable]);
 
   /* Bundle (zip) 다운로드 진행 중 상태 — 사이드바 버튼 disabled 처리용. */
   const [bundleBusy, setBundleBusy] = useState(false);
@@ -1591,7 +1507,7 @@ export function ArtifactsPage() {
      - Dashboard / MAPPING(diff) → .xlsx (in-app preview 와 동일 색상/스타일).
      - DDL Scripts → asis/tobe 각 .sql.
      - MIGRATION SQL → 성공 테이블 별 .migrate.sql.
-     - Validation 은 mock 이라 일단 skip. */
+     - VALIDATION → prefetch 한 validation_reports 의 테이블 별 .report.xlsx. */
   const handleDownloadBundle = async () => {
     if (bundleBusy) return;
     setBundleBusy(true);
@@ -1627,6 +1543,14 @@ export function ArtifactsPage() {
       // 4) MIGRATION SQL — table 별 합성 SQL.
       for (const [tableLc, sql] of Object.entries(compiledSqlByTable)) {
         if (sql) zip.file(`migration-sql/${tableLc}.migrate.sql`, sql);
+      }
+      // 5) VALIDATION — prefetch 한 report 별 .report.xlsx.
+      for (const [tableName, dto] of Object.entries(validationByTable)) {
+        try {
+          const blob = await buildXlsxBlob('validation', SHEETS.validation,
+            (sheet) => validationRowsFor(dto, sheet));
+          zip.file(`validation/${tableName}.report.xlsx`, await blob.arrayBuffer());
+        } catch (e) { console.warn('bundle: validation skipped', tableName, e); }
       }
 
       const zipBlob = await zip.generateAsync({ type: 'blob' });
@@ -1686,6 +1610,7 @@ export function ArtifactsPage() {
           ddlText={ddlText}
           dashboard={dashboard}
           compiledSqlByTable={compiledSqlByTable}
+          validationByTable={validationByTable}
         />
       </section>
     </div>
@@ -1801,6 +1726,10 @@ interface ExcelWorkbookProps {
   /** MIGRATION SQL — latest run 의 transform stage 가 박제한 (테이블 → SQL 텍스트).
    *  키는 lowercase tobeTable. selectedTable 의 lowercase 로 lookup. */
   compiledSqlByTable?: Record<string, string>;
+  /** VALIDATION — pinned snapshot 의 박제 run 으로부터 prefetch 한 per-table report.
+   *  키는 tobe_table (case-sensitive — BE 의 binding.tobeTable 그대로). 값 미존재 = 그 테이블
+   *  에 대해 run 안 됐거나 binding 미포함. */
+  validationByTable?: Record<string, ValidationReportDto>;
 }
 
 function ExcelWorkbook({
@@ -1813,6 +1742,7 @@ function ExcelWorkbook({
   ddlText,
   dashboard,
   compiledSqlByTable,
+  validationByTable,
 }: ExcelWorkbookProps) {
   const t = useT();
   /* Copy 버튼 직후 짧은 "Copied" 토스트를 띄우기 위한 상태.
@@ -1834,7 +1764,11 @@ function ExcelWorkbook({
   /* 현재 시트에 그릴 행. 상태바 rows 카운트도 이 배열 길이를 사용.
      - DASHBOARD: DDL+mapping 커버리지(Overview/Tables/Issues) — 실데이터
      - MAPPING(diff): Diff = buildDiff rows(선택 테이블 필터), Summary = 테이블별 집계 — 실데이터
-     - VALIDATION: 아직 mock(MOCK_ROWS_BY_TABLE), MIGRATION SQL: MOCK_ROWS (의도적 mock) */
+     - VALIDATION: pinned snapshot 의 박제 run 의 validation_reports — 실데이터
+     - MIGRATION SQL: MOCK_ROWS (의도적 mock — viewType='sql' 이라 grid 미사용) */
+  const validationDto = (category.key === 'validation' && selectedTable)
+    ? validationByTable?.[selectedTable] ?? null
+    : null;
   const dataRows: Cell[][] =
     category.key === 'dashboard'
       ? (dashboard?.sheets[activeSheet] ?? [])
@@ -1843,7 +1777,7 @@ function ExcelWorkbook({
         : category.key === 'diff' && activeSheet === 'Summary'
           ? ((selectedTable ? (diff?.summaryByTable[selectedTable] ?? []) : (diff?.summaryAll ?? [])))
           : category.key === 'validation' && selectedTable
-            ? MOCK_ROWS_BY_TABLE.validation[selectedTable]?.[activeSheet] ?? []
+            ? validationRowsFor(validationDto, activeSheet)
             : MOCK_ROWS[category.key]?.[activeSheet] ?? [];
 
   /* viewType='sql' 인 두 카테고리:
@@ -1885,8 +1819,8 @@ function ExcelWorkbook({
   const handleDownloadXlsx = () => {
     /* 워크북 전체(현재 카테고리의 모든 시트)를 실제 xlsx 로 저장. */
     const dlName = `${baseName}${category.suffix}`;
-    /* 각 시트별 데이터 lookup — diff 는 실데이터(Diff/Summary), validation 은 테이블별 mock,
-       나머지는 카테고리 직접. in-app preview 와 동일 행을 그대로 xlsx 로 굽는다. */
+    /* 각 시트별 데이터 lookup — 다 실데이터. validation 은 prefetch 한 DTO 를 시트별 Cell[][]
+       로 변환. in-app preview 와 동일 행을 그대로 xlsx 로 굽는다. */
     const getRows = (sheetName: string): Cell[][] => {
       if (category.key === 'dashboard') return dashboard?.sheets[sheetName] ?? [];
       if (category.key === 'diff') {
@@ -1895,7 +1829,7 @@ function ExcelWorkbook({
         return [];
       }
       if (category.key === 'validation' && selectedTable) {
-        return MOCK_ROWS_BY_TABLE.validation[selectedTable]?.[sheetName] ?? [];
+        return validationRowsFor(validationByTable?.[selectedTable] ?? null, sheetName);
       }
       return MOCK_ROWS[category.key]?.[sheetName] ?? [];
     };
@@ -1905,10 +1839,10 @@ function ExcelWorkbook({
   /* fx 수식바 placeholder 치환 — projectName + 카테고리별 context.
      사이드바에서 테이블을 선택했으면 {table} 을 그 값으로 override.
      diff 카테고리면 선택 테이블의 fxByTable 로 ASIS/TOBE/changed override (실데이터).
-     validation 카테고리면 선택 테이블의 VALIDATION_CHECK_COUNT 로 {n} override (아직 mock). */
+     validation 카테고리면 prefetch 한 DTO 의 totalChecks 로 {n} override (실데이터). */
   const validationN: number | undefined =
-    category.key === 'validation' && selectedTable
-      ? VALIDATION_CHECK_COUNT[selectedTable]
+    category.key === 'validation' && validationDto
+      ? validationDto.totalChecks
       : undefined;
   const formulaText = substitute(SUMMARY_PLACEHOLDER[category.key], {
     project: projectName,
