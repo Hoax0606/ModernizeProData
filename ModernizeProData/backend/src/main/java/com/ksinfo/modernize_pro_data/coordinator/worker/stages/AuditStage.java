@@ -92,11 +92,11 @@ public class AuditStage implements StageRunner {
 
         int successCount = 0;
         int failedCount = 0;
-        // cutover 는 본운영 — 위반이 있으면 분리 없이 fail 시켜 downstream gate(LocalWorkerExecutor)에 맡긴다.
-        // test / rehearsal 은 데이터 검증·시연 목적이므로 위반 row 를 DuckDB tobe_ 에서 분리해
-        // Load 가 정상 row 만 적재하도록 한다 (PoC1 row-level Quarantine separation, sample 5행은
-        // QuarantineService 가 이미 기록).
-        boolean separateViolations = ctx.getRunHistory().getRunType() != RunType.cutover;
+        // row-level Quarantine separation — 위반 row 를 DuckDB tobe_ 에서 DELETE 분리,
+        // 정상 row 만 Load 까지. sample 5행은 QuarantineService 가 이미 기록, 전수는 parquet 보존.
+        // 2026-05-29: cutover 도 동일 적용 (이전엔 cutover 만 strict — 분리 없이 fail).
+        // 근거: green-field 배포 모델에선 분리 후 정상 row 적재가 합리적. docs/ONBOARDING.md §Cutover 참조.
+        boolean separateViolations = true;
 
         for (MappingTableBinding binding : ctx.getBindings()) {
             OffsetDateTime tableStart = OffsetDateTime.now();

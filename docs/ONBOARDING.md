@@ -1312,7 +1312,104 @@ will turn this into an interactive setup.
 
 ---
 
-## 20. Further Reading
+## 20. Cutover Gate Policy — unified continue-on-error (decided 2026-05-29)
+
+### Decision
+
+`cutover` runType is treated **the same as `test` / `rehearsal`** by the stage gate:
+
+- **Within a stage**: continue-on-error (binding-level try/catch). Unchanged.
+- **Between stages**: only structural failure (`throw`) skips downstream. Per-table
+  `tables_failed > 0` does **not** trigger a gate anymore.
+- **AuditStage row-level Quarantine separation** also applies to cutover — violating
+  rows are removed from DuckDB `tobe_xxx` before Load. Sample 5 rows + full parquet
+  archive remain available.
+
+This removes the previous *strict cutover gate* (introduced when the model
+assumed in-place live-DB swap).
+
+### Why we changed it
+
+The first deployment target operates **green-field**:
+
+```
+1. Empty target PG  ──┐
+2. Run cutover ───────┤  (data lands in NEW PG)
+3. Verify & sign-off  │
+4. Swap app conn str ─┘  (old PG keeps serving until step 4)
+```
+
+- The old PG is **still serving live traffic** until the swap moment in step 4.
+- If cutover step 2 partially fails: just `TRUNCATE` the new PG and rerun. The
+  rollback cost is effectively zero because no consumer reads the new PG yet.
+
+Under that model, the *strict gate* (stop on first failed table, skip rest) loses
+its protective value:
+
+| Policy | Outcome on first failed table in 10-table cutover |
+|---|---|
+| **Strict (removed)** | Stop at Audit. Load / Verify skipped. Operator only knows the 1 failure. Fixes it. Re-runs. Discovers a 2nd failure. Iterates serially. |
+| **Continue (current)** | Audit separates violating rows. Load / Verify run all 10 tables. Operator sees the **full failure landscape** in one run, fixes all at once, re-runs once for sign-off. |
+
+### Scope — what was changed, what was not
+
+Two cutover-specific branches were unified:
+
+| Location | Before | After |
+|---|---|---|
+| `LocalWorkerExecutor.execute` — between-stage gate | `if (threw \|\| (isCutover && stageFailed))` | `if (threw)` |
+| `AuditStage.run` — `separateViolations` | `runType != cutover` | always `true` |
+
+Three other cutover-specific branches were **left as-is** (different concerns,
+not gate policy):
+
+| Location | Behavior | Why kept |
+|---|---|---|
+| `StageCatalog.stagesFor` | cutover uses 6 stages (no Audit) | Sprint 0 decision — separate question. Audit re-inclusion is its own discussion. |
+| `TransformStage` parquet2 dump | skipped on cutover | storage efficiency, one-shot run, not a safety policy |
+| `RunExecutionListener` stage-cache | skipped on cutover | re-execution safety for one-shot runs |
+| `RunService.validateForCutover` | production env + snapshotId required | trigger condition, not gate behavior |
+
+### When we would re-introduce strict (and how)
+
+If a future site uses **live-swap (in-place)** model where bad rows reaching the
+live PG would damage downstream consumers, the recommended approach is
+**site-level policy**, not a global runType branch:
+
+```sql
+ALTER TABLE sites ADD COLUMN cutover_policy VARCHAR(16)
+    NOT NULL DEFAULT 'green_field'
+    CHECK (cutover_policy IN ('green_field', 'live_swap'));
+```
+
+```java
+// LocalWorkerExecutor
+boolean strictGate = "live_swap".equals(site.getCutoverPolicy())
+                  && runType == RunType.cutover;
+if (threw || (strictGate && stageFailed)) { ... }
+```
+
+This stays per-site so the tool can serve both deployment models from the same
+build. Estimated work: ~1 hour. Not in PoC1 scope.
+
+### Related files
+
+- `backend/.../coordinator/worker/LocalWorkerExecutor.java`
+- `backend/.../coordinator/worker/stages/AuditStage.java`
+- (future) `backend/.../coordinator/site/Site.java` — if `cutover_policy` column is added
+
+### Conversation history (for context if this comes up later)
+
+The original strict-gate was put in by analogy to traditional in-place migrations
+where mid-flight failure is dangerous. The shift to continue-on-error was
+prompted by the first deployment site's green-field model. The team discussed
+three options (per-site policy / global config flag / full runType-vs-policy
+separation) and chose **unified continue-on-error now + per-site policy later if
+needed** — see commit history around 2026-05-29.
+
+---
+
+## 21. Further Reading
 
 - `CLAUDE.md` — stack, conventions, domain glossary, local run.
 - `docs/handoff/` — time-stamped handoff notes (read the most recent first).
