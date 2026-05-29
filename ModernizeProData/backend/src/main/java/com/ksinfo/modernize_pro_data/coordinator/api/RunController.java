@@ -5,16 +5,22 @@ import com.ksinfo.modernize_pro_data.common.exception.ApiException;
 import com.ksinfo.modernize_pro_data.coordinator.auth.ApiCredential;
 import com.ksinfo.modernize_pro_data.coordinator.auth.ApiCredentialRepository;
 import com.ksinfo.modernize_pro_data.coordinator.common.SolutionSettingsRepository;
+import com.ksinfo.modernize_pro_data.coordinator.run.ProjectRunReadinessService;
+import com.ksinfo.modernize_pro_data.coordinator.run.ProjectRunReadinessService.ProjectRunReadinessDto;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunHistory;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunHistoryRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunResult;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunService;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunTableResultsService;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunTableResultsService.TableResultDto;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunTableResultsService.TableSummaryDto;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunStartStatus;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunStatus;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunType;
 import com.ksinfo.modernize_pro_data.coordinator.run.TriggerSource;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
+import com.ksinfo.modernize_pro_data.coordinator.site.SiteRepository;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import lombok.RequiredArgsConstructor;
@@ -49,8 +55,11 @@ public class RunController {
     private final RunService runService;
     private final RunHistoryRepository runHistoryRepo;
     private final ProjectRepository projectRepo;
+    private final SiteRepository siteRepo;
     private final ApiCredentialRepository apiCredentialRepo;
     private final SolutionSettingsRepository solutionSettingsRepo;
+    private final ProjectRunReadinessService runReadinessService;
+    private final RunTableResultsService tableResultsService;
 
     /* ── DTOs ──────────────────────────────────────── */
 
@@ -61,8 +70,10 @@ public class RunController {
     public record StartRunRequest(
             @NotBlank String projectId,
             RunType runType,
-            List<String> tables,   // 선택한 TO-BE 테이블명. null/empty = 전체 실행.
-            boolean useCache       // true 면 직전 성공 run 의 CP2 재사용 시도 (stage-cache). 기본 false.
+            List<String> tables,    // 선택한 TO-BE 테이블명. null/empty = 전체 실행.
+            boolean useCache,       // true 면 직전 성공 run 의 CP2 재사용 시도 (stage-cache). 기본 false.
+            String resumeFromRunId  // 실패 run 의 마지막 success stage 이후부터 재개 (Retry 의 본격 흐름).
+                                    // null = 처음부터. 검증 실패 (mapping/DDL 변경, parquet 부재) 시 자동 fallback 처음부터.
     ) {}
 
     public record RunResultDto(
@@ -111,6 +122,19 @@ public class RunController {
             String snapshotId,
             Long batchJobExecutionId,
             String errorMessage,
+            /**
+             * 実行対象テーブル (TO-BE 物理名). null = 全 binding 対象, 非 null = 部分実行で
+             * 選択された TO-BE テーブル名一覧. metadata.selectedTables の型付き写し.
+             * FE Run History 表でこの値を表示し「どのテーブルを動かした run か」を識別.
+             */
+            List<String> tables,
+            /**
+             * Run History drill-down 用の table 別件数サマリ. {@link StageTableResult} を
+             * tobe_table 単位に集約した success / failed / running の件数.
+             * 一覧画面で 1 行に 「4 tables: 3✓ 1✗」 のような badge を出すための材料.
+             * stage_table_results が一つも無い run (例: 開始直後 / aborted) は 0/0/0/0.
+             */
+            TableSummaryDto tableSummary,
             Map<String, Object> metadata
     ) {}
 
@@ -162,7 +186,8 @@ public class RunController {
                 requestedBy,
                 credentialId,
                 req.tables(),
-                req.useCache());
+                req.useCache(),
+                req.resumeFromRunId());
         log.info("startRun via {} projectId={} runType={} by={} → status={}",
                 source, req.projectId(), runType, requestedBy, r.status());
         String projectName = project.getName();
@@ -170,9 +195,17 @@ public class RunController {
     }
 
     /**
-     * 全 project 를 一斉 起動 (외부 스케줄러로부터의 /runs/all entry).
-     *   - 対象: 全 project (旧設計은 schedule_start_time set 만이었으나, common mode 에서는
-     *     start_time 가 不要 — 결과적으로 무관한 필터가 되어 廃止)
+     * /runs/all 의 request body. siteId は必須 — 1 Coordinator が複数 site をホストしていても
+     * 意図せず別 site の project まで発火しないよう、必ず明示する.
+     */
+    public record StartAllRequest(
+            @NotBlank String siteId
+    ) {}
+
+    /**
+     * 指定 site の全 project 을 一斉 起動 (외부 스케줄러로부터의 /runs/all entry).
+     *   - 対象: siteId が指定する site の全 project (旧設計은 schedule_start_time set 만이었으나,
+     *     common mode 에서는 start_time 가 不要 — 결과적으로 무관한 필터가 되어 廃止)
      *   - 각 project 의 phase 로부터 runType (test/rehearsal/cutover) 자동 결정
      *   - eligible 하지 않은 phase (planning/analysis/sign-off/ready/hypercare/done) 의
      *     project 는 결과에 REJECTED 로 포함 — 추적 용
@@ -182,10 +215,15 @@ public class RunController {
      *
      * 외부 스케줄러 ↔ master/admin UI 双方 호출 가능. triggerSource 는 호출자에 따라
      * external / manual 자동 판별.
+     *
+     * siteId 必須化 (2026-05-29): 旧仕様은 projectRepo.findAll() 로 全 site 의 全 project
+     * 을 対象으로 했으나、1 Coordinator 가 複数 site 을 ホスト する dev / 多 customer 構成
+     * では PROD/TEST 同時発火等 의 事故 リスク가 大. body 의 siteId 로 明示 scope 限定 必須.
      */
     @PostMapping("/api/v1/runs/all")
     @PreAuthorize("hasAnyRole('API_CLIENT', 'MASTER', 'ADMIN')")
-    public ApiResponse<BulkRunResultDto> startAll(Authentication auth) {
+    public ApiResponse<BulkRunResultDto> startAll(@Valid @RequestBody StartAllRequest req,
+                                                  Authentication auth) {
         // External 모드 비활성 시 host 종류 (api_token / JWT 모두) 에 관계없이 503.
         // /runs/all 은 외부 trigger pattern 의 entry 이므로, master/admin UI 가 호출해도
         // external_enabled = false 면 끄는 일관 정책.
@@ -195,13 +233,20 @@ public class RunController {
                     HttpStatus.SERVICE_UNAVAILABLE);
         }
 
+        // siteId が指す site が存在しなければ 404. 空 project list が「site 不在」と「site あり
+        // だが project 0」で区別つかなくなるのを防ぐ.
+        if (!siteRepo.existsById(req.siteId())) {
+            throw new ApiException("SITE_NOT_FOUND",
+                    "site not found: " + req.siteId(), HttpStatus.NOT_FOUND);
+        }
+
         boolean isApiClient = auth.getAuthorities().stream()
                 .anyMatch(a -> "ROLE_API_CLIENT".equals(a.getAuthority()));
         TriggerSource source = isApiClient ? TriggerSource.external : TriggerSource.manual;
         String credentialId = isApiClient ? auth.getName() : null;
         String requestedBy = resolveRequestedBy(isApiClient, auth);
 
-        List<Project> targets = projectRepo.findAll();
+        List<Project> targets = projectRepo.findBySiteId(req.siteId());
         List<RunResultDto> results = new ArrayList<>();
         int started = 0, rejected = 0, locked = 0;
         for (Project p : targets) {
@@ -246,23 +291,8 @@ public class RunController {
         return ApiResponse.ok(toViewDtos(List.of(rh)).get(0));
     }
 
-    /** 進行中 run 一時停止 (running → paused). stage 경계에서 멈춤. */
-    @PostMapping("/api/v1/runs/{runId}/pause")
-    @PreAuthorize("hasAnyRole('MASTER', 'ADMIN')")
-    public ApiResponse<RunHistoryViewDto> pauseRun(@PathVariable String runId) {
-        RunHistory rh = runService.pauseRun(runId);
-        log.info("pauseRun via UI runId={} → status={}", runId, rh.getStatus());
-        return ApiResponse.ok(toViewDtos(List.of(rh)).get(0));
-    }
-
-    /** 一時停止 run 再開 (paused → running). */
-    @PostMapping("/api/v1/runs/{runId}/resume")
-    @PreAuthorize("hasAnyRole('MASTER', 'ADMIN')")
-    public ApiResponse<RunHistoryViewDto> resumeRun(@PathVariable String runId) {
-        RunHistory rh = runService.resumeRun(runId);
-        log.info("resumeRun via UI runId={} → status={}", runId, rh.getStatus());
-        return ApiResponse.ok(toViewDtos(List.of(rh)).get(0));
-    }
+    // pause / resume endpoint 제거 (2026-05-29). Stop + Retry (resume-from-failed-stage) 가
+    // 기능 동치라 UI 단순화 결정. project_pause_removed 메모리 참조.
 
     /** Run の現在 status 取得. user session 認証. */
     @GetMapping("/api/v1/runs/{runId}")
@@ -285,6 +315,32 @@ public class RunController {
         return ApiResponse.ok(toViewDtos(runHistoryRepo.findByProjectIdOrderByStartedAtDesc(id)));
     }
 
+    /**
+     * Project の Request Review readiness (Versions 画面の Request Review ゲート用).
+     * 全 TO-BE テーブルの最新 run = success の時のみ allReady=true.
+     */
+    @GetMapping("/api/v1/projects/{id}/run-readiness")
+    public ApiResponse<ProjectRunReadinessDto> runReadiness(@PathVariable String id) {
+        if (!projectRepo.existsById(id)) {
+            throw new ApiException("PROJECT_NOT_FOUND",
+                    "project not found: " + id, HttpStatus.NOT_FOUND);
+        }
+        return ApiResponse.ok(runReadinessService.readinessFor(id));
+    }
+
+    /**
+     * Run History drill-down — 1 run の per-table 詳細結果.
+     * 行展開時に FE が呼び出して per-table の status / rows / duration / error を表示する.
+     */
+    @GetMapping("/api/v1/runs/{runId}/table-results")
+    public ApiResponse<List<TableResultDto>> tableResults(@PathVariable String runId) {
+        if (!runHistoryRepo.existsById(runId)) {
+            throw new ApiException("RUN_NOT_FOUND",
+                    "run not found: " + runId, HttpStatus.NOT_FOUND);
+        }
+        return ApiResponse.ok(tableResultsService.resultsForRun(runId));
+    }
+
     /* ── DTO 변환 helpers ───────────────────────────── */
 
     /**
@@ -301,6 +357,10 @@ public class RunController {
         Map<String, String> projectNames = projectRepo.findAllById(projectIds).stream()
                 .collect(Collectors.toMap(Project::getId, Project::getName));
 
+        // Per-run の table summary を一括取得 (N+1 回避).
+        List<String> runIds = runs.stream().map(RunHistory::getId).toList();
+        Map<String, TableSummaryDto> summaries = tableResultsService.summariesForRuns(runIds);
+
         return runs.stream()
                 .map(r -> new RunHistoryViewDto(
                         r.getId(), r.getProjectId(),
@@ -310,8 +370,26 @@ public class RunController {
                         r.getWorkerId(),
                         r.getStatus(), r.getStartedAt(), r.getFinishedAt(),
                         r.getDurationMs(), r.getSnapshotId(),
-                        r.getBatchJobExecutionId(), r.getErrorMessage(), r.getMetadata()))
+                        r.getBatchJobExecutionId(), r.getErrorMessage(),
+                        extractSelectedTables(r.getMetadata()),
+                        summaries.getOrDefault(r.getId(), TableSummaryDto.empty()),
+                        r.getMetadata()))
                 .toList();
+    }
+
+    /**
+     * RunHistory.metadata.selectedTables を型付きで取り出す. 非 List / null / 空なら null
+     * (全テーブル run の意味). 型不一致要素は無視.
+     */
+    private static List<String> extractSelectedTables(Map<String, Object> metadata) {
+        if (metadata == null) return null;
+        Object raw = metadata.get("selectedTables");
+        if (!(raw instanceof List<?> list) || list.isEmpty()) return null;
+        List<String> result = new ArrayList<>(list.size());
+        for (Object o : list) {
+            if (o instanceof String s) result.add(s);
+        }
+        return result.isEmpty() ? null : result;
     }
 
     /**

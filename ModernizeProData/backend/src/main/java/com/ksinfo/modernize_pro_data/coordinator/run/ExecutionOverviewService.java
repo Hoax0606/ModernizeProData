@@ -29,6 +29,22 @@ public class ExecutionOverviewService {
     private final StageTableResultRepository stageTableResultRepo;
     private final QuarantineEntryRepository quarantineRepo;
 
+    /**
+     * Per-row pipeline 7-bar 描画用の stage 集約.
+     * FE 側 (api/runs.ts:StageView と互換) で {@code buildStagesFromStageViews} に渡せる
+     * 形にしておき、ExecutionPage の per-stage chip と同じレンダラを通せる.
+     * tables の詳細 (per-binding 結果) は overview では不要なので省略.
+     */
+    public record StageSummary(
+            String stageKey,
+            int seq,
+            String status,       // StageStatus.name() — pending / running / success / failed
+            int pct,             // 0..100. tablesSuccess / tablesTotal で BE 算出
+            int tablesTotal,
+            int tablesSuccess,
+            int tablesFailed
+    ) {}
+
     public record ProjectExecMetrics(
             String projectId,
             String projectName,
@@ -39,7 +55,14 @@ public class ExecutionOverviewService {
             int tablesDone,
             long errorCount,
             long warningCount,
-            int progressPct
+            int progressPct,
+            /**
+             * 7-stage の現在状態. run 履歴が無ければ空 List.
+             * FE はこれをそのまま buildStagesFromStageViews に渡し、Execution 画面と
+             * 同じレンダリングで bar を描く (旧仕様の progressPct → floor() 換算による
+             * 「3 success なのに 2 bar しか塗られない」ずれを排除).
+             */
+            List<StageSummary> stages
     ) {}
 
     public List<ProjectExecMetrics> bySite(String siteId) {
@@ -52,7 +75,7 @@ public class ExecutionOverviewService {
         RunHistory latest = runHistoryRepo.findFirstByProjectIdOrderByStartedAtDesc(p.getId());
         if (latest == null) {
             return new ProjectExecMetrics(p.getId(), p.getName(), null, null,
-                    0, p.getTobeTableCount(), 0, 0, 0, 0);
+                    0, p.getTobeTableCount(), 0, 0, 0, 0, List.of());
         }
         String runId = latest.getId();
         List<StageInstance> stages = stageInstanceRepo.findByRunIdOrderBySeqAsc(runId);
@@ -79,14 +102,51 @@ public class ExecutionOverviewService {
         } else if (stages.isEmpty()) {
             progressPct = 0;
         } else {
-            long done = stages.stream().filter(s -> s.getStatus() == StageStatus.success).count();
-            progressPct = (int) (100 * done / stages.size());
+            /* success は 1 段分の完全進捗、running は tablesSuccess/tablesTotal 割合の
+               部分進捗として加算. failed は「結果が出た」けど 1 段ぶんとはみなさない
+               (FE は失敗 stage を err として描画するので、失敗 stage を success と
+               同列に数えると上の bar 数が増えて見える). */
+            double progressed = 0;
+            for (StageInstance s : stages) {
+                if (s.getStatus() == StageStatus.success) {
+                    progressed += 1.0;
+                } else if (s.getStatus() == StageStatus.running) {
+                    int total = s.getTablesTotal() == null ? 0 : s.getTablesTotal();
+                    int ok = s.getTablesSuccess() == null ? 0 : s.getTablesSuccess();
+                    if (total > 0) progressed += (double) ok / total;
+                }
+            }
+            progressPct = (int) Math.round(100.0 * progressed / stages.size());
         }
+
+        // FE 描画用 stage summary.
+        List<StageSummary> stageSummaries = stages.stream()
+                .map(ExecutionOverviewService::toSummary)
+                .toList();
 
         long errorCount = quarantineRepo.countByRunIdAndSeverity(runId, QuarantineSeverity.error);
         long warningCount = quarantineRepo.countByRunIdAndSeverity(runId, QuarantineSeverity.warning);
 
         return new ProjectExecMetrics(p.getId(), p.getName(), runId, latest.getStatus().name(),
-                rows, tablesTotal, tablesDone, errorCount, warningCount, progressPct);
+                rows, tablesTotal, tablesDone, errorCount, warningCount, progressPct, stageSummaries);
+    }
+
+    /** StageInstance → StageSummary. pct は tablesSuccess/tablesTotal 比. */
+    private static StageSummary toSummary(StageInstance s) {
+        int total = s.getTablesTotal() == null ? 0 : s.getTablesTotal();
+        int ok = s.getTablesSuccess() == null ? 0 : s.getTablesSuccess();
+        int failed = s.getTablesFailed() == null ? 0 : s.getTablesFailed();
+        int pct;
+        if (s.getStatus() == StageStatus.success) {
+            pct = 100;
+        } else if (s.getStatus() == StageStatus.failed) {
+            pct = total > 0 ? (int) Math.round(100.0 * ok / total) : 0;
+        } else if (s.getStatus() == StageStatus.running) {
+            pct = total > 0 ? (int) Math.round(100.0 * (ok + failed) / total) : 0;
+        } else {
+            pct = 0;
+        }
+        return new StageSummary(s.getStageKey(), s.getSeq(), s.getStatus().name(),
+                Math.max(0, Math.min(100, pct)), total, ok, failed);
     }
 }

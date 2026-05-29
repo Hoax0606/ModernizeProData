@@ -8,20 +8,21 @@
  *
  * Internal/External は mutex (BE の CHECK constraint + service 自動 flip で二重強制).
  */
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { useAuthStore } from '../store/auth';
 import { useWorkspaceStore } from '../store/workspace';
 import { useSettingsStore } from '../store/settings';
 import { ApiError } from '../api/client';
-import { runsApi, type RunHistoryDto } from '../api/runs';
+import { runsApi, type RunHistoryDto, type RunTableResult } from '../api/runs';
 import { credentialsApi, type CurrentCredentialDto } from '../api/credentials';
 import { solutionSettingsApi, type SolutionSettingsDto, type InternalMode } from '../api/solutionSettings';
 import { scheduleApi } from '../api/schedule';
 import { Toggle } from '../components/Toggle';
 import { Radio } from '../components/Checkbox';
 import { useT } from '../i18n';
-import { toHHmm, toHHmmss, formatTimestamp, formatDuration } from '../lib/formatters';
+import { toHHmm, toHHmmss, formatTimestamp, formatTimeMs, formatDuration } from '../lib/formatters';
 
 export function SchedulerPage() {
   const t = useT();
@@ -29,10 +30,23 @@ export function SchedulerPage() {
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
 
-  const projects = useWorkspaceStore((s) => s.projects);
-  const sites = useWorkspaceStore((s) => s.sites);
+  const allProjects = useWorkspaceStore((s) => s.projects);
+  const allSites = useWorkspaceStore((s) => s.sites);
+  const activeSiteId = useWorkspaceStore((s) => s.activeSiteId);
   const fetchSites = useWorkspaceStore((s) => s.fetchSites);
   const fetchProjects = useWorkspaceStore((s) => s.fetchProjects);
+  /* SchedulerPage は active site の context で開かれる前提.
+     trigger curl 例 / project schedule 設定 / project 一覧 などはすべて active site
+     に絞る. activeSiteId が null の時は空 list (= site が選ばれていない、サイドバーで
+     site を選択するように促す形). */
+  const sites = useMemo(
+    () => allSites.filter((s) => s.id === activeSiteId),
+    [allSites, activeSiteId],
+  );
+  const projects = useMemo(
+    () => allProjects.filter((p) => p.siteId === activeSiteId),
+    [allProjects, activeSiteId],
+  );
 
   // settings store の externalIntegrations toggle は BE と optimistic mirror.
   const setStoreExternalIntegrations = useSettingsStore((s) => s.setExternalIntegrations);
@@ -43,6 +57,13 @@ export function SchedulerPage() {
   const [historyStatusFilter, setHistoryStatusFilter] = useState<string>('');
   const [historyTypeFilter, setHistoryTypeFilter] = useState<string>('');
   const [historyTriggerFilter, setHistoryTriggerFilter] = useState<string>('');
+  /** Run History の drill-down 展開行 (複数同時展開可). */
+  const [expandedRunIds, setExpandedRunIds] = useState<Set<string>>(new Set());
+  const toggleExpandedRun = (runId: string) => setExpandedRunIds((cur) => {
+    const next = new Set(cur);
+    if (next.has(runId)) next.delete(runId); else next.add(runId);
+    return next;
+  });
 
   const [credential, setCredential] = useState<CurrentCredentialDto | null>(null);
   const [settings, setSettings] = useState<SolutionSettingsDto | null>(null);
@@ -318,28 +339,39 @@ export function SchedulerPage() {
     catch (e) { setError(formatError(e)); }
   };
 
+  /* Page scope = active site. History も active site の project が走らせた run のみ.
+     runsApi.listAll() は全 site 横断で返るため FE 側で project.siteId 照合. */
+  const activeSiteProjectIds = useMemo(
+    () => new Set(allProjects.filter((p) => p.siteId === activeSiteId).map((p) => p.id)),
+    [allProjects, activeSiteId],
+  );
+  const historyForSite = useMemo(
+    () => history.filter((r) => activeSiteProjectIds.has(r.projectId)),
+    [history, activeSiteProjectIds],
+  );
+
   /** Run history dropdown 選択肢 — 現データに存在する値だけ derive. */
   const historyStatusOptions = useMemo(() => {
     const m = new Map<string, number>();
-    for (const r of history) m.set(r.status, (m.get(r.status) ?? 0) + 1);
+    for (const r of historyForSite) m.set(r.status, (m.get(r.status) ?? 0) + 1);
     return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [history]);
+  }, [historyForSite]);
   const historyTypeOptions = useMemo(() => {
     const m = new Map<string, number>();
-    for (const r of history) m.set(r.runType, (m.get(r.runType) ?? 0) + 1);
+    for (const r of historyForSite) m.set(r.runType, (m.get(r.runType) ?? 0) + 1);
     return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [history]);
+  }, [historyForSite]);
   const historyTriggerOptions = useMemo(() => {
     const m = new Map<string, number>();
-    for (const r of history) m.set(r.triggerSource, (m.get(r.triggerSource) ?? 0) + 1);
+    for (const r of historyForSite) m.set(r.triggerSource, (m.get(r.triggerSource) ?? 0) + 1);
     return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [history]);
-  const filteredHistory = useMemo(() => history.filter((r) => {
+  }, [historyForSite]);
+  const filteredHistory = useMemo(() => historyForSite.filter((r) => {
     if (historyStatusFilter && r.status !== historyStatusFilter) return false;
     if (historyTypeFilter && r.runType !== historyTypeFilter) return false;
     if (historyTriggerFilter && r.triggerSource !== historyTriggerFilter) return false;
     return true;
-  }), [history, historyStatusFilter, historyTypeFilter, historyTriggerFilter]);
+  }), [historyForSite, historyStatusFilter, historyTypeFilter, historyTriggerFilter]);
 
   /* データから消えた値を選んでた場合は filter をリセット. */
   useEffect(() => {
@@ -385,15 +417,26 @@ export function SchedulerPage() {
   //   windows      : curl ... -d "{\"...\"}"
   //   powershell   : curl.exe --% ... -d "{\"...\"}"   (--% で PowerShell の引数加工を停止)
   const curlCmd = shellMode === 'powershell' ? 'curl.exe --%' : 'curl';
-  const bulkCommand = `${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs/all -H "Authorization: Bearer ${tokenForDocs}"`;
-  const singleProjectCommands = projects.length === 0
-    ? '# (project 未作成 — All Projects 画面で project を作成すると単発実行コマンドがここに表示されます)'
-    : projects.map((p) => {
-        const body = shellMode === 'bash'
-          ? `'{"projectId":"${p.id}"}'`
-          : `"{\\"projectId\\":\\"${p.id}\\"}"`;
-        return `# ${p.name} (phase=${p.phase})\n${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs -H "Authorization: Bearer ${tokenForDocs}" -H "Content-Type: application/json" -d ${body}`;
-      }).join('\n\n');
+  const quoteBody = (obj: Record<string, string>) => {
+    const json = JSON.stringify(obj);
+    return shellMode === 'bash' ? `'${json}'` : `"${json.replace(/"/g, '\\"')}"`;
+  };
+  /* /runs/all は siteId 必須 (2026-05-29 改). このページは active site scope なので
+     その site の bulk + その site の project の single だけを表示. */
+  const activeSite = sites[0] ?? null;
+  const triggerExamplesText = (() => {
+    if (!activeSite) {
+      return '# (サイドバーで site を選んでください)';
+    }
+    const bulkCmd = `${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs/all -H "Authorization: Bearer ${tokenForDocs}" -H "Content-Type: application/json" -d ${quoteBody({ siteId: activeSite.id })}`;
+    const singleCmds = projects.length === 0
+      ? '# (この site にはまだ project がありません)'
+      : projects.map((p) => {
+          const body = quoteBody({ projectId: p.id });
+          return `# ${p.name} (phase=${p.phase})\n${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs -H "Authorization: Bearer ${tokenForDocs}" -H "Content-Type: application/json" -d ${body}`;
+        }).join('\n\n');
+    return `${t('scheduler.external.docs.bulkComment')}\n${bulkCmd}\n\n${t('scheduler.external.docs.singleComment')}\n${singleCmds}`;
+  })();
 
   return (
     <div style={styles.page}>
@@ -651,11 +694,7 @@ export function SchedulerPage() {
               borderRadius: 3, lineHeight: 1.6,
               whiteSpace: 'pre-wrap',
             }}>
-{`${t('scheduler.external.docs.bulkComment')}
-${bulkCommand}
-
-${t('scheduler.external.docs.singleComment')}
-${singleProjectCommands}`}
+{triggerExamplesText}
             </pre>
           </div>
 
@@ -671,7 +710,7 @@ ${singleProjectCommands}`}
             {t('scheduler.section.history')}
             {(historyStatusFilter || historyTypeFilter || historyTriggerFilter) && (
               <span style={styles.historyFilterCount}>
-                {filteredHistory.length} / {history.length}
+                {filteredHistory.length} / {historyForSite.length}
               </span>
             )}
           </h3>
@@ -684,7 +723,7 @@ ${singleProjectCommands}`}
                 style={styles.historyFilterSelect}
                 disabled={historyStatusOptions.length === 0}
               >
-                <option value="">All ({history.length})</option>
+                <option value="">All ({historyForSite.length})</option>
                 {historyStatusOptions.map(([v, n]) => (
                   <option key={v} value={v}>{v} ({n})</option>
                 ))}
@@ -698,7 +737,7 @@ ${singleProjectCommands}`}
                 style={styles.historyFilterSelect}
                 disabled={historyTypeOptions.length === 0}
               >
-                <option value="">All ({history.length})</option>
+                <option value="">All ({historyForSite.length})</option>
                 {historyTypeOptions.map(([v, n]) => (
                   <option key={v} value={v}>{v} ({n})</option>
                 ))}
@@ -712,7 +751,7 @@ ${singleProjectCommands}`}
                 style={styles.historyFilterSelect}
                 disabled={historyTriggerOptions.length === 0}
               >
-                <option value="">All ({history.length})</option>
+                <option value="">All ({historyForSite.length})</option>
                 {historyTriggerOptions.map(([v, n]) => (
                   <option key={v} value={v}>{v} ({n})</option>
                 ))}
@@ -737,49 +776,109 @@ ${singleProjectCommands}`}
           <table style={styles.table}>
             <thead>
               <tr>
+                <th style={{ ...styles.th, width: 22 }} aria-label="expand"></th>
                 <th style={styles.th}>{t('scheduler.history.col.runId')}</th>
                 <th style={styles.th}>{t('scheduler.history.col.project')}</th>
                 <th style={styles.th}>{t('scheduler.history.col.type')}</th>
                 <th style={styles.th}>{t('scheduler.history.col.trigger')}</th>
                 <th style={styles.th}>{t('scheduler.history.col.worker')}</th>
+                <th style={styles.th}>{t('scheduler.history.col.tables')}</th>
                 <th style={styles.th}>{t('scheduler.history.col.status')}</th>
                 <th style={styles.th}>{t('scheduler.history.col.started')}</th>
                 <th style={styles.th}>{t('scheduler.history.col.finished')}</th>
-                <th style={styles.th}>{t('scheduler.history.col.duration')}</th>
+                <th
+                  style={styles.th}
+                  title={t('projectSettings.schedule.history.col.duration.tooltip')}
+                >
+                  {t('scheduler.history.col.duration')}
+                </th>
                 <th style={styles.th}>{t('scheduler.history.col.actions')}</th>
               </tr>
             </thead>
             <tbody>
-              {filteredHistory.map((h) => (
-                <tr key={h.id}>
-                  <td style={styles.td}><code>{h.id}</code></td>
-                  <td style={styles.td}>
-                    <div>{h.projectName}</div>
-                    <div style={{ fontSize: 9, color: 'var(--text-4)' }}><code>{h.projectId}</code></div>
-                  </td>
-                  <td style={styles.td}>{h.runType}</td>
-                  <td style={styles.td}>{h.triggerSource}</td>
-                  <td style={styles.td}>{h.workerId ?? '-'}</td>
-                  <td style={styles.td}>
-                    <span style={statusStyle(h.status)}>{h.status}</span>
-                  </td>
-                  <td style={styles.td}>{formatTimestamp(h.startedAt)}</td>
-                  <td style={styles.td}>{h.finishedAt ? formatTimestamp(h.finishedAt) : '-'}</td>
-                  <td style={styles.td}>{formatDuration(h.durationMs)}</td>
-                  <td style={styles.td}>
-                    {h.status === 'running' && (
-                      <button
-                        onClick={() => handleAbort(h.id)}
-                        style={styles.iconBtn}
-                        title={t('scheduler.tooltip.abort')}
-                        aria-label={t('scheduler.action.abort')}
+              {filteredHistory.map((h) => {
+                const expanded = expandedRunIds.has(h.id);
+                const canExpand = h.tableSummary.total > 0;
+                const s = h.tableSummary;
+                return (
+                  <Fragment key={h.id}>
+                    <tr
+                      onClick={canExpand ? () => toggleExpandedRun(h.id) : undefined}
+                      style={{ cursor: canExpand ? 'pointer' : 'default' }}
+                    >
+                      <td style={{ ...styles.td, textAlign: 'center', padding: '4px 4px' }}>
+                        {canExpand && (
+                          <span style={{ color: 'var(--text-3)', fontSize: 11, userSelect: 'none' }}>
+                            {expanded ? '▾' : '▸'}
+                          </span>
+                        )}
+                      </td>
+                      <td style={styles.td}><code>{h.id}</code></td>
+                      <td style={styles.td}>
+                        <div>{h.projectName}</div>
+                        <div style={{ fontSize: 9, color: 'var(--text-4)' }}><code>{h.projectId}</code></div>
+                      </td>
+                      <td style={styles.td}>{h.runType}</td>
+                      <td style={styles.td}>{h.triggerSource}</td>
+                      <td style={styles.td}>{h.workerId ?? '-'}</td>
+                      <td style={styles.td}>
+                        {s.total === 0 ? (
+                          <span
+                            title={h.tables == null
+                              ? t('scheduler.history.tables.all')
+                              : `partial: ${h.tables.length}\n${h.tables.join('\n')}`}
+                            style={{ color: 'var(--text-4)', fontFamily: 'var(--mono)', fontSize: 11 }}
+                          >
+                            —
+                          </span>
+                        ) : (
+                          <span
+                            title={h.tables == null
+                              ? t('scheduler.history.tables.all')
+                              : `partial: ${h.tables.length}\n${h.tables.join('\n')}`}
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--mono)', fontSize: 11 }}
+                          >
+                            <span style={{ color: 'var(--text-3)' }}>{s.total}</span>
+                            {s.success > 0 && <span style={schedSummaryBadge('#166534', '#dcfce7', '#86efac')}>{s.success}✓</span>}
+                            {s.failed > 0 && <span style={schedSummaryBadge('#991b1b', '#fee2e2', '#fca5a5')}>{s.failed}✗</span>}
+                            {s.running > 0 && <span style={schedSummaryBadge('#92400e', '#fef3c7', '#fcd34d')}>{s.running}…</span>}
+                          </span>
+                        )}
+                      </td>
+                      <td style={styles.td}>
+                        <span style={statusStyle(h.status)}>{h.status}</span>
+                      </td>
+                      <td style={styles.td}>{formatTimestamp(h.startedAt)}</td>
+                      <td style={styles.td}>{h.finishedAt ? formatTimestamp(h.finishedAt) : '-'}</td>
+                      <td
+                        style={styles.td}
+                        title={t('projectSettings.schedule.history.col.duration.tooltip')}
                       >
-                        ⏹
-                      </button>
+                        {formatDuration(h.durationMs)}
+                      </td>
+                      <td style={styles.td}>
+                        {h.status === 'running' && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleAbort(h.id); }}
+                            style={styles.iconBtn}
+                            title={t('scheduler.tooltip.abort')}
+                            aria-label={t('scheduler.action.abort')}
+                          >
+                            ⏹
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                    {expanded && (
+                      <tr>
+                        <td colSpan={12} style={{ padding: 0, background: 'var(--panel-2)' }}>
+                          <SchedulerRunDrilldown runId={h.id} t={t} />
+                        </td>
+                      </tr>
                     )}
-                  </td>
-                </tr>
-              ))}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -794,6 +893,73 @@ function formatError(e: unknown): string {
   if (e instanceof Error) return e.message;
   return String(e);
 }
+
+const schedSummaryBadge = (color: string, bg: string, border: string): React.CSSProperties => ({
+  display: 'inline-block', padding: '0 5px', borderRadius: 3,
+  fontSize: 10, fontWeight: 700, border: `1px solid ${border}`,
+  color, background: bg, lineHeight: '14px',
+});
+
+/**
+ * Scheduler Run History の per-table drill-down sub-row. LogViewerPage の
+ * HistoryRunDrilldown と同じく BE /runs/{id}/table-results を取得して表示.
+ */
+function SchedulerRunDrilldown({ runId, t }: { runId: string; t: (k: string, v?: Record<string, string>) => string }) {
+  const { data, isLoading, isError } = useQuery<RunTableResult[]>({
+    queryKey: ['run-table-results', runId],
+    queryFn: () => runsApi.tableResults(runId),
+    staleTime: 5_000,
+  });
+  if (isLoading) return <div style={schedDrillStyles.note}>{t('projectSettings.schedule.history.drilldown.loading')}</div>;
+  if (isError) return <div style={{ ...schedDrillStyles.note, color: 'var(--red)' }}>{t('projectSettings.schedule.history.drilldown.error')}</div>;
+  if (!data || data.length === 0) return <div style={schedDrillStyles.note}>{t('projectSettings.schedule.history.drilldown.empty')}</div>;
+  return (
+    <div style={schedDrillStyles.wrap}>
+      <table style={schedDrillStyles.table}>
+        <thead>
+          <tr>
+            <th style={schedDrillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.status')}</th>
+            <th style={schedDrillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.table')}</th>
+            <th style={{ ...schedDrillStyles.th, textAlign: 'right' }}>{t('projectSettings.schedule.history.drilldown.col.rows')}</th>
+            <th style={schedDrillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.started')}</th>
+            <th style={schedDrillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.finished')}</th>
+            <th style={{ ...schedDrillStyles.th, textAlign: 'right' }}>{t('projectSettings.schedule.history.drilldown.col.duration')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.map((r) => {
+            const fullName = r.tobeSchema ? `${r.tobeSchema}.${r.tobeTable}` : r.tobeTable;
+            const color = r.status === 'success' ? '#166534'
+              : r.status === 'failed' ? '#991b1b'
+              : '#92400e';
+            const icon = r.status === 'success' ? '✓' : r.status === 'failed' ? '✗' : '…';
+            return (
+              <tr key={fullName}>
+                <td style={{ ...schedDrillStyles.td, color, fontWeight: 700 }}>{icon} {r.status}</td>
+                <td style={schedDrillStyles.td}>{fullName}</td>
+                <td style={{ ...schedDrillStyles.td, textAlign: 'right' }}>{r.rows.toLocaleString()}</td>
+                <td style={schedDrillStyles.td}>{r.startedAt ? formatTimeMs(r.startedAt) : '—'}</td>
+                <td style={schedDrillStyles.td}>{r.finishedAt ? formatTimeMs(r.finishedAt) : '—'}</td>
+                <td style={{ ...schedDrillStyles.td, textAlign: 'right' }}>{formatDuration(r.durationMs)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+const schedDrillStyles: Record<string, React.CSSProperties> = {
+  wrap: { padding: '8px 12px 12px 36px', background: 'var(--panel-2)' },
+  table: { width: '100%', borderCollapse: 'collapse', fontSize: 11, fontFamily: 'var(--mono)' },
+  th: {
+    textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--border)',
+    color: 'var(--text-3)', fontWeight: 600, fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5,
+  },
+  td: { padding: '3px 8px', borderBottom: '1px dashed var(--border)', color: 'var(--text-2)' },
+  note: { padding: '8px 12px 8px 36px', color: 'var(--text-3)', fontSize: 11, fontStyle: 'italic' },
+};
 function statusStyle(status: string): React.CSSProperties {
   const base: React.CSSProperties = { padding: '2px 6px', borderRadius: 3, fontSize: 11 };
   switch (status) {

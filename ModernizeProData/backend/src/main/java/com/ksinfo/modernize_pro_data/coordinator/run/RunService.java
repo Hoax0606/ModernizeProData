@@ -96,7 +96,7 @@ public class RunService {
                               TriggerSource triggerSource,
                               String requestedBy,
                               String credentialId) {
-        return startRun(projectId, runType, triggerSource, requestedBy, credentialId, null, false);
+        return startRun(projectId, runType, triggerSource, requestedBy, credentialId, null, false, null);
     }
 
     @Transactional
@@ -106,13 +106,9 @@ public class RunService {
                               String requestedBy,
                               String credentialId,
                               List<String> tables) {
-        return startRun(projectId, runType, triggerSource, requestedBy, credentialId, tables, false);
+        return startRun(projectId, runType, triggerSource, requestedBy, credentialId, tables, false, null);
     }
 
-    /**
-     * 부분 실행(tables) + stage-cache(useCache) 지원. tables=null/empty 면 전체, useCache=true 면 직전 CP2 재사용 시도.
-     * 두 플래그는 RunHistory.metadata 에 저장 → RunExecutionListener 가 사용.
-     */
     @Transactional
     public RunResult startRun(String projectId,
                               RunType runType,
@@ -121,6 +117,27 @@ public class RunService {
                               String credentialId,
                               List<String> tables,
                               boolean useCache) {
+        return startRun(projectId, runType, triggerSource, requestedBy, credentialId, tables, useCache, null);
+    }
+
+    /**
+     * 부분 실행(tables) + stage-cache(useCache) + resume-from-failed-run 지원.
+     * - tables=null/empty 면 전체.
+     * - useCache=true 면 직전 success run 의 CP2 재사용 시도.
+     * - resumeFromRunId 있으면 그 옛 run 의 마지막 success stage 이후부터 재개 (Retry 흐름).
+     *   처음부터 끝까지 실행하는 게 아니라 그 stage 이전을 모두 success 로 미리 마킹 → executor 가 skip.
+     *   RunExecutionListener 가 parquet1/parquet2 도 DuckDB 에 복원.
+     * 세 플래그/필드는 RunHistory.metadata 에 저장 → RunExecutionListener 가 사용.
+     */
+    @Transactional
+    public RunResult startRun(String projectId,
+                              RunType runType,
+                              TriggerSource triggerSource,
+                              String requestedBy,
+                              String credentialId,
+                              List<String> tables,
+                              boolean useCache,
+                              String resumeFromRunId) {
 
         // 1. Validate — project 存在 (FOR UPDATE で同時にロック取得)
         Project project = projectRepo.findByIdForUpdate(projectId).orElse(null);
@@ -156,11 +173,11 @@ public class RunService {
             }
         }
 
-        // 2. Lock check — 실행 중 (running / paused) 만 LOCKED.
+        // 2. Lock check — running 만 LOCKED.
         // idle / null / completed 는 새 run trigger 허용.
-        // completed = 이전 run 결과 (frontend mock simulation 잔재 포함) — 새 run 막을 이유 없음.
+        // (paused 는 2026-05-29 제거 — Stop + Retry 가 대체.)
         String currentStatus = project.getRunStatus();
-        boolean isActuallyRunning = STATUS_RUNNING.equals(currentStatus) || "paused".equals(currentStatus);
+        boolean isActuallyRunning = STATUS_RUNNING.equals(currentStatus);
         if (isActuallyRunning) {
             log.info("startRun locked: projectId={} run_status={}", projectId, currentStatus);
             return RunResult.locked("project already in run_status: " + currentStatus);
@@ -181,6 +198,19 @@ public class RunService {
         //   (REJECT 정책은 운영 부담이 커서 fallback 으로 통일 — Worker 안 켜져있어도 일이 멈추지 않게.)
         String resolvedWorker = resolveWorkerForProject(project);
 
+        // 3.6. Resume-from-failed-run 검증 — resumeFromRunId 가 주어지면 옛 run 정합성 확인.
+        //   조건 통과: same snapshot + same selectedTables (또는 옛 run 의 superset) + 옛 run 의
+        //   parquet1/parquet2 가 디스크에 존재. 검증 실패 시 처음부터 fallback (resumeFromStage=null).
+        String resumeFromStageKey = null;  // null = 처음부터, "audit" 같은 stage key = 그 stage 부터.
+        if (resumeFromRunId != null && !resumeFromRunId.isBlank()) {
+            resumeFromStageKey = validateResumeContext(resumeFromRunId, projectId, snapshotId, tables);
+            if (resumeFromStageKey == null) {
+                log.info("Resume from {} fallback to fresh run (validation failed or no failed stage)", resumeFromRunId);
+            } else {
+                log.info("Resume from {} : will skip stages before '{}'", resumeFromRunId, resumeFromStageKey);
+            }
+        }
+
         // 4. 状態遷移 — run_history INSERT + project.run_status='running'
         List<String> selectedTables = (tables == null || tables.isEmpty()) ? null : tables;
         RunHistory rh = RunHistory.create(projectId, runType, triggerSource,
@@ -189,6 +219,10 @@ public class RunService {
         Map<String, Object> meta = new HashMap<>();
         if (selectedTables != null) meta.put("selectedTables", selectedTables);
         if (useCache) meta.put("useCache", true);
+        if (resumeFromStageKey != null) {
+            meta.put("resumeFromRunId", resumeFromRunId);
+            meta.put("resumeFromStage", resumeFromStageKey);
+        }
         if (!meta.isEmpty()) rh.setMetadata(meta);
         rh.setWorkerId(resolvedWorker);
         runHistoryRepo.save(rh);
@@ -199,6 +233,7 @@ public class RunService {
 
         // 5. Stage pre-create — runType 별 stage list 를 pending 상태로 사전 등록.
         //    tables_total 은 run start 시점의 binding 수로 materialize (mid-run 변경 무시).
+        //    resumeFromStageKey 가 있으면 그 stage 이전을 모두 success 로 미리 마킹 → executor 가 skip.
         //    같은 @Transactional 안 — 이후 WS dispatch 실패 시 함께 rollback.
         List<String> stageKeys = StageCatalog.forRunType(runType);
         int tablesTotal = selectedTables == null
@@ -206,8 +241,25 @@ public class RunService {
                 : (int) bindingRepo.findByProjectId(projectId).stream()
                         .filter(b -> selectedTables.contains(b.getTobeTable())).count();
         int seq = 1;
+        boolean reachedResumePoint = (resumeFromStageKey == null);
+        OffsetDateTime preMarkAt = OffsetDateTime.now();
         for (String stageKey : stageKeys) {
-            stageInstanceRepo.save(StageInstance.create(rh.getId(), stageKey, seq++, tablesTotal));
+            StageInstance si = StageInstance.create(rh.getId(), stageKey, seq++, tablesTotal);
+            if (!reachedResumePoint) {
+                if (stageKey.equals(resumeFromStageKey)) {
+                    reachedResumePoint = true;   // 이 stage 부터 실행. 이 stage 는 pending 유지.
+                } else {
+                    // resume 시점 이전 stage — 옛 run 에서 success 로 종료된 stage 들. 미리 마킹.
+                    si.setStatus(StageStatus.success);
+                    si.setStartedAt(preMarkAt);
+                    si.setFinishedAt(preMarkAt);
+                    si.setDurationMs(0L);
+                    si.setTablesSuccess(tablesTotal);
+                    si.setTablesFailed(0);
+                    si.setErrorSummary("resumed from " + resumeFromRunId + " — skipped (success)");
+                }
+            }
+            stageInstanceRepo.save(si);
         }
 
         // 6. WS dispatch — Worker へ RUN_START
@@ -255,7 +307,7 @@ public class RunService {
      */
     @Transactional
     public RunHistory abortRun(String runId, String reason) {
-        runControlRegistry.cancel(runId);   // paused 로 대기 중인 executor 깨워서 중단
+        runControlRegistry.cancel(runId);   // 다음 stage 경계 진입 전 break.
         return finishRun(runId, RunStatus.aborted, null, null, reason);
     }
 
@@ -269,45 +321,9 @@ public class RunService {
         return finishRun(runId, RunStatus.timed_out, null, null, reason);
     }
 
-    /** 실행 중 run 일시정지 — running 일 때만. projects.run_status='paused' 로 잠금 유지. */
-    @Transactional
-    public RunHistory pauseRun(String runId) {
-        RunHistory rh = runHistoryRepo.findById(runId)
-                .orElseThrow(() -> new IllegalArgumentException("run not found: " + runId));
-        if (rh.getStatus() != RunStatus.running) {
-            log.info("pauseRun ignored — runId={} status={}", runId, rh.getStatus());
-            return rh;
-        }
-        rh.setStatus(RunStatus.paused);
-        runHistoryRepo.save(rh);
-        Project project = projectRepo.findByIdForUpdate(rh.getProjectId())
-                .orElseThrow(() -> new IllegalStateException("project disappeared: " + rh.getProjectId()));
-        project.setRunStatus("paused");
-        projectRepo.save(project);
-        runControlRegistry.pause(runId);
-        log.info("pauseRun runId={}", runId);
-        return rh;
-    }
-
-    /** 일시정지된 run 재개 — paused 일 때만. */
-    @Transactional
-    public RunHistory resumeRun(String runId) {
-        RunHistory rh = runHistoryRepo.findById(runId)
-                .orElseThrow(() -> new IllegalArgumentException("run not found: " + runId));
-        if (rh.getStatus() != RunStatus.paused) {
-            log.info("resumeRun ignored — runId={} status={}", runId, rh.getStatus());
-            return rh;
-        }
-        rh.setStatus(RunStatus.running);
-        runHistoryRepo.save(rh);
-        Project project = projectRepo.findByIdForUpdate(rh.getProjectId())
-                .orElseThrow(() -> new IllegalStateException("project disappeared: " + rh.getProjectId()));
-        project.setRunStatus(STATUS_RUNNING);
-        projectRepo.save(project);
-        runControlRegistry.resume(runId);
-        log.info("resumeRun runId={}", runId);
-        return rh;
-    }
+    // pauseRun / resumeRun 제거 (2026-05-29). Stop + Retry (resume-from-failed-stage) 가
+    // 기능 동치이고 paused 의 잠재 버그 4 가지 (CHECK / partial commit / race / 사용자 혼란)
+    // 모두 제거됨. project_pause_removed 메모리 참조.
 
     private RunHistory finishRun(String runId,
                                  RunStatus finalStatus,
@@ -373,33 +389,30 @@ public class RunService {
     }
 
     /**
-     * Project phase 로부터 scheduler 가 起動해야 할 runType 을 결정.
-     * 스케줄러 (내부 Quartz / 외부 bulk / 외부 single runType 省略時) 가 사용.
+     * Project phase 로부터 scheduler / 외부 trigger 가 起動해야 할 runType 결정.
+     * 스케줄러 (내부 Quartz / 외부 /runs/all / 외부 /runs (runType 省略時)) 가 사용.
      *
-     * Phase semantics (2026-05-24 update):
-     *   - test       → RunType.test       (dry-run test 実行可)
-     *   - rehearsal  → RunType.rehearsal  (dry-run rehearsal 実行可)
-     *   - ready      → RunType.cutover    (cutover 実行準備完了 — 本番切替を起動)
-     *   - cutover    → empty              (= 既に cutover 実行中、新 run は受け付けない)
-     *   - その他 (planning / analysis / sign-off / hypercare / done) → empty
+     * 設計 (2026-05-29 update): scheduler / 외부 trigger 는 sign-off + ready phase
+     * 限定으로 絞る. 이유는 두 phase 모두「snapshot Request Review 가 通過한 後」 =
+     * mapping 이 検証済み の状態. 따라서 별도의 preflight DB 영속화 없이도 「FE
+     * preflight 通っている前提」 が phase 自体で保証된다.
+     *   - sign-off → RunType.rehearsal — mapping approved 後 dry-run.  起動 後
+     *                  maybeAdvancePhase 가 phase 를 sign-off → rehearsal 로 自動 前進.
+     *   - ready    → RunType.cutover — cutover snapshot approved 後 production 切替.
+     *   - 其他 (planning / analysis / test / rehearsal / cutover / hypercare / done)
+     *                → empty.  REJECTED 로 결과 표시.  사용자가 UI 에서 explicit runType
+     *                指定 하면 /runs 経由로 起動 可能 (= 手動 path 는 制限 없음).
      *
-     * cutover 終了後は phase が hypercare に遷移する想定.
-     */
-    /**
-     * Project phase 로부터 default runType 결정.
-     *   - rehearsal → RunType.rehearsal
-     *   - ready     → RunType.cutover (단 prod 환경 가드 통과 필요)
-     *   - 그 외 (planning/analysis/test/sign-off/cutover/hypercare/done) → RunType.test
-     *
-     * Env-based 정책: non-prod 모든 phase 에서 default=test runType 으로 trigger 가능.
-     * Pre-flight 가 frontend 에서 미준비 상태 막음.
+     * 旧 仕様 (default → test) 은 planning / analysis 等 mapping 未準備 의 project 도
+     * scheduler 가 fire 시킬 수 있어 사고 リスク 있었다.  본 結束로 「phase eligibility =
+     * preflight 통과의 暗黙の保証」 으로 統合.
      */
     public static Optional<RunType> resolveRunTypeFromPhase(String phase) {
         if (phase == null) return Optional.empty();
         return switch (phase) {
-            case "rehearsal" -> Optional.of(RunType.rehearsal);
-            case "ready"     -> Optional.of(RunType.cutover);
-            default          -> Optional.of(RunType.test);
+            case "sign-off" -> Optional.of(RunType.rehearsal);
+            case "ready"    -> Optional.of(RunType.cutover);
+            default         -> Optional.empty();
         };
     }
 
@@ -421,6 +434,20 @@ public class RunService {
         Map<String, Object> md = new HashMap<>(rh.getMetadata() == null ? Map.of() : rh.getMetadata());
         md.put("cacheFingerprint", fingerprint);
         md.put("parquet2Dir", parquet2Dir);
+        rh.setMetadata(md);
+        runHistoryRepo.save(rh);
+    }
+
+    /**
+     * Resume-from-failed-run 용 — RunExecutionListener 가 outputDir 결정 직후 호출.
+     * 옛 run 의 parquet1 / parquet2 / quarantine 위치를 후속 retry 가 찾을 수 있게 박제.
+     */
+    @Transactional
+    public void recordOutputDir(String runId, String outputDir) {
+        RunHistory rh = runHistoryRepo.findById(runId).orElse(null);
+        if (rh == null) return;
+        Map<String, Object> md = new HashMap<>(rh.getMetadata() == null ? Map.of() : rh.getMetadata());
+        md.put("outputDir", outputDir);
         rh.setMetadata(md);
         runHistoryRepo.save(rh);
     }
@@ -464,6 +491,61 @@ public class RunService {
      *
      * cutover 만 snapshot 필수 (caller 가 null 면 reject). 다른 runType 은 snapshot 이 없어도 진행.
      */
+    /**
+     * Resume-from-failed-run 정합성 검증 + 재개 시작 stage 결정.
+     *
+     * 검증 조건 (모두 통과해야 resume 진행, 하나라도 어긋나면 null = 처음부터 fallback):
+     *   1. 옛 run 존재.
+     *   2. 옛 run.projectId 가 같은 projectId.
+     *   3. 옛 run.snapshotId 가 새 run 의 snapshotId 와 동일 (mapping 변경 없음).
+     *   4. 옛 run.metadata.selectedTables 가 새 tables 와 같거나 새 tables 가 옛 것의 subset.
+     *      (옛 run 의 stage-cache 데이터가 새 tables 를 다 커버하는지 확인.)
+     *   5. 옛 run 에 success 인 stage 가 1개 이상 (skip 할 게 있어야 의미 있음).
+     *
+     * @return 재개 시작 stage key (= 옛 run 의 첫 비-success stage). 그 stage 부터 실행.
+     *         또는 null (검증 실패 → 처음부터). 옛 run 이 모두 success 면 null (재실행 의미 없음).
+     */
+    private String validateResumeContext(String resumeFromRunId, String projectId,
+                                         String snapshotId, List<String> newTables) {
+        RunHistory old = runHistoryRepo.findById(resumeFromRunId).orElse(null);
+        if (old == null) {
+            log.info("resume: old run not found id={}", resumeFromRunId);
+            return null;
+        }
+        if (!projectId.equals(old.getProjectId())) {
+            log.info("resume: old run project mismatch old={} new={}", old.getProjectId(), projectId);
+            return null;
+        }
+        // snapshotId 비교 — 양쪽 모두 null 인 경우 OK, 한쪽만 null 이거나 다른 값이면 mapping 변경.
+        String oldSnap = old.getSnapshotId();
+        if (oldSnap == null ? snapshotId != null : !oldSnap.equals(snapshotId)) {
+            log.info("resume: snapshot mismatch old={} new={} — mapping changed", oldSnap, snapshotId);
+            return null;
+        }
+        // selectedTables — 새 tables 가 옛 tables 의 subset 인지.
+        @SuppressWarnings("unchecked")
+        List<String> oldTables = old.getMetadata() == null ? null
+                : (List<String>) old.getMetadata().get("selectedTables");
+        if (newTables != null && !newTables.isEmpty()) {
+            if (oldTables == null) {
+                // 옛 run 은 전체였고 새 run 도 일부 — 옛 데이터로 충분히 커버. OK.
+            } else if (!oldTables.containsAll(newTables)) {
+                log.info("resume: new tables {} not subset of old {} — extra tables not cached", newTables, oldTables);
+                return null;
+            }
+        }
+        // 옛 run 의 stage 들 순회 — 첫 비-success stage 가 재개 시작점.
+        List<StageInstance> oldStages = stageInstanceRepo.findByRunIdOrderBySeqAsc(resumeFromRunId);
+        for (StageInstance s : oldStages) {
+            if (s.getStatus() != StageStatus.success) {
+                return s.getStageKey();
+            }
+        }
+        // 모두 success — 재실행 의미 없음.
+        log.info("resume: all stages of {} are success — nothing to resume", resumeFromRunId);
+        return null;
+    }
+
     private String resolveSnapshotId(String projectId, RunType runType) {
         // 1) baseline pinned snapshot 우선 — 사용자 선택을 그대로 존중.
         Optional<Snapshot> pinned = snapshotRepo.findByProjectIdAndBaselineTrue(projectId);

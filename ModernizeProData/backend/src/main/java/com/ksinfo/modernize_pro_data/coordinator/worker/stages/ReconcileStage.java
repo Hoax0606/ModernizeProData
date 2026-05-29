@@ -2,6 +2,7 @@ package com.ksinfo.modernize_pro_data.coordinator.worker.stages;
 
 import com.ksinfo.modernize_pro_data.common.duckdb.DuckDbService;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
@@ -40,6 +41,7 @@ public class ReconcileStage implements StageRunner {
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
     private final DuckDbService duckDbService;
+    private final QuarantineService quarantineService;
     private final RunLogIngestService runLogIngest;
 
     @Override
@@ -64,6 +66,7 @@ public class ReconcileStage implements StageRunner {
             OffsetDateTime tableStart = OffsetDateTime.now();
             String tobeSchema = binding.getTobeSchema() == null ? "" : binding.getTobeSchema();
             String tobeTable  = binding.getTobeTable();
+            String tableLabel = tobeSchema.isBlank() ? tobeTable : tobeSchema + "." + tobeTable;
 
             StageTableResult result = stageTableResultRepo
                     .findByStageInstanceIdAndBindingId(stage.getId(), binding.getId())
@@ -107,7 +110,11 @@ public class ReconcileStage implements StageRunner {
                 result.setDurationMs(Duration.between(tableStart, tableEnd).toMillis());
                 stageTableResultRepo.save(result);
 
-                ingest(ctx, "Reconcile failed for " + tobeTable + ": " + e.getMessage(), false);
+                /* Step 1 — binding-level 실패를 Quarantine 카드로 노출. */
+                StageHelpers.recordStageFailureQuarantine(ctx, quarantineService, stage, binding,
+                        tableLabel, "Reconcile", "reconcile.failure", e.getMessage());
+
+                ingest(ctx, "Reconcile failed for " + tableLabel + ": " + e.getMessage(), false);
                 failedCount++;
             }
         }
