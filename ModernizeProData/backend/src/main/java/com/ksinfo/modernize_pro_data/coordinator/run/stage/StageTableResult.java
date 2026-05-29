@@ -67,6 +67,12 @@ public class StageTableResult {
     @Column(name = "error_detail", columnDefinition = "jsonb")
     private Map<String, Object> errorDetail;
 
+    /** TransformStage 가 생성·실행한 CREATE OR REPLACE TABLE ... SELECT ... 텍스트.
+     *  ArtifactsPage 의 MIGRATION SQL 카테고리에서 표시 — run 시점에 박제되므로 mapping_rules 가
+     *  나중에 바뀌어도 그 run 에서 실제로 돌았던 SQL 이 그대로 남는다. */
+    @Column(name = "compiled_sql", columnDefinition = "text")
+    private String compiledSql;
+
     public static StageTableResult create(String stageInstanceId, String bindingId,
                                           String tobeSchema, String tobeTable) {
         StageTableResult str = new StageTableResult();

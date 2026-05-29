@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect } from 'react';
 import ExcelJS from 'exceljs';
 import { useWorkspaceStore } from '../store/workspace';
 import { snapshotApi } from '../api/workspace';
-import { useSnapshotsStore, type FrozenRule } from '../store/snapshots';
+import { useSnapshotsStore, usePinnedSnapshotsStore, type FrozenRule } from '../store/snapshots';
 import { asisDdlApi, type DdlSchema, type DdlColumn } from '../api/asisDdl';
 import { tobeDdlApi } from '../api/tobeDdl';
 import { mappingImportApi } from '../api/mappingImport';
@@ -43,7 +43,7 @@ export const CATEGORIES: Category[] = [
      내부 key 는 'diff' 그대로 유지 (코드 전반의 SHEETS.diff / MOCK_ROWS.diff / 등이 참조). */
   { key: 'diff',       labelKey: 'artifacts.cat.mapping',    suffix: '.map.xlsx',       icon: '◨', downloadType: 'xlsx' },
   { key: 'ddl',        labelKey: 'artifacts.cat.ddl',        suffix: '.ddl.sql',        icon: '▤', single: true, viewType: 'sql' },
-  { key: 'sql',        labelKey: 'artifacts.cat.sql',        suffix: '.migrate.xlsx',   icon: '↦', downloadType: 'xlsx' },
+  { key: 'sql',        labelKey: 'artifacts.cat.sql',        suffix: '.migrate.sql',    icon: '↦', viewType: 'sql' },
   { key: 'validation', labelKey: 'artifacts.cat.validation', suffix: '.report.xlsx',    icon: '✓', downloadType: 'xlsx' },
 ];
 
@@ -678,6 +678,19 @@ function diffStatusKind(r: DiffRule): StrategyKind | null {
   return 'rule';
 }
 
+/** type 문자열을 거친 카테고리로 분류 — Summary 의 type-mismatch 카운트용.
+ *  VARCHAR2(50) 과 VARCHAR(100) 처럼 길이만 다른 건 같은 string 카테고리로 본다. */
+function typeCategory(t: string | null | undefined): string {
+  if (!t) return 'unknown';
+  const s = t.toLowerCase().trim();
+  if (/^(var)?char|^nchar|^nvarchar|^text|^clob/.test(s))                       return 'string';
+  if (/^(big|small|tiny)?int|^integer|^number|^numeric|^decimal|^float|^double|^real/.test(s)) return 'number';
+  if (/^date|^timestamp|^time/.test(s))                                         return 'date';
+  if (/^bool|^bit/.test(s))                                                     return 'boolean';
+  if (/^blob|^bytea|^binary|^raw/.test(s))                                      return 'binary';
+  return 'other';
+}
+
 /** DdlSchema 를 `${table}.${column}` (lowercase) → DdlColumn 맵으로. */
 function ddlColumnMap(schema: DdlSchema | null): Map<string, DdlColumn> {
   const m = new Map<string, DdlColumn>();
@@ -698,8 +711,17 @@ interface DiffBuild {
   tables: string[];
   /** 테이블별 Summary 시트 rows (Kind / Count / % of TOBE / Note). */
   summaryByTable: Record<string, Cell[][]>;
+  /** 전체(테이블 미선택) Summary — Total tables/columns + strategy 분포 + type mismatch. */
+  summaryAll: Cell[][];
   /** 테이블별 fx 수식바 컨텍스트. */
   fxByTable: Record<string, { asis: string; tobe: string; changed: number }>;
+  /** 전체 모드 fx 수식바 컨텍스트 — 사이드바 미선택 시 사용. */
+  fxAll: { asis: string; tobe: string; changed: number };
+  /** 사이드바에서 회색 disabled 로 표시할 테이블 (= latest run 에서 성공하지 못한 테이블).
+   *  Set 요소는 비교 일관성을 위해 lowercase. */
+  disabledTables: Set<string>;
+  /** latest run 자체가 없을 때 (= 아직 실행 안 됨). 사이드바 안내 메시지용. */
+  noRun: boolean;
 }
 
 /** mapping rules + ASIS/TOBE DDL → MAPPING(diff) 산출물.
@@ -714,7 +736,25 @@ function buildDiff(
   rules: DiffRule[],
   asisSchema: DdlSchema | null,
   tobeSchema: DdlSchema | null,
+  /** snapshot.executionContext 의 성공 테이블 (lowercase). null = 그 snapshot 으로
+   *  한 번도 run 한 적 없음 → 모든 Artifacts 카테고리(MAPPING diff 포함) 빈 상태.
+   *  ("mapping 은 그대로 보여줘야" 는 사이드바 메뉴의 Mapping 탭 / `/mapping` 페이지 얘기로,
+   *  Artifacts 의 MAPPING(diff) 카테고리는 별개로 박제 기준 표시.) */
+  successTables: Set<string> | null,
 ): DiffBuild {
+  // run 박제가 없으면 Artifacts 의 어느 카테고리도 (diff 포함) 빈 상태 — sidebar 안내.
+  if (successTables === null) {
+    return {
+      rows: [],
+      tables: [],
+      summaryByTable: {},
+      summaryAll: [],
+      fxByTable: {},
+      fxAll: { asis: '—', tobe: '—', changed: 0 },
+      disabledTables: new Set(),
+      noRun: true,
+    };
+  }
   const asisMap = ddlColumnMap(asisSchema);
   const tobeMap = ddlColumnMap(tobeSchema);
 
@@ -737,6 +777,9 @@ function buildDiff(
   const rowsByTable = new Map<string, Cell[][]>();
   const asisByTable = new Map<string, Set<string>>();
   const colsByTable = new Map<string, number>();
+  const typeMismatchByTable = new Map<string, number>();
+  const asisAll = new Set<string>();
+  let typeMismatchAll = 0;
   for (const r of rules) {
     const kind = diffStatusKind(r);
     if (!kind) continue;
@@ -767,11 +810,27 @@ function buildDiff(
     if (r.asisTable) {
       if (!asisByTable.has(table)) asisByTable.set(table, new Set());
       asisByTable.get(table)!.add(r.asisTable);
+      asisAll.add(r.asisTable);
+    }
+
+    // type mismatch — ASIS / TOBE 둘 다 column 정보가 있고, 카테고리가 다른 경우만.
+    // (passed/rule 모두 포함 — 매핑된 컬럼 중 type kind 가 어긋난 것 카운트.)
+    if (aCol && tCol) {
+      if (typeCategory(aCol.dataTypeRaw) !== typeCategory(tCol.dataTypeRaw)) {
+        typeMismatchByTable.set(table, (typeMismatchByTable.get(table) ?? 0) + 1);
+        typeMismatchAll++;
+      }
     }
   }
 
   const tables = tableOrder.filter((t) => rowsByTable.has(t));
-  const rows: Cell[][] = tables.flatMap((t) => rowsByTable.get(t)!);
+  // 사이드바 회색 disabled 대상 — snapshot 에 있지만 latest run 에서 성공하지 못한 테이블.
+  const disabledTables = new Set(
+    tables.filter((t) => !successTables.has(t.toLowerCase())).map((t) => t.toLowerCase()),
+  );
+  // Diff 시트(전체 모드) rows / Summary all 은 latest run 성공 테이블만 집계.
+  const successOnly = tables.filter((t) => successTables.has(t.toLowerCase()));
+  const rows: Cell[][] = successOnly.flatMap((t) => rowsByTable.get(t)!);
 
   const summaryByTable: Record<string, Cell[][]> = {};
   const fxByTable: Record<string, { asis: string; tobe: string; changed: number }> = {};
@@ -783,6 +842,7 @@ function buildDiff(
     const asisList = [...(asisByTable.get(t) ?? [])].join(', ') || '—';
     const changed = trows.length - counts.passed;
     const pct = (n: number) => (tobeCols > 0 ? `${((n / tobeCols) * 100).toFixed(1)}%` : '—');
+    const tmCount = typeMismatchByTable.get(t) ?? 0;
     summaryByTable[t] = [
       ['TOBE table',     t,             '',                '' ],
       ['ASIS source',    asisList,      '',                '' ],
@@ -792,11 +852,46 @@ function buildDiff(
       ['default',        counts.default, pct(counts.default), 'constant default'],
       ['null',           counts.null,   pct(counts.null),    'set NULL'],
       ['passed',         counts.passed, pct(counts.passed),  'pass-through (no transform)'],
+      ['type mismatch',  tmCount,       pct(tmCount),        'ASIS / TOBE type kind differs'],
     ];
     fxByTable[t] = { asis: asisList, tobe: t, changed };
   }
 
-  return { rows, tables, summaryByTable, fxByTable };
+  // 전체(테이블 미선택) Summary — latest run 에서 성공한 테이블만 집계.
+  // snapshot 의 전체 rules 가 아니라 successOnly 의 rows 만 카운트한다 (사용자 요청).
+  const totalCountsAll: Record<StrategyKind, number> = { rule: 0, default: 0, null: 0, passed: 0 };
+  const asisSucc = new Set<string>();
+  let typeMismatchSucc = 0;
+  for (const t of successOnly) {
+    const trows = rowsByTable.get(t)!;
+    for (const rr of trows) totalCountsAll[rr[0] as StrategyKind]++;
+    for (const a of asisByTable.get(t) ?? []) asisSucc.add(a);
+    typeMismatchSucc += typeMismatchByTable.get(t) ?? 0;
+  }
+  const totalMapped = totalCountsAll.rule + totalCountsAll.default + totalCountsAll.null + totalCountsAll.passed;
+  // 전체 TOBE 컬럼 — 성공 테이블의 컬럼 합 (이게 매핑 진척률의 자연스러운 기준).
+  let totalTobeCols = 0;
+  for (const t of successOnly) totalTobeCols += colsByTable.get(t) ?? 0;
+  if (totalTobeCols === 0) totalTobeCols = totalMapped;
+  const pctAll = (n: number) => (totalTobeCols > 0 ? `${((n / totalTobeCols) * 100).toFixed(1)}%` : '—');
+  const asisListAll = [...asisSucc].sort().join(', ') || '—';
+  // asisAll 은 type mismatch 계산이 끝났으니 더 이상 안 쓴다 — 의도적으로 unused.
+  void asisAll;
+  void typeMismatchAll;
+  const summaryAll: Cell[][] = successOnly.length === 0 ? [] : [
+    ['TOBE tables',    successOnly.length,                  '',                              ''],
+    ['ASIS sources',   asisListAll,                          '',                              ''],
+    ['TOBE columns',   totalTobeCols,                        '',                              ''],
+    ['Mapped columns', totalMapped,                          pctAll(totalMapped),             ''],
+    ['rule',           totalCountsAll.rule,                  pctAll(totalCountsAll.rule),     'transform expression'],
+    ['default',        totalCountsAll.default,               pctAll(totalCountsAll.default),  'constant default'],
+    ['null',           totalCountsAll.null,                  pctAll(totalCountsAll.null),     'set NULL'],
+    ['passed',         totalCountsAll.passed,                pctAll(totalCountsAll.passed),   'pass-through (no transform)'],
+    ['type mismatch',  typeMismatchSucc,                     pctAll(typeMismatchSucc),        'ASIS / TOBE type kind differs'],
+  ];
+  const fxAll = { asis: asisListAll, tobe: `${successOnly.length} tables`, changed: totalMapped - totalCountsAll.passed };
+
+  return { rows, tables, summaryByTable, summaryAll, fxByTable, fxAll, disabledTables, noRun: false };
 }
 
 /** 파싱된 DdlSchema 를 CREATE TABLE 스크립트로 재구성.
@@ -921,18 +1016,22 @@ const RULE_BADGE: Record<string, React.CSSProperties> = {
 
 /** MAPPING(diff) Status 컬럼 배지 — 매핑 strategy 분류. */
 const STRATEGY_BADGE: Record<string, React.CSSProperties> = {
-  rule:    { background: '#d4eedb', color: '#0a5a1f' },     // green
-  default: { background: '#d6e3f3', color: '#0a448a' },     // blue
-  null:    { background: '#fbe8c6', color: '#8a5500' },     // amber (의도적 NULL — 주의 환기)
-  passed:  { background: 'transparent', color: '#605e5c' }, // plain
+  rule:            { background: '#d4eedb', color: '#0a5a1f' },     // green
+  default:         { background: '#d6e3f3', color: '#0a448a' },     // blue
+  null:            { background: '#fbe8c6', color: '#8a5500' },     // amber (의도적 NULL — 주의 환기)
+  passed:          { background: 'transparent', color: '#605e5c' }, // plain
+  // Summary 시트 전용 — strategy 가 아니라 ASIS/TOBE type kind 가 어긋난 매핑 카운트 행.
+  // 주의 환기 의미로 warning red 계열 (null 의 amber 와 의미 구분).
+  'type mismatch': { background: '#f3d3d3', color: '#a00000' },     // red
 };
 
 /** strategy 별 행 전체 tint (배지보다 연하게). */
 const STRATEGY_ROW_TINT: Record<string, string> = {
-  rule:    '#eef7f1',
-  default: '#eef2fa',
-  null:    '#fbf4e6',
-  passed:  '#ffffff',
+  rule:            '#eef7f1',
+  default:         '#eef2fa',
+  null:            '#fbf4e6',
+  passed:          '#ffffff',
+  'type mismatch': '#fbeaea',
 };
 
 /** Verdict 컬럼 — Validation 시트의 검증 결과 배지. */
@@ -1048,13 +1147,15 @@ const VALIDATION_CHECK_COUNT: Record<string, number> = {
 /* MAPPING(diff) Diff/Summary 시트의 strategy 색 — in-app STRATEGY_BADGE / STRATEGY_ROW_TINT 와 1:1.
    배지(col 0)는 진한 bg+fg, 나머지 행은 연한 tint. passed 는 흰색이라 칠하지 않는다. */
 const ARGB_STRATEGY_BADGE: Record<string, { bg: string; fg: string }> = {
-  rule:    { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
-  default: { bg: 'FFD6E3F3', fg: 'FF0A448A' },
-  null:    { bg: 'FFFBE8C6', fg: 'FF8A5500' },
-  passed:  { bg: 'FFFFFFFF', fg: 'FF605E5C' },
+  rule:            { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
+  default:         { bg: 'FFD6E3F3', fg: 'FF0A448A' },
+  null:            { bg: 'FFFBE8C6', fg: 'FF8A5500' },
+  passed:          { bg: 'FFFFFFFF', fg: 'FF605E5C' },
+  'type mismatch': { bg: 'FFF3D3D3', fg: 'FFA00000' },
 };
 const ARGB_STRATEGY_ROW_TINT: Record<string, string> = {
   rule: 'FFEEF7F1', default: 'FFEEF2FA', null: 'FFFBF4E6', passed: 'FFFFFFFF',
+  'type mismatch': 'FFFBEAEA',
 };
 const ARGB_BY_STATUS: Record<string, { bg: string; fg: string }> = {
   running: { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
@@ -1288,19 +1389,23 @@ export function ArtifactsPage() {
     [projects, activeProjectId],
   );
 
-  // MAPPING(diff) 산출물 — 최신 mapping snapshot rules + ASIS/TOBE DDL 조합.
+  // MAPPING(diff) 산출물 — 활성 snapshot 의 frozen rules + ASIS/TOBE DDL 조합.
+  // 활성 snapshot 우선순위: (1) 프로젝트의 pinned (baseline) snapshot, (2) 가장 최근 mapping snapshot.
+  // 사용자가 pin 을 옛 snapshot 으로 옮기면 그 시점의 executionContext/mapping 으로 자동 전환.
   const snapshots = useSnapshotsStore((s) => s.snapshots);
   const fetchSnapshots = useSnapshotsStore((s) => s.fetchByProject);
+  const pinnedIds = usePinnedSnapshotsStore((s) => s.pinnedIds);
   useEffect(() => {
     if (activeProjectId) fetchSnapshots(activeProjectId);
   }, [activeProjectId, fetchSnapshots]);
-  const latestMappingSnapshot = useMemo(
-    () =>
-      snapshots
-        .filter((s) => s.projectId === activeProjectId && s.type === 'mapping')
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null,
-    [snapshots, activeProjectId],
-  );
+  const latestMappingSnapshot = useMemo(() => {
+    const projectMapping = snapshots.filter(
+      (s) => s.projectId === activeProjectId && s.type === 'mapping',
+    );
+    const pinned = projectMapping.find((s) => pinnedIds.includes(s.id));
+    if (pinned) return pinned;
+    return [...projectMapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
+  }, [snapshots, activeProjectId, pinnedIds]);
   const [mappingRules, setMappingRules] = useState<DiffRule[]>([]);
   const [asisSchema, setAsisSchema] = useState<DdlSchema | null>(null);
   const [tobeSchema, setTobeSchema] = useState<DdlSchema | null>(null);
@@ -1337,9 +1442,38 @@ export function ArtifactsPage() {
     tobeDdlApi.get(activeProjectId).then((d) => { if (!cancelled) setTobeSchema(d); }).catch(() => { if (!cancelled) setTobeSchema(null); });
     return () => { cancelled = true; };
   }, [activeProjectId]);
+  // latest mapping snapshot 의 박제된 execution_context 가 source — runs API 폴링이 아니라
+  // "snapshot 시점" 의 상태를 보여준다 (사용자 결정 — phase 2). snapshot 의 executionContext
+  // 가 null (아직 한 번도 run 안 됨) 이면 diff 가 noRun=true 빈 상태.
+  const successTables = useMemo<Set<string> | null>(() => {
+    const ctx = latestMappingSnapshot?.executionContext;
+    if (!ctx) return null;
+    const s = new Set<string>();
+    for (const st of ctx.stages) {
+      for (const tr of st.tables) {
+        if (tr.status === 'success') s.add(tr.tobeTable.toLowerCase());
+      }
+    }
+    return s;
+  }, [latestMappingSnapshot]);
+  // MIGRATION SQL 은 load stage 의 합성 SQL 만 (Transform 의 박제는 backend 에 디버깅용으로
+  // 두지만 사용자에겐 노출 X — 사용자 의도: 실행되는 적재 SQL 만).
+  const compiledSqlByTable = useMemo<Record<string, string>>(() => {
+    const ctx = latestMappingSnapshot?.executionContext;
+    if (!ctx) return {};
+    const map: Record<string, string> = {};
+    const loadStage = ctx.stages.find((s) => s.stageKey === 'load');
+    if (loadStage) {
+      for (const tr of loadStage.tables) {
+        if (tr.compiledSql) map[tr.tobeTable.toLowerCase()] = tr.compiledSql;
+      }
+    }
+    return map;
+  }, [latestMappingSnapshot]);
+
   const diff = useMemo(
-    () => buildDiff(mappingRules, asisSchema, tobeSchema),
-    [mappingRules, asisSchema, tobeSchema],
+    () => buildDiff(mappingRules, asisSchema, tobeSchema, successTables),
+    [mappingRules, asisSchema, tobeSchema, successTables],
   );
   // DDL SCRIPTS — 임포트한 ASIS/TOBE DDL 을 CREATE TABLE 로 재구성 (AS-IS / TO-BE 탭).
   const ddlText = useMemo<Record<string, string>>(
@@ -1374,9 +1508,18 @@ export function ArtifactsPage() {
      "Rendered more hooks than during the previous render" 가 안 남. */
   const childTables = useMemo(() => {
     const base = childTablesFor(project?.name ?? '');
-    // MAPPING(diff) 테이블 목록 = 현재 TOBE DDL 에 있고 rule 이 매칭된 테이블 (DDL ordinal 순).
-    return { ...base, diff: diff.tables };
+    // MAPPING(diff) / MIGRATION SQL 둘 다 — 현재 TOBE DDL 에 있고 rule 이 매칭된 테이블.
+    // SQL 도 사이드바에 같은 list 가 뜨고 성공 외 테이블은 disabled.
+    return { ...base, diff: diff.tables, sql: diff.tables };
   }, [project?.name, diff.tables]);
+
+  /* diff / sql 의 default selected — early return 위에서 계산 (hooks 순서 보장).
+     latest run 미성공 테이블이 첫 번째일 수 있으니 첫 success 로 default.
+     두 카테고리 모두 같은 successTables/disabledTables 를 공유하므로 default 도 같다. */
+  const defaultSuccessTable = useMemo(() => {
+    if (!diff || diff.noRun) return undefined;
+    return diff.tables.find((t) => !diff.disabledTables.has(t.toLowerCase())) ?? undefined;
+  }, [diff]);
 
   if (!project) {
     return (
@@ -1395,10 +1538,16 @@ export function ArtifactsPage() {
     setActiveSheetByCat((prev) => ({ ...prev, [activeCategory.key]: name }));
 
   /* 사용자가 명시적으로 자식을 안 골라도 첫 번째 자식이 default 로 활성.
-     Dashboard / DDL 은 단일 산출물이라 항상 그 single child, 다른 카테고리면 MOCK_TABLES[0]. */
+     Dashboard / DDL 은 단일 산출물이라 항상 그 single child.
+     defaultDiffTable 은 early return 위에서 이미 계산함. */
   const selectedTable =
-    selectedTableByCat[activeCategory.key] ?? childTables[activeCategory.key][0];
+    selectedTableByCat[activeCategory.key]
+      ?? ((activeCategory.key === 'diff' || activeCategory.key === 'sql')
+          ? defaultSuccessTable
+          : childTables[activeCategory.key][0]);
   const handleSelectTable = (catKey: CategoryKey, tbl: string) => {
+    // diff / sql 의 disabled (latest run 미성공) 테이블은 선택 차단 — silently 무시.
+    if ((catKey === 'diff' || catKey === 'sql') && diff.disabledTables.has(tbl.toLowerCase())) return;
     setSelectedCat(catKey);
     setSelectedTableByCat((prev) => ({ ...prev, [catKey]: tbl }));
   };
@@ -1420,6 +1569,8 @@ export function ArtifactsPage() {
             selectedTableByCat={selectedTableByCat}
             onSelectTable={handleSelectTable}
             childTables={childTables}
+            disabledDiffTables={diff.disabledTables}
+            diffNoRun={diff.noRun}
           />
         </div>
         <div style={styles.cta}>
@@ -1445,6 +1596,7 @@ export function ArtifactsPage() {
           diff={diff}
           ddlText={ddlText}
           dashboard={dashboard}
+          compiledSqlByTable={compiledSqlByTable}
         />
       </section>
     </div>
@@ -1463,6 +1615,10 @@ interface TreeProps {
   selectedTableByCat: Partial<Record<CategoryKey, string>>;
   onSelectTable: (cat: CategoryKey, tbl: string) => void;
   childTables: Record<CategoryKey, string[]>;
+  /** diff 카테고리에서 회색·비활성으로 보일 테이블 (lowercase). */
+  disabledDiffTables?: Set<string>;
+  /** diff 카테고리에 표시할 run 자체가 없을 때 = 안내 메시지로 대체. */
+  diffNoRun?: boolean;
 }
 
 function ArtifactTree({
@@ -1473,6 +1629,8 @@ function ArtifactTree({
   selectedTableByCat,
   onSelectTable,
   childTables,
+  disabledDiffTables,
+  diffNoRun,
 }: TreeProps) {
   const t = useT();
   return (
@@ -1502,22 +1660,30 @@ function ArtifactTree({
             </div>
             {open && (
               <div style={styles.tableList}>
-                {tables.map((tbl) => {
-                  const tblActive = active && selectedTable === tbl;
-                  return (
-                    <div
-                      key={tbl}
-                      onClick={() => onSelectTable(cat.key, tbl)}
-                      style={{
-                        ...styles.tableRow,
-                        ...(tblActive ? styles.tableRowActive : null),
-                      }}
-                      title={`${tbl}${cat.suffix}`}
-                    >
-                      {tbl}{cat.suffix}
-                    </div>
-                  );
-                })}
+                {(cat.key === 'diff' || cat.key === 'sql') && diffNoRun ? (
+                  <div style={styles.noRunHint}>{t('artifacts.diff.noRun')}</div>
+                ) : (
+                  tables.map((tbl) => {
+                    const disabled = (cat.key === 'diff' || cat.key === 'sql') && !!disabledDiffTables?.has(tbl.toLowerCase());
+                    const tblActive = active && selectedTable === tbl && !disabled;
+                    return (
+                      <div
+                        key={tbl}
+                        onClick={disabled ? undefined : () => onSelectTable(cat.key, tbl)}
+                        style={{
+                          ...styles.tableRow,
+                          ...(tblActive ? styles.tableRowActive : null),
+                          ...(disabled ? styles.tableRowDisabled : null),
+                        }}
+                        title={disabled
+                          ? `${tbl}${cat.suffix} — ${t('artifacts.diff.notInLatestRun')}`
+                          : `${tbl}${cat.suffix}`}
+                      >
+                        {tbl}{cat.suffix}
+                      </div>
+                    );
+                  })
+                )}
               </div>
             )}
           </div>
@@ -1543,6 +1709,9 @@ interface ExcelWorkbookProps {
   ddlText?: Record<string, string>;
   /** DASHBOARD — DDL + mapping 커버리지 시트(Overview/Tables/Issues) + fx 메타. */
   dashboard?: DashboardBuild;
+  /** MIGRATION SQL — latest run 의 transform stage 가 박제한 (테이블 → SQL 텍스트).
+   *  키는 lowercase tobeTable. selectedTable 의 lowercase 로 lookup. */
+  compiledSqlByTable?: Record<string, string>;
 }
 
 function ExcelWorkbook({
@@ -1554,6 +1723,7 @@ function ExcelWorkbook({
   diff,
   ddlText,
   dashboard,
+  compiledSqlByTable,
 }: ExcelWorkbookProps) {
   const t = useT();
   /* Copy 버튼 직후 짧은 "Copied" 토스트를 띄우기 위한 상태.
@@ -1582,19 +1752,29 @@ function ExcelWorkbook({
       : category.key === 'diff' && activeSheet === 'Diff'
         ? (diff?.rows ?? []).filter((r) => !selectedTable || String(r[1]) === selectedTable)
         : category.key === 'diff' && activeSheet === 'Summary'
-          ? (diff?.summaryByTable[selectedTable ?? ''] ?? [])
+          ? ((selectedTable ? (diff?.summaryByTable[selectedTable] ?? []) : (diff?.summaryAll ?? [])))
           : category.key === 'validation' && selectedTable
             ? MOCK_ROWS_BY_TABLE.validation[selectedTable]?.[activeSheet] ?? []
             : MOCK_ROWS[category.key]?.[activeSheet] ?? [];
 
-  /* DDL SCRIPTS (SQL 뷰) — 재구성한 AS-IS / TO-BE DDL 텍스트. activeSheet = 'AS-IS' | 'TO-BE'. */
+  /* viewType='sql' 인 두 카테고리:
+       - DDL SCRIPTS: ddlText[activeSheet] ('AS-IS' / 'TO-BE')
+       - MIGRATION SQL: compiledSqlByTable[selectedTable.toLowerCase()] — latest run 의 박제 SQL. */
   const isSqlView = category.viewType === 'sql';
-  const sqlText: string = isSqlView ? (ddlText?.[activeSheet] ?? '') : '';
+  const sqlText: string = !isSqlView
+    ? ''
+    : category.key === 'sql'
+      ? (selectedTable ? (compiledSqlByTable?.[selectedTable.toLowerCase()] ?? '') : '')
+      : (ddlText?.[activeSheet] ?? '');
   const sqlLines = sqlText ? sqlText.split('\n') : [];
 
-  /* Diff 카테고리 — 선택된 테이블의 ASIS source / TOBE 이름 & 변환 컬럼 수 (실데이터). */
+  /* Diff 카테고리 — fx 수식바 컨텍스트.
+     사이드바 테이블 선택 시: 그 테이블의 fxByTable, 미선택(전체) 시: fxAll (전체 카운트).
+     둘 다 실데이터. */
   const diffFx =
-    category.key === 'diff' && selectedTable ? diff?.fxByTable[selectedTable] : undefined;
+    category.key === 'diff'
+      ? (selectedTable ? diff?.fxByTable[selectedTable] : diff?.fxAll)
+      : undefined;
   /* Dashboard — fx 수식바의 {n} 테이블 수 / {progress} 매핑 커버리지 % (실데이터). */
   const dashFx = category.key === 'dashboard' ? dashboard : undefined;
 
@@ -1605,8 +1785,12 @@ function ExcelWorkbook({
     });
   };
   const handleDownload = () => {
-    /* 다운로드 파일명: <table>.<sheet>.sql — 예: acct_master.AS-IS.ddl.sql */
-    const dlName = `${baseName}.${activeSheet}${category.suffix}`;
+    /* 다운로드 파일명:
+         DDL          : <table>.<sheet>.sql — 예: acct_master.AS-IS.ddl.sql
+         MIGRATION SQL: <table>.migrate.sql — 시트 한 장이라 sheet 이름 생략. */
+    const dlName = category.key === 'sql'
+      ? `${baseName}${category.suffix}`
+      : `${baseName}.${activeSheet}${category.suffix}`;
     downloadText(dlName, sqlText, 'application/sql');
   };
   const handleDownloadXlsx = () => {
@@ -1618,7 +1802,7 @@ function ExcelWorkbook({
       if (category.key === 'dashboard') return dashboard?.sheets[sheetName] ?? [];
       if (category.key === 'diff') {
         if (sheetName === 'Diff') return (diff?.rows ?? []).filter((r) => !selectedTable || String(r[1]) === selectedTable);
-        if (sheetName === 'Summary') return diff?.summaryByTable[selectedTable ?? ''] ?? [];
+        if (sheetName === 'Summary') return (selectedTable ? (diff?.summaryByTable[selectedTable] ?? []) : (diff?.summaryAll ?? []));
         return [];
       }
       if (category.key === 'validation' && selectedTable) {
@@ -1671,7 +1855,11 @@ function ExcelWorkbook({
         <div style={styles.vscodeTabBar}>
           {sheets.map((s) => {
             const isActive = s.name === activeSheet;
-            const tabFilename = `${baseName}.${s.name === 'AS-IS' ? 'asis' : 'tobe'}${category.suffix}`;
+            /* DDL 은 시트가 AS-IS/TO-BE 라 sheet 이름이 파일명에 들어가지만,
+               MIGRATION SQL 은 시트 한 장이라 selectedTable 만 들어간다. */
+            const tabFilename = category.key === 'sql'
+              ? `${baseName}${category.suffix}`
+              : `${baseName}.${s.name === 'AS-IS' ? 'asis' : 'tobe'}${category.suffix}`;
             return (
               <div
                 key={s.name}
@@ -2061,6 +2249,21 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--navy)',
     fontWeight: 600,
     borderLeft: '2px solid var(--navy)',
+  },
+  /* diff: latest run 에서 성공하지 못한 테이블 — 회색·dim, click 차단(컴포넌트에서 onClick 미부착). */
+  tableRowDisabled: {
+    color: 'var(--text-4)',
+    opacity: 0.55,
+    cursor: 'not-allowed',
+    fontStyle: 'italic',
+  },
+  /* diff: run 자체가 없을 때 사이드바 자리에 뜨는 안내 한 줄. */
+  noRunHint: {
+    padding: '6px 10px 6px 32px',
+    fontSize: 10.5,
+    color: 'var(--text-4)',
+    fontStyle: 'italic',
+    lineHeight: 1.4,
   },
 
   /* ===== Excel workbook chrome (fills right pane) ===== */

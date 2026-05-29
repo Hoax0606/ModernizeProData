@@ -110,6 +110,9 @@ public class TransformStage implements StageRunner {
                 }
 
                 String sql = buildTransformSql(schema, tobeTable, rules, binding, codeMapsByDomain);
+                // run 시점의 SQL 을 result 에 박제 (성공/실패 무관하게 디버깅에 도움).
+                // Artifacts 가 보여주는 건 frontend 가 성공 테이블만 필터하므로 여기선 무조건 set.
+                result.setCompiledSql(sql);
 
                 long rowCount;
                 try (Statement st = duckDbService.statement()) {
@@ -179,31 +182,32 @@ public class TransformStage implements StageRunner {
                                      Map<String, List<MappingCodeMap>> codeMapsByDomain) {
         String fqTobe = quoteIdent(schema) + "." + quoteIdent("tobe_" + tobeTable);
 
+        // 가독성을 위해 여러 줄로 포맷팅 — DuckDB 는 whitespace 무관. ArtifactsPage 의 SQL view
+        // 가 이 텍스트를 그대로 보여주므로 컬럼/절 구분이 분명해야 한다.
         StringBuilder sb = new StringBuilder();
-        sb.append("CREATE OR REPLACE TABLE ").append(fqTobe).append(" AS SELECT ");
+        sb.append("CREATE OR REPLACE TABLE ").append(fqTobe).append(" AS\n");
+        sb.append("SELECT\n");
 
-        boolean first = true;
+        // skip 이 아닌 rule 만 모아 한 번에 join — 쉼표를 줄 끝에 두고 마지막엔 안 붙인다.
+        java.util.List<String> colLines = new java.util.ArrayList<>();
         for (MappingRule rule : rules) {
             if ("skip".equals(rule.getStrategy())) continue;
-
             String expr = buildColumnExpr(rule, binding, codeMapsByDomain);
-            if (!first) sb.append(", ");
-            sb.append(expr).append(" AS ").append(quoteIdent(rule.getTobeColumn()));
-            first = false;
+            colLines.add("  " + expr + " AS " + quoteIdent(rule.getTobeColumn()));
         }
-
-        if (first) {
+        if (colLines.isEmpty()) {
             // 모든 rule 이 skip 이면 SELECT 가 비어 SQL 깨짐
             throw new IllegalStateException("all rules are 'skip' for " + tobeTable);
         }
+        sb.append(String.join(",\n", colLines));
 
-        // composition_kind 별 FROM 절. sources 없으면 (none) FROM 생략 — DuckDB FROM-less SELECT (1 row).
+        // composition_kind 별 FROM 절. sources 없으면 (none) FROM 생략 — DuckDB FROM-less SELECT.
         String fromClause = SqlComposer.fromClause(schema, binding);
         if (fromClause != null) {
-            sb.append(" FROM ").append(fromClause);
+            sb.append("\nFROM ").append(fromClause);
         }
         if (binding.getWhereFilter() != null && !binding.getWhereFilter().isBlank()) {
-            sb.append(" WHERE ").append(binding.getWhereFilter());
+            sb.append("\nWHERE ").append(binding.getWhereFilter());
         }
         return sb.toString();
     }

@@ -55,7 +55,10 @@ public class StageController {
             Map<String, Object> errorDetail,
             OffsetDateTime startedAt,
             OffsetDateTime finishedAt,
-            Long durationMs
+            Long durationMs,
+            /** TransformStage 가 박제한 CREATE OR REPLACE TABLE ... AS SELECT ... 텍스트.
+             *  ArtifactsPage 의 MIGRATION SQL 카테고리에서 표시. transform 외 stage 는 NULL. */
+            String compiledSql
     ) {}
 
     @GetMapping("/api/v1/runs/{runId}/stages")
@@ -108,7 +111,8 @@ public class StageController {
                 str.getErrorDetail(),
                 str.getStartedAt(),
                 str.getFinishedAt(),
-                str.getDurationMs()
+                str.getDurationMs(),
+                str.getCompiledSql()
         );
     }
 

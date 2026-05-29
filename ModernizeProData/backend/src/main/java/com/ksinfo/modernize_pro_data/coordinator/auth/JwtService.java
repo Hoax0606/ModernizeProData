@@ -1,6 +1,7 @@
 package com.ksinfo.modernize_pro_data.coordinator.auth;
 
 import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.ExpiredJwtException;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.io.Decoders;
@@ -71,6 +72,10 @@ public class JwtService {
                             .parseSignedClaims(token)
                             .getPayload()
             );
+        } catch (ExpiredJwtException e) {
+            // 토큰 만료는 정상 흐름 (브라우저가 stale 토큰을 다음 요청에 잠깐 같이 보내는 케이스
+            // 등) — 로그를 찍지 않는다. 클라이언트는 401 받고 재로그인 한다.
+            return Optional.empty();
         } catch (JwtException | IllegalArgumentException e) {
             log.debug("JWT 검증 실패: {}", e.getMessage());
             return Optional.empty();
