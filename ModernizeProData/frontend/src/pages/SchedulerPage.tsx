@@ -776,7 +776,12 @@ export function SchedulerPage() {
                 <th style={styles.th}>{t('scheduler.history.col.status')}</th>
                 <th style={styles.th}>{t('scheduler.history.col.started')}</th>
                 <th style={styles.th}>{t('scheduler.history.col.finished')}</th>
-                <th style={styles.th}>{t('scheduler.history.col.duration')}</th>
+                <th
+                  style={styles.th}
+                  title={t('projectSettings.schedule.history.col.duration.tooltip')}
+                >
+                  {t('scheduler.history.col.duration')}
+                </th>
                 <th style={styles.th}>{t('scheduler.history.col.actions')}</th>
               </tr>
             </thead>
@@ -796,7 +801,12 @@ export function SchedulerPage() {
                   </td>
                   <td style={styles.td}>{formatTimestamp(h.startedAt)}</td>
                   <td style={styles.td}>{h.finishedAt ? formatTimestamp(h.finishedAt) : '-'}</td>
-                  <td style={styles.td}>{formatDuration(h.durationMs)}</td>
+                  <td
+                    style={styles.td}
+                    title={t('projectSettings.schedule.history.col.duration.tooltip')}
+                  >
+                    {formatDuration(h.durationMs)}
+                  </td>
                   <td style={styles.td}>
                     {h.status === 'running' && (
                       <button

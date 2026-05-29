@@ -1068,6 +1068,7 @@ export const ja: Record<TranslationKey, string> = {
   'projectSettings.schedule.history.col.worker':   'Worker',
   'projectSettings.schedule.history.col.status':   'Status',
   'projectSettings.schedule.history.col.duration': 'Duration',
+  'projectSettings.schedule.history.col.duration.tooltip': 'run 全体の wall-clock (finishedAt − startedAt)。テーブルを並列処理している場合、per-table の duration 合計とは一致しません。',
   'projectSettings.action.refresh':                'Refresh',
 
   // Schedule — cutover window

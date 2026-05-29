@@ -471,7 +471,10 @@ export function LogViewerPage() {
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.trigger')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.worker')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.status')}</th>
-                      <th style={{ ...styles.historyTh, textAlign: 'right' }}>
+                      <th
+                        style={{ ...styles.historyTh, textAlign: 'right' }}
+                        title={t('projectSettings.schedule.history.col.duration.tooltip')}
+                      >
                         {t('projectSettings.schedule.history.col.duration')}
                       </th>
                     </tr>
@@ -487,7 +490,10 @@ export function LogViewerPage() {
                         <td style={styles.historyTd}>
                           <span style={historyStatusStyle(h.status)}>{h.status}</span>
                         </td>
-                        <td style={{ ...styles.historyTd, textAlign: 'right', fontFamily: 'var(--mono)' }}>
+                        <td
+                          style={{ ...styles.historyTd, textAlign: 'right', fontFamily: 'var(--mono)' }}
+                          title={t('projectSettings.schedule.history.col.duration.tooltip')}
+                        >
                           {formatDuration(h.durationMs)}
                         </td>
                       </tr>

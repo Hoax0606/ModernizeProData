@@ -1066,6 +1066,7 @@ export const ko = {
   'projectSettings.schedule.history.col.worker':   'Worker',
   'projectSettings.schedule.history.col.status':   'Status',
   'projectSettings.schedule.history.col.duration': 'Duration',
+  'projectSettings.schedule.history.col.duration.tooltip': 'run 전체의 wall-clock (finishedAt − startedAt). 테이블을 병렬 처리하는 경우 per-table duration 의 합과 일치하지 않습니다.',
   'projectSettings.action.refresh':                'Refresh',
 
 

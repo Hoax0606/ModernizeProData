@@ -1062,6 +1062,7 @@ export const en: Record<TranslationKey, string> = {
   'projectSettings.schedule.history.col.worker':   'Worker',
   'projectSettings.schedule.history.col.status':   'Status',
   'projectSettings.schedule.history.col.duration': 'Duration',
+  'projectSettings.schedule.history.col.duration.tooltip': 'Wall-clock for the whole run (finishedAt − startedAt). Does not match the sum of per-table durations when tables run in parallel.',
   'projectSettings.action.refresh':                'Refresh',
 
   // Schedule — cutover window
