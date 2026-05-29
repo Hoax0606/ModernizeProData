@@ -100,8 +100,9 @@ modernize:
 
   # Run 산출물 (parquet1 / parquet2 / quarantine) — 각 노드의 local 디스크.
   # 4대 분산 시 각 PC 마다 SSD 위치 등을 다르게 잡고 싶으면 MPD_OUTPUT_BASE_PATH 환경 변수로 override.
+  # default: C:/modernize/output (PR run-output 결정 — system-wide, user-independent).
   output:
-    base-path: ${MPD_OUTPUT_BASE_PATH:#{systemProperties['user.home']}/.modernize/output}
+    base-path: ${MPD_OUTPUT_BASE_PATH:C:/modernize/output}
 
 # ── 로깅 ────────────────────────────────────────────────────────────────
 logging:

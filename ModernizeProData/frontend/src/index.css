@@ -3,6 +3,10 @@
    코드      = JetBrains Mono. */
 @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.css');
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* FontAwesome — local bundle. CDN 이 아니라 npm 패키지에서 import 해야 폐쇄망 jpackage
+   WebView 에서도 아이콘 (fa-folder-open / fa-trash / fa-link 등) 이 렌더링된다.
+   2026-05-30 회귀 fix — 이전엔 fa-solid 클래스만 박혀있고 font 자체 로드 누락. */
+@import '@fortawesome/fontawesome-free/css/all.min.css';
 
 :root, [data-theme="light"] {
   --bg: #f9fafb;

@@ -14,6 +14,7 @@ import { CreateProjectModal } from '../components/CreateProjectModal';
 import { SignOutModal } from '../components/SignOutModal';
 import { ClusterAdminModal } from '../components/ClusterAdminModal';
 import { LicenseBanner } from '../components/LicenseBanner';
+import { NotificationToast } from '../components/NotificationToast';
 import { LockIcon } from '../components/LockIcon';
 import { HourglassHalfIcon } from '../components/HourglassHalfIcon';
 import { useLicenseStore } from '../store/license';
@@ -894,6 +895,10 @@ export function AppShell() {
           <Outlet />
         </div>
       </main>
+
+      {/* 새 audit log entry 가 생기면 우측 하단에 잠깐 toast 로 떴다 사라짐.
+          bell panel 의 알림과 동일한 필터 (notification subscription / scope / global enabled). */}
+      <NotificationToast />
 
       <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} />
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />

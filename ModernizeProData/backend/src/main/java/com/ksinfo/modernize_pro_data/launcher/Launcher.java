@@ -878,8 +878,9 @@ public class Launcher {
             // Coordinator app 과 메타 PG 가 같은 host 라는 가정 — 다른 host 면 운영자가
             // 환경 변수 COORDINATOR_DB_URL 으로 override (Launcher 가 set 한 뒤라도
             // Spring 의 -D > 환경 변수 우선순위 따라 envvar 가 이김).
+            // port 5433 = installer 동봉 PG (application-prod.yml 과 일치).
             System.setProperty("COORDINATOR_DB_URL",
-                    "jdbc:postgresql://" + host + ":5432/mpd_meta");
+                    "jdbc:postgresql://" + host + ":5433/mpd_meta");
             // spring.profiles.active 는 jpackage args 의 --java-options 에서 prod,worker 로
             // 이미 박혔다. 추가 설정 불요.
 

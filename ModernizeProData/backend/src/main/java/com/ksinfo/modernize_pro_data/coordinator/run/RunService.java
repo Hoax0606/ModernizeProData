@@ -347,30 +347,6 @@ public class RunService {
     // 기능 동치이고 paused 의 잠재 버그 4 가지 (CHECK / partial commit / race / 사용자 혼란)
     // 모두 제거됨. project_pause_removed 메모리 참조.
 
-    /**
-     * RunHistory.workerId 가 가리키는 worker 가 Coordinator self 가 아니고 현재 online 이면
-     * 그 worker 에 RUN_CANCEL WS push. offline / self / 미할당 인 경우 no-op.
-     * 호출자 (abortRun/timeoutRun) 가 finishRun 전에 부르는 게 의도 — worker stage runner
-     * 가 cancel signal 받는 시점이 DB 상태 변경보다 약간 앞서도 무방.
-     */
-    private void dispatchCancelToWorkerIfRemote(String runId, String reason) {
-        RunHistory rh = runHistoryRepo.findById(runId).orElse(null);
-        if (rh == null) return;
-        String assignee = rh.getWorkerId();
-        if (assignee == null || assignee.isBlank()) return;
-        if (assignee.equals(coordinatorSelfUsername)) return;
-        if (workerNodeService.findOnlineForUsername(assignee).isEmpty()) {
-            log.info("RUN_CANCEL skipped — worker offline runId={} workerId={}", runId, assignee);
-            return;
-        }
-        try {
-            workerDispatcher.dispatchRunCancel(assignee, runId, reason);
-            log.info("RUN_CANCEL dispatched runId={} workerId={} reason={}", runId, assignee, reason);
-        } catch (Exception e) {
-            log.error("RUN_CANCEL dispatch failed runId={} workerId={}", runId, assignee, e);
-        }
-    }
-
     private RunHistory finishRun(String runId,
                                  RunStatus finalStatus,
                                  Long batchJobExecutionId,

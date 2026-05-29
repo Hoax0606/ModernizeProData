@@ -925,7 +925,10 @@ function OverallProgress({ t, stages }: { t: T; stages: Stage[] }) {
                   : st.tone === 'running' ? 'var(--green)'
                   : st.tone === 'err' ? 'var(--red)'
                   : 'var(--amber)',
-                transition: 'width .4s ease',
+                // transition 제거 — JavaFX WebView (WebKit ~v608) 에서 빠른 polling +
+// width 변경이 compositing layer 재구성 폭주를 일으켜 native crash 유발.
+// 즉시 갱신으로 안전성 우선.
+transition: 'none',
               }} />
             </div>
           ))}

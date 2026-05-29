@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18
     container_name: mpd-meta-pg
     environment:
       POSTGRES_DB: mpd_meta
@@ -8,8 +8,11 @@ services:
       POSTGRES_PASSWORD: mpd
     ports:
       - "5432:5432"
+    # PG 18 부터 권장 mount path 변경 — /var/lib/postgresql 위에 mount 하면
+    # image 가 major-version-specific subdirectory 를 자동 생성. 옛 PG 16 의
+    # /var/lib/postgresql/data mount 와 비호환.
     volumes:
-      - mpd_pgdata:/var/lib/postgresql/data
+      - mpd_pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mpd -d mpd_meta"]
       interval: 5s

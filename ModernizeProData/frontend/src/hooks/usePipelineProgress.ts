@@ -49,21 +49,34 @@ export function usePipelineProgress(
 
   /* WebSocket 옵션 채널 — STOMP `/topic/run/{id}/progress` 메시지 수신 시 즉시 invalidate.
      terminal 도달 시 onConnect 안에서 unsubscribe (defensive — finishRun broadcast 후
-     polling 도 멈추므로 메시지 더 안 옴). */
+     polling 도 멈추므로 메시지 더 안 옴).
+     2026-05-30 — invalidate 4개를 매 신호마다 동시 발사하면 React Query 4개 refetch +
+     ExecutionPage 의 큰 tree re-render storm 이 JavaFX WebView (WebKit ~v608) 의 GC 를
+     폭주시켜 native access violation crash 유발. 350ms debounce + run-history /
+     quarantine 은 polling 에만 맡김 (덜 빈번한 staleness 허용). */
   useEffect(() => {
     if (!runId) return;
     const client = createWebSocket();
     let sub: { unsubscribe(): void } | null = null;
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushInvalidate = () => {
+      void queryClient.invalidateQueries({ queryKey: ['run', runId] });
+      void queryClient.invalidateQueries({ queryKey: ['run-stages', runId] });
+    };
+
+    const scheduleInvalidate = () => {
+      if (debounceTimer != null) return; // 이미 예약됨 — 같은 batch 로 묶음
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null;
+        flushInvalidate();
+      }, 350);
+    };
 
     client.onConnect = () => {
       try {
         sub = subscribe(client, `/topic/run/${runId}/progress`, (_body: unknown, _msg: IMessage) => {
-          /* payload 무엇이든 invalidate 트리거로 사용. polling 보다 즉시 refetch.
-             run-history / quarantine 도 같이 → 활성 run finish 시 history 카운트 + 위반 카드 즉시. */
-          void queryClient.invalidateQueries({ queryKey: ['run', runId] });
-          void queryClient.invalidateQueries({ queryKey: ['run-stages', runId] });
-          void queryClient.invalidateQueries({ queryKey: ['run-history'] });
-          void queryClient.invalidateQueries({ queryKey: ['quarantine', runId] });
+          scheduleInvalidate();
         });
       } catch {
         /* subscribe 실패는 무시 — polling 으로 fallback. */
@@ -74,6 +87,7 @@ export function usePipelineProgress(
 
     client.activate();
     return () => {
+      if (debounceTimer != null) { clearTimeout(debounceTimer); debounceTimer = null; }
       try { sub?.unsubscribe(); } catch { /* ignore */ }
       try { void client.deactivate(); } catch { /* ignore */ }
     };
