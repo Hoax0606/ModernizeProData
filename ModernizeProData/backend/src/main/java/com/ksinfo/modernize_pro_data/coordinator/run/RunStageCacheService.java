@@ -78,7 +78,9 @@ public class RunStageCacheService {
                 .sorted(Comparator.comparing(MappingTableBinding::getTobeTable, Comparator.nullsFirst(Comparator.naturalOrder())))
                 .forEach(b -> sb.append("bind=").append(nv(b.getTobeTable())).append('|')
                         .append(nv(b.getCompositionKind())).append('|')
-                        .append(nv(b.getWhereFilter())).append('\n'));
+                        .append(nv(b.getWhereFilter())).append('|')
+                        .append(nv(b.getGroupByExpr())).append('|')
+                        .append(nv(b.getExpandExpr())).append('\n'));
 
         // 3. mapping rules (id 정렬 → 결정적)
         List<MappingRule> rules = mappingRuleRepo.findByProjectId(projectId);

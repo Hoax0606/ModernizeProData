@@ -24,6 +24,10 @@ export type TableBindingEdit = {
   whereFilter?: string;
   /** master project_id — 값 있으면 자식 link, row editor read-only, master 룰 inherit. */
   sharedFromProjectId?: string;
+  /** Row N:1 집계 GROUP BY 표현식 — null / 빈 값이면 GROUP BY 없음. */
+  groupByExpr?: string;
+  /** Row 1:N 펼침 free SQL fragment — null / 빈 값이면 펼침 없음. */
+  expandExpr?: string;
 };
 
 export type RowEdit = {
