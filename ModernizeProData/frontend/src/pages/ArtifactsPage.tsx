@@ -60,7 +60,7 @@ const SUMMARY_PLACEHOLDER: Record<CategoryKey, string> = {
 /* 카테고리 × 시트 별 placeholder 스키마.
    시트 탭을 클릭하면 ExcelWorkbook 이 해당 시트의 columns 로 그리드를 다시 렌더한다.
    실제 산출물 데이터가 들어오면 columns 옆에 rows 데이터만 추가하면 된다. */
-interface SheetSchema {
+export interface SheetSchema {
   name: string;
   columns: { name: string; type: string }[];
   /** true 면 컬럼명/타입 헤더 행 (1행/2행) 을 생략하고 데이터를 row 1 부터 시작.
@@ -68,7 +68,7 @@ interface SheetSchema {
   freeForm?: boolean;
 }
 
-const SHEETS: Record<CategoryKey, SheetSchema[]> = {
+export const SHEETS: Record<CategoryKey, SheetSchema[]> = {
   dashboard: [
     { name: 'Overview', columns: [
       { name: 'Item',  type: 'TEXT' },
@@ -169,7 +169,7 @@ const SHEETS: Record<CategoryKey, SheetSchema[]> = {
    ExcelWorkbook 안의 mock 참조를 제거하면 된다.
    ─────────────────────────────────────────────────────────────── */
 
-type Cell = string | number | boolean | null;
+export type Cell = string | number | boolean | null;
 
 const MOCK_ROWS: Record<CategoryKey, Record<string, Cell[][]>> = {
   dashboard: {
@@ -649,7 +649,7 @@ type StrategyKind = 'rule' | 'default' | 'null' | 'passed';
 
 /** buildDiff 가 받는 rule 의 최소 형태 — FrozenRule(snapshot) 과 MappingRuleDto(live) 양쪽이 만족.
  *  데이터 소스가 snapshot 이든 live mapping_rules 든 같은 코드로 처리하기 위한 구조적 타입. */
-type DiffRule = Pick<
+export type DiffRule = Pick<
   FrozenRule,
   | 'strategy'
   | 'transformSql'
@@ -732,7 +732,7 @@ interface DiffBuild {
  *  short-fallback 으로 TOBE DDL 테이블에 매칭하고, 못 찾은 rule 은 버린다.
  *
  *  Diff 9컬 순서: Status, Table, ASIS column, ASIS type, ASIS null, TOBE column, TOBE type, TOBE null, Mapping/default. */
-function buildDiff(
+export function buildDiff(
   rules: DiffRule[],
   asisSchema: DdlSchema | null,
   tobeSchema: DdlSchema | null,
@@ -897,7 +897,7 @@ function buildDiff(
 /** 파싱된 DdlSchema 를 CREATE TABLE 스크립트로 재구성.
  *  DDL 임포트는 원본 SQL 텍스트를 저장하지 않으므로(ddl_tables/ddl_columns 로 파싱됨),
  *  컬럼·타입(dataTypeRaw)·NULL·PK·default 로 CREATE TABLE 을 다시 만든다. */
-function reconstructDdl(schema: DdlSchema | null): string {
+export function reconstructDdl(schema: DdlSchema | null): string {
   if (!schema || schema.tables.length === 0) return '';
   const blocks: string[] = [];
   for (const tw of [...schema.tables].sort((a, b) => a.table.ordinal - b.table.ordinal)) {
@@ -1189,7 +1189,20 @@ async function downloadWorkbookAsXlsx(
   const wb = new ExcelJS.Workbook();
   wb.creator = 'KS Info System';
   wb.created = new Date();
+  await fillWorkbook(wb, categoryKey, sheets, getRows);
+  const blob = await xlsxBlobFromWorkbook(wb);
+  triggerBlobDownload(blob, filename);
+}
 
+/** 빈 workbook 에 한 카테고리의 모든 시트 + 행 + ARGB 배지 색을 채워 넣는다.
+ *  downloadWorkbookAsXlsx (단일 카테고리 다운로드) 와 buildXlsxBlob (bundle zip 용)
+ *  둘 다 이 함수를 통해 동일한 결과를 얻는다. */
+async function fillWorkbook(
+  wb: ExcelJS.Workbook,
+  categoryKey: CategoryKey,
+  sheets: SheetSchema[],
+  getRows: (sheetName: string) => Cell[][],
+): Promise<void> {
   for (const sheet of sheets) {
     /* Excel 시트명은 31 자 이하, \\ / ? : * [ ] 금지. 안전하게 잘라낸다. */
     const safeName = sheet.name.replace(/[\\/?:*[\]]/g, '_').slice(0, 31) || 'Sheet';
@@ -1300,23 +1313,22 @@ async function downloadWorkbookAsXlsx(
       });
     });
   }
+}
 
+/** ExcelJS Workbook → Blob. writeBuffer 가 Node Buffer(폴리필) 를 줄 수 있어
+ *  순수 ArrayBuffer 로 slice 한 뒤 Blob 으로 감싼다 (ZIP 헤더 깨짐 방지). */
+async function xlsxBlobFromWorkbook(wb: ExcelJS.Workbook): Promise<Blob> {
   const buf = await wb.xlsx.writeBuffer();
-  /* ExcelJS 3.x 의 browser 번들은 writeBuffer() 가 Node 스타일 Buffer(폴리필) 를
-     돌려준다. 이걸 그대로 new Blob([buf]) 에 넘기면 일부 번들 환경에서 Buffer.toString()
-     이 호출돼 텍스트로 직렬화 → ZIP 헤더가 깨져 Excel 에서 "파일 형식이 올바르지 않음"
-     오류가 난다.
-
-     해결책: 우리가 신뢰할 수 있는 raw ArrayBuffer 를 직접 잘라내서 Blob 에 넘긴다.
-       - ArrayBufferView (Buffer/Uint8Array) → underlying buffer 를 byteOffset/Length 만큼 slice
-       - 그 외 (ArrayBuffer) → 그대로 사용
-     이렇게 하면 Blob 은 Buffer wrapper 없이 순수 바이트만 본다. */
   const arrayBuffer: ArrayBuffer = ArrayBuffer.isView(buf)
     ? (buf.buffer as ArrayBuffer).slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
     : (buf as ArrayBuffer);
-  const blob = new Blob([arrayBuffer], {
+  return new Blob([arrayBuffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
+}
+
+/** Blob 다운로드 — <a download> 트릭. */
+function triggerBlobDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -1325,6 +1337,26 @@ async function downloadWorkbookAsXlsx(
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+/** 한 카테고리 분의 ExcelJS workbook 을 만들어 Blob 으로 돌려준다.
+ *  downloadWorkbookAsXlsx 의 내부 로직과 동일 — bundle 다운로드에서 같은 결과를
+ *  blob 형태로 zip 에 넣기 위해 분리한 entry point. */
+export async function buildXlsxBlob(
+  categoryKey: CategoryKey,
+  sheets: SheetSchema[],
+  getRows: (sheetName: string) => Cell[][],
+): Promise<Blob> {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'KS Info System';
+  wb.created = new Date();
+  // downloadWorkbookAsXlsx 와 동일 sheet/row/스타일 처리를 거치도록 그 함수의 in-place
+  // 효과를 그대로 활용 — 임시로 호출하고 마지막 download 부분만 우회.
+  // (DRY 를 위해 downloadWorkbookAsXlsx 를 한 번 더 부르고 Blob 만 가로채는 대신,
+  // helper 가 받은 wb 를 호출자가 채우게 두면 단순하지만 시그니처가 커진다 — 그래서
+  // 동일 로직을 호출하는 시점에 writeBuffer 만 별도로 한다.)
+  await fillWorkbook(wb, categoryKey, sheets, getRows);
+  return xlsxBlobFromWorkbook(wb);
 }
 
 /* Clipboard 복사 — 최신 API 우선, 실패 시 fallback. */
@@ -1513,6 +1545,9 @@ export function ArtifactsPage() {
     return { ...base, diff: diff.tables, sql: diff.tables };
   }, [project?.name, diff.tables]);
 
+  /* Bundle (zip) 다운로드 진행 중 상태 — 사이드바 버튼 disabled 처리용. */
+  const [bundleBusy, setBundleBusy] = useState(false);
+
   /* diff / sql 의 default selected — early return 위에서 계산 (hooks 순서 보장).
      latest run 미성공 테이블이 첫 번째일 수 있으니 첫 success 로 default.
      두 카테고리 모두 같은 successTables/disabledTables 를 공유하므로 default 도 같다. */
@@ -1552,6 +1587,57 @@ export function ArtifactsPage() {
     setSelectedTableByCat((prev) => ({ ...prev, [catKey]: tbl }));
   };
 
+  /* Artifacts 의 모든 다운로드 가능 산출물을 zip 한 묶음으로.
+     - Dashboard / MAPPING(diff) → .xlsx (in-app preview 와 동일 색상/스타일).
+     - DDL Scripts → asis/tobe 각 .sql.
+     - MIGRATION SQL → 성공 테이블 별 .migrate.sql.
+     - Validation 은 mock 이라 일단 skip. */
+  const handleDownloadBundle = async () => {
+    if (bundleBusy) return;
+    setBundleBusy(true);
+    try {
+      const JSZipMod = await import('jszip');
+      const JSZip = JSZipMod.default;
+      const zip = new JSZip();
+      const stem = projectSlug(project.name);
+
+      // 카테고리별 폴더 안에 배치 — 사용자가 압축 해제했을 때 카테고리별로 묶여 보이게.
+      // 1) Dashboard
+      if (dashboard) {
+        try {
+          const blob = await buildXlsxBlob('dashboard', SHEETS.dashboard,
+            (sheet) => dashboard.sheets[sheet] ?? []);
+          zip.file(`dashboard/${stem}.dashboard.xlsx`, await blob.arrayBuffer());
+        } catch (e) { console.warn('bundle: dashboard skipped', e); }
+      }
+      // 2) MAPPING (diff) — 박제 있을 때만.
+      if (!diff.noRun && diff.tables.length > 0) {
+        try {
+          const blob = await buildXlsxBlob('diff', SHEETS.diff, (sheet) => {
+            if (sheet === 'Diff') return diff.rows;
+            if (sheet === 'Summary') return diff.summaryAll;
+            return [];
+          });
+          zip.file(`mapping/${stem}.map.xlsx`, await blob.arrayBuffer());
+        } catch (e) { console.warn('bundle: mapping skipped', e); }
+      }
+      // 3) DDL Scripts
+      if (ddlText['AS-IS']) zip.file(`ddl/${stem}.asis.ddl.sql`, ddlText['AS-IS']);
+      if (ddlText['TO-BE']) zip.file(`ddl/${stem}.tobe.ddl.sql`, ddlText['TO-BE']);
+      // 4) MIGRATION SQL — table 별 합성 SQL.
+      for (const [tableLc, sql] of Object.entries(compiledSqlByTable)) {
+        if (sql) zip.file(`migration-sql/${tableLc}.migrate.sql`, sql);
+      }
+
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      triggerBlobDownload(zipBlob, `${stem}.artifacts.zip`);
+    } catch (e) {
+      console.warn('bundle download failed', e);
+    } finally {
+      setBundleBusy(false);
+    }
+  };
+
   return (
     <div style={styles.page}>
       {/* Sidebar — feature/artifacts 디자인 유지 (export btn in header) */}
@@ -1575,12 +1661,15 @@ export function ArtifactsPage() {
         </div>
         <div style={styles.cta}>
           <button
-            disabled
-            title={t('artifacts.empty.hint')}
-            style={{ ...styles.btnPrimary, ...styles.btnPrimaryDisabled }}
+            onClick={() => void handleDownloadBundle()}
+            disabled={bundleBusy}
+            title={bundleBusy ? '...' : t('siteExport.btn.download')}
+            style={bundleBusy
+              ? { ...styles.btnPrimary, ...styles.btnPrimaryDisabled }
+              : styles.btnPrimary}
           >
             <span style={styles.btnIcon}>↓</span>
-            {t('siteExport.btn.download')}
+            {bundleBusy ? '...' : t('siteExport.btn.download')}
           </button>
         </div>
       </aside>
