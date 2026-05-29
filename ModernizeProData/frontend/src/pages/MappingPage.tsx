@@ -3337,6 +3337,24 @@ function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, 
               })();
               return (
                 <>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4 }}>
+                    <AggregateTemplateMenu
+                      onPick={(kind) => {
+                        if (kind === null) {
+                          setEditValue('');
+                          return;
+                        }
+                        // 첫 source 의 alias / column 자동 인식.
+                        const firstSrc = editSrc.find((s) => s && s.trim());
+                        const di = firstSrc?.indexOf('.') ?? -1;
+                        const alias = di >= 0 ? firstSrc!.slice(0, di) : '';
+                        const col = di >= 0 ? firstSrc!.slice(di + 1) : firstSrc || '';
+                        setEditValue(generateAggregateTemplate(kind, alias, col));
+                        if (ruleError) setRuleError(null);
+                      }}
+                      disabled={readOnly}
+                    />
+                  </div>
                   <HighlightEditor
                     value={editValue}
                     onChange={(v) => { setEditValue(upperSqlKeywords(v)); if (ruleError) setRuleError(null); }}
