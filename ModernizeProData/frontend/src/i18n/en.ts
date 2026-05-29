@@ -53,11 +53,13 @@ export const en: Record<TranslationKey, string> = {
   'scheduler.history.col.type':        'Type',
   'scheduler.history.col.trigger':     'Trigger',
   'scheduler.history.col.worker':      'Worker',
+  'scheduler.history.col.tables':      'Tables',
   'scheduler.history.col.status':      'Status',
   'scheduler.history.col.started':     'Started',
   'scheduler.history.col.finished':    'Finished',
   'scheduler.history.col.duration':    'Duration',
   'scheduler.history.col.actions':     'Actions',
+  'scheduler.history.tables.all':      'All bindings (no specific table list — scheduler / bulk run)',
 
   'scheduler.action.abort':            'Abort',
   'scheduler.tooltip.abort':           'Abort — stop the run and reset to idle (status=aborted)',
@@ -156,7 +158,7 @@ export const en: Record<TranslationKey, string> = {
   'solution.notifications.enable': 'Enable notifications',
   'solution.notifications.enableDesc': 'Turning off disables in-app notifications across all projects.',
   'solution.internal': 'Internal scheduler',
-  'solution.internal.desc': 'The Coordinator-embedded Quartz scheduler fires a run for eligible projects once a day. With Mode = Common, all projects fire at the same time; with Mode = Individual, each project fires at its own configured time. The run type is decided by the current phase (test → test run, rehearsal → rehearsal run, ready → cutover run). Cannot be ON at the same time as External integrations (turning one on automatically turns the other off).',
+  'solution.internal.desc': 'The Coordinator-embedded Quartz scheduler fires a run for eligible projects once a day. With Mode = Common, all projects fire at the same time; with Mode = Individual, each project fires at its own configured time. Only projects in sign-off or ready phase are eligible (sign-off → rehearsal run, ready → cutover run); other phases are skipped because their mapping has not yet been approved. Cannot be ON at the same time as External integrations (turning one on automatically turns the other off).',
   'solution.internal.activeHint':   'Enabled — projects fire daily, either all at once (Common) or per project (Individual)',
   'solution.internal.inactiveHint': 'Disabled — Quartz nightly triggers will not fire',
   'solution.external': 'External integrations',
@@ -426,6 +428,13 @@ export const en: Record<TranslationKey, string> = {
   'versions.preflight.blocked':           'Pin this snapshot on the Execution page and pass preflight to enable Request Review',
   'versions.preflight.notRun':            'Pin this snapshot on the Execution page and run preflight first',
   'versions.preflight.partialSelection':  'Run preflight on all tables on the Execution page first',
+
+  /* Request Review gate — based on "latest run is success for every table" (2026-05-28 spec change).
+     failed / incomplete / not-run are all surfaced as "not completed" — see Run History for the breakdown. */
+  'versions.runReadiness.loading':      'Loading latest run status…',
+  'versions.runReadiness.noTables':     'Import the TO-BE DDL first',
+  'versions.runReadiness.notCompleted': 'Run for {count} table(s) is not complete ({tables}) — run them on the Execution page',
+  'versions.statusDesc.draftRunReady':  'All tables completed successfully ({completed}/{total}) — ready for an approval request.',
 
   // CHANGES section (versions detail panel)
   'versions.changes.title':           'Changes',
@@ -1047,9 +1056,22 @@ export const en: Record<TranslationKey, string> = {
   'projectSettings.schedule.history.col.finished': 'Finished',
   'projectSettings.schedule.history.col.type':     'Type',
   'projectSettings.schedule.history.col.trigger':  'Trigger',
+  'projectSettings.schedule.history.col.runId':    'Run ID',
+  'projectSettings.schedule.history.col.duration.tooltip': 'Wall-clock for the whole run (finishedAt − startedAt). Does not match the sum of per-table durations when tables run in parallel.',
   'projectSettings.schedule.history.col.worker':   'Worker',
+  'projectSettings.schedule.history.col.tables':   'Tables',
   'projectSettings.schedule.history.col.status':   'Status',
   'projectSettings.schedule.history.col.duration': 'Duration',
+  'projectSettings.schedule.history.tables.all':   'All bindings (no specific table list — scheduler / bulk run)',
+  'projectSettings.schedule.history.drilldown.loading':       'Loading per-table results…',
+  'projectSettings.schedule.history.drilldown.error':         'Failed to load per-table results',
+  'projectSettings.schedule.history.drilldown.empty':         'No per-table results yet for this run',
+  'projectSettings.schedule.history.drilldown.col.status':    'Status',
+  'projectSettings.schedule.history.drilldown.col.table':     'Table',
+  'projectSettings.schedule.history.drilldown.col.rows':      'Rows',
+  'projectSettings.schedule.history.drilldown.col.started':   'Started',
+  'projectSettings.schedule.history.drilldown.col.finished':  'Finished',
+  'projectSettings.schedule.history.drilldown.col.duration':  'Duration',
   'projectSettings.action.refresh':                'Refresh',
 
   // Schedule — cutover window

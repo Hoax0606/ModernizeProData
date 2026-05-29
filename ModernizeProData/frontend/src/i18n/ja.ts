@@ -59,11 +59,13 @@ export const ja: Record<TranslationKey, string> = {
   'scheduler.history.col.type':        'Type',
   'scheduler.history.col.trigger':     'Trigger',
   'scheduler.history.col.worker':      'Worker',
+  'scheduler.history.col.tables':      'Tables',
   'scheduler.history.col.status':      'Status',
   'scheduler.history.col.started':     'Started',
   'scheduler.history.col.finished':    'Finished',
   'scheduler.history.col.duration':    'Duration',
   'scheduler.history.col.actions':     'Actions',
+  'scheduler.history.tables.all':      '全 binding (個別 table 指定なし — scheduler / 一括 trigger)',
 
   'scheduler.action.abort':            'Abort',
   'scheduler.tooltip.abort':           'Abort — run を中止し idle に復旧 (status=aborted)',
@@ -162,7 +164,7 @@ export const ja: Record<TranslationKey, string> = {
   'solution.notifications.enable': 'Enable notifications',
   'solution.notifications.enableDesc': 'オフにすると全プロジェクトのアプリ内通知が一括無効化されます。',
   'solution.internal': 'Internal scheduler',
-  'solution.internal.desc': 'Coordinator 内蔵の Quartz スケジューラが、対象プロジェクトの run を毎日 1 回自動起動します。Mode = Common なら全プロジェクトを同じ時刻に、Mode = Individual なら Project ごとに設定した時刻に発火。起動される run の種類はその時点の phase により決まります (test → test run / rehearsal → rehearsal run / ready → cutover run)。External integrations と同時には ON にできません (片方を ON にするともう片方は自動 OFF)。',
+  'solution.internal.desc': 'Coordinator 内蔵の Quartz スケジューラが、対象プロジェクトの run を毎日 1 回自動起動します。Mode = Common なら全プロジェクトを同じ時刻に、Mode = Individual なら Project ごとに設定した時刻に発火。対象は sign-off / ready phase の project のみ (sign-off → rehearsal run / ready → cutover run)。他 phase は mapping 未承認のため skip。External integrations と同時には ON にできません (片方を ON にするともう片方は自動 OFF)。',
   'solution.internal.activeHint':   '有効 — Mode の設定に従って全プロジェクト (Common) または Project ごと (Individual) に日次自動起動',
   'solution.internal.inactiveHint': '無効 — Quartz Nightly trigger は発火しない',
   'solution.external': 'External integrations',
@@ -432,6 +434,13 @@ export const ja: Record<TranslationKey, string> = {
   'versions.preflight.blocked':           'Execution 画面でこのスナップショットを pin して preflight を全 pass させると Request Review が有効になります',
   'versions.preflight.notRun':            'Execution 画面でこのスナップショットを pin して preflight を実行してください',
   'versions.preflight.partialSelection':  'Execution 画面で全テーブルを選択して preflight を実行してください',
+
+  /* Request Review ゲート — 「全テーブルの最新 run が success」基準 (2026-05-28 仕様変更).
+     失敗 / 中断 / 未実行 はゲート的に全部「未完了」と同列扱い (詳細は Run History 参照). */
+  'versions.runReadiness.loading':      '最新 run の状態を取得中…',
+  'versions.runReadiness.noTables':     '先に TO-BE DDL を取り込んでください',
+  'versions.runReadiness.notCompleted': '{count} 個のテーブルの run が完了していません ({tables}) — Execution 画面で実行してください',
+  'versions.statusDesc.draftRunReady':  '全テーブル ({completed}/{total}) が正常終了済みです。承認リクエストの準備ができています。',
 
   // CHANGES section (versions detail panel)
   'versions.changes.title':           'Changes',
@@ -1053,9 +1062,22 @@ export const ja: Record<TranslationKey, string> = {
   'projectSettings.schedule.history.col.finished': 'Finished',
   'projectSettings.schedule.history.col.type':     'Type',
   'projectSettings.schedule.history.col.trigger':  'Trigger',
+  'projectSettings.schedule.history.col.runId':    'Run ID',
+  'projectSettings.schedule.history.col.duration.tooltip': 'run 全体の wall-clock (finishedAt − startedAt)。テーブルを並列処理している場合、per-table の duration 合計とは一致しません。',
   'projectSettings.schedule.history.col.worker':   'Worker',
+  'projectSettings.schedule.history.col.tables':   'Tables',
   'projectSettings.schedule.history.col.status':   'Status',
   'projectSettings.schedule.history.col.duration': 'Duration',
+  'projectSettings.schedule.history.tables.all':   '全 binding (個別 table 指定なし — scheduler / 一括 trigger)',
+  'projectSettings.schedule.history.drilldown.loading':       'テーブル別結果を読み込み中…',
+  'projectSettings.schedule.history.drilldown.error':         'テーブル別結果の取得に失敗',
+  'projectSettings.schedule.history.drilldown.empty':         'この run はまだテーブル別結果がありません',
+  'projectSettings.schedule.history.drilldown.col.status':    'Status',
+  'projectSettings.schedule.history.drilldown.col.table':     'Table',
+  'projectSettings.schedule.history.drilldown.col.rows':      'Rows',
+  'projectSettings.schedule.history.drilldown.col.started':   'Started',
+  'projectSettings.schedule.history.drilldown.col.finished':  'Finished',
+  'projectSettings.schedule.history.drilldown.col.duration':  'Duration',
   'projectSettings.action.refresh':                'Refresh',
 
   // Schedule — cutover window

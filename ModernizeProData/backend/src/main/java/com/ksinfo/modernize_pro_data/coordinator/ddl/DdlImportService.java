@@ -32,6 +32,12 @@ import java.util.stream.Collectors;
  * side ('asis' | 'tobe') を引数で受け取り、同じ ddl_imports / ddl_tables / ddl_columns に格納する.
  * 再インポート時は同じ project_id + side の既存データを CASCADE 削除して上書きする.
  * AS-IS の場合 projects.table_count を、TO-BE の場合 projects.tobe_table_count を更新する.
+ *
+ * mapping 連携: import / delete どちらも該当 project の mapping_rules /
+ * mapping_table_bindings / mapping_code_maps を一律 wipe する. re-import 時 mapping
+ * 保存はサイレント不整合 (DDL 側 column rename / drop で rule が孤児化) のリスクが
+ * 大きいため、「DDL を入れ直す ＝ mapping もやり直し」で統一. ReImport ボタンは
+ * Delete → Import の単なるショートカット.
  */
 @Slf4j
 @Service
@@ -76,6 +82,20 @@ public class DdlImportService {
 
         ddlImportRepo.deleteByProjectIdAndSide(projectId, side);
         ddlImportRepo.flush();
+
+        /* DDL import 는 「やり直し動作」으로 취급 — deleteDdl 와 同じく project 의
+           mapping_rules / mapping_table_bindings / mapping_code_maps 를 全 wipe.
+           re-import (旣存 DDL 上書き) 인 경우 mapping 보존 동작이 「軽한 DDL 수정으로
+           mapping 살아남음」 vs 「DDL 와 mapping 不整合」 의 trade-off 였으나, 후자가
+           사일런트 오류로 더 위험하다는 사용자 결정. 初回 import 라면 wipe 할 게
+           없어 no-op. ReImport 버튼 = Delete + Import 의 ショートカット. */
+        int rules = mappingRuleRepo.deleteAllByProjectId(projectId);
+        int bindings = mappingBindingRepo.deleteAllByProjectId(projectId);
+        int codes = mappingCodeMapRepo.deleteAllByProjectId(projectId);
+        if (rules + bindings + codes > 0) {
+            log.info("DDL import wiped mapping (re-import): project={}, side={}, rules={}, bindings={}, codeMaps={}",
+                    projectId, side, rules, bindings, codes);
+        }
 
         // Site 의 DB type 정보로 dialect 결정 (없으면 "oracle" 폴백).
         // AS-IS → site.asisDbType, TO-BE → site.tobeDbByEnv[site.environment].type
@@ -195,8 +215,8 @@ public class DdlImportService {
 
         /* DDL 削除는 「やり直し動作」으로 취급 — AS-IS / TO-BE 어느 쪽이든 그 project 의
            mapping_rules / mapping_table_bindings / mapping_code_maps 를 전체 wipe.
-           이유: 한쪽 DDL 이 없어지면 rule 의 참조가 끊겨 의미가 없고, 도구가 「孤児 rule
-           이 同名 DDL 재 import 시 자동 재연결」 동작은 사용자 의도와 어긋난다는 결정. */
+           이유: 한쪽 DDL 이 없어지면 rule 의 참조가 끊겨 의미가 없고, 한쪽 DDL 만 보존된
+           mapping 정의는 의미가 없다. import 側도 同 동작 (재 import 시 wipe). */
         int rules = mappingRuleRepo.deleteAllByProjectId(projectId);
         int bindings = mappingBindingRepo.deleteAllByProjectId(projectId);
         int codes = mappingCodeMapRepo.deleteAllByProjectId(projectId);

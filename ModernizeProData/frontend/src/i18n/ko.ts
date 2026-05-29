@@ -57,11 +57,13 @@ export const ko = {
   'scheduler.history.col.type':        'Type',
   'scheduler.history.col.trigger':     'Trigger',
   'scheduler.history.col.worker':      'Worker',
+  'scheduler.history.col.tables':      'Tables',
   'scheduler.history.col.status':      'Status',
   'scheduler.history.col.started':     'Started',
   'scheduler.history.col.finished':    'Finished',
   'scheduler.history.col.duration':    'Duration',
   'scheduler.history.col.actions':     'Actions',
+  'scheduler.history.tables.all':      '전 binding (개별 table 미지정 — scheduler / 일괄 trigger)',
 
   'scheduler.action.abort':            'Abort',
   'scheduler.tooltip.abort':           'Abort — run 을 중단하고 idle 로 復旧 (status=aborted)',
@@ -160,7 +162,7 @@ export const ko = {
   'solution.notifications.enable': 'Enable notifications',
   'solution.notifications.enableDesc': '끄면 모든 프로젝트의 인앱 알림이 일괄 비활성화됩니다.',
   'solution.internal': 'Internal scheduler',
-  'solution.internal.desc': 'Coordinator 내장 Quartz 스케줄러가 대상 프로젝트의 run 을 매일 1 회 자동 기동합니다. Mode = Common 이면 전체 프로젝트를 같은 시각에, Mode = Individual 이면 Project 별로 설정한 시각에 발화. 기동되는 run 의 종류는 그 시점의 phase 에 따라 결정됩니다 (test → test run / rehearsal → rehearsal run / ready → cutover run). External integrations 와 동시에 ON 으로 둘 수 없습니다 (한쪽 켜면 다른 쪽이 자동 OFF).',
+  'solution.internal.desc': 'Coordinator 내장 Quartz 스케줄러가 대상 프로젝트의 run 을 매일 1 회 자동 기동합니다. Mode = Common 이면 전체 프로젝트를 같은 시각에, Mode = Individual 이면 Project 별로 설정한 시각에 발화. 대상은 sign-off / ready phase 의 project 만 (sign-off → rehearsal run / ready → cutover run). 그 외 phase 는 mapping 미승인 상태이므로 skip. External integrations 와 동시에 ON 으로 둘 수 없습니다 (한쪽 켜면 다른 쪽이 자동 OFF).',
   'solution.internal.activeHint':   '활성화됨 — Mode 설정에 따라 전체 프로젝트 (Common) 또는 Project 별 (Individual) 로 일일 자동 기동',
   'solution.internal.inactiveHint': '비활성화 — Quartz Nightly trigger 는 발화되지 않음',
   'solution.external': 'External integrations',
@@ -430,6 +432,13 @@ export const ko = {
   'versions.preflight.blocked':           'Execution 화면에서 이 스냅샷을 pin 하고 preflight 를 모두 pass 시켜야 Request Review 가 가능합니다',
   'versions.preflight.notRun':            'Execution 화면에서 이 스냅샷을 pin 한 후 preflight 를 실행해주세요',
   'versions.preflight.partialSelection':  'Execution 화면에서 전체 테이블을 선택해 preflight 를 실행해야 합니다',
+
+  /* Request Review 게이트 — 「전 테이블의 최신 run 이 success」 기준 (2026-05-28 사양 변경).
+     실패 / 중단 / 미실행 은 게이트적으로 모두 「미완료」 로 통합 (상세는 Run History 참조). */
+  'versions.runReadiness.loading':      '최신 run 상태 로드 중…',
+  'versions.runReadiness.noTables':     '먼저 TO-BE DDL 을 import 해주세요',
+  'versions.runReadiness.notCompleted': '{count} 개 테이블의 run 이 완료되지 않았습니다 ({tables}) — Execution 화면에서 실행해주세요',
+  'versions.statusDesc.draftRunReady':  '전 테이블 ({completed}/{total}) 의 최신 run 이 success 입니다. 승인 요청 준비 완료.',
 
   // CHANGES section (versions detail panel)
   'versions.changes.title':           'Changes',                          // *.title — 영문 통일
@@ -1051,9 +1060,22 @@ export const ko = {
   'projectSettings.schedule.history.col.finished': 'Finished',
   'projectSettings.schedule.history.col.type':     'Type',
   'projectSettings.schedule.history.col.trigger':  'Trigger',
+  'projectSettings.schedule.history.col.runId':    'Run ID',
+  'projectSettings.schedule.history.col.duration.tooltip': 'run 전체의 wall-clock (finishedAt − startedAt). 테이블을 병렬 처리하는 경우 per-table duration 의 합과 일치하지 않습니다.',
   'projectSettings.schedule.history.col.worker':   'Worker',
+  'projectSettings.schedule.history.col.tables':   'Tables',
   'projectSettings.schedule.history.col.status':   'Status',
   'projectSettings.schedule.history.col.duration': 'Duration',
+  'projectSettings.schedule.history.tables.all':   '전 binding (개별 table 미지정 — scheduler / 일괄 trigger)',
+  'projectSettings.schedule.history.drilldown.loading':       '테이블별 결과 로드 중…',
+  'projectSettings.schedule.history.drilldown.error':         '테이블별 결과 조회 실패',
+  'projectSettings.schedule.history.drilldown.empty':         '이 run 은 아직 테이블별 결과가 없습니다',
+  'projectSettings.schedule.history.drilldown.col.status':    'Status',
+  'projectSettings.schedule.history.drilldown.col.table':     'Table',
+  'projectSettings.schedule.history.drilldown.col.rows':      'Rows',
+  'projectSettings.schedule.history.drilldown.col.started':   'Started',
+  'projectSettings.schedule.history.drilldown.col.finished':  'Finished',
+  'projectSettings.schedule.history.drilldown.col.duration':  'Duration',
   'projectSettings.action.refresh':                'Refresh',
 
 
