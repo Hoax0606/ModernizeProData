@@ -27,8 +27,13 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
+        // /ws — 브라우저 (frontend) 용. SockJS fallback 활성. raw WS upgrade 는 거부됨.
         registry.addEndpoint("/ws")
                 .setAllowedOriginPatterns("*")
                 .withSockJS();
+        // /ws-raw — Worker daemon (StandardWebSocketClient) 용 pure WebSocket endpoint.
+        // SockJS 안 끼고 직접 ws:// upgrade.
+        registry.addEndpoint("/ws-raw")
+                .setAllowedOriginPatterns("*");
     }
 }

@@ -7,6 +7,8 @@ export interface WorkerSummaryDto {
   name: string;
   siteId: string | null;
   userId: string | null;
+  /** worker_node.userId 의 username — Overview 가 executionAssignee 와 매칭. */
+  username: string | null;
   status: WorkerStatus;
   registeredAt: string | null;
   lastSeenAt: string | null;

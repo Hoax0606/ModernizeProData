@@ -1229,7 +1229,12 @@ export const en: Record<TranslationKey, string> = {
   'executionOverview.kpi.errors':   'Errors',
   'executionOverview.kpi.warnings': 'Warnings',
   'executionOverview.empty':        'No projects',
-  'executionOverview.noRunYet':     'run engine not wired yet',
+  'executionOverview.noRunYet':     'No run yet',
+  'executionOverview.statusRunning':'{n} run(s) in progress',
+  'executionOverview.statusFailed': '{n} run(s) ended in failure',
+  'executionOverview.statusAllDone':'All runs done',
+  'executionOverview.worker.online': '{name} Worker is online',
+  'executionOverview.worker.offline':'{name} Worker is offline / unregistered — Run will be rejected',
   'executionOverview.overall':      'Overall progress',
   'executionOverview.notSelectable':'Only projects in rehearsal / cutover phase can be selected (current: {phase})',
 

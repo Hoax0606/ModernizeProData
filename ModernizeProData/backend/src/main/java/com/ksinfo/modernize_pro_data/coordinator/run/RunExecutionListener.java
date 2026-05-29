@@ -14,8 +14,10 @@ import com.ksinfo.modernize_pro_data.coordinator.site.SiteRepository;
 import com.ksinfo.modernize_pro_data.coordinator.worker.RunOutputPathResolver;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageContext;
 import com.ksinfo.modernize_pro_data.coordinator.worker.WorkerExecutor;
+import com.ksinfo.modernize_pro_data.coordinator.worker.WorkerNodeService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.event.TransactionPhase;
@@ -58,12 +60,45 @@ public class RunExecutionListener {
     private final DuckDbService duckDbService;
     private final RunControlRegistry runControlRegistry;
     private final RunStageCacheService stageCacheService;
+    private final WorkerNodeService workerNodeService;
+
+    @Value("${modernize.mode:coordinator}")
+    private String mode;
+
+    @Value("${modernize.coordinator.self-username:master}")
+    private String coordinatorSelfUsername;
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
     @Async
     public void onRunStarted(RunStartedEvent event) {
         String runId = event.runId();
         String projectId = event.projectId();
+        // Coordinator mode 에서 assignee 의 Worker 가 online 이고 assignee 가 Coordinator self
+        // 가 아니면 그 Worker 가 STOMP 으로 RUN_START 를 받아 자기 PC 에서 실행 → Coordinator
+        // 의 local executor 는 skip.
+        // Coordinator self user 가 assignee 면 worker_node 가 없을 테니 항상 local 실행.
+        // Worker mode 에선 이 listener 자체가 안 발사된다 (RunService.start 가 Coordinator 에서만 호출).
+        if ("coordinator".equals(mode)) {
+            RunHistory rh = runRepo.findById(runId).orElse(null);
+            String assignee = rh == null ? null : rh.getWorkerId();
+            boolean isSelf = assignee != null && assignee.equals(coordinatorSelfUsername);
+            if (assignee != null && !isSelf
+                    && workerNodeService.findOnlineForUsername(assignee).isPresent()) {
+                log.info("Run delegated to worker {} (skipping local execution) runId={}", assignee, runId);
+                return;
+            }
+        }
+        executeRun(runId);
+    }
+
+    /**
+     * 한 run 의 stage 파이프라인을 이 PC 의 backend (Coordinator local 또는 Worker daemon) 에서
+     * 실제로 돌린다. RunService 가 발사하는 RunStartedEvent 의 흐름과, Worker daemon 의
+     * STOMP RUN_START 수신 흐름 둘 다 진입점.
+     */
+    public void executeRun(String runId) {
+        RunHistory rhHead = runRepo.findById(runId).orElse(null);
+        String projectId = rhHead == null ? null : rhHead.getProjectId();
         log.info("Run execution thread started runId={} projectId={}", runId, projectId);
 
         StageContext ctx;

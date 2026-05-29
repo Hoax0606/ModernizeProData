@@ -2,16 +2,20 @@ import { useEffect, useMemo, useState } from 'react';
 import { useWorkspaceStore } from '../store/workspace';
 import { useT } from '../i18n';
 import { tobeDdlApi } from '../api/tobeDdl';
-import type { DdlSchema } from '../api/asisDdl';
+import { asisDdlApi, type DdlSchema } from '../api/asisDdl';
+import { snapshotApi } from '../api/workspace';
+import { useSnapshotsStore, usePinnedSnapshotsStore } from '../store/snapshots';
 import {
   buildManifest,
   DEFAULT_FORMATS,
   generateZipBundle,
   pathSafeName,
   triggerBlobDownload,
+  type ProjectArtifactData,
   type SchemaCount,
   type SelectedFormats,
 } from '../lib/siteExportManifest';
+import type { DiffRule } from './ArtifactsPage';
 import { SiteExportPicker } from '../components/SiteExportPicker';
 import { SiteExportPreview, type PreviewView } from '../components/SiteExportPreview';
 
@@ -93,9 +97,45 @@ export function SiteExportPage() {
     [site, stamp],
   );
 
+  /* 각 project 별 활성 snapshot 의 박제된 successTables (= "마지막 전환 기준 실 테이블 명").
+     mount 후 fetch — manifest preview / zip 양쪽에서 일관된 파일명 사용. */
+  const [tablesByProject, setTablesByProject] = useState<Record<string, string[]>>({});
+  useEffect(() => {
+    if (siteProjects.length === 0) {
+      setTablesByProject({});
+      return;
+    }
+    let alive = true;
+    (async () => {
+      const snapshotsStore = useSnapshotsStore.getState();
+      const pinned = usePinnedSnapshotsStore.getState().pinnedIds;
+      await Promise.all(siteProjects.map((p) => snapshotsStore.fetchByProject(p.id)));
+      const refreshed = useSnapshotsStore.getState().snapshots;
+      const result: Record<string, string[]> = {};
+      for (const p of siteProjects) {
+        const projectMapping = refreshed.filter((s) => s.projectId === p.id && s.type === 'mapping');
+        const active = projectMapping.find((s) => pinned.includes(s.id))
+          ?? [...projectMapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+        const ctx = active?.executionContext;
+        if (ctx) {
+          const set = new Set<string>();
+          for (const st of ctx.stages) {
+            for (const tr of st.tables) {
+              if (tr.status === 'success') set.add(tr.tobeTable);
+            }
+          }
+          if (set.size > 0) result[p.id] = [...set];
+        }
+      }
+      if (alive) setTablesByProject(result);
+    })();
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectIdsKey]);
+
   const manifest = useMemo(
-    () => buildManifest({ projects: siteProjects, schemaCounts, selectedFormats, bundleStem }),
-    [siteProjects, schemaCounts, selectedFormats, bundleStem],
+    () => buildManifest({ projects: siteProjects, schemaCounts, selectedFormats, bundleStem, tablesByProject }),
+    [siteProjects, schemaCounts, selectedFormats, bundleStem, tablesByProject],
   );
   const totalTables = useMemo(
     () => siteProjects.reduce((a, p) => a + (schemaCounts[p.id]?.tables ?? p.tableCount ?? 0), 0),
@@ -120,12 +160,67 @@ export function SiteExportPage() {
     if (busy || noFormat) return;
     setBusy(true);
     try {
+      // 각 프로젝트 별 활성 snapshot (pinned > latest mapping) 의 실데이터 fetch.
+      const snapshotsAll = useSnapshotsStore.getState().snapshots;
+      const pinnedIds = usePinnedSnapshotsStore.getState().pinnedIds;
+      // snapshots 가 아직 fetch 안 된 경우 — 안전하게 한 번 더 보장.
+      await Promise.all(siteProjects.map((p) => useSnapshotsStore.getState().fetchByProject(p.id)));
+      const refreshedSnapshots = useSnapshotsStore.getState().snapshots;
+
+      const projectArtifacts: Record<string, ProjectArtifactData> = {};
+      await Promise.all(siteProjects.map(async (p) => {
+        const projectMapping = refreshedSnapshots
+          .filter((s) => s.projectId === p.id && s.type === 'mapping');
+        const pinned = projectMapping.find((s) => pinnedIds.includes(s.id));
+        const active = pinned
+          ?? [...projectMapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+        if (!active) {
+          // snapshot 자체 없음 — DDL 만 추가될 수 있도록 placeholder.
+          const [asis, tobe] = await Promise.all([
+            asisDdlApi.get(p.id).catch(() => null),
+            tobeDdlApi.get(p.id).catch(() => null),
+          ]);
+          projectArtifacts[p.id] = {
+            snapshotId: null, rules: [], asisSchema: asis, tobeSchema: tobe,
+            successTables: null, compiledSqlByTable: {},
+          };
+          return;
+        }
+        const [mappingData, asis, tobe] = await Promise.all([
+          snapshotApi.getMapping(active.id).catch(() => null),
+          asisDdlApi.get(p.id).catch(() => null),
+          tobeDdlApi.get(p.id).catch(() => null),
+        ]);
+        const ctx = active.executionContext ?? null;
+        const successTables = ctx
+          ? new Set(ctx.stages.flatMap((st) => st.tables.filter((t) => t.status === 'success').map((t) => t.tobeTable.toLowerCase())))
+          : null;
+        const compiledSqlByTable: Record<string, string> = {};
+        const loadStage = ctx?.stages.find((s) => s.stageKey === 'load');
+        if (loadStage) {
+          for (const tr of loadStage.tables) {
+            if (tr.compiledSql) compiledSqlByTable[tr.tobeTable.toLowerCase()] = tr.compiledSql;
+          }
+        }
+        projectArtifacts[p.id] = {
+          snapshotId: active.id,
+          rules: (mappingData?.rules ?? []) as unknown as DiffRule[],
+          asisSchema: asis,
+          tobeSchema: tobe,
+          successTables,
+          compiledSqlByTable,
+        };
+      }));
+      // snapshots 변수는 의도적으로 사용 안 함 — getState() 직접 호출로 최신 보장.
+      void snapshotsAll;
+
       const blob = await generateZipBundle({
         site,
         projects: siteProjects,
         schemas,
         manifest,
         generatedAt,
+        projectArtifacts,
       });
       triggerBlobDownload(blob, `${bundleStem}.zip`);
     } finally {

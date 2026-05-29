@@ -12,6 +12,7 @@ import {
 import { useT } from '../i18n';
 import { overviewApi, type ProjectExecMetrics } from '../api/executionOverview';
 import { runsApi } from '../api/runs';
+import { workerApi, type WorkerSummaryDto } from '../api/worker';
 
 const PHASES: Project['phase'][] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
 
@@ -103,18 +104,94 @@ export function ExecutionOverviewPage() {
   const [warningFilter, setWarningFilter] = useState<'' | 'has' | 'none'>('');
 
   // execution overview 실데이터 — per-project 최신 run 집계 (BE: /sites/{id}/execution-overview).
-  const [metrics, setMetrics] = useState<Record<string, ProjectExecMetrics>>({});
+  const [apiMetrics, setApiMetrics] = useState<Record<string, ProjectExecMetrics>>({});
   const loadMetrics = useCallback(() => {
-    if (!activeSiteId) { setMetrics({}); return; }
+    if (!activeSiteId) { setApiMetrics({}); return; }
     overviewApi.bySite(activeSiteId)
       .then((list) => {
         const m: Record<string, ProjectExecMetrics> = {};
         for (const it of list) m[it.projectId] = it;
-        setMetrics(m);
+        setApiMetrics(m);
       })
-      .catch(() => setMetrics({}));
+      .catch(() => setApiMetrics({}));
   }, [activeSiteId]);
   useEffect(() => { loadMetrics(); }, [loadMetrics]);
+  // (A) 자동 갱신 — Execution 단일 페이지와 동일한 5초 polling. 다른 페이지로 떠나면 cleanup.
+  // run 시작 / 종료 / abort 후 사용자가 Refresh 안 눌러도 화면이 따라온다.
+  useEffect(() => {
+    if (!activeSiteId) return;
+    const id = window.setInterval(() => loadMetrics(), 5000);
+    return () => window.clearInterval(id);
+  }, [activeSiteId, loadMetrics]);
+
+  // worker_nodes — master 만 fetch (endpoint 가 master only). assignee 별 online dot 용.
+  // 90s heartbeat timeout. 동일 5초 polling.
+  const [workers, setWorkers] = useState<WorkerSummaryDto[]>([]);
+  const loadWorkers = useCallback(() => {
+    if (!isMaster) { setWorkers([]); return; }
+    workerApi.list().then(setWorkers).catch(() => setWorkers([]));
+  }, [isMaster]);
+  useEffect(() => { loadWorkers(); }, [loadWorkers]);
+  useEffect(() => {
+    if (!isMaster) return;
+    const id = window.setInterval(() => loadWorkers(), 5000);
+    return () => window.clearInterval(id);
+  }, [isMaster, loadWorkers]);
+
+  // username -> 가장 최근 heartbeat 받은 worker. online 판정은 lastSeenAt 90s 기준.
+  const workerByUsername = useMemo(() => {
+    const map = new Map<string, WorkerSummaryDto>();
+    const sorted = [...workers].sort((a, b) =>
+      (b.lastSeenAt ?? '').localeCompare(a.lastSeenAt ?? ''));
+    for (const w of sorted) {
+      if (w.username && !map.has(w.username)) map.set(w.username, w);
+    }
+    return map;
+  }, [workers]);
+  const ONLINE_TIMEOUT_MS = 90_000;
+  const isWorkerOnline = (username: string | null | undefined): boolean => {
+    if (!username) return false;
+    const w = workerByUsername.get(username);
+    if (!w || w.status !== 'REGISTERED' || !w.lastSeenAt) return false;
+    return Date.now() - new Date(w.lastSeenAt).getTime() <= ONLINE_TIMEOUT_MS;
+  };
+
+  // (D) pinned snapshot 의 박제된 executionContext 가 있으면 그것을 우선 source 로.
+  // 사용자가 옛 snapshot 으로 pin 을 옮기면 Overview 도 그 시점 결과로 자동 전환.
+  // 박제 없으면 (= 그 snapshot 으로 한 번도 run 안 함) latest run 의 apiMetrics fallback.
+  const metrics = useMemo<Record<string, ProjectExecMetrics>>(() => {
+    const merged: Record<string, ProjectExecMetrics> = { ...apiMetrics };
+    for (const p of siteProjects) {
+      const pinned = pinnedByProject[p.id];
+      const ctx = pinned?.executionContext;
+      if (!ctx) continue;
+      const loadStage = ctx.stages.find((s) => s.stageKey === 'load');
+      const tablesTotal = ctx.stages.reduce((a, s) => Math.max(a, s.tablesTotal ?? 0), 0);
+      const tablesDone = loadStage?.tablesSuccess ?? 0;
+      const rows = loadStage
+        ? loadStage.tables.reduce((a, t) => a + (t.rowCount ?? 0), 0)
+        : 0;
+      const errorCount = ctx.stages.reduce((a, s) => a + (s.tablesFailed ?? 0), 0);
+      const totalStages = ctx.stages.length;
+      const progressPct = totalStages > 0
+        ? ctx.stages.reduce((a, s) => a + (s.pct ?? 0), 0) / totalStages
+        : 0;
+      merged[p.id] = {
+        projectId: p.id,
+        projectName: p.name,
+        latestRunId: ctx.runId,
+        runStatus: ctx.status,
+        rows,
+        tablesTotal,
+        tablesDone,
+        errorCount,
+        // Quarantine warningCount 는 별도 fetch 필요 — 일단 apiMetrics 의 값 유지.
+        warningCount: apiMetrics[p.id]?.warningCount ?? 0,
+        progressPct,
+      };
+    }
+    return merged;
+  }, [apiMetrics, pinnedByProject, siteProjects]);
 
   const errorCount = (p: Project) => metrics[p.id]?.errorCount ?? 0;
   const warningCount = (p: Project) => metrics[p.id]?.warningCount ?? 0;
@@ -181,25 +258,45 @@ export function ExecutionOverviewPage() {
   const canRun = runCount > 0;
   const canAbort = selectedRunningCount > 0;
 
-  const handleRefresh = () => loadMetrics();
+  const handleRefresh = () => { loadMetrics(); loadWorkers(); };
   const handleRun = async () => {
     if (!isMaster) return;
     const ids = [...selected];
-    await Promise.allSettled(ids.map((id) => runsApi.start(id)));
+    const results = await Promise.allSettled(ids.map((id) => runsApi.start(id)));
+    // backend 가 worker offline / 미할당 인 경우 RunResultDto.status='REJECTED' 로 반환.
+    // 성공 응답인데 REJECTED 인 경우 + Promise reject (네트워크 / 권한) 둘 다 모아 안내.
+    const rejected: string[] = [];
+    results.forEach((r, idx) => {
+      const projectName = siteProjects.find((p) => p.id === ids[idx])?.name ?? ids[idx];
+      if (r.status === 'fulfilled' && r.value.status === 'REJECTED') {
+        rejected.push(`${projectName}: ${r.value.reason ?? 'rejected'}`);
+      } else if (r.status === 'rejected') {
+        rejected.push(`${projectName}: ${(r.reason as Error)?.message ?? 'request failed'}`);
+      }
+    });
+    if (rejected.length > 0) {
+      // 브라우저 alert 정책상 제거 대상이지만, 현재 toast 컴포넌트가 페이지에 없어
+      // 일단 console 에 모아두고 즉시 사용자 인지될 수 있도록 첫 줄을 alert 으로 안내.
+      console.warn('[ExecutionOverview] run rejected', rejected);
+      // TODO(toast): 페이지에 inline 토스트 도입 후 alert 제거.
+      window.alert(rejected.join('\n'));
+    }
     setSelected(new Set());
     loadMetrics();
   };
   const handleAbort = async () => {
     if (!isMaster) return;
+    // Abort 대상은 항상 "지금 실행 중인 run". pinned snapshot 의 박제는 종료 상태라
+    // 그것을 abort 하려 들면 실패 — 그래서 apiMetrics (latest run) 만 본다.
     const runIds = [...selected]
-      .map((id) => metrics[id])
+      .map((id) => apiMetrics[id])
       .filter((m): m is ProjectExecMetrics => !!m && m.runStatus === 'running' && !!m.latestRunId)
       .map((m) => m.latestRunId!);
     await Promise.allSettled(runIds.map((rid) => runsApi.abort(rid, 'aborted from overview')));
     loadMetrics();
   };
 
-  // KPI 집계 — 현재는 placeholder.
+  // KPI 집계 — phase 기준 (running/done counter 용).
   const status = siteProjects.reduce(
     (a, p) => {
       if (p.phase === 'done') return { ...a, done: a.done + 1 };
@@ -208,6 +305,22 @@ export function ExecutionOverviewPage() {
     },
     { running: 0, done: 0 },
   );
+
+  // (B) Overall progress / toolbar 상단 안내 — metrics 상태에 따라 동적.
+  const metricValues = Object.values(metrics);
+  const runningRuns = metricValues.filter((m) => m.runStatus === 'running').length;
+  const failedRuns = metricValues.filter(
+    (m) => m.runStatus === 'failed' || m.runStatus === 'timed_out' || m.runStatus === 'aborted',
+  ).length;
+  const successRuns = metricValues.filter((m) => m.runStatus === 'success').length;
+  const anyRun = runningRuns + failedRuns + successRuns > 0;
+  const statusHint = !anyRun
+    ? t('executionOverview.noRunYet')
+    : runningRuns > 0
+      ? t('executionOverview.statusRunning', { n: runningRuns })
+      : failedRuns > 0
+        ? t('executionOverview.statusFailed', { n: failedRuns })
+        : t('executionOverview.statusAllDone');
   const totalTables = siteProjects.reduce((a, p) => a + p.tableCount, 0);
   const totalRows = siteProjects.reduce((a, p) => a + (metrics[p.id]?.rows ?? 0), 0);
   const totalTablesDone = siteProjects.reduce((a, p) => a + (metrics[p.id]?.tablesDone ?? 0), 0);
@@ -235,7 +348,7 @@ export function ExecutionOverviewPage() {
           <span style={styles.overallProgressLabel}>{t('executionOverview.overall')}</span>
           <span style={styles.overallProgressPct}>{overallProgressPct.toFixed(1)}%</span>
           <div style={{ flex: 1 }} />
-          <span style={styles.overallProgressDim}>{t('executionOverview.noRunYet')}</span>
+          <span style={styles.overallProgressDim}>{statusHint}</span>
         </div>
         <div style={styles.overallProgressOuter}>
           <div style={{ ...styles.overallProgressInner, width: `${overallProgressPct}%` }} />
@@ -283,7 +396,7 @@ export function ExecutionOverviewPage() {
 
       {/* Toolbar — Refresh / Run / Abort */}
       <div style={styles.toolbar}>
-        <span style={styles.toolbarHint}>{t('executionOverview.noRunYet')}</span>
+        <span style={styles.toolbarHint}>{statusHint}</span>
         <div style={{ flex: 1 }} />
         {dirtyAssigneeIds.length > 0 && (
           <>
@@ -388,30 +501,57 @@ export function ExecutionOverviewPage() {
                       })()}
                     </td>
                     <td style={styles.td}>
-                      {canEditRow(p) ? (
-                        (() => {
-                          const draftValue = assigneeDraft[p.id];
-                          const effective = draftValue !== undefined ? draftValue : (p.executionAssignee ?? '');
-                          const isDirty = draftValue !== undefined && (draftValue ?? '') !== (p.executionAssignee ?? '');
-                          return (
-                            <select
-                              value={effective}
-                              onChange={(e) => setAssigneeDraft((cur) => ({ ...cur, [p.id]: e.target.value }))}
-                              disabled={savingAssignees}
-                              style={{ ...styles.assigneeSelect, ...(isDirty ? styles.assigneeSelectDirty : {}) }}
-                            >
-                              <option value="">— {t('executionOverview.unassigned')} —</option>
-                              {users.map((u) => (
-                                <option key={u.id} value={u.username}>{u.username}</option>
-                              ))}
-                            </select>
-                          );
-                        })()
-                      ) : (
-                        <span style={{ ...styles.assigneeText, color: p.executionAssignee ? 'var(--text)' : 'var(--text-4)' }}>
-                          {p.executionAssignee ?? t('executionOverview.unassigned')}
-                        </span>
-                      )}
+                      {(() => {
+                        // dropdown 또는 text 옆에 worker online 상태 dot 한 개 — assignee
+                        // 가 잡혀있고 그 사람의 Worker daemon 이 heartbeat 살아있으면 green,
+                        // 아니면 red. 미할당은 dot 없음.
+                        const effective = assigneeDraft[p.id] !== undefined
+                          ? assigneeDraft[p.id]
+                          : (p.executionAssignee ?? '');
+                        const online = isWorkerOnline(effective || null);
+                        const dotTitle = !effective
+                          ? ''
+                          : online
+                            ? t('executionOverview.worker.online', { name: effective })
+                            : t('executionOverview.worker.offline', { name: effective });
+                        return (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                            {effective && (
+                              <span
+                                title={dotTitle}
+                                style={{
+                                  width: 7, height: 7, borderRadius: '50%',
+                                  background: online ? 'var(--green)' : 'var(--red)',
+                                  flexShrink: 0,
+                                }}
+                              />
+                            )}
+                            {canEditRow(p) ? (
+                              (() => {
+                                const isDirty = assigneeDraft[p.id] !== undefined
+                                  && (assigneeDraft[p.id] ?? '') !== (p.executionAssignee ?? '');
+                                return (
+                                  <select
+                                    value={effective}
+                                    onChange={(e) => setAssigneeDraft((cur) => ({ ...cur, [p.id]: e.target.value }))}
+                                    disabled={savingAssignees}
+                                    style={{ ...styles.assigneeSelect, ...(isDirty ? styles.assigneeSelectDirty : {}) }}
+                                  >
+                                    <option value="">— {t('executionOverview.unassigned')} —</option>
+                                    {users.map((u) => (
+                                      <option key={u.id} value={u.username}>{u.username}</option>
+                                    ))}
+                                  </select>
+                                );
+                              })()
+                            ) : (
+                              <span style={{ ...styles.assigneeText, color: effective ? 'var(--text)' : 'var(--text-4)' }}>
+                                {effective || t('executionOverview.unassigned')}
+                              </span>
+                            )}
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)' }}>{p.tableCount}</td>
                     <td style={{ ...styles.td, textAlign: 'right',  fontFamily: 'var(--mono)', color: (metrics[p.id]?.rows ?? 0) > 0 ? 'var(--text-2)' : 'var(--text-4)' }}>{(metrics[p.id]?.rows ?? 0).toLocaleString()}</td>

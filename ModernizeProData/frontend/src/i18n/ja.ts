@@ -1235,7 +1235,12 @@ export const ja: Record<TranslationKey, string> = {
   'executionOverview.kpi.errors':   'Errors',
   'executionOverview.kpi.warnings': 'Warnings',
   'executionOverview.empty':        'プロジェクトがありません。',
-  'executionOverview.noRunYet':     'run エンジン未接続',
+  'executionOverview.noRunYet':     'まだ実行された run はありません',
+  'executionOverview.statusRunning':'{n} 件の run が進行中',
+  'executionOverview.statusFailed': '{n} 件の run が失敗で終了',
+  'executionOverview.statusAllDone':'すべての run 完了',
+  'executionOverview.worker.online': '{name} の Worker が接続されています',
+  'executionOverview.worker.offline':'{name} の Worker が未接続/未登録 — Run は拒否されます',
   'executionOverview.overall':      'Overall progress',
   'executionOverview.notSelectable':'rehearsal / cutover フェーズのプロジェクトのみ選択可能 (現在: {phase})',
 
