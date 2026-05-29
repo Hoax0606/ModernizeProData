@@ -108,7 +108,8 @@ export const runsApi = {
    * 未指定 (undefined / 空配列) なら BE は全 binding を処理. BE が tables を未対応の
    * 期間でも互換性あり (フィールド無視されるだけ).
    */
-  start: (projectId: string, runType?: RunTypeStr, tables?: string[]) =>
+  start: (projectId: string, runType?: RunTypeStr, tables?: string[],
+          opts?: { resumeFromRunId?: string; useCache?: boolean }) =>
     unwrap(
       api.post<ApiResponse<RunResultDto>>(
         '/api/v1/runs',
@@ -116,6 +117,8 @@ export const runsApi = {
           projectId,
           ...(runType ? { runType } : {}),
           ...(tables && tables.length > 0 ? { tables } : {}),
+          ...(opts?.resumeFromRunId ? { resumeFromRunId: opts.resumeFromRunId } : {}),
+          ...(opts?.useCache ? { useCache: true } : {}),
         },
       ),
     ),

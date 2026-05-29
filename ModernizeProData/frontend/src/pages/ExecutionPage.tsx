@@ -374,10 +374,12 @@ export function ExecutionPage() {
   const controlsLocked = displayedActiveRun !== null || !hasPinnedSnapshot;
 
   /* Real モードの run 起動本体 — start API 呼び出し + runId 保存.
-     handleStartRun(二重起動 guard 経由) と handleRetry(guard なしで再起動) が共有. */
-  const startRealRun = async (tables: string[], mode: RunMode) => {
+     handleStartRun(二重起動 guard 経由) と handleRetry(guard なしで再起動 + resumeFromRunId) が共有.
+     opts.resumeFromRunId 있으면 BE 가 옛 run 의 마지막 success stage 이후부터 재개 (parquet 복원). */
+  const startRealRun = async (tables: string[], mode: RunMode,
+                              opts?: { resumeFromRunId?: string }) => {
     try {
-      const result = await runsApi.start(project.id, mode, tables);
+      const result = await runsApi.start(project.id, mode, tables, opts);
       if (result.status === 'STARTED' && result.runId) {
         setActiveRunId(result.runId);
       } else {
@@ -400,7 +402,11 @@ export function ExecutionPage() {
 
     /* BE에 start 던지고 반환 runId 보존. polling은 usePipelineProgress가 자동 시작.
        project.runStatus / phase는 BE의 RunService가 갱신 → AppShell의 10s polling으로 sidebar 반영. */
-    if (activeRunId) return;  // 이미 도는 중 — 이중 기동 방지
+    /* 이중 기동 방지 — 진행 중(running/paused) 인 run 일 때만 차단.
+       halted (success/failed/aborted/timed_out) 면 같은 버튼이 'Start over' 로 노출되며
+       새 run 시작 허용. 이전엔 activeRunId 만 체크해서 Start over 가 항상 noop 이었음 (2026-05-29 수정). */
+    if (activeRunId && run && !isTerminal(run.status)) return;
+    if (activeRunId) setActiveRunId(null);  // halted run UI 정리 후 새 run.
     await startRealRun(tables, runMode);
   };
 
@@ -418,12 +424,14 @@ export function ExecutionPage() {
   };
 
   const handleRetry = async () => {
-    /* Retry = 失敗した run を捨てて新しい run を起こす.
-       handleStartRun の `if (activeRunId) return` を経由すると、setActiveRunId(null) が
-       同期反映されず stale closure の旧 activeRunId を見て no-op になる → startRealRun 직접 호출. */
+    /* Retry = 실패한 run 의 **마지막 success stage 이후부터** 재개. BE 가 정합성 검증
+       (snapshot / selectedTables 동일 + 옛 parquet 존재) → 자동 fallback 처음부터 if 부적합.
+       opts.resumeFromRunId 로 옛 run id 전달. handleStartRun 의 guard 우회 위해 직접 호출. */
     if (!runMode || selectedTables.size === 0) return;
+    const oldRunId = activeRunId;   // null 가능 — 그 경우 처음부터.
     setActiveRunId(null);
-    await startRealRun(Array.from(selectedTables), runMode);
+    await startRealRun(Array.from(selectedTables), runMode,
+        oldRunId ? { resumeFromRunId: oldRunId } : undefined);
   };
 
   const handleDiscard = () => {
