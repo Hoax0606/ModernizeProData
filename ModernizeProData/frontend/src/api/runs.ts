@@ -67,6 +67,23 @@ export interface StageView {
   tables: TableResultView[];
 }
 
+/**
+ * Versions 画面の Request Review ゲート用の per-project run readiness.
+ * BE: GET /api/v1/projects/{id}/run-readiness.
+ *
+ * allReady: 全 TO-BE テーブルの最新 run が success の時のみ true.
+ *   FE 側は allReady=true でないと Request Review ボタンが押せない.
+ */
+export interface ProjectRunReadinessDto {
+  allReady: boolean;
+  totalTables: number;
+  completedTables: number;
+  /** まだ一度も run に含まれた事のない TO-BE テーブル名. */
+  notRunTables: string[];
+  /** 最新 run が success 以外 (failed/aborted/timed_out) の TO-BE テーブル名. */
+  failedTables: string[];
+}
+
 export interface RunHistoryDto {
   id: string;
   projectId: string;
@@ -162,6 +179,13 @@ export const runsApi = {
 
   listByProject: (projectId: string) =>
     unwrap(api.get<ApiResponse<RunHistoryDto[]>>(`/api/v1/projects/${projectId}/runs`)),
+
+  /**
+   * Versions 画面の Request Review ゲート判定. BE が project の全 TO-BE テーブル
+   * について「最新 run の status」を集計して返す.
+   */
+  runReadiness: (projectId: string) =>
+    unwrap(api.get<ApiResponse<ProjectRunReadinessDto>>(`/api/v1/projects/${projectId}/run-readiness`)),
 
   /**
    * DEV: Worker complete callback シミュレーション. PoC dev mode 에서 master/admin 으로 호출 가능.

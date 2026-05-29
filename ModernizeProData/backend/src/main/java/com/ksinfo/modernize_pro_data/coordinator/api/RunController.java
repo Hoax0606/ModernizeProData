@@ -5,6 +5,8 @@ import com.ksinfo.modernize_pro_data.common.exception.ApiException;
 import com.ksinfo.modernize_pro_data.coordinator.auth.ApiCredential;
 import com.ksinfo.modernize_pro_data.coordinator.auth.ApiCredentialRepository;
 import com.ksinfo.modernize_pro_data.coordinator.common.SolutionSettingsRepository;
+import com.ksinfo.modernize_pro_data.coordinator.run.ProjectRunReadinessService;
+import com.ksinfo.modernize_pro_data.coordinator.run.ProjectRunReadinessService.ProjectRunReadinessDto;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunHistory;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunHistoryRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunResult;
@@ -53,6 +55,7 @@ public class RunController {
     private final SiteRepository siteRepo;
     private final ApiCredentialRepository apiCredentialRepo;
     private final SolutionSettingsRepository solutionSettingsRepo;
+    private final ProjectRunReadinessService runReadinessService;
 
     /* ── DTOs ──────────────────────────────────────── */
 
@@ -305,6 +308,19 @@ public class RunController {
     @GetMapping("/api/v1/projects/{id}/runs")
     public ApiResponse<List<RunHistoryViewDto>> listByProject(@PathVariable String id) {
         return ApiResponse.ok(toViewDtos(runHistoryRepo.findByProjectIdOrderByStartedAtDesc(id)));
+    }
+
+    /**
+     * Project の Request Review readiness (Versions 画面の Request Review ゲート用).
+     * 全 TO-BE テーブルの最新 run = success の時のみ allReady=true.
+     */
+    @GetMapping("/api/v1/projects/{id}/run-readiness")
+    public ApiResponse<ProjectRunReadinessDto> runReadiness(@PathVariable String id) {
+        if (!projectRepo.existsById(id)) {
+            throw new ApiException("PROJECT_NOT_FOUND",
+                    "project not found: " + id, HttpStatus.NOT_FOUND);
+        }
+        return ApiResponse.ok(runReadinessService.readinessFor(id));
     }
 
     /* ── DTO 변환 helpers ───────────────────────────── */

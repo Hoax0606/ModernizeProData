@@ -433,6 +433,13 @@ export const ja: Record<TranslationKey, string> = {
   'versions.preflight.notRun':            'Execution 画面でこのスナップショットを pin して preflight を実行してください',
   'versions.preflight.partialSelection':  'Execution 画面で全テーブルを選択して preflight を実行してください',
 
+  /* Request Review ゲート — 「全テーブルの最新 run が success」基準 (2026-05-28 仕様変更).
+     失敗 / 中断 / 未実行 はゲート的に全部「未完了」と同列扱い (詳細は Run History 参照). */
+  'versions.runReadiness.loading':      '最新 run の状態を取得中…',
+  'versions.runReadiness.noTables':     '先に TO-BE DDL を取り込んでください',
+  'versions.runReadiness.notCompleted': '{count} 個のテーブルの run が完了していません ({tables}) — Execution 画面で実行してください',
+  'versions.statusDesc.draftRunReady':  '全テーブル ({completed}/{total}) が正常終了済みです。承認リクエストの準備ができています。',
+
   // CHANGES section (versions detail panel)
   'versions.changes.title':           'Changes',
   'versions.changes.status.added':    'ADDED',

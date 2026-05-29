@@ -427,6 +427,13 @@ export const en: Record<TranslationKey, string> = {
   'versions.preflight.notRun':            'Pin this snapshot on the Execution page and run preflight first',
   'versions.preflight.partialSelection':  'Run preflight on all tables on the Execution page first',
 
+  /* Request Review gate — based on "latest run is success for every table" (2026-05-28 spec change).
+     failed / incomplete / not-run are all surfaced as "not completed" — see Run History for the breakdown. */
+  'versions.runReadiness.loading':      'Loading latest run status…',
+  'versions.runReadiness.noTables':     'Import the TO-BE DDL first',
+  'versions.runReadiness.notCompleted': 'Run for {count} table(s) is not complete ({tables}) — run them on the Execution page',
+  'versions.statusDesc.draftRunReady':  'All tables completed successfully ({completed}/{total}) — ready for an approval request.',
+
   // CHANGES section (versions detail panel)
   'versions.changes.title':           'Changes',
   'versions.changes.status.added':    'ADDED',

@@ -431,6 +431,13 @@ export const ko = {
   'versions.preflight.notRun':            'Execution 화면에서 이 스냅샷을 pin 한 후 preflight 를 실행해주세요',
   'versions.preflight.partialSelection':  'Execution 화면에서 전체 테이블을 선택해 preflight 를 실행해야 합니다',
 
+  /* Request Review 게이트 — 「전 테이블의 최신 run 이 success」 기준 (2026-05-28 사양 변경).
+     실패 / 중단 / 미실행 은 게이트적으로 모두 「미완료」 로 통합 (상세는 Run History 참조). */
+  'versions.runReadiness.loading':      '최신 run 상태 로드 중…',
+  'versions.runReadiness.noTables':     '먼저 TO-BE DDL 을 import 해주세요',
+  'versions.runReadiness.notCompleted': '{count} 개 테이블의 run 이 완료되지 않았습니다 ({tables}) — Execution 화면에서 실행해주세요',
+  'versions.statusDesc.draftRunReady':  '전 테이블 ({completed}/{total}) 의 최신 run 이 success 입니다. 승인 요청 준비 완료.',
+
   // CHANGES section (versions detail panel)
   'versions.changes.title':           'Changes',                          // *.title — 영문 통일
   'versions.changes.status.added':    'ADDED',                            // *.status.* — 영문 통일
