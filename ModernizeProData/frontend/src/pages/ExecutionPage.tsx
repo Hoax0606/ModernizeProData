@@ -1,41 +1,57 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useWorkspaceStore } from '../store/workspace';
-import type { Project, ProjectPhase } from '../store/workspace';
+import type { Project, ProjectPhase, ProjectEnvironment, Site } from '../store/workspace';
 import { useTobeDdlStore } from '../store/tobeDdl';
-import { useSnapshotsStore, type MappingSnapshot } from '../store/snapshots';
+import { useAsisDdlStore } from '../store/asisDdl';
+import { useAuthStore } from '../store/auth';
+import { useSnapshotsStore, usePinnedSnapshotsStore, type MappingSnapshot } from '../store/snapshots';
 import { Checkbox } from '../components/Checkbox';
 import {
   useExecutionPreflightStore,
   type PreflightCheck,
   type PreflightPhase,
-  type CheckStatus,
-  type ActiveRunState,
 } from '../store/executionPreflight';
-import { useDemoMode, type DemoMode } from '../lib/useDemoMode';
+import { runPreflight, isAllPass, type TableCheckResult } from '../lib/preflightValidation';
+import { tobeDbApi } from '../api/tobeDb';
+import { csvPreviewApi } from '../api/csvPreview';
+import { runsApi, type RunHistoryDto, type StageView } from '../api/runs';
+import { usePipelineProgress, isTerminal } from '../hooks/usePipelineProgress';
+import { PreflightResultPanel } from '../components/PreflightResultPanel';
 import {
-  STAGE_MS,
-  TOTAL_STAGES,
-  TOTAL_RUN_MS,
   BASE_STAGES,
   buildStages,
-  buildStagesFromActiveRun,
-  computeElapsedMs,
+  buildStagesFromStageViews,
   type Stage,
   type StageTone,
 } from '../lib/pipelineStages';
+import { useQuery } from '@tanstack/react-query';
 import { useT, type TranslationKey } from '../i18n';
 
 type T = (key: TranslationKey, vars?: Record<string, string | number>) => string;
 
-type RunMode = 'rehearsal' | 'cutover';
+/** BE run + stageViews 를 한 묶음의 표시용 shape 로 합성. RunHeader · banner 등 UI 가 사용. */
+type ActiveRunStatus = 'running' | 'completed' | 'failed' | 'aborted';
+interface ActiveRunState {
+  runId: string;
+  selectedTables: string[];
+  startedAt: number;
+  pausedAt: number | null;
+  pauseAccumMs: number;
+  runStatus: ActiveRunStatus;
+  failedStageIndex: number | null;
+  failureReason: string | null;
+  haltedAt: number | null;
+}
+
+type RunMode = 'test' | 'rehearsal' | 'cutover';
 type RunResult = 'ok' | 'warn' | 'failed' | 'aborted' | 'running';
 type RunScope = 'all' | 'failed-only';
 type BadgeTone = 'ok' | 'running' | 'queued' | 'err' | 'warn' | 'info';
 
 interface Run {
   id: string;
-  mode: RunMode;
+  mode: 'rehearsal' | 'cutover';
   scope: RunScope;
   scopeLabel?: string;
   startedAt: string;
@@ -53,105 +69,161 @@ interface Run {
 export function ExecutionPage() {
   const t = useT();
   const projects = useWorkspaceStore((s) => s.projects);
+  const sites = useWorkspaceStore((s) => s.sites);
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const project = useMemo(
     () => projects.find((p) => p.id === activeProjectId) ?? null,
     [projects, activeProjectId],
   );
-
-  const { isDemo, demoMode, exitDemo } = useDemoMode();
-
-  /* activeRun (frontend mock simulation) — Pre-flight pass 후 Start 누르면 store 에 생성된다.
-     Stage 진행은 startedAt(절대 시각) 기반으로 derive — tick state 는 단순 re-render trigger. */
-  const storeActiveRun: ActiveRunState | null = useExecutionPreflightStore(
-    (s) => (project ? s.byProject[project.id]?.activeRun : null) ?? null,
+  const site = useMemo(
+    () => project ? sites.find((s) => s.id === project.siteId) ?? null : null,
+    [sites, project],
   );
-  const [tick, setTick] = useState(0);
 
-  /* Re-render timer — run 이 진짜로 running 일 때만 (paused / completed / failed 면 멈춤). */
-  useEffect(() => {
-    if (!storeActiveRun) return;
-    if (storeActiveRun.runStatus !== 'running') return;
-    if (storeActiveRun.pausedAt !== null) return;
-    const id = window.setInterval(() => setTick((n) => n + 1), 250);
-    return () => window.clearInterval(id);
-  }, [storeActiveRun?.runId, storeActiveRun?.pausedAt, storeActiveRun?.runStatus]);
+  const user = useAuthStore((s) => s.user);
 
-  /* Finish 감지 — elapsed >= TOTAL_RUN_MS 면 completed. Fail 은 명시적 trigger (Demo 버튼 / 백엔드) 로만. */
-  const projectId = project?.id ?? null;
-  useEffect(() => {
-    if (!projectId || !storeActiveRun) return;
-    if (storeActiveRun.runStatus !== 'running') return;
-    if (computeElapsedMs(storeActiveRun) >= TOTAL_RUN_MS) {
-      useExecutionPreflightStore.getState().finishActiveRun(projectId);
-      useWorkspaceStore.getState().setProjectRunStatus(projectId, 'completed').catch(() => { /* mock; ignore */ });
-    }
-  }, [tick, storeActiveRun, projectId]);
-
-  /* TO-BE DDL → 테이블 선택 목록. 캐시 미존재 시 자동 fetch. */
+  /* 활성 run id. start 성공 시 BE 반환값 보존 → usePipelineProgress 자동 polling.
+     setActiveRunId(null) 로 polling 정지 + 표시 클리어.
+     localStorage(zustand persist) 에 저장돼 새로고침 후 pipeline 복원 — mount 시 store 가
+     undefined (legacy / 첫 방문) 이면 아래 useEffect 가 runHistoryData 의 최신 run 으로 자동 복원.
+     null 은 사용자가 Discard 한 의도로 간주 → 복원 안 함. */
+  const storedActiveRunId = useExecutionPreflightStore((s) =>
+    project ? s.byProject[project.id]?.activeRunId : undefined,
+  );
+  const activeRunId: string | null = storedActiveRunId ?? null;
+  const setActiveRunId = (runId: string | null) => {
+    if (!project) return;
+    useExecutionPreflightStore.getState().setActiveRunId(project.id, runId);
+  };
+  /* TO-BE / AS-IS DDL schemas — used for table selector + preflight validation. */
   const tobeSchema = useTobeDdlStore((s) => project ? s.schemasByProject[project.id] : undefined);
+  const asisSchema = useAsisDdlStore((s) => project ? s.schemasByProject[project.id] : undefined);
   const fetchTobeDdl = useTobeDdlStore((s) => s.fetch);
+  const fetchAsisDdl = useAsisDdlStore((s) => s.fetch);
   useEffect(() => {
     if (!project) return;
-    if (!tobeSchema) {
-      fetchTobeDdl(project.id).catch(() => { /* DDL 미등록 — UI 가 안내 표시 */ });
-    }
-  }, [project?.id, tobeSchema, fetchTobeDdl]);
+    if (!tobeSchema) fetchTobeDdl(project.id).catch(() => { /* DDL 미등록 */ });
+    if (!asisSchema) fetchAsisDdl(project.id).catch(() => { /* DDL 미등록 */ });
+  }, [project?.id, tobeSchema, asisSchema, fetchTobeDdl, fetchAsisDdl]);
   const tobeTables = tobeSchema?.tables.map((tc) => tc.table.physicalName) ?? [];
 
-  /* Demo 모드: stale flag 시연용. store 의 isStale 가드는 wasDone (preflightPhase === 'done') 인데
-     demo 의 store phase 는 'idle' 이라 안 걸린다. demoStale 로컬 state 로 시각 흐름만 흉내낸다.
-     - 진입/이탈 시 reset
-     - 사용자가 selection 변경하면 true
-     - Pre-flight Start 누르면 false 로 해제 (시연 reset 진입로) */
-  const [demoStale, setDemoStale] = useState(false);
-  useEffect(() => {
-    setDemoStale(false);
-  }, [isDemo, demoMode, project?.id]);
-
-  /* Demo 진입 시 fixture 의 모든 TO-BE 테이블 자동 선택 — 사용자가 바로 stale 시연 가능. */
-  useEffect(() => {
-    if (!isDemo || !project) return;
-    const store = useExecutionPreflightStore.getState();
-    const entry = store.byProject[project.id];
-    if ((entry?.selectedTables.length ?? 0) === 0 && tobeTables.length > 0) {
-      store.setSelected(project.id, tobeTables);
-    }
-  }, [isDemo, project?.id, tobeTables.length]);
-
-  /* approved-snapshot 체크는 phase 가 아니라 snapshots store 의 실제 데이터로 판정 — phase 는
-     단방향 전환이라 snapshot 삭제 후 sign-off 에 머무르는 케이스에서 거짓 pass 가 됐었음. */
+  /* Snapshots + pin. Pin is per-project — at most one snapshot per project. */
   const snapshots = useSnapshotsStore((s) => s.snapshots);
-
-  /* Pre-flight 워크플로 state — store 에서 영속. project 별로 격리되어 자동 reset 효과. */
-  const entrySelected = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.selectedTables : undefined);
-  const entrySnapshot = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.selectedSnapshotId : undefined);
-  const entryPhase    = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.preflightPhase : undefined);
-  const entryResults  = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.preflightResults : undefined);
-  const entryStale    = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.isStale : undefined);
-  const selectedTables = useMemo(() => new Set(entrySelected ?? []), [entrySelected]);
-  const selectedSnapshotId: string | null = entrySnapshot ?? null;
-  const preflightPhase: PreflightPhase = entryPhase ?? 'idle';
-  const preflightResults: PreflightCheck[] = entryResults ?? [];
-  const isStale: boolean = entryStale ?? false;
-
-  const setSelectedTables = (next: Set<string>) => {
+  const pinnedIds = usePinnedSnapshotsStore((s) => s.pinnedIds);
+  const fetchSnapshots = useSnapshotsStore((s) => s.fetchByProject);
+  useEffect(() => {
     if (!project) return;
-    useExecutionPreflightStore.getState().setSelected(project.id, [...next]);
-    if (isDemo) setDemoStale(true);
-  };
-
-  /* 현재 project 의 snapshot 만 — SnapshotDisplay 가 selectedSnapshotId 로 찾을 때 사용. */
+    void fetchSnapshots(project.id);
+  }, [project?.id, fetchSnapshots]);
   const projectSnapshots = useMemo(
     () => project ? snapshots.filter((s) => s.projectId === project.id) : [],
     [snapshots, project],
   );
   const pinnedSnapshot = useMemo(
-    () => selectedSnapshotId ? projectSnapshots.find((s) => s.id === selectedSnapshotId) ?? null : null,
-    [projectSnapshots, selectedSnapshotId],
+    () => projectSnapshots.find((s) => pinnedIds.includes(s.id)) ?? null,
+    [projectSnapshots, pinnedIds],
+  );
+  /* Pipeline fallback — pinned snapshot 우선, 없으면 가장 최근 mapping snapshot.
+     사용자가 pin 을 옛 snapshot 으로 옮기면 그 시점 execution_context 로 자동 전환. */
+  const fallbackSnapshot = useMemo<MappingSnapshot | null>(() => {
+    if (pinnedSnapshot && pinnedSnapshot.type === 'mapping') return pinnedSnapshot;
+    const projectMapping = projectSnapshots.filter((s) => s.type === 'mapping');
+    return [...projectMapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
+  }, [pinnedSnapshot, projectSnapshots]);
+  /* pinned snapshot 의 id 가 변경되면 stale activeRunId 는 clear.
+     예: Test 1 run → activeRunId=run1, pin 을 Test 2(아직 run X)로 옮기면 run1 은 더 이상
+     이 snapshot 의 것이 아님 → clear 하면 fallback(빈 또는 그 snapshot 박제) 으로 자동 전환.
+     deps 는 pinnedSnapshot.id 만 — pinned 의 executionContext 가 갱신될 뿐인 경우(같은 snapshot
+     으로 run 끝남) 에는 clear 하지 않는다. */
+  useEffect(() => {
+    if (!project) return;
+    if (!pinnedSnapshot) return; // pin 없으면 activeRunId 그대로 (test ad-hoc 등).
+    const expectedRunId = pinnedSnapshot.executionContext?.runId ?? null;
+    if (activeRunId && activeRunId !== expectedRunId) {
+      setActiveRunId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinnedSnapshot?.id, project?.id]);
+  const { run, stages: stageViews } = usePipelineProgress(
+    activeRunId,
+    fallbackSnapshot?.executionContext ?? null,
   );
 
-  if (!project) {
+  const entrySelected = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.selectedTables : undefined);
+  const entryPhase    = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.preflightPhase : undefined);
+  const entryStale    = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.isStale : undefined);
+  /* pin 단위 결과 캐시. pin 이 바뀌면 표시도 자동으로 그 pin 의 結果로 切替. */
+  const entryBySnapshot = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.bySnapshot : undefined);
+  const selectedTables = useMemo(() => new Set(entrySelected ?? []), [entrySelected]);
+  const preflightPhase: PreflightPhase = entryPhase ?? 'idle';
+  const isStale: boolean = entryStale ?? false;
+
+  const setSelectedTables = (next: Set<string>) => {
+    if (!project) return;
+    useExecutionPreflightStore.getState().setSelected(project.id, [...next]);
+  };
+
+  /* mount 시 stuck 'checking' 검출 → idle 복구. 이전 실행이 throw 했거나 navigate 로
+     interrupt 된 상태로부터의 escape hatch.  반드시 early return 보다 위에 두어
+     hooks 호출 순서를 安定시킨다 (이전 버그: f5 새로고침 시 hooks count mismatch). */
+  const projectIdForReset = project?.id;
+  useEffect(() => {
+    if (!projectIdForReset) return;
+    const cur = useExecutionPreflightStore.getState();
+    if (cur.byProject[projectIdForReset]?.preflightPhase === 'checking') {
+      cur.setPhase(projectIdForReset, 'idle');
+    }
+  }, [projectIdForReset]);
+
+  /* === Hooks: 必ず early return より前 ===
+     project/site が未確定でも hook 数を一定に保つため、ここに集約する.
+     使用は早期 return 後に分岐. */
+
+  /* BE polling 結果 (RunHistoryDto + StageView[]) を ActiveRunState 形に合成. real モードのみ. */
+  const realActiveRun: ActiveRunState | null = useMemo(() => {
+    if (!run) return null;
+    const startedAtMs = run.startedAt ? new Date(run.startedAt).getTime() : Date.now();
+    const haltedAtMs = run.finishedAt && isTerminal(run.status) ? new Date(run.finishedAt).getTime() : null;
+    const failedIdx = stageViews ? findFailedStageIndex(stageViews) : null;
+    return {
+      runId: run.id,
+      selectedTables: [],            // BE は run 単位で記録しない (tables[] は per-stage 配下)
+      startedAt: startedAtMs,
+      /* paused 中は pausedAt≠null → isPaused=true (status chip=paused / 버튼=Resume).
+         demo の様な正確な pause 時刻/pauseAccumMs は FE で追跡しないため Date.now() で近似
+         (elapsed ラベルは wall-clock; 実 progress は stageViews=BE 真値が描く). */
+      pausedAt: run.status === 'paused' ? Date.now() : null,
+      pauseAccumMs: 0,
+      runStatus: mapBeRunStatus(run.status),
+      failedStageIndex: failedIdx,
+      failureReason: run.errorMessage ?? null,
+      haltedAt: haltedAtMs,
+    };
+  }, [run, stageViews]);
+
+  const displayedActiveRun: ActiveRunState | null = realActiveRun;
+
+  /* 実行履歴: real は BE fetch、demo は既存 mock. project が未確定なら disabled. */
+  const runHistoryQuery = useQuery<RunHistoryDto[]>({
+    queryKey: ['run-history', projectIdForReset],
+    enabled: !!projectIdForReset,
+    queryFn: () => runsApi.listByProject(projectIdForReset!),
+    staleTime: 5_000,
+    refetchInterval: activeRunId ? 5_000 : false,
+  });
+  const runHistoryData = runHistoryQuery.data;
+
+  /* 새로고침 후 pipeline 복원: store 의 activeRunId 가 undefined (한 번도 set 안 된 상태)
+     이고 BE 히스토리에 run 이 있으면 최신 run 으로 자동 복원. null (Discard) 은 사용자 의도
+     이므로 손대지 않는다. */
+  useEffect(() => {
+    if (!projectIdForReset) return;
+    if (storedActiveRunId !== undefined) return;
+    if (!runHistoryData || runHistoryData.length === 0) return;
+    useExecutionPreflightStore.getState().setActiveRunId(projectIdForReset, runHistoryData[0].id);
+  }, [projectIdForReset, runHistoryData, storedActiveRunId]);
+
+  if (!project || !site) {
     return (
       <div style={styles.empty}>
         <div style={styles.emptyTitle}>{t('execution.empty.noProject')}</div>
@@ -159,117 +231,208 @@ export function ExecutionPage() {
     );
   }
 
-  const startPreflight = () => {
-    /* Demo 시연: Pre-flight ▶ 누르면 stale 만 해제. 실제 체크 흐름은 안 돈다 (fixture 가 항상 표시). */
-    if (isDemo) {
-      setDemoStale(false);
-      return;
-    }
+  const hasPinnedSnapshot = !!pinnedSnapshot;
+  const runMode = deriveRunMode(project.phase, site.environment);
+
+  /* selection / pin 변경 → snapshot 결과 캐시 / store 결과 모두 stale 화 (UX 명료성). */
+
+  const startPreflight = async () => {
+    if (!project || !site || !pinnedSnapshot) return;
     if (selectedTables.size === 0 || preflightPhase === 'checking') return;
-    const checks = buildPreflightChecks(project, Array.from(selectedTables), t);
+
     const store = useExecutionPreflightStore.getState();
     store.setPhase(project.id, 'checking');
-    store.setResults(project.id, []);
-    /* 각 체크가 600ms 간격으로 순차 확정. fail 나도 끝까지 진행. */
-    checks.forEach((check, i) => {
-      window.setTimeout(() => {
-        useExecutionPreflightStore.getState().setResults(project.id, (prev) => [...prev, check]);
-        if (i === checks.length - 1) {
-          useExecutionPreflightStore.getState().setPhase(project.id, 'done');
-        }
-      }, (i + 1) * 600);
+    /* 이 pin 에 대한 cache 를 初期化 (선택 테이블 / 빈 results) — 演出 중 incremental
+       append 가 이 base 에 上書きされる. */
+    const tablesList = [...selectedTables];
+    store.setSnapshotResult(project.id, pinnedSnapshot.id, {
+      runAt: Date.now(),
+      selectedTables: tablesList,
+      results: [],
     });
+
+    try {
+      const snapshotData = await useSnapshotsStore.getState().ensureSnapshotData(pinnedSnapshot.id);
+
+      /* TO-BE DB 接続テストを live で実行. host/username 等が空なら test 自体スキップ —
+         runPreflight 側 (checkConnTobe) が「設定不足」として fail を出す. */
+      const env = site.environment;
+      const conn = site.tobeDbByEnv?.[env];
+      let tobeDbReachable: { success: boolean; message: string } | null = null;
+      if (conn && conn.host?.trim() && conn.database?.trim() && conn.username?.trim()) {
+        try {
+          const r = await tobeDbApi.testConnection(site.id, {
+            dbType: conn.type, host: conn.host, port: conn.port,
+            database: conn.database, username: conn.username, password: conn.password,
+          });
+          tobeDbReachable = { success: r.success, message: r.message };
+        } catch (e) {
+          tobeDbReachable = {
+            success: false,
+            message: e instanceof Error ? e.message : 'request failed',
+          };
+        }
+      }
+
+      /* CSV ファイル存在チェックを per-AS-IS-table 並列で実行.
+         選択 TO-BE → bindings → 必要 AS-IS テーブル集合 を計算し、
+         csv-preview/{table}?limit=1 で 404 / 200 を判定. */
+      let csvFilesByAsisTable: Record<string, { exists: boolean; error?: string }> = {};
+      if (site.csvPath?.trim()) {
+        // key = asisTable(schema 제거된 이름, csvFilesByAsisTable 조회 키), value = preview API 에 넘길 이름
+        // (schema 있으면 'schema.table' — BE resolver 가 schema 한정 파일을 먼저 찾도록).
+        const asisTablesNeeded = new Map<string, string>();
+        for (const tobeTable of tablesList) {
+          const bindings = (snapshotData.bindings ?? []).filter((b) => b.tobeTable === tobeTable);
+          for (const b of bindings) {
+            for (const src of b.sources ?? []) {
+              if (src.asisTable) {
+                const queryName = src.asisSchema ? `${src.asisSchema}.${src.asisTable}` : src.asisTable;
+                asisTablesNeeded.set(src.asisTable, queryName);
+              }
+            }
+          }
+        }
+        if (asisTablesNeeded.size > 0) {
+          /* BE の DuckDbService が現状スレッドセーフでなく、Promise.all で並列に
+             csv-preview を叩くと "Invalid Input Error: Attempting to execute an
+             unsuccessful or closed pending query result" でランダムに 1 件失敗する.
+             直列化(for-of await)で回避. 数テーブル分の +N × ~100ms 待ち増は preflight
+             の演出時間内に収まるので体感差は無視できる. BE 側の並列対応 / bulk endpoint
+             が入ったら parallel に戻すか bulk 呼び出しに切替可能. */
+          for (const [table, queryName] of asisTablesNeeded) {
+            try {
+              await csvPreviewApi.forTable(site.id, queryName, 1);
+              csvFilesByAsisTable[table] = { exists: true };
+            } catch (e) {
+              csvFilesByAsisTable[table] = {
+                exists: false,
+                error: e instanceof Error ? e.message : 'not found',
+              };
+            }
+          }
+        }
+      }
+
+      const results = runPreflight({
+        project, site, tobeSchema, asisSchema, snapshotData,
+        selectedTables: tablesList,
+        t,
+        tobeDbReachable,
+        csvFilesByAsisTable,
+      });
+      /* 결과를 400ms 간격으로 bySnapshot[pinnedId].results 에 incremental append.
+         setTimeout は이미 종료된 mount 후에도 발화하지만 store 가 살아있어 무해. */
+      results.forEach((check, i) => {
+        window.setTimeout(() => {
+          const cur = useExecutionPreflightStore.getState();
+          cur.appendSnapshotResultCheck(project.id, pinnedSnapshot.id, check);
+          if (i === results.length - 1) {
+            cur.setPhase(project.id, 'done');
+          }
+        }, (i + 1) * 400);
+      });
+    } catch (e) {
+      /* ensureSnapshotData / runPreflight 가 throw 했을 때 phase 가 'checking' 에 영구
+         lock 되지 않도록 idle 로 강제 reset. cache 도 비워둠. console 에 reason 남김. */
+      console.error('[execution] preflight failed:', e);
+      store.setPhase(project.id, 'idle');
+      store.clearSnapshotResult(project.id, pinnedSnapshot.id);
+    }
   };
 
-  /* Demo 모드: trigger 없이 즉시 결과 표시. mode 별로 8 fail / 8 pass 분기. */
-  const displayedResults = demoMode === 'run-fail'
-    ? buildDemoPreflightPassChecks(t)
-    : demoMode === 'preflight'
-      ? buildDemoPreflightChecks(t)
-      : preflightResults;
-  const displayedPhase: PreflightPhase = isDemo ? 'done' : preflightPhase;
-  const displayedStale = isDemo ? demoStale : isStale;
+  /* 현재 pin 된 snapshot 의 cached 결과를 표시 source 로 사용.
+     - pin 切替 → 表示も自動的に切替 (그 snapshot 用 cache がなければ empty)
+     - 동일 snapshot 으로 다시 돌리면 results が逐次 append 되어 演出 진행 */
+  const pinnedResult = (pinnedSnapshot && entryBySnapshot) ? entryBySnapshot[pinnedSnapshot.id] : undefined;
+  const cachedResults: PreflightCheck[] = pinnedResult?.results ?? [];
+
+  const displayedResults = cachedResults;
+  /* phase 派生: checking 中なら checking、cache 에 결과 있으면 done、그 외 idle */
+  const displayedPhase: PreflightPhase = preflightPhase === 'checking'
+    ? 'checking'
+    : cachedResults.length > 0
+      ? 'done'
+      : 'idle';
+  const displayedStale = isStale;
   const preflightPassed = displayedPhase === 'done'
     && !displayedStale
-    && displayedResults.length > 0
-    && displayedResults.every((c) => c.status !== 'fail');
+    && isAllPass(displayedResults);
 
-  /* Stage 진행은 activeRun 기반 (mock simulation), 없으면 phase 기반 fallback (기존 동작). */
-  const stages = storeActiveRun
-    ? buildStagesFromActiveRun(storeActiveRun, TOTAL_RUN_MS)
-    : buildStages(project.phase);
-  const runs = buildRuns(project);
+  /* stages 표시: BE polling 派生. null 이면 project.phase ベースの 정적 fallback. */
+  const stages = stageViews ? buildStagesFromStageViews(stageViews) : buildStages(project.phase);
 
-  /* ActiveRun 이 존재하면 (running / paused / completed / failed / aborted) 모든 컨트롤 잠금.
-     한 번 시작한 run 의 selection 은 고정 — 새 selection 으로 가려면 Discard 링크. */
-  const controlsLocked = storeActiveRun !== null;
+  const runs = (runHistoryData ?? []).map(beRunToRunCard);
 
-  const handleStartRun = () => {
+  const controlsLocked = displayedActiveRun !== null || !hasPinnedSnapshot;
+
+  /* Real モードの run 起動本体 — start API 呼び出し + runId 保存.
+     handleStartRun(二重起動 guard 経由) と handleRetry(guard なしで再起動) が共有. */
+  const startRealRun = async (tables: string[], mode: RunMode) => {
+    try {
+      const result = await runsApi.start(project.id, mode, tables);
+      if (result.status === 'STARTED' && result.runId) {
+        setActiveRunId(result.runId);
+      } else {
+        /* REJECTED / LOCKED — alert 暫定. toast 化は別件. */
+        console.warn('[execution] startRun rejected:', result.status, result.reason);
+        alert(`Start rejected: ${result.status}\n${result.reason ?? ''}`);
+      }
+    } catch (e) {
+      console.error('[execution] startRun failed:', e);
+      alert(`Start failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+    }
+  };
+
+  const handleStartRun = async () => {
     if (!preflightPassed || selectedTables.size === 0) return;
-    /* 이전 run 이 completed / failed 상태라면 먼저 정리하고 새 run 생성. */
-    const current = useExecutionPreflightStore.getState().byProject[project.id]?.activeRun;
-    if (current && current.runStatus !== 'running') {
-      useExecutionPreflightStore.getState().clearActiveRun(project.id);
-    } else if (current && current.runStatus === 'running') {
-      /* 방어적 — 이론상 도달 안 함 (controlsLocked 라 Start 자체가 disabled). */
-      return;
-    }
+    if (!hasPinnedSnapshot || !pinnedSnapshot) return;
+    if (!runMode) return;
+
     const tables = Array.from(selectedTables);
-    useExecutionPreflightStore.getState().startActiveRun(project.id, tables);
-    /* Project phase 를 'test' 로, runStatus 'running' 으로. demo 모드면 fixture 가 일시적 — 영향 없음. */
-    useWorkspaceStore.getState().setProjectPhase(project.id, 'test').catch(() => { /* mock */ });
-    useWorkspaceStore.getState().setProjectRunStatus(project.id, 'running').catch(() => { /* mock */ });
+
+    /* BE에 start 던지고 반환 runId 보존. polling은 usePipelineProgress가 자동 시작.
+       project.runStatus / phase는 BE의 RunService가 갱신 → AppShell의 10s polling으로 sidebar 반영. */
+    if (activeRunId) return;  // 이미 도는 중 — 이중 기동 방지
+    await startRealRun(tables, runMode);
   };
 
-  const handlePauseToggle = () => {
-    if (!storeActiveRun) return;
-    if (storeActiveRun.pausedAt === null) {
-      useExecutionPreflightStore.getState().pauseActiveRun(project.id);
-      useWorkspaceStore.getState().setProjectRunStatus(project.id, 'paused').catch(() => { /* mock */ });
-    } else {
-      useExecutionPreflightStore.getState().resumeActiveRun(project.id);
-      useWorkspaceStore.getState().setProjectRunStatus(project.id, 'running').catch(() => { /* mock */ });
+  const handlePauseToggle = async () => {
+    /* BE pause/resume endpoint 호출. 상태 전이는 usePipelineProgress polling이
+       다음 tick에서 캐치 — 수동 갱신 불필요 (paused는 non-terminal → polling 계속). */
+    if (!activeRunId || !run) return;
+    try {
+      if (run.status === 'running')     await runsApi.pause(activeRunId);
+      else if (run.status === 'paused') await runsApi.resume(activeRunId);
+    } catch (e) {
+      console.error('[execution] pause/resume failed:', e);
+      alert(`Pause/Resume failed: ${e instanceof Error ? e.message : 'unknown error'}`);
     }
   };
 
-  /* Demo 모드 한정 — 현재 진행 중인 stage 에서 즉시 fail 처리.
-     실제 운영 환경에선 backend WS 이벤트 → failActiveRun store action 으로 진입한다. */
-  const handleTriggerFail = () => {
-    if (!storeActiveRun || storeActiveRun.runStatus !== 'running') return;
-    const elapsed = computeElapsedMs(storeActiveRun);
-    const stageIndex = Math.min(Math.floor(elapsed / STAGE_MS), TOTAL_STAGES - 1);
-    const stageName = BASE_STAGES[stageIndex]?.name ?? '?';
-    /* mock reason — 실 백엔드 연결 시 fail 페이로드의 reason 으로 교체된다. */
-    const reason = `Demo: ${stageName} 단계에서 PK 위반 3건 — accounts.account_id`;
-    useExecutionPreflightStore.getState().failActiveRun(project.id, stageIndex, reason);
-    useWorkspaceStore.getState().setProjectRunStatus(project.id, 'failed').catch(() => { /* mock */ });
+  const handleRetry = async () => {
+    /* Retry = 失敗した run を捨てて新しい run を起こす.
+       handleStartRun の `if (activeRunId) return` を経由すると、setActiveRunId(null) が
+       同期反映されず stale closure の旧 activeRunId を見て no-op になる → startRealRun 직접 호출. */
+    if (!runMode || selectedTables.size === 0) return;
+    setActiveRunId(null);
+    await startRealRun(Array.from(selectedTables), runMode);
   };
 
-  const handleRetry = () => {
-    useExecutionPreflightStore.getState().retryActiveRun(project.id, STAGE_MS);
-    useWorkspaceStore.getState().setProjectRunStatus(project.id, 'running').catch(() => { /* mock */ });
-  };
-
-  /* halted (completed/failed/aborted) 상태에서만 노출 — activeRun 제거 + 컨트롤 잠금 해제. */
   const handleDiscard = () => {
-    useExecutionPreflightStore.getState().clearActiveRun(project.id);
-    useWorkspaceStore.getState().setProjectRunStatus(project.id, 'idle').catch(() => { /* mock */ });
+    /* polling 停止 + UI から「현재 run」을 외す. BE 의 run 자체는 履歴에 남音. */
+    setActiveRunId(null);
   };
 
-  /* 사용자 명시 중단 — running / paused 중에만 가능. 현재 stage 에서 멈춤. */
-  const handleStopRun = () => {
-    if (!storeActiveRun || storeActiveRun.runStatus !== 'running') return;
-    const elapsed = computeElapsedMs(storeActiveRun);
-    const stageIndex = Math.min(Math.floor(elapsed / STAGE_MS), TOTAL_STAGES - 1);
-    const reason = t('execution.run.abortReason');
-    useExecutionPreflightStore.getState().abortActiveRun(project.id, stageIndex, reason);
-    useWorkspaceStore.getState().setProjectRunStatus(project.id, 'aborted').catch(() => { /* mock */ });
-  };
-
-  /* exitDemo 시 demo project 의 activeRun 도 정리 — 잔재 방지. */
-  const handleExitDemo = () => {
-    if (project) useExecutionPreflightStore.getState().clearActiveRun(project.id);
-    exitDemo();
+  const handleStopRun = async () => {
+    if (!activeRunId) return;
+    if (run && isTerminal(run.status)) return; // 既に terminal 이면 무시
+    try {
+      await runsApi.abort(activeRunId, t('execution.run.abortReason'));
+    } catch (e) {
+      console.warn('[execution] abort failed:', e);
+      alert(`Abort failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+    }
   };
 
   return (
@@ -277,17 +440,19 @@ export function ExecutionPage() {
       <RunHeader
         t={t}
         project={project}
-        activeRun={storeActiveRun}
+        site={site}
+        runMode={runMode}
+        activeRun={displayedActiveRun}
         runs={runs}
         preflightPassed={preflightPassed}
+        hasPinnedSnapshot={hasPinnedSnapshot}
         selectedTablesCount={selectedTables.size}
-        isDemo={isDemo}
         onStart={handleStartRun}
         onPauseToggle={handlePauseToggle}
         onStop={handleStopRun}
-        onTriggerFail={handleTriggerFail}
         onRetry={handleRetry}
         onDiscard={handleDiscard}
+        onReset={() => useExecutionPreflightStore.getState().resetForProject(project.id)}
       />
       <DisabledOverlay disabled={controlsLocked}>
         <TableSelector
@@ -302,12 +467,10 @@ export function ExecutionPage() {
           checks={displayedResults}
           phase={displayedPhase}
           isStale={displayedStale}
-          canStart={selectedTables.size > 0}
+          canStart={selectedTables.size > 0 && hasPinnedSnapshot}
+          startDisabledReason={!hasPinnedSnapshot ? t('execution.preflight.trigger.disabledNoPin') : t('execution.preflight.trigger.disabled')}
           onStart={startPreflight}
           onReset={() => useExecutionPreflightStore.getState().resetForProject(project.id)}
-          isDemo={isDemo}
-          demoMode={demoMode}
-          onExitDemo={handleExitDemo}
         />
       </DisabledOverlay>
       <OverallProgress t={t} stages={stages} />
@@ -318,7 +481,6 @@ export function ExecutionPage() {
 
 /* ───────────────────────── Disabled overlay ─────────────────────── */
 
-/** Active run 중인 동안 선택 컨트롤을 비활성화 — pointer-events 차단 + opacity 표시. */
 function DisabledOverlay({ disabled, children }: { disabled: boolean; children: React.ReactNode }) {
   return (
     <div style={disabled ? { pointerEvents: 'none', opacity: 0.55, filter: 'saturate(0.7)' } : undefined}>
@@ -330,37 +492,36 @@ function DisabledOverlay({ disabled, children }: { disabled: boolean; children: 
 /* ───────────────────────── Run header ──────────────────────────── */
 
 function RunHeader({
-  t,
-  project,
-  activeRun,
-  runs,
-  preflightPassed,
-  selectedTablesCount,
-  isDemo,
-  onStart,
-  onPauseToggle,
-  onStop,
-  onTriggerFail,
-  onRetry,
-  onDiscard,
+  t, project, site, runMode, activeRun, runs, preflightPassed, hasPinnedSnapshot,
+  selectedTablesCount, onStart, onPauseToggle, onStop, onRetry, onDiscard, onReset,
 }: {
   t: T;
   project: Project;
+  site: Site;
+  runMode: RunMode | null;
   activeRun: ActiveRunState | null;
   runs: Run[];
   preflightPassed: boolean;
+  hasPinnedSnapshot: boolean;
   selectedTablesCount: number;
-  isDemo: boolean;
   onStart: () => void;
   onPauseToggle: () => void;
   onStop: () => void;
-  onTriggerFail: () => void;
   onRetry: () => void;
   onDiscard: () => void;
+  /** 테스트용 — preflight 캐시 / selectedTables / activeRunId 한꺼번에 비움. */
+  onReset: () => void;
 }) {
-  /* Start 활성 = Pre-flight 모든 체크 pass + 최소 1개 테이블 선택. */
-  const canStart = preflightPassed && selectedTablesCount > 0;
+  const canStart = preflightPassed && selectedTablesCount > 0 && hasPinnedSnapshot && runMode !== null;
   const isDone = project.phase === 'done';
+
+  const startTooltip = !hasPinnedSnapshot
+    ? t('execution.run.startBlocked.noPin')
+    : !runMode
+      ? t('execution.run.startBlocked.phaseEnv', { phase: project.phase, env: site.environment })
+      : !preflightPassed
+        ? t('execution.run.startBlockedHint')
+        : t('execution.run.startReadyHint');
 
   if (!activeRun) {
     const lastRun = runs[0] ?? null;
@@ -379,36 +540,28 @@ function RunHeader({
             type="button"
             onClick={() => { if (canStart) onStart(); }}
             disabled={!canStart}
-            title={canStart ? t('execution.run.startReadyHint') : t('execution.run.startBlockedHint')}
+            title={startTooltip}
             style={canStart ? styles.btnPrimary : styles.btnDisabled}
           >
-            ▶ {t('execution.run.startBtn')}
+            ▶ {runMode === 'cutover' ? t('execution.run.startBtn.cutover') : runMode === 'rehearsal' ? t('execution.run.startBtn.rehearsal') : t('execution.run.startBtn')}
           </button>
         )}
       </section>
     );
   }
 
-  /* Active run 상태 = running / paused / completed / failed / aborted. */
   const isPaused = activeRun.pausedAt !== null;
   const isCompleted = activeRun.runStatus === 'completed';
   const isFailed = activeRun.runStatus === 'failed';
   const isAborted = activeRun.runStatus === 'aborted';
   const isHalted = isCompleted || isFailed || isAborted;
   const running = activeRun.runStatus === 'running' && !isPaused;
-  const elapsedMs = computeElapsedMs(activeRun);
-  const totalMs = STAGE_MS * BASE_STAGES.length;
-  const remainingMs = Math.max(0, totalMs - elapsedMs);
-  const elapsedLabel = isHalted
-    ? t('execution.run.elapsed', {
-        time: formatTimeOfDay(activeRun.startedAt),
-        elapsed: formatDuration(elapsedMs),
-      })
-    : t('execution.run.elapsedEta', {
-        time: formatTimeOfDay(activeRun.startedAt),
-        elapsed: formatDuration(elapsedMs),
-        eta: formatDuration(remainingMs),
-      });
+  /* elapsed: BE 真値 기반 wall-clock(시작~정지/현재). 신뢰할 ETA 없으므로 미표시. */
+  const elapsedMs = Math.max(0, (activeRun.haltedAt ?? activeRun.pausedAt ?? Date.now()) - activeRun.startedAt);
+  const elapsedLabel = t('execution.run.elapsed', {
+    time: formatTimeOfDay(activeRun.startedAt),
+    elapsed: formatDuration(elapsedMs),
+  });
 
   const statusChipTone: BadgeTone =
     isFailed ? 'err'
@@ -423,11 +576,17 @@ function RunHeader({
     : running ? t('execution.run.status.running')
     : t('execution.run.status.paused');
 
-  /* Error/abort banner — failed / aborted 일 때 RunHeader 아래에 메시지 박스로 노출. */
   const failedStageName = activeRun.failedStageIndex != null
     ? BASE_STAGES[activeRun.failedStageIndex]?.name ?? '?'
     : '?';
   const showBanner = (isFailed || isAborted) && !!activeRun.failureReason;
+
+  /* Run 순번 (#N) — runHistoryData desc 정렬에서 활성 run 위치로 계산.
+     가장 오래된=#1, 최신=#N. mock 시절 PreflightEntry.runCounter 와 등가 (BE 폴링 기반). */
+  const activeRunIndex = (() => {
+    const idx = runs.findIndex((r) => r.id === activeRun.runId);
+    return idx >= 0 ? runs.length - idx : null;
+  })();
 
   return (
     <>
@@ -435,22 +594,19 @@ function RunHeader({
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={styles.runHeaderLabel}>{t('execution.run.active')}</div>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 16, fontWeight: 600 }}>{activeRun.runId}</span>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 16, fontWeight: 600 }}>
+              {project.id}{activeRunIndex != null ? ` · #${activeRunIndex}` : ''}
+            </span>
             <StatusBadge tone={statusChipTone}>{statusChipText}</StatusBadge>
             <span style={{ fontSize: 12, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>{elapsedLabel}</span>
           </div>
           <div style={{ fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: 3 }}>
-            {t('execution.run.triggeredBy')}{' '}
+            <span>run </span><b style={{ color: 'var(--text-2)' }}>{activeRun.runId}</b>
+            <span> · </span>{t('execution.run.triggeredBy')}{' '}
             <b style={{ color: 'var(--text-2)' }}>{project.executionAssignee ?? project.owner ?? 'Admin'}</b>
-            <span> · {t('execution.run.tablesSummary', { n: activeRun.selectedTables.length })}</span>
+            <span> · {t('execution.run.tablesSummary', { n: selectedTablesCount })}</span>
           </div>
         </div>
-        {/* Demo 모드 + running 일 때만 노출 — 실 운영에선 fail 은 backend 이벤트가 trigger */}
-        {isDemo && running && (
-          <button type="button" onClick={onTriggerFail} style={styles.btnGhost} title={t('execution.run.demo.triggerFail')}>
-            {t('execution.run.demo.triggerFail')}
-          </button>
-        )}
         {isHalted && (
           <button
             type="button"
@@ -474,15 +630,31 @@ function RunHeader({
         {isHalted && (
           <button
             type="button"
-            onClick={onStart}
-            style={{ ...styles.btnPrimary, minWidth: 80 }}
-            title={t('execution.run.startOverHint')}
+            onClick={() => { if (canStart) onStart(); }}
+            disabled={!canStart}
+            style={canStart ? { ...styles.btnPrimary, minWidth: 80 } : { ...styles.btnDisabled, minWidth: 80 }}
+            title={startTooltip}
           >
             ▶ {t('execution.run.startOver')}
           </button>
         )}
+        {isHalted && (
+          /* 테스트용 한방 리셋 — preflight + 테이블 선택 + 활성 run 표시 모두 비움.
+             PreflightPanel 의 Reset 은 DisabledOverlay 안이라 halted 중엔 접근 불가 →
+             여기에서 노출. 활성 run(=running) 중엔 보이지 않음 (orphan 방지). */
+          <button
+            type="button"
+            onClick={onReset}
+            style={{ ...styles.btnGhost, minWidth: 80 }}
+            title={t('execution.preflight.trigger.reset')}
+          >
+            ↺ {t('execution.preflight.trigger.reset')}
+          </button>
+        )}
         {!isHalted && (
           <>
+            {/* Pause/Resume — real/demo 両対応. real は BE pause/resume endpoint へ
+               (同期実行のため停止は次 stage 境界で反応). */}
             <button type="button" onClick={onPauseToggle} style={styles.btnSecondary}>
               {running ? `⏸ ${t('execution.run.pause')}` : `▶ ${t('execution.run.resume')}`}
             </button>
@@ -496,11 +668,15 @@ function RunHeader({
         <div style={isAborted ? styles.warnBanner : styles.errorBanner}>
           <span style={{ fontSize: 14 }}>{isAborted ? '⏹' : '❌'}</span>
           <span>
-            {t('execution.run.errorBanner', {
-              stage: (activeRun.failedStageIndex ?? 0) + 1,
-              name: failedStageName,
-              reason: activeRun.failureReason ?? '',
-            })}
+            {activeRun.failedStageIndex != null
+              ? t('execution.run.errorBanner', {
+                  stage: activeRun.failedStageIndex + 1,
+                  name: failedStageName,
+                  reason: activeRun.failureReason ?? '',
+                })
+              : t('execution.run.errorBannerNoStage', {
+                  reason: activeRun.failureReason ?? '',
+                })}
           </span>
         </div>
       )}
@@ -511,10 +687,7 @@ function RunHeader({
 /* ───────────────────────── Table selector ─────────────────────── */
 
 function TableSelector({
-  t,
-  tables,
-  selected,
-  onChange,
+  t, tables, selected, onChange,
 }: {
   t: T;
   tables: string[];
@@ -601,19 +774,15 @@ function TableSelector({
 
 /* ───────────────────────── Snapshot display (read-only) ────────── */
 
-/**
- * 선택된 snapshot 의 이름·version·status 를 read-only 로 표시.
- * 실제 snapshot 선택(pin)은 /versions 페이지에서 — 여기선 그 결과만 보여준다.
- */
 function SnapshotDisplay({ t, pinned }: { t: T; pinned: MappingSnapshot | null }) {
   const label = pinned
     ? t('execution.snapshot.value', { name: pinned.name, version: pinned.version, status: pinned.status })
     : t('execution.snapshot.empty');
   return (
-    <div style={{ ...styles.section, background: 'var(--panel)' }}>
+    <div style={{ ...styles.section, background: pinned ? 'var(--panel)' : 'var(--red-50)' }}>
       <div style={{ padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 10 }}>
         <span style={styles.sectionLabel}>{t('execution.snapshot.title')}</span>
-        <span style={{ fontSize: 11, color: pinned ? 'var(--text-2)' : 'var(--text-3)', fontFamily: 'var(--mono)' }}>
+        <span style={{ fontSize: 11, color: pinned ? 'var(--text-2)' : 'var(--red)', fontFamily: 'var(--mono)', fontWeight: pinned ? 400 : 600 }}>
           {label}
         </span>
       </div>
@@ -623,62 +792,52 @@ function SnapshotDisplay({ t, pinned }: { t: T; pinned: MappingSnapshot | null }
 
 /* ───────────────────────── Pre-flight panel ────────────────────── */
 
-function PreflightPanel({ t, checks, phase, isStale, canStart, onStart, onReset, isDemo, demoMode, onExitDemo }: {
+function PreflightPanel({
+  t, checks, phase, isStale, canStart, startDisabledReason, onStart, onReset,
+}: {
   t: T;
   checks: PreflightCheck[];
   phase: PreflightPhase;
   isStale: boolean;
   canStart: boolean;
+  startDisabledReason: string;
   onStart: () => void;
   onReset: () => void;
-  isDemo?: boolean;
-  demoMode?: DemoMode | null;
-  onExitDemo?: () => void;
 }) {
-  // PreflightPanel 내부에서 navigate 시 search 보존을 위해 isDemo 를 그대로 사용.
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const counts: Record<CheckStatus, number> = { pass: 0, fail: 0, skip: 0 };
-  checks.forEach((c) => { counts[c.status]++; });
+  const counts = countResults(checks);
   const hasBlocking = counts.fail > 0;
   const isChecking = phase === 'checking';
   const isDone = phase === 'done';
-  // 기본 펼친 상태 — 사용자가 Pre-flight 항목을 바로 볼 수 있게.
-  // checking / fail 발생 시에도 자동으로 펼치는 보조 effect 는 유지.
   const [open, setOpen] = useState(true);
   useEffect(() => {
     if (isChecking || hasBlocking) setOpen(true);
   }, [isChecking, hasBlocking]);
 
-  // demo URL 로 진입한 상태였다면 도착 페이지도 demo 로 유지되도록 search 보존.
-  const search = demoMode ? `?demo=${demoMode}` : '';
-  const handleFix = (c: PreflightCheck) => {
+  const handleFix = (c: PreflightCheck, table?: string) => {
     switch (c.id) {
       case 'csv-arrived':
       case 'conn-tobe': {
-        // 외부 인프라 영역이지만 1차 자연스러운 액션은 SiteSettings 의 해당 입력값 확인.
-        // 현재 페이지 유지 + URL 쿼리로 AppShell 이 SiteSettingsModal 자동 open + 섹션 강조.
         const next = new URLSearchParams(searchParams);
         next.set('siteSettings', c.id === 'csv-arrived' ? 'csv' : 'tobe-db');
         setSearchParams(next);
         return;
       }
       case 'ddl-asis':
-        navigate({ pathname: '/settings', search }, { state: { highlightSide: 'asis' } });
+        navigate('/settings', { state: { highlightSide: 'asis' } });
         return;
       case 'ddl-tobe':
-        navigate({ pathname: '/settings', search }, { state: { highlightSide: 'tobe' } });
+        navigate('/settings', { state: { highlightSide: 'tobe' } });
         return;
       case 'tobe-bindings':
-        // table-level routing 누락 — Table binding 패널을 강조.
-        navigate({ pathname: '/mapping', search }, { state: { fixTarget: { kind: 'unbound-tobe' } } });
+        navigate('/mapping', { state: { fixTarget: { kind: 'unbound-tobe', table } } });
         return;
       case 'unmapped-cols':
-        // column-level mapping 누락 — 첫 unmapped TO-BE 컬럼 row 를 강조.
-        navigate({ pathname: '/mapping', search }, { state: { fixTarget: { kind: 'unmapped-tobe' } } });
+        navigate('/mapping', { state: { fixTarget: { kind: 'unmapped-tobe', table } } });
         return;
       case 'asis-unmapped':
-        navigate({ pathname: '/mapping', search }, { state: { fixTarget: { kind: 'unmapped-asis' } } });
+        navigate('/mapping', { state: { fixTarget: { kind: 'unmapped-asis', table } } });
         return;
     }
   };
@@ -703,30 +862,13 @@ function PreflightPanel({ t, checks, phase, isStale, canStart, onStart, onReset,
           {counts.fail > 0 && <StatusBadge tone="err">{t('execution.preflight.count.fail', { n: counts.fail })}</StatusBadge>}
           {counts.skip > 0 && <StatusBadge tone="queued">{t('execution.preflight.count.skip', { n: counts.skip })}</StatusBadge>}
         </div>
-        {isDemo && (
-          <span
-            onClick={(e) => { e.stopPropagation(); onExitDemo?.(); }}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              padding: '2px 8px', marginLeft: 6,
-              fontSize: 10, fontWeight: 700, fontFamily: 'var(--mono)',
-              background: 'var(--navy-50)', color: 'var(--navy)',
-              border: '1px solid var(--navy)', borderRadius: 2,
-              letterSpacing: 0.4, textTransform: 'uppercase', cursor: 'pointer',
-            }}
-            title={t('execution.preflight.demo.exit')}
-          >
-            {t('execution.preflight.demo.indicator')}
-            <span style={{ fontSize: 10 }}>✕</span>
-          </span>
-        )}
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>{hint}</span>
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onStart(); }}
           disabled={!canStart || isChecking}
-          title={canStart ? t('execution.preflight.trigger.start') : t('execution.preflight.trigger.disabled')}
+          title={canStart ? t('execution.preflight.trigger.start') : startDisabledReason}
           style={canStart && !isChecking ? styles.btnPrimary : styles.btnDisabled}
         >
           ▶ {t('execution.preflight.trigger.start')}
@@ -734,9 +876,8 @@ function PreflightPanel({ t, checks, phase, isStale, canStart, onStart, onReset,
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onReset(); }}
-          disabled={isChecking}
           title={t('execution.preflight.trigger.reset')}
-          style={isChecking ? styles.btnDisabled : styles.btnGhost}
+          style={styles.btnGhost}
         >
           ↺ {t('execution.preflight.trigger.reset')}
         </button>
@@ -755,39 +896,11 @@ function PreflightPanel({ t, checks, phase, isStale, canStart, onStart, onReset,
               </div>
             </div>
           )}
-          <div style={{ border: '1px solid var(--border)', borderRadius: 4, background: 'var(--panel)' }}>
-            {checks.length === 0 && !isChecking && (
-              <div style={{ padding: 14, textAlign: 'center', fontSize: 12, color: 'var(--text-3)' }}>
-                {t('execution.preflight.empty')}
-              </div>
-            )}
-            {checks.length === 0 && isChecking && (
-              <div style={{ padding: 14, textAlign: 'center', fontSize: 12, color: 'var(--text-3)' }}>
-                {t('execution.preflight.checking')}
-              </div>
-            )}
-            {checks.map((c, i) => (
-              <div
-                key={c.id}
-                style={{
-                  display: 'grid', gridTemplateColumns: '24px 260px 1fr auto',
-                  alignItems: 'center', gap: 12,
-                  padding: '8px 14px',
-                  borderBottom: i < checks.length - 1 ? '1px solid var(--border)' : 'none',
-                  background: c.status === 'fail' ? 'var(--red-50)' : 'var(--panel)',
-                }}
-              >
-                <StatusDot tone={toneForCheck(c.status)} />
-                <span style={{ fontSize: 12, fontWeight: 500 }}>{c.title}</span>
-                <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: detailColorFor(c.status) }}>{c.detail}</span>
-                {c.status === 'fail' ? (
-                  <button type="button" style={styles.btnGhost} onClick={() => handleFix(c)}>
-                    {t('execution.preflight.fix')}
-                  </button>
-                ) : <span />}
-              </div>
-            ))}
-          </div>
+          <PreflightResultPanel
+            checks={checks}
+            onFix={handleFix}
+            emptyText={isChecking ? t('execution.preflight.checking') : t('execution.preflight.empty')}
+          />
         </div>
       )}
     </div>
@@ -913,16 +1026,6 @@ function StatusBadge({ tone, children }: { tone: BadgeTone; children: React.Reac
   );
 }
 
-function StatusDot({ tone }: { tone: BadgeTone }) {
-  const color =
-    tone === 'ok' ? 'var(--green)'
-    : tone === 'warn' || tone === 'running' ? 'var(--amber)'
-    : tone === 'err' ? 'var(--red)'
-    : tone === 'info' ? 'var(--navy)'
-    : 'var(--text-4)';
-  return <span style={{ width: 9, height: 9, borderRadius: '50%', background: color, display: 'inline-block' }} />;
-}
-
 function ProgressBar({ pct, tone }: { pct: number; tone: StageTone }) {
   const fill =
     tone === 'ok'       ? 'var(--text-3)'
@@ -938,7 +1041,6 @@ function ProgressBar({ pct, tone }: { pct: number; tone: StageTone }) {
 
 /* ───────────────────────── Mock data + helpers ─────────────────── */
 
-/** ms → MM:SS 문자열. RunHeader 의 elapsed/eta 표시용. */
 function formatDuration(ms: number): string {
   const totalSec = Math.max(0, Math.floor(ms / 1000));
   const m = Math.floor(totalSec / 60);
@@ -946,149 +1048,105 @@ function formatDuration(ms: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
-/** epoch ms → HH:MM 문자열. startedAt 표시용 (현지 시각 기준). */
 function formatTimeOfDay(ts: number): string {
   const d = new Date(ts);
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-function buildPreflightChecks(
-  project: Project,
-  selectedTables: string[],
-  t: T,
-): PreflightCheck[] {
-  const asisDdl = project.tableCount > 0;
-  const tobeDdl = project.tobeTableCount > 0;
-  const bothDdl = asisDdl && tobeDdl;
-  const selectedCount = selectedTables.length;
+/** BE 의 RunStatus enum 을 FE ActiveRunState.runStatus 에 매핑. */
+function mapBeRunStatus(s: RunHistoryDto['status']): ActiveRunState['runStatus'] {
+  switch (s) {
+    case 'success':   return 'completed';
+    case 'failed':    return 'failed';
+    case 'aborted':   return 'aborted';
+    case 'timed_out': return 'failed';   // UX 上は failed 扱い
+    case 'paused':                        // paused は runStatus='running' + pausedAt≠null で表現
+    case 'pending':                       // queued state → 視覚的には running 扱い
+    case 'running':
+    default:          return 'running';
+  }
+}
 
-  return [
-    {
-      id: 'csv-arrived',
-      title: t('execution.preflight.check.csvArrived.title'),
-      detail: asisDdl
-        ? t('execution.preflight.check.csvArrived.pass')
-        : t('execution.preflight.check.needsAsisDdl'),
-      status: asisDdl ? 'pass' : 'fail',
-    },
-    {
-      id: 'ddl-asis',
-      title: t('execution.preflight.check.ddlAsis.title'),
-      detail: asisDdl
-        ? t('execution.preflight.check.ddlAsis.pass', { n: project.tableCount })
-        : t('execution.preflight.check.ddlAsis.fail'),
-      status: asisDdl ? 'pass' : 'fail',
-    },
-    {
-      id: 'ddl-tobe',
-      title: t('execution.preflight.check.ddlTobe.title'),
-      detail: tobeDdl
-        ? t('execution.preflight.check.ddlTobe.pass', { n: project.tobeTableCount })
-        : t('execution.preflight.check.ddlTobe.fail'),
-      status: tobeDdl ? 'pass' : 'fail',
-    },
-    {
-      id: 'conn-tobe',
-      title: t('execution.preflight.check.connTobe.title'),
-      detail: t('execution.preflight.check.connTobe.pass'),
-      status: 'pass',
-    },
-    {
-      id: 'tobe-bindings',
-      title: t('execution.preflight.check.tobeBindings.title'),
-      detail: !bothDdl
-        ? t('execution.preflight.check.needsBothDdl')
-        : t('execution.preflight.check.tobeBindings.pass', { n: selectedCount }),
-      status: bothDdl ? 'pass' : 'fail',
-    },
-    {
-      id: 'asis-unmapped',
-      title: t('execution.preflight.check.asisUnmapped.title'),
-      detail: !bothDdl
-        ? t('execution.preflight.check.needsBothDdl')
-        : t('execution.preflight.check.asisUnmapped.pass'),
-      status: bothDdl ? 'pass' : 'fail',
-    },
-    {
-      id: 'unmapped-cols',
-      title: t('execution.preflight.check.unmappedCols.title'),
-      detail: !bothDdl
-        ? t('execution.preflight.check.needsBothDdl')
-        : t('execution.preflight.check.unmappedCols.pass'),
-      status: bothDdl ? 'pass' : 'fail',
-    },
-  ];
+/** stages から最初に failed になった stage の index を求める. 全 success / 全 pending なら null. */
+function findFailedStageIndex(stageViews: StageView[]): number | null {
+  /* stageKey と BASE_STAGES.id の対応で index を確定. BE が seq 順で返す保証は無いので明示マッチ. */
+  for (let i = 0; i < BASE_STAGES.length; i++) {
+    const sv = stageViews.find((s) => s.stageKey === BASE_STAGES[i].id);
+    if (sv?.status === 'failed') return i;
+  }
+  return null;
+}
+
+/** BE RunHistoryDto → 既存 Run カード形 (履歴表示用). */
+function beRunToRunCard(r: RunHistoryDto): Run {
+  const startedAt = r.startedAt ? new Date(r.startedAt) : null;
+  const durationMs = r.durationMs ?? 0;
+  const result: RunResult =
+    r.status === 'success'   ? 'ok'
+    : r.status === 'failed'   ? 'failed'
+    : r.status === 'aborted'  ? 'aborted'
+    : r.status === 'timed_out'? 'failed'
+    : 'running';
+  return {
+    id: r.id,
+    mode: r.runType === 'cutover' ? 'cutover' : 'rehearsal',
+    scope: 'all',
+    startedAt: startedAt ? formatRunStartedAt(startedAt) : '—',
+    elapsed: formatDuration(durationMs),
+    result,
+    triggeredBy: { actor: r.requestedBy ?? 'system', source: r.triggerSource ?? undefined },
+  };
+}
+
+function formatRunStartedAt(d: Date): string {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const HH = String(d.getHours()).padStart(2, '0');
+  const MM = String(d.getMinutes()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd} ${HH}:${MM}`;
+}
+
+/** phase の lifecycle 순서. forward-only な phase 自動進行 비교에 사용. */
+const PHASE_ORDER: ProjectPhase[] = [
+  'planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done',
+];
+function phaseOrder(phase: ProjectPhase): number {
+  const i = PHASE_ORDER.indexOf(phase);
+  return i < 0 ? 0 : i;
 }
 
 /**
- * Demo 결과 — 7개 체크 모두 fail. 사용자가 demo 한 번 진입으로 모든 Fix 흐름
- * (도착지·강조) 을 검증할 수 있게 의도적으로 worst-case 시나리오로 통일.
+ * phase × site.environment から起動可能な run mode を導出.
+ * BE 側 `RunService.resolveRunTypeFromPhase` と一致させる:
+ *   - production + ready             → cutover (本番移行)
+ *   - production + その他            → null   (本番では ready のみ実行可)
+ *   - non-prod   + rehearsal         → rehearsal (リハーサル run)
+ *   - non-prod   + cutover/hypercare/done → null (既に走っている / 終了済)
+ *   - non-prod   + その他            → test (planning / analysis / test / sign-off / ready
+ *                                            すべて test run 扱い — preflight 通れば起動可)
  */
-function buildDemoPreflightChecks(t: T): PreflightCheck[] {
-  return [
-    { id: 'csv-arrived',       title: t('execution.preflight.check.csvArrived.title'),       detail: t('execution.preflight.demo.csvArrived.fail'),       status: 'fail' },
-    { id: 'ddl-asis',          title: t('execution.preflight.check.ddlAsis.title'),          detail: t('execution.preflight.check.ddlAsis.fail'),         status: 'fail' },
-    { id: 'ddl-tobe',          title: t('execution.preflight.check.ddlTobe.title'),          detail: t('execution.preflight.check.ddlTobe.fail'),         status: 'fail' },
-    { id: 'conn-tobe',         title: t('execution.preflight.check.connTobe.title'),         detail: t('execution.preflight.demo.connTobe.fail'),         status: 'fail' },
-    { id: 'tobe-bindings',     title: t('execution.preflight.check.tobeBindings.title'),     detail: t('execution.preflight.demo.tobeBindings.fail'),     status: 'fail' },
-    { id: 'asis-unmapped',     title: t('execution.preflight.check.asisUnmapped.title'),     detail: t('execution.preflight.demo.asisUnmapped.fail'),     status: 'fail' },
-    { id: 'unmapped-cols',     title: t('execution.preflight.check.unmappedCols.title'),     detail: t('execution.preflight.demo.unmappedCols.fail'),     status: 'fail' },
-  ];
-}
-
-/**
- * `?demo=run-fail` 용 — 7개 체크 모두 pass. preflightPassed=true 가 되어 Start 활성화.
- * 그 후 사용자가 ⚡ Simulate failure 로 실패 시연.
- */
-function buildDemoPreflightPassChecks(t: T): PreflightCheck[] {
-  return [
-    { id: 'csv-arrived',       title: t('execution.preflight.check.csvArrived.title'),       detail: t('execution.preflight.demo.passDetail'),            status: 'pass' },
-    { id: 'ddl-asis',          title: t('execution.preflight.check.ddlAsis.title'),          detail: t('execution.preflight.demo.passDetail'),            status: 'pass' },
-    { id: 'ddl-tobe',          title: t('execution.preflight.check.ddlTobe.title'),          detail: t('execution.preflight.demo.passDetail'),            status: 'pass' },
-    { id: 'conn-tobe',         title: t('execution.preflight.check.connTobe.title'),         detail: t('execution.preflight.demo.passDetail'),            status: 'pass' },
-    { id: 'tobe-bindings',     title: t('execution.preflight.check.tobeBindings.title'),     detail: t('execution.preflight.demo.passDetail'),            status: 'pass' },
-    { id: 'asis-unmapped',     title: t('execution.preflight.check.asisUnmapped.title'),     detail: t('execution.preflight.demo.passDetail'),            status: 'pass' },
-    { id: 'unmapped-cols',     title: t('execution.preflight.check.unmappedCols.title'),     detail: t('execution.preflight.demo.passDetail'),            status: 'pass' },
-  ];
-}
-
-function buildRuns(project: Project): Run[] {
-  const phase = project.phase;
-  if (phase === 'planning' || phase === 'analysis') return [];
-
-  const baseDate = '2026-05-22';
-  const runs: Run[] = [];
-
-  if (phase === 'rehearsal' || phase === 'cutover') {
-    runs.push({
-      id: phase === 'cutover' ? 'cut-001' : 'reh-003',
-      mode: phase === 'cutover' ? 'cutover' : 'rehearsal',
-      scope: 'all',
-      startedAt: `${baseDate} 10:12`,
-      elapsed: '04:38',
-      eta: '06:20',
-      result: 'running',
-      triggeredBy: { actor: project.executionAssignee ?? 'Admin', source: 'manual' },
-    });
+function deriveRunMode(phase: ProjectPhase, env: ProjectEnvironment): RunMode | null {
+  if (env === 'production') {
+    return phase === 'ready' ? 'cutover' : null;
   }
-  if (phase !== 'test') {
-    runs.push(
-      { id: 'reh-002', mode: 'rehearsal', scope: 'all', startedAt: `${baseDate} 09:01`, elapsed: '06:12', result: 'ok',   quarantineCount: 0, triggeredBy: { actor: 'Admin', source: 'manual' } },
-      { id: 'reh-001', mode: 'rehearsal', scope: 'all', startedAt: '2026-05-21 17:40', elapsed: '06:30', result: 'warn', quarantineCount: 24, triggeredBy: { actor: 'Admin', source: 'manual' } },
-    );
-  }
-  if (phase === 'hypercare' || phase === 'done') {
-    runs.unshift({ id: 'cut-001', mode: 'cutover', scope: 'all', startedAt: `${baseDate} 02:00`, elapsed: '05:48', result: 'ok', quarantineCount: 0, triggeredBy: { actor: project.cutover?.startedBy ?? 'Admin', source: 'manual · cutover' } });
-  }
-  return runs;
+  /* non-prod: ready 以降は全部 block. ready の cutover は production 専用仕様, それより
+     先 (cutover/hypercare/done) は実行できる phase ではない. */
+  if (phase === 'rehearsal') return 'rehearsal';
+  if (phase === 'ready' || phase === 'cutover' || phase === 'hypercare' || phase === 'done') return null;
+  return 'test';
 }
 
-function toneForCheck(s: CheckStatus): BadgeTone {
-  return s === 'pass' ? 'ok' : s === 'fail' ? 'err' : 'queued';
-}
-
-function detailColorFor(s: CheckStatus): string {
-  return s === 'fail' ? 'var(--red)' : s === 'skip' ? 'var(--text-4)' : 'var(--text-2)';
+function countResults(checks: PreflightCheck[]): { pass: number; fail: number; skip: number } {
+  return checks.reduce(
+    (acc, c) => {
+      if (c.aggregate === 'pass') acc.pass++;
+      else if (c.aggregate === 'fail') acc.fail++;
+      else acc.skip++;
+      return acc;
+    },
+    { pass: 0, fail: 0, skip: 0 },
+  );
 }
 
 /* ───────────────────────── Styles ──────────────────────────────── */

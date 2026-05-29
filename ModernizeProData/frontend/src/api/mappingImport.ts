@@ -90,6 +90,10 @@ export interface MappingTableBindingDto {
   sources: MappingTableBindingSourceDto[];
   /** 자식 link 마킹 — null 이면 자체 정의. 값 있으면 master project_id. */
   sharedFromProjectId?: string | null;
+  /** Row N:1 집계 GROUP BY 표현식 — null / blank 이면 GROUP BY 없음. */
+  groupByExpr?: string | null;
+  /** Row 1:N 펼침 free SQL fragment — null / blank 이면 펼침 없음. */
+  expandExpr?: string | null;
 }
 
 /* ── Link candidates ─────────────────────────────── */
@@ -243,6 +247,10 @@ export const mappingImportApi = {
     }>;
     /** 자식 link 마킹 — 값 있으면 sources 무시 + master 의 룰 inherit. null 이면 자체 정의. */
     sharedFromProjectId?: string | null;
+    /** Row N:1 집계 GROUP BY 표현식 — null / blank 이면 GROUP BY 없음. */
+    groupByExpr?: string | null;
+    /** Row 1:N 펼침 free SQL fragment — null / blank 이면 펼침 없음. */
+    expandExpr?: string | null;
   }): Promise<MappingTableBindingDto> =>
     unwrap(api.post<ApiResponse<MappingTableBindingDto>>(
       `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/bindings`,

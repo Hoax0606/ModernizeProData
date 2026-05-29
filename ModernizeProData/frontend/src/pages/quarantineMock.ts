@@ -36,6 +36,7 @@ export type QuarantineCell = string | number | null;
 
 export interface QuarantineGroup {
   id: string;
+  bindingId?: string;                            // BE 만 채움. mock 은 비움. parquet 다운로드 endpoint key.
   reason: string;                                // 짧은 제목 — severity color 로 강조
   detail: string;                                // 세부 (어떤 컬럼/제약), 예: "GL_ENTRY.acct_no → ACCT_MASTER.account_no"
   severity: QuarantineSeverity;
@@ -483,6 +484,25 @@ export function quarantineRowAsIs(g: QuarantineGroup, rowIdx: number): Quarantin
   const violatedIdx = g.columnRoles.findIndex((r) => r === 'violated');
   if (violatedIdx < 0) return null;
   return g.sampleRows[rowIdx]?.[violatedIdx] ?? null;
+}
+
+/** sample row 의 PK 컬럼 값 = 어떤 row 인지 식별용. PK 없으면 null. */
+export function quarantineRowPk(g: QuarantineGroup, rowIdx: number): QuarantineCell {
+  const pkIdx = g.columnRoles.findIndex((r) => r === 'pk');
+  if (pkIdx < 0) return null;
+  return g.sampleRows[rowIdx]?.[pkIdx] ?? null;
+}
+
+/** PK 컬럼명 — 없으면 null (헤더 fallback 라벨용). */
+export function quarantinePkColumnName(g: QuarantineGroup): string | null {
+  const pkIdx = g.columnRoles.findIndex((r) => r === 'pk');
+  return pkIdx >= 0 ? g.columns[pkIdx] ?? null : null;
+}
+
+/** violated 컬럼명 — 헤더 AS-IS 옆 표기용. 없으면 null. */
+export function quarantineViolatedColumnName(g: QuarantineGroup): string | null {
+  const idx = g.columnRoles.findIndex((r) => r === 'violated');
+  return idx >= 0 ? g.columns[idx] ?? null : null;
 }
 
 /** 룰 엔진 transform 시도 결과 = TO-BE 표시값. toBeValues 미제공이면 null. */

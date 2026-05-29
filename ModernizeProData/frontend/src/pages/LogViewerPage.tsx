@@ -1,21 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { useQuery } from '@tanstack/react-query';
 import { useWorkspaceStore } from '../store/workspace';
 import { useT } from '../i18n';
 import {
   levelName,
+  runLogApi,
   type RunLogLevel,
   type RunLogLine,
 } from '../api/runLogs';
 import { runsApi, type RunHistoryDto } from '../api/runs';
+import { quarantineApi } from '../api/quarantine';
+import { useSnapshotsStore, usePinnedSnapshotsStore } from '../store/snapshots';
 import { formatTimestamp, formatDuration } from '../lib/formatters';
-import { buildMockLines, stageColor } from './logViewerMock';
+import { stageColor } from './logViewerMock';
 import {
-  buildQuarantineGroups,
   humanizeQuarantineDetail,
   quarantineRowAsIs,
   quarantineRowToBe,
+  quarantineRowPk,
+  quarantinePkColumnName,
+  quarantineViolatedColumnName,
   type QuarantineGroup,
   type QuarantineSeverity,
 } from './quarantineMock';
@@ -23,14 +29,12 @@ import {
 /**
  * Log viewer — 프로젝트 실행 로그 조회.
  *
- *  데모 모드: USE_MOCK=true 면 결정적 합성 로그 240줄을 화면에 채운다.
- *  BE ingest 가 실데이터로 들어오면 useLogsHistory / useLogsStream 으로 swap.
- *  (swap 포인트: 아래 allLines 계산부)
+ *  activeProjectId 의 최근 run 의 runId 를 listByProject 로 자동 결정.
+ *  runLogApi.list 로 line stream, quarantineApi.byRun 로 group 데이터 fetch.
  */
 
-const USE_MOCK = true;
-const MOCK_COUNT = 240;
 const ROW_ESTIMATE = 22;
+const LOG_FETCH_LIMIT = 1000;
 
 export function LogViewerPage() {
   const t = useT();
@@ -41,7 +45,41 @@ export function LogViewerPage() {
     () => projects.find((p) => p.id === activeProjectId) ?? null,
     [projects, activeProjectId],
   );
-  const runId = activeProjectId ?? 'demo';
+  /** project 의 최근 run — useQuery 로 5s 폴링 + window focus refetch + WS invalidate 와 키 공유.
+     mount 후 새 run 起動되면 자동으로 최신 run 의 로그·quarantine 으로 전환된다. */
+  const { data: runHistory } = useQuery<RunHistoryDto[]>({
+    queryKey: ['run-history', activeProjectId],
+    enabled: !!activeProjectId,
+    queryFn: () => runsApi.listByProject(activeProjectId!),
+    refetchInterval: 5_000,
+    refetchOnWindowFocus: true,
+    staleTime: 2_000,
+  });
+  /* runHistory 가 비었거나 아직 로딩 중일 때 활성 snapshot 의 박제된 executionContext.runId
+     로 fallback. 활성 snapshot 우선순위: (1) pinned, (2) 가장 최근 mapping. 사용자가 pin 을
+     옛 snapshot 으로 옮기면 그 snapshot 의 logs 가 자동으로 보인다.
+     박제 안 된 snapshot 이면 runId 가 '' → empty state 표시 (사용자 결정). */
+  const snapshots = useSnapshotsStore((s) => s.snapshots);
+  const fetchSnapshots = useSnapshotsStore((s) => s.fetchByProject);
+  const pinnedIds = usePinnedSnapshotsStore((s) => s.pinnedIds);
+  useEffect(() => {
+    if (activeProjectId) void fetchSnapshots(activeProjectId);
+  }, [activeProjectId, fetchSnapshots]);
+  const snapshotFallbackRunId = useMemo(() => {
+    const projectMapping = snapshots.filter(
+      (s) => s.projectId === activeProjectId && s.type === 'mapping',
+    );
+    const pinned = projectMapping.find((s) => pinnedIds.includes(s.id));
+    const active = pinned
+      ?? [...projectMapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    return active?.executionContext?.runId ?? '';
+  }, [snapshots, activeProjectId, pinnedIds]);
+  /* 활성 snapshot 의 박제된 runId 가 있으면 그것 우선. 박제 없으면 — 그 snapshot 으로 한 번도
+     run 안 됐다는 뜻이라 empty 가 맞다 (사용자 결정 — 다른 snapshot 의 run logs 가 잘못 보이면 안 됨).
+     runHistory[0] (가장 최근 run) 은 fallback 으로도 안 씀: pin 을 옛 snapshot 으로 옮기면
+     runHistory[0] 는 새 snapshot 의 run 이라 stale. */
+  const runId = snapshotFallbackRunId;
+  void runHistory; // useQuery 는 다른 부수효과 (WS invalidate 캐시 키) 를 위해 유지.
 
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -66,10 +104,14 @@ export function LogViewerPage() {
   }, [search]);
 
   /* ── 데이터 ─────────────────────────────────────── */
-  const allLines = useMemo<RunLogLine[]>(
-    () => (USE_MOCK ? buildMockLines(runId, MOCK_COUNT) : []),
-    [runId],
-  );
+  /** runId 의 모든 RunLog line (최대 LOG_FETCH_LIMIT). runId 변경 시 자동 refetch. */
+  const [allLines, setAllLines] = useState<RunLogLine[]>([]);
+  useEffect(() => {
+    if (!runId) { setAllLines([]); return; }
+    runLogApi.list(runId, { limit: LOG_FETCH_LIMIT })
+      .then((p) => setAllLines(p.lines))
+      .catch((e) => { console.error('runLog fetch failed', e); setAllLines([]); });
+  }, [runId]);
 
   /** Stream 모드 라인 — 검색/level/step 필터 적용. Quarantine 모드는 별도 데이터 소스(아래 groups)로 동작. */
   const lines = useMemo(() => {
@@ -83,11 +125,17 @@ export function LogViewerPage() {
     });
   }, [allLines, debouncedSearch, levelFilter, stepFilter]);
 
-  /** Quarantine groups — rule-violation 묶음. mock 결정적. BE 들어오면 fetch 로 swap. */
-  const allGroups = useMemo<QuarantineGroup[]>(
-    () => buildQuarantineGroups(runId),
-    [runId],
-  );
+  /** Quarantine groups — runId 의 위반 row 묶음. useQuery 로 캐시 + 자동 refetch.
+     runId 변경 시 자동 refetch. usePipelineProgress 의 WS invalidate('run-history') 와는
+     별개 queryKey 라 직접 invalidate 안 받지만, 5s 폴링이 곧 따라잡음. */
+  const { data: allGroupsData } = useQuery<QuarantineGroup[]>({
+    queryKey: ['quarantine', runId],
+    enabled: !!runId,
+    queryFn: () => quarantineApi.byRun(runId),
+    refetchInterval: 5_000,
+    staleTime: 2_000,
+  });
+  const allGroups: QuarantineGroup[] = allGroupsData ?? [];
   const groupStats = useMemo(() => {
     let errRows = 0, warnRows = 0;
     for (const g of allGroups) {
@@ -532,6 +580,7 @@ export function LogViewerPage() {
                     g={g}
                     t={t}
                     open={openGroupId === g.id}
+                    runId={runId}
                     onToggle={() => setOpenGroupId((cur) => (cur === g.id ? null : g.id))}
                     onOpenMapping={() => navigate('/mapping')}
                     onOpenInspector={() => {
@@ -695,13 +744,14 @@ function SevTab({ label, count, active, onClick, tone }: {
 }
 
 /** Quarantine group card — 카드 클릭으로 열고 닫음. 열렸을 때만 액션바(이 테이블만 다시 이행/매핑/Requeue/...) 표시. */
-function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector }: {
+function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, runId }: {
   g: QuarantineGroup;
   t: (k: string, v?: Record<string, string>) => string;
   open: boolean;
   onToggle: () => void;
   onOpenMapping: () => void;
   onOpenInspector: () => void;
+  runId: string | null;
 }) {
   const isErr = g.severity === 'error';
   const sevColor = isErr ? '#c92a3f' : '#a86b00';
@@ -766,23 +816,36 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector }
         {open && (
           <div style={styles.cardExpand}>
             <div style={styles.cardTableWrap}>
+              {/* 첫 컬럼: PK (어느 row 가 위반인지 식별). 헤더는 PK 컬럼명, 없으면 fallback "ROW".
+                 (이전엔 group 의 table 이름을 매 row 반복 표시 — 행 식별 불가했음.) */}
               <table style={styles.cardTable}>
                 <thead>
+                  {/* AS-IS 헤더에 violated 컬럼명 부기 — 예: "AS-IS · gender" */}
                   <tr>
-                    <th style={{ ...styles.cardTh, ...styles.cardThTable }}>{t('logs.quarantine.colTable')}</th>
-                    <th style={{ ...styles.cardTh, color: sevColor }}>{t('logs.quarantine.colAsIs')}</th>
+                    <th style={{ ...styles.cardTh, ...styles.cardThTable }}>
+                      {quarantinePkColumnName(g) ?? t('logs.quarantine.colTable')}
+                    </th>
+                    <th style={{ ...styles.cardTh, color: sevColor }}>
+                      {t('logs.quarantine.colAsIs')}
+                      {quarantineViolatedColumnName(g) && (
+                        <span style={{ fontWeight: 400, opacity: 0.75 }}> · {quarantineViolatedColumnName(g)}</span>
+                      )}
+                    </th>
                     <th style={styles.cardTh}>{t('logs.quarantine.colToBe')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {sample.map((_, ri) => {
+                    const pk = quarantineRowPk(g, ri);
                     const asIs = quarantineRowAsIs(g, ri);
                     const toBe = quarantineRowToBe(g, ri);
                     /* AS-IS NULL 은 위반 값이므로 severity 색, TO-BE NULL 은 거부됐다는 표시라 중립색. */
                     const asIsNullStyle = { ...styles.nullCell, color: sevColor, background: 'transparent', border: `1px solid ${sevBorder}` };
                     return (
                       <tr key={ri}>
-                        <td style={{ ...styles.cardTd, ...styles.cardTdTable }}>{g.table}</td>
+                        <td style={{ ...styles.cardTd, ...styles.cardTdTable }}>
+                          {pk === null ? <span style={styles.nullCell}>—</span> : String(pk)}
+                        </td>
                         <td style={{ ...styles.cardTd, color: sevColor, fontWeight: 700, background: sevBg }}>
                           {asIs === null ? <span style={asIsNullStyle}>NULL</span> : String(asIs)}
                         </td>
@@ -805,6 +868,18 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector }
               >
                 {t('logs.quarantine.act.openMapping')}
               </button>
+              {/* 위반 row 전수 parquet 다운로드 — BE 가 bindingId 채운 경우만 노출. */}
+              {runId && g.bindingId && (
+                <a
+                  href={`/api/v1/runs/${runId}/quarantine/${g.bindingId}/download`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  download
+                  style={{ ...styles.actLink, textDecoration: 'none' }}
+                >
+                  {t('logs.quarantine.act.downloadParquet')}
+                </a>
+              )}
               <div style={{ flex: 1 }} />
               <button
                 type="button"

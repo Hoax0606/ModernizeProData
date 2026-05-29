@@ -6,6 +6,9 @@ import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.OracleDdlParser;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.ParsedColumn;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.ParsedDdl;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.parser.ParsedTable;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingCodeMapRepository;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRuleRepository;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.Site;
@@ -45,6 +48,9 @@ public class DdlImportService {
     private final ProjectRepository projectRepo;
     private final SiteRepository siteRepo;
     private final OracleDdlParser parser;
+    private final MappingRuleRepository mappingRuleRepo;
+    private final MappingTableBindingRepository mappingBindingRepo;
+    private final MappingCodeMapRepository mappingCodeMapRepo;
     private final AuditLogService auditLogService;
 
     @Transactional
@@ -186,7 +192,17 @@ public class DdlImportService {
         applyTableCountToProject(project, side, 0);
         demoteToPlanningIfDdlIncomplete(project);
         projectRepo.save(project);
-        log.info("DDL deleted: project={}, side={}", projectId, side);
+
+        /* DDL 削除는 「やり直し動作」으로 취급 — AS-IS / TO-BE 어느 쪽이든 그 project 의
+           mapping_rules / mapping_table_bindings / mapping_code_maps 를 전체 wipe.
+           이유: 한쪽 DDL 이 없어지면 rule 의 참조가 끊겨 의미가 없고, 도구가 「孤児 rule
+           이 同名 DDL 재 import 시 자동 재연결」 동작은 사용자 의도와 어긋난다는 결정. */
+        int rules = mappingRuleRepo.deleteAllByProjectId(projectId);
+        int bindings = mappingBindingRepo.deleteAllByProjectId(projectId);
+        int codes = mappingCodeMapRepo.deleteAllByProjectId(projectId);
+
+        log.info("DDL deleted: project={}, side={}, mapping wiped (rules={}, bindings={}, codeMaps={})",
+                projectId, side, rules, bindings, codes);
     }
 
     private void applyTableCountToProject(Project project, String side, int count) {

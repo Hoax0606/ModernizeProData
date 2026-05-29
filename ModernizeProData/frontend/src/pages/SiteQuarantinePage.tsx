@@ -3,13 +3,16 @@ import { useNavigate } from 'react-router-dom';
 import { useWorkspaceStore } from '../store/workspace';
 import { useT } from '../i18n';
 import {
-  buildSiteQuarantineGroups,
   humanizeQuarantineDetail,
   quarantineRowAsIs,
   quarantineRowToBe,
+  quarantineRowPk,
+  quarantinePkColumnName,
+  quarantineViolatedColumnName,
   type SiteQuarantineGroup,
   type QuarantineSeverity,
 } from './quarantineMock';
+import { quarantineApi } from '../api/quarantine';
 
 /**
  * Site Quarantine — site 전체의 모든 프로젝트에서 모인 quarantine group 을 한 화면에 표시.
@@ -29,10 +32,14 @@ export function SiteQuarantinePage() {
     () => allProjects.filter((p) => p.siteId === activeSiteId),
     [allProjects, activeSiteId],
   );
-  const allGroups = useMemo<SiteQuarantineGroup[]>(
-    () => buildSiteQuarantineGroups(siteProjects.map((p) => ({ id: p.id, name: p.name }))),
-    [siteProjects],
-  );
+  /** activeSiteId 의 site 전체 quarantine. quarantineApi.bySite 로 fetch. */
+  const [allGroups, setAllGroups] = useState<SiteQuarantineGroup[]>([]);
+  useEffect(() => {
+    if (!activeSiteId) { setAllGroups([]); return; }
+    quarantineApi.bySite(activeSiteId)
+      .then(setAllGroups)
+      .catch((e) => { console.error('site quarantine fetch failed', e); setAllGroups([]); });
+  }, [activeSiteId]);
 
   const [severityFilter, setSeverityFilter] = useState<'all' | QuarantineSeverity>('all');
   const [projectFilter,  setProjectFilter]  = useState<string | null>(null);   // null = 모든 프로젝트
@@ -254,22 +261,34 @@ function SiteQuarantineCard({ g, t, open, onToggle, onOpenMapping }: {
             <div style={styles.cardTableWrap}>
               <table style={styles.cardTable}>
                 <thead>
+                  {/* PROJECT 컬럼은 cross-project 뷰의 식별 도움 (card 헤더와 중복이지만 긴 스크롤 시 유용).
+                      TABLE 컬럼은 PK 로 교체 — 같은 group 안에서 row 식별. */}
                   <tr>
                     <th style={{ ...styles.cardTh, ...styles.cardThTable }}>{t('logs.quarantine.colProject')}</th>
-                    <th style={{ ...styles.cardTh, ...styles.cardThTable }}>{t('logs.quarantine.colTable')}</th>
-                    <th style={{ ...styles.cardTh, color: sevColor }}>{t('logs.quarantine.colAsIs')}</th>
+                    <th style={{ ...styles.cardTh, ...styles.cardThTable }}>
+                      {quarantinePkColumnName(g) ?? t('logs.quarantine.colTable')}
+                    </th>
+                    <th style={{ ...styles.cardTh, color: sevColor }}>
+                      {t('logs.quarantine.colAsIs')}
+                      {quarantineViolatedColumnName(g) && (
+                        <span style={{ fontWeight: 400, opacity: 0.75 }}> · {quarantineViolatedColumnName(g)}</span>
+                      )}
+                    </th>
                     <th style={styles.cardTh}>{t('logs.quarantine.colToBe')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {g.sampleRows.map((_, ri) => {
+                    const pk = quarantineRowPk(g, ri);
                     const asIs = quarantineRowAsIs(g, ri);
                     const toBe = quarantineRowToBe(g, ri);
                     const asIsNullStyle = { ...styles.nullCell, color: sevColor, background: 'transparent', border: `1px solid ${sevBorder}` };
                     return (
                       <tr key={ri}>
                         <td style={{ ...styles.cardTd, ...styles.cardTdTable }}>{g.projectName}</td>
-                        <td style={{ ...styles.cardTd, ...styles.cardTdTable }}>{g.table}</td>
+                        <td style={{ ...styles.cardTd, ...styles.cardTdTable }}>
+                          {pk === null ? <span style={styles.nullCell}>—</span> : String(pk)}
+                        </td>
                         <td style={{ ...styles.cardTd, color: sevColor, fontWeight: 700, background: sevBg }}>
                           {asIs === null ? <span style={asIsNullStyle}>NULL</span> : String(asIs)}
                         </td>

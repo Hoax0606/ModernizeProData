@@ -13,7 +13,6 @@ import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
 import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
 import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult, type MappingRuleDto, type MappingTableBindingDto, type LinkCandidatesResponse } from '../api/mappingImport';
 import { MappingOnboarding } from './DashboardPage';
-import { isDemoProjectId } from '../lib/demoFixtures';
 import { copyText } from '../lib/clipboard';
 import { effectiveTobeDb } from '../lib/effectiveTobeDb';
 import { Checkbox } from '../components/Checkbox';
@@ -51,6 +50,8 @@ type TobeTable = {
   compositionKind: 'single' | 'join' | 'union' | 'none';
   sources: { alias: string; table: string; role: 'primary' | 'join' | 'union'; joinType?: string; joinOn?: string; rows: number }[];
   whereFilter?: string;
+  groupByExpr?: string;
+  expandExpr?: string;
   /** 부모 project_id — null/undef 면 자체 정의, 값 있으면 자식 link */
   linkedFromProjectId?: string;
   /** 다른 project 의 자식들이 자기를 link 한 부모인지 */
@@ -287,8 +288,6 @@ export function MappingPage() {
 
   useEffect(() => {
     if (!activeProjectId) return;
-    // demo project 는 AppShell 이 schema 를 inject 했으므로 백엔드 fetch 를 건너뛴다.
-    if (isDemoProjectId(activeProjectId)) return;
     useAsisDdlStore.getState().fetch(activeProjectId).catch((e) => console.error('[mapping] asis-ddl fetch failed', e));
     useTobeDdlStore.getState().fetch(activeProjectId).catch((e) => console.error('[mapping] tobe-ddl fetch failed', e));
   }, [activeProjectId]);
@@ -379,17 +378,33 @@ export function MappingPage() {
     }
 
     const kind = state?.fixTarget?.kind;
+    const targetTable = state?.fixTarget?.table;
     if (!kind) return;
     // unmapped-asis: AS-IS 사이드로 자동 전환해야 AsisTableDetail 이 mount 되고
-    // [data-fix-row="asis-unmapped"] 마커가 DOM 에 등장. 첫 AS-IS 테이블로 switch.
+    // [data-fix-row="asis-unmapped"] 마커가 DOM 에 등장. table 명시 시 그 AS-IS table, 없으면 첫번째.
+    // matcher: qualified name (`schema.physical`) / physical name (`short`) 둘 다 받기.
     if (kind === 'unmapped-asis' && ASIS_TABLES.length > 0) {
-      setSelected({ side: 'asis', name: ASIS_TABLES[0].name });
+      const target = targetTable
+        ? ASIS_TABLES.find((tt) => tt.name === targetTable || tt.short === targetTable)
+        : null;
+      const pick = target ?? ASIS_TABLES[0];
+      setSelected({ side: 'asis', name: pick.name });
     }
-    // unbound-tobe: 첫 unbound TO-BE 테이블(sources 비어있는)을 활성으로 → CollapsibleBinding 렌더.
-    if (kind === 'unbound-tobe') {
-      const firstUnbound = effectiveTobe.find((t) => t.sources.length === 0);
-      if (firstUnbound) {
-        setSelected({ side: 'tobe', name: firstUnbound.name, internalName: firstUnbound.internalName });
+    // unbound-tobe / unmapped-tobe: table 指定 → その TO-BE を選択. なければ最初の該当を選択.
+    // matcher: qualified name / internalName(uuid) / physical name 全部 OK.
+    if (kind === 'unbound-tobe' || kind === 'unmapped-tobe') {
+      let chosen = targetTable
+        ? effectiveTobe.find((tt) =>
+            tt.name === targetTable
+            || tt.internalName === targetTable
+            || tt.short === targetTable,
+          )
+        : null;
+      if (!chosen && kind === 'unbound-tobe') {
+        chosen = effectiveTobe.find((tt) => tt.sources.length === 0);
+      }
+      if (chosen) {
+        setSelected({ side: 'tobe', name: chosen.name, internalName: chosen.internalName });
       }
     }
     const id = window.setTimeout(() => {
@@ -514,6 +529,8 @@ export function MappingPage() {
       whereFilter: edit.whereFilter ?? null,
       sources,
       sharedFromProjectId: edit.sharedFromProjectId ?? null,
+      groupByExpr: edit.groupByExpr ?? null,
+      expandExpr: edit.expandExpr ?? null,
     }).catch((e) => console.warn('[mapping] upsertBinding failed', e));
     demoteToAnalysisOnEdit(activeProjectId);
   }, [activeProjectId, readOnly]);
@@ -540,6 +557,8 @@ export function MappingPage() {
         unrouted: !edit.sharedFromProjectId && srcs.length === 0,
         compositionKind: (srcs.length === 0 ? 'none' : srcs.length === 1 ? 'single' : edit.mode) as TobeTable['compositionKind'],
         whereFilter: edit.whereFilter ?? t.whereFilter,
+        groupByExpr: edit.groupByExpr ?? t.groupByExpr,
+        expandExpr: edit.expandExpr ?? t.expandExpr,
         linkedFromProjectId: edit.sharedFromProjectId,
         isParent,
       };
@@ -1087,12 +1106,16 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
           };
         }),
         sharedFromProjectId: newSharedFromProjectId,
+        groupByExpr: newSharedFromProjectId ? null : (bindingGroupBy || null),
+        expandExpr: newSharedFromProjectId ? null : (bindingExpand || null),
       });
       // store 의 binding edit 도 갱신
       onBindingChange({
         sources: newSharedFromProjectId ? [] : bindingSources,
         mode: bindingMode,
         whereFilter: bindingWhere,
+        groupByExpr: newSharedFromProjectId ? undefined : bindingGroupBy,
+        expandExpr: newSharedFromProjectId ? undefined : bindingExpand,
         sharedFromProjectId: newSharedFromProjectId ?? undefined,
       });
       setLinkModalOpen(false);
@@ -1150,6 +1173,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
         edits[tobe.internalName] = {
           mode,
           whereFilter: b.whereFilter ?? undefined,
+          groupByExpr: b.groupByExpr ?? undefined,
+          expandExpr: b.expandExpr ?? undefined,
           sharedFromProjectId: b.sharedFromProjectId ?? undefined,
           sources: b.sources.map((s) => ({
             alias: s.alias,
@@ -1347,13 +1372,17 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     bindingEdit?.mode ?? (table.compositionKind === 'union' ? 'union' : 'join'),
   );
   const [bindingWhere, setBindingWhere] = useState(bindingEdit?.whereFilter ?? table.whereFilter ?? '');
+  const [bindingGroupBy, setBindingGroupBy] = useState(bindingEdit?.groupByExpr ?? table.groupByExpr ?? '');
+  const [bindingExpand, setBindingExpand] = useState(bindingEdit?.expandExpr ?? table.expandExpr ?? '');
   // Apply/hydrate 등으로 외부에서 bindingEdit 가 갱신되면 로컬 state 도 따라가게.
   // (useState 는 첫 렌더의 prop 으로만 초기화되어 이후 prop 변경을 못 받음)
   useEffect(() => {
     setBindingSources(bindingEdit?.sources ?? table.sources);
     setBindingMode(bindingEdit?.mode ?? (table.compositionKind === 'union' ? 'union' : 'join'));
     setBindingWhere(bindingEdit?.whereFilter ?? table.whereFilter ?? '');
-  }, [bindingEdit, table.internalName, table.sources, table.compositionKind, table.whereFilter]);
+    setBindingGroupBy(bindingEdit?.groupByExpr ?? table.groupByExpr ?? '');
+    setBindingExpand(bindingEdit?.expandExpr ?? table.expandExpr ?? '');
+  }, [bindingEdit, table.internalName, table.sources, table.compositionKind, table.whereFilter, table.groupByExpr, table.expandExpr]);
   const allRows = useMemo(() => rows.map((r) => {
     // 자식 link 테이블 — 모든 컬럼이 'link' state. master 룰은 실행 시점에 read-time inherit
     // 되므로 자식 화면 자체는 단순 'Linked' 단일 표시.
@@ -1574,11 +1603,15 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
           <CollapsibleBinding
             table={table} open={bindingOpen} pulse={bindingPulse} onToggle={() => setBindingOpen((o) => !o)}
             sources={bindingSources}
-            onSourcesChange={(s) => { if (isLinkedChild) return; setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode, whereFilter: bindingWhere }); }}
+            onSourcesChange={(s) => { if (isLinkedChild) return; setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode, whereFilter: bindingWhere, groupByExpr: bindingGroupBy, expandExpr: bindingExpand }); }}
             compositionMode={bindingMode}
-            onCompositionModeChange={(m) => { if (isLinkedChild) return; setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m, whereFilter: bindingWhere }); }}
+            onCompositionModeChange={(m) => { if (isLinkedChild) return; setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m, whereFilter: bindingWhere, groupByExpr: bindingGroupBy, expandExpr: bindingExpand }); }}
             whereFilter={bindingWhere}
-            onWhereChange={(v) => { if (isLinkedChild) return; setBindingWhere(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: v }); }}
+            onWhereChange={(v) => { if (isLinkedChild) return; setBindingWhere(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: v, groupByExpr: bindingGroupBy, expandExpr: bindingExpand }); }}
+            groupByExpr={bindingGroupBy}
+            onGroupByChange={(v) => { if (isLinkedChild) return; setBindingGroupBy(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: bindingWhere, groupByExpr: v, expandExpr: bindingExpand }); }}
+            expandExpr={bindingExpand}
+            onExpandChange={(v) => { if (isLinkedChild) return; setBindingExpand(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: bindingWhere, groupByExpr: bindingGroupBy, expandExpr: v }); }}
           />
         </div>
       )}
@@ -1780,6 +1813,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
             active={active}
             composition={table.compositionKind}
             sources={bindingSources}
+            expandExpr={bindingExpand}
             rowEdit={rowEdits[active?.tgt ?? '']}
             onSave={(edit) => handleSaveEdit(active, edit)}
             onClose={() => setInspectorOpen(false)}
@@ -1992,11 +2026,13 @@ function AutocompleteInput({
   );
 }
 
-function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesChange, compositionMode, onCompositionModeChange, whereFilter, onWhereChange }: {
+function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesChange, compositionMode, onCompositionModeChange, whereFilter, onWhereChange, groupByExpr, onGroupByChange, expandExpr, onExpandChange }: {
   table: TobeTable; open: boolean; pulse?: boolean; onToggle: () => void;
   sources: TobeTable['sources']; onSourcesChange: (s: TobeTable['sources']) => void;
   compositionMode: 'join' | 'union'; onCompositionModeChange: (m: 'join' | 'union') => void;
   whereFilter: string; onWhereChange: (v: string) => void;
+  groupByExpr: string; onGroupByChange: (v: string) => void;
+  expandExpr: string; onExpandChange: (v: string) => void;
 }) {
   const t = useT();
   const readOnly = useActiveProjectReadOnly();
@@ -2015,7 +2051,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
   const usedTables = new Set(sources.map((s) => s.table));
   const availableTables = ASIS_TABLES.filter((t) => !usedTables.has(t.name));
 
-  // {alias}.{column} 자동완성 후보 — 현재 binding 의 모든 source 의 컬럼들.
+  // {alias}.{column} 자동완성 후보 — sources 의 컬럼들 + expand_expr 의 AS u(...) 컬럼들.
   const datalistId = `mpd-cols-${table.internalName}`;
   const aliasColumnOptions = useMemo(() => {
     const opts: string[] = [];
@@ -2023,8 +2059,11 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
       const cols = ASIS_COLUMNS[s.table] || [];
       for (const c of cols) opts.push(`${s.alias}.${c.name}`);
     }
+    for (const e of parseExpandAliases(expandExpr)) {
+      for (const c of e.columns) opts.push(`${e.alias}.${c}`);
+    }
     return opts;
-  }, [sources, table.internalName]);
+  }, [sources, expandExpr, table.internalName]);
 
   const startAdd = () => {
     if (readOnly) return;
@@ -2228,6 +2267,22 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
           {sources.length > 0 && (
             <div style={{ marginTop: 12 }}>
               <div style={styles.whereLabel}>
+                <span>EXPAND (row 1:N)</span>
+                <span style={styles.whereHint}>{t('mapping.binding.expandHint')}</span>
+              </div>
+              <AutocompleteInput
+                completions={aliasColumnOptions}
+                value={expandExpr}
+                onChange={onExpandChange}
+                placeholder={`예: CROSS JOIN LATERAL (VALUES ('phone', ${sources[0].alias}.PHONE), ('email', ${sources[0].alias}.EMAIL)) AS u(channel, value)`}
+                style={styles.whereInput}
+                disabled={readOnly}
+              />
+            </div>
+          )}
+          {sources.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={styles.whereLabel}>
                 <span>WHERE filter</span>
                 <span style={styles.whereHint}>{t('mapping.binding.whereHint')}</span>
               </div>
@@ -2236,6 +2291,22 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
                 value={whereFilter}
                 onChange={onWhereChange}
                 placeholder={`예: ${sources[0].alias}.party_type = 'P'`}
+                style={styles.whereInput}
+                disabled={readOnly}
+              />
+            </div>
+          )}
+          {sources.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={styles.whereLabel}>
+                <span>GROUP BY</span>
+                <span style={styles.whereHint}>{t('mapping.binding.groupByHint')}</span>
+              </div>
+              <AutocompleteInput
+                completions={aliasColumnOptions}
+                value={groupByExpr}
+                onChange={onGroupByChange}
+                placeholder={`예: EXTRACT(MONTH FROM ${sources[0].alias}.txn_date), ${sources[0].alias}.account`}
                 style={styles.whereInput}
                 disabled={readOnly}
               />
@@ -2257,6 +2328,23 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
 type RowEdit = { savedSrc?: string[]; savedRule?: string; savedDefault?: string; savedNotNull?: boolean; savedStrategy?: 'expression' | 'null' | 'default'; ruleOrigin?: 'imported' | 'manual'; savedNotes?: string };
 
 // Module-level helper so it can be called from useEffect closures
+/**
+ * binding 의 expand_expr 안에서 `AS alias(col1, col2, ...)` 패턴을 모두 추출.
+ * row editor / 자동완성이 expand alias.column 도 source 후보로 보여줄 수 있게 한다.
+ * type 정보는 expand_expr 에 없으므로 VARCHAR fallback.
+ */
+function parseExpandAliases(expr: string | undefined | null): { alias: string; columns: string[] }[] {
+  if (!expr) return [];
+  const out: { alias: string; columns: string[] }[] = [];
+  const re = /\bAS\s+(\w+)\s*\(\s*([^)]+)\s*\)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(expr)) !== null) {
+    const cols = m[2].split(',').map((c) => c.trim()).filter(Boolean);
+    if (cols.length > 0) out.push({ alias: m[1], columns: cols });
+  }
+  return out;
+}
+
 function resolveSrcType(s: string, sources: TobeTable['sources']): string {
   if (!s) return '—';
   const di = s.indexOf('.');
@@ -2611,10 +2699,11 @@ function HighlightEditor({
 
 // ── Inspector ────────────────────────────────────────────────
 
-function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
+function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, onClose }: {
   active: MappingRow | undefined;
   composition: TobeTable['compositionKind'];
   sources: TobeTable['sources'];
+  expandExpr?: string;
   rowEdit?: RowEdit;
   onSave: (edit: RowEdit) => void;
   onClose: () => void;
@@ -2818,6 +2907,13 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
                       (ASIS_COLUMNS[src.table] || []).map((c) => (
                         <option key={`${src.alias}.${c.name}`} value={`${src.alias}.${c.name}`}>
                           [{src.alias}] {c.name}  ({c.type})
+                        </option>
+                      ))
+                    )}
+                    {parseExpandAliases(expandExpr).flatMap((e) =>
+                      e.columns.map((c) => (
+                        <option key={`${e.alias}.${c}`} value={`${e.alias}.${c}`}>
+                          [{e.alias}] {c}  (expand)
                         </option>
                       ))
                     )}

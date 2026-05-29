@@ -112,9 +112,27 @@ public class SiteCsvPreviewController {
         return ApiResponse.ok(preview);
     }
 
-    /** Resolve {baseDir}/{tableName}.csv, case-insensitive fallback. Returns null if absent. */
+    /**
+     * Resolve a CSV under {baseDir}. {tableName} 은 schema 한정(HR_PAYROLL.EMPLOYEES)
+     * 또는 bare(employees) 둘 다 허용. 다음 순서로 시도 (둘 다 case-insensitive):
+     *   1) {tableName}.csv               (예: HR_PAYROLL.EMPLOYEES.csv)
+     *   2) {첫 점 이후 부분}.csv          (예: EMPLOYEES.csv → customers.csv)
+     * stages/preflight 의 StageHelpers.resolveCsvFile 와 동일 규칙 — preview 와 run 이
+     * 같은 파일을 찾도록 일치시킨다. 없으면 null.
+     */
     private Path resolveCsvFile(Path baseDir, String tableName) {
-        Path exact = baseDir.resolve(tableName + ".csv").normalize();
+        Path direct = tryResolve(baseDir, tableName);
+        if (direct != null) return direct;
+        int dot = tableName.indexOf('.');
+        if (dot > 0 && dot < tableName.length() - 1) {
+            return tryResolve(baseDir, tableName.substring(dot + 1));
+        }
+        return null;
+    }
+
+    /** Exact then case-insensitive match for {name}.csv under {baseDir}. */
+    private Path tryResolve(Path baseDir, String name) {
+        Path exact = baseDir.resolve(name + ".csv").normalize();
         if (!exact.startsWith(baseDir)) {
             throw new ApiException(
                     "PATH_TRAVERSAL_DENIED",
@@ -123,7 +141,7 @@ public class SiteCsvPreviewController {
         }
         if (Files.isRegularFile(exact)) return exact;
 
-        String want = (tableName + ".csv").toLowerCase();
+        String want = (name + ".csv").toLowerCase();
         try (Stream<Path> stream = Files.list(baseDir)) {
             return stream
                     .filter(Files::isRegularFile)

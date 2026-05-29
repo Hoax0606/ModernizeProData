@@ -280,10 +280,13 @@ public class MappingImportService {
                     // code_domain 이 지정돼있고 해당 domain 의 entries 가 있으면 CASE 자동 생성
                     if (row.codeDomain != null && codeByDomain.containsKey(row.codeDomain)) {
                         row.transformSql = buildCaseFromCodeMap(src, codeByDomain.get(row.codeDomain));
-                    } else if (typeCategoriesMatch(asisTypeFirst, row.tobeType)) {
+                    } else if (row.tobeType == null || row.tobeType.isBlank()
+                            || "string".equals(typeCategory(row.tobeType))) {
+                        // tobe 가 string 또는 미명시 — ExtractStage 의 all_varchar input 그대로 통과.
                         row.transformSql = src;
                     } else {
-                        // CHAR(8) YYYYMMDD / CHAR(14) YYYYMMDDHH24MISS 같은 Oracle 컨벤션 패턴 우선
+                        // tobe 가 non-string — 실제 input 은 VARCHAR (all_varchar) 이므로 항상 변환 필요.
+                        // CHAR(8) YYYYMMDD 같은 컨벤션 hint 가 있으면 STRPTIME, 아니면 명시적 CAST.
                         String strDateSql = tryStringToDateSql(src, asisTypeFirst, row.tobeType);
                         row.transformSql = strDateSql != null ? strDateSql
                                 : "CAST(" + src + " AS " + (row.tobeType != null ? row.tobeType : "VARCHAR") + ")";
@@ -358,8 +361,10 @@ public class MappingImportService {
         LinkedHashMap<String, RuleRow> grouped = new LinkedHashMap<>();
 
         // read_csv (not _auto) 으로 delimiter / quote / escape 모두 명시.
+        // RFC 4180 dialect 명시 — sniffer 가 셀 안의 따옴표/콤마 (SQL fragment 같은 복잡한
+        // notes) 로 실패하지 않도록. quote / escape 모두 double-quote.
         String sql = "SELECT * FROM read_csv('" + escape(csv.toString())
-                + "', header=true, delim=',', all_varchar=true, null_padding=true)";
+                + "', header=true, delim=',', quote='\"', escape='\"', all_varchar=true, null_padding=true)";
 
         try (Statement st = duckDbService.statement();
              ResultSet rs = st.executeQuery(sql)) {
@@ -479,8 +484,10 @@ public class MappingImportService {
         List<CodeRow> out = new ArrayList<>();
         Set<String> seen = new HashSet<>();
 
+        // RFC 4180 dialect 명시 — sniffer 가 셀 안의 따옴표/콤마 (SQL fragment 같은 복잡한
+        // notes) 로 실패하지 않도록. quote / escape 모두 double-quote.
         String sql = "SELECT * FROM read_csv('" + escape(csv.toString())
-                + "', header=true, delim=',', all_varchar=true, null_padding=true)";
+                + "', header=true, delim=',', quote='\"', escape='\"', all_varchar=true, null_padding=true)";
 
         try (Statement st = duckDbService.statement();
              ResultSet rs = st.executeQuery(sql)) {
@@ -783,7 +790,11 @@ public class MappingImportService {
              * 자식 link 마킹용 master project_id. null 또는 비우면 자체 정의 (기본).
              * 값 있을 때는 sources 는 무시됨 (master 의 sources 를 read 시점에 inherit).
              */
-            String sharedFromProjectId
+            String sharedFromProjectId,
+            /** Row N:1 집계 GROUP BY 표현식 — null / blank 이면 GROUP BY 없음. */
+            String groupByExpr,
+            /** Row 1:N 펼침 free SQL fragment — null / blank 이면 펼침 없음. */
+            String expandExpr
     ) {}
 
     public record UpsertSourceDto(
@@ -825,6 +836,8 @@ public class MappingImportService {
         b.setTobeTable(req.tobeTable());
         b.setCompositionKind(req.compositionKind() != null ? req.compositionKind() : "single");
         b.setWhereFilter(req.whereFilter());
+        b.setGroupByExpr(req.groupByExpr());
+        b.setExpandExpr(req.expandExpr());
         b.setBindingOrigin("manual");
         b.setCreatedBy(createdBy);
         b.setCreatedAt(createdAt);
@@ -1046,12 +1059,6 @@ public class MappingImportService {
     }
 
     /** AS-IS / TO-BE 타입이 같은 카테고리면 cast 불필요. */
-    private static boolean typeCategoriesMatch(String asisType, String tobeType) {
-        String a = typeCategory(asisType);
-        String t = typeCategory(tobeType);
-        if (a == null || t == null) return true; // 모르면 일단 passthrough
-        return a.equals(t);
-    }
 
     /** 거친 타입 카테고리 — string/integer/decimal/boolean/date/timestamp/timestamptz/binary. */
     private static String typeCategory(String type) {

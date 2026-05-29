@@ -100,4 +100,16 @@ public class Site {
         s.createdAt = OffsetDateTime.now();
         return s;
     }
+
+    /**
+     * 런타임 활성 TO-BE DB config — {@code environment} 기준으로 {@code tobeDbByEnv} 에서 조회.
+     * FE(SiteSettingsModal 저장 / preflight) · DdlImportService · RunService 와 동일 키 사용.
+     * 설정이 없으면 null.
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> getActiveTobeDbConfig() {
+        if (tobeDbByEnv == null || environment == null) return null;
+        Object cfg = tobeDbByEnv.get(environment);
+        return cfg instanceof Map ? (Map<String, Object>) cfg : null;
+    }
 }

@@ -147,6 +147,17 @@ interface WorkspaceState {
   setProjectPhase: (projectId: string, phase: ProjectPhase) => Promise<void>;
   /** Project runStatus 전환 (running/completed/idle). undefined = 초기화. */
   setProjectRunStatus: (projectId: string, runStatus: RunStatus | undefined) => Promise<void>;
+  /**
+   * phase + runStatus 를 단일 BE 호출 + 단일 set 으로 atomic 갱신.
+   * Run 起動時に 2 つを分けて呼ぶと 2 BE call + 2 set のレースで一瞬「test + 非 running」
+   * 상태가 보일 수 있다 (sidebar chip が一瞬色なし). このメソッドで両方を 1 リクエスト로 묶어
+   * race 회피.
+   */
+  setProjectPhaseAndRunStatus: (
+    projectId: string,
+    phase: ProjectPhase,
+    runStatus: RunStatus | undefined,
+  ) => Promise<void>;
 }
 
 export const emptyDbConnection = (): SiteDbConnection => ({
@@ -396,6 +407,21 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             p.id === projectId ? { ...p, runStatus } : p
           ),
         }));
+      },
+
+      setProjectPhaseAndRunStatus: async (projectId, phase, runStatus) => {
+        /* 楽観 update 를 동기적으로 먼저 — UI 가 즉시 새 색을 보여주도록.
+           BE 호출은 background 로 await, 실패해도 (mock 모드 등) 일단 store 는 유지. */
+        set((s) => ({
+          projects: s.projects.map((p) =>
+            p.id === projectId ? { ...p, phase, runStatus } : p
+          ),
+        }));
+        try {
+          await projectApi.update(projectId, { phase, runStatus });
+        } catch (e) {
+          console.error('[workspace] setProjectPhaseAndRunStatus BE failed:', e);
+        }
       },
     }),
     {

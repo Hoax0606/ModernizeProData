@@ -1,4 +1,4 @@
-import { useState, type CSSProperties, type RefObject } from 'react';
+import { useEffect, useState, type CSSProperties, type RefObject } from 'react';
 import {
   emptyDbConnection,
   PROJECT_ENVIRONMENTS,
@@ -84,6 +84,10 @@ export function TobeDbCard({
 
   const toggleStageLock = () => {
     if (!isMaster) return;
+    const isLocking = !locks[stage];
+    // 잠그려는 시도면 connection test 가 'ok' 일 때만 허용 — fail/미테스트 면 차단.
+    // 잘못된 정보가 DB 에 저장되지 않도록 lock 자체를 막는다.
+    if (isLocking && testStatus !== 'ok') return;
     onLocksChange({ ...locks, [stage]: !locks[stage] });
   };
 
@@ -95,7 +99,7 @@ export function TobeDbCard({
       const result = await tobeDbApi.testConnection(siteIdForTest, {
         dbType:   tobeDb.type,
         host:     tobeDb.host.trim(),
-        port:     tobeDb.port.trim() || '5432',
+        port:     tobeDb.port.trim(),
         database: tobeDb.database.trim(),
         username: tobeDb.username.trim(),
         password: tobeDb.password,
@@ -108,8 +112,15 @@ export function TobeDbCard({
     }
   };
 
+  // stage 가 바뀌면 이전 stage 의 test 결과가 잔류하지 않도록 reset.
+  useEffect(() => {
+    setTestStatus('idle');
+    setTestMessage(null);
+  }, [stage]);
+
   const canTestConnection =
     !!tobeDb.host.trim() &&
+    !!tobeDb.port.trim() &&
     !!tobeDb.username.trim() &&
     !!tobeDb.database.trim() &&
     testStatus !== 'testing';

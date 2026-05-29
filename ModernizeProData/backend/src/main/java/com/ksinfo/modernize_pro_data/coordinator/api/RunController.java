@@ -60,7 +60,9 @@ public class RunController {
      */
     public record StartRunRequest(
             @NotBlank String projectId,
-            RunType runType
+            RunType runType,
+            List<String> tables,   // 선택한 TO-BE 테이블명. null/empty = 전체 실행.
+            boolean useCache       // true 면 직전 성공 run 의 CP2 재사용 시도 (stage-cache). 기본 false.
     ) {}
 
     public record RunResultDto(
@@ -158,7 +160,9 @@ public class RunController {
                 runType,
                 source,
                 requestedBy,
-                credentialId);
+                credentialId,
+                req.tables(),
+                req.useCache());
         log.info("startRun via {} projectId={} runType={} by={} → status={}",
                 source, req.projectId(), runType, requestedBy, r.status());
         String projectName = project.getName();
@@ -222,6 +226,42 @@ public class RunController {
         log.info("startAll via {} → total={} started={} rejected={} locked={}",
                 source, targets.size(), started, rejected, locked);
         return ApiResponse.ok(new BulkRunResultDto(targets.size(), started, rejected, locked, results));
+    }
+
+    /** UI 의 Stop 버튼 요청 body. reason 생략 가능. */
+    public record AbortRunRequest(String reason) {}
+
+    /**
+     * 進行中 run 을 中断 (UI Stop 버튼). run_history.status=aborted + projects.run_status=idle 復旧.
+     * ⚠️ 現状 동기 실행이라 실행 中 stage thread 를 강제 중단하지는 않음 — status 전이 + lock 解放.
+     */
+    @PostMapping("/api/v1/runs/{runId}/abort")
+    @PreAuthorize("hasAnyRole('MASTER', 'ADMIN')")
+    public ApiResponse<RunHistoryViewDto> abortRun(@PathVariable String runId,
+                                                   @RequestBody(required = false) AbortRunRequest req) {
+        String reason = (req != null && req.reason() != null && !req.reason().isBlank())
+                ? req.reason() : "aborted by user";
+        RunHistory rh = runService.abortRun(runId, reason);
+        log.info("abortRun via UI runId={} reason={}", runId, reason);
+        return ApiResponse.ok(toViewDtos(List.of(rh)).get(0));
+    }
+
+    /** 進行中 run 一時停止 (running → paused). stage 경계에서 멈춤. */
+    @PostMapping("/api/v1/runs/{runId}/pause")
+    @PreAuthorize("hasAnyRole('MASTER', 'ADMIN')")
+    public ApiResponse<RunHistoryViewDto> pauseRun(@PathVariable String runId) {
+        RunHistory rh = runService.pauseRun(runId);
+        log.info("pauseRun via UI runId={} → status={}", runId, rh.getStatus());
+        return ApiResponse.ok(toViewDtos(List.of(rh)).get(0));
+    }
+
+    /** 一時停止 run 再開 (paused → running). */
+    @PostMapping("/api/v1/runs/{runId}/resume")
+    @PreAuthorize("hasAnyRole('MASTER', 'ADMIN')")
+    public ApiResponse<RunHistoryViewDto> resumeRun(@PathVariable String runId) {
+        RunHistory rh = runService.resumeRun(runId);
+        log.info("resumeRun via UI runId={} → status={}", runId, rh.getStatus());
+        return ApiResponse.ok(toViewDtos(List.of(rh)).get(0));
     }
 
     /** Run の現在 status 取得. user session 認証. */

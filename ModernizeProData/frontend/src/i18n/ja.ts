@@ -429,6 +429,10 @@ export const ja: Record<TranslationKey, string> = {
   'versions.pin.toggleTitleIneligible': '現在の phase ではピン留め不可',
   'versions.pin.iconAria':           'Pinned to top',
 
+  'versions.preflight.blocked':           'Execution 画面でこのスナップショットを pin して preflight を全 pass させると Request Review が有効になります',
+  'versions.preflight.notRun':            'Execution 画面でこのスナップショットを pin して preflight を実行してください',
+  'versions.preflight.partialSelection':  'Execution 画面で全テーブルを選択して preflight を実行してください',
+
   // CHANGES section (versions detail panel)
   'versions.changes.title':           'Changes',
   'versions.changes.status.added':    'ADDED',
@@ -537,7 +541,7 @@ export const ja: Record<TranslationKey, string> = {
   'execution.run.abortReason':        'ユーザーによる中断',
   'execution.run.tablesSummary':      '{n} tables',
   'execution.run.errorBanner':        'Stage {stage} ({name}) 失敗 — {reason}',
-  'execution.run.demo.triggerFail':   '⚡ 失敗をシミュレート',
+  'execution.run.errorBannerNoStage': '実行失敗 — {reason}',
 
   /* Pre-flight */
   'execution.preflight.title':                             'Pre-flight',
@@ -577,14 +581,39 @@ export const ja: Record<TranslationKey, string> = {
   'execution.preflight.check.asisUnmapped.pass':           '全ての AS-IS カラムがマッピング済み',
   'execution.preflight.check.unmappedCols.title':          '全ての TO-BE テーブルのカラム unmapped 検査',
   'execution.preflight.check.unmappedCols.pass':           '全ての TO-BE カラムにソースが割当て済み',
-  'execution.preflight.demo.indicator':                    'Preview',
-  'execution.preflight.demo.exit':                         '実データに戻る',
-  'execution.preflight.demo.connTobe.fail':                'latency 412 ms · 応答遅延',
-  'execution.preflight.demo.tobeBindings.fail':            '2 TO-BE テーブルが AS-IS ソース未連結',
-  'execution.preflight.demo.asisUnmapped.fail':            '3 AS-IS カラムが未マッピング',
-  'execution.preflight.demo.csvArrived.fail':              '抽出ファイル未到着 (デモ用)',
-  'execution.preflight.demo.unmappedCols.fail':            '4 件の TO-BE カラムが未マッピング (デモ用)',
-  'execution.preflight.demo.passDetail':                   'OK (デモ用)',
+
+  /* Pre-flight — per-table 化 new keys */
+  'execution.preflight.check.csvArrived.failNoPath':       'CSV パスが Site 設定に登録されていません',
+  'execution.preflight.check.csvArrived.passOne':          'OK: {tables}',
+  'execution.preflight.check.csvArrived.failOne':          '未到着 {n} 件: {tables}',
+  'execution.preflight.check.csvArrived.skipNoBinding':    'バインディングがなく検証対象なし',
+  'execution.preflight.check.connTobe.passConfigured':     '{env} 環境の TO-BE DB 接続 OK',
+  'execution.preflight.check.connTobe.failMissing':        '{env} 環境の TO-BE DB host/database/username が未設定',
+  'execution.preflight.check.connTobe.failUnreachable':    '{env} 環境の TO-BE DB 接続失敗: {msg}',
+  'execution.preflight.check.connTobe.failUntested':       '{env} 環境の TO-BE DB 接続テスト未実施',
+  'execution.preflight.check.tobeBindings.passOne':        'バインディング OK',
+  'execution.preflight.check.tobeBindings.failOne':        'AS-IS ソースにバインディングされていません',
+  'execution.preflight.check.unmappedCols.passOne':        '全 {n} カラムマッピング済み',
+  'execution.preflight.check.unmappedCols.failOne':        '未マッピング {n} 件: {cols}',
+  'execution.preflight.check.unmappedCols.skipNoDdl':      'TO-BE DDL に該当テーブルなし',
+  'execution.preflight.check.asisUnmapped.passOne':        'AS-IS カラム利用 OK',
+  'execution.preflight.check.asisUnmapped.failOne':        '未使用 AS-IS カラム {n} 件: {cols}',
+  'execution.preflight.check.asisUnmapped.skipNoBinding':  'バインディングがなく検証対象なし',
+
+  'execution.preflight.aggregate.notRun':                  'まだ実行されていません',
+  'execution.preflight.aggregate.allPass':                 '全 {n} テーブル pass',
+  'execution.preflight.aggregate.skipped':                 '{skip}/{total} skip',
+  'execution.preflight.aggregate.mixed':                   '{pass} pass · {fail} fail / {total}',
+  'execution.preflight.aggregate.statusPass':              'pass',
+  'execution.preflight.aggregate.statusFail':              'fail',
+  'execution.preflight.aggregate.statusSkip':              'skip',
+  'execution.preflight.aggregate.noTables':                '対象テーブルがありません',
+  'execution.preflight.trigger.disabledNoPin':             'Versions 画面でスナップショットを Pin してください',
+
+  'execution.run.startBlocked.noPin':                      '実行するには Versions 画面でスナップショットを Pin してください',
+  'execution.run.startBlocked.phaseEnv':                   '{env} 環境 + {phase} フェーズでは run を起動できません',
+  'execution.run.startBtn.cutover':                        'Start cutover',
+  'execution.run.startBtn.rehearsal':                      'Start rehearsal',
 
   /* Overall progress */
   'execution.progress.title':         'Overall progress',
@@ -817,6 +846,8 @@ export const ja: Record<TranslationKey, string> = {
   'artifacts.empty.title':        'No artifacts yet',
   'artifacts.empty.hint':         'マッピング・スナップショット・実行が進むと成果物がここに表示されます。',
   'artifacts.empty.noItems':      '(no items yet)',
+  'artifacts.diff.noRun':         'まだ実行された run がありません。Execution で run を実行して成功したテーブルが出るとここに表示されます。',
+  'artifacts.diff.notInLatestRun':'最新 run で成功していない (非アクティブ)',
   'artifacts.cat.dashboard':      'Dashboard snapshot',
   'artifacts.cat.diff':           'Schema diff',
   'artifacts.cat.ddl':            'DDL scripts',
@@ -1266,7 +1297,7 @@ export const ja: Record<TranslationKey, string> = {
   'logs.quarantine.pick.all':      '項目を選択…',
   'logs.quarantine.rowsBadge':     '{n} ROWS',
   'logs.quarantine.colProject':    'PROJECT_NAME',
-  'logs.quarantine.colTable':      'TABLE_NAME',
+  'logs.quarantine.colTable':      'ROW',
   'logs.quarantine.colAsIs':       'AS-IS',
   'logs.quarantine.colToBe':       'TO-BE',
 
@@ -1298,6 +1329,7 @@ export const ja: Record<TranslationKey, string> = {
   'logs.quarantine.act.rerunTable':    'このテーブルだけ再実行',
   'logs.quarantine.act.openMapping':   'マッピングを開く',
   'logs.quarantine.act.openInspector': 'ストリームで表示',
+  'logs.quarantine.act.downloadParquet': '⬇ 違反行のダウンロード',
 
   'siteQuarantine.eyebrow':         'SITE QUARANTINE',
   'siteQuarantine.empty.noSite':    'サイトを先に選択してください。',
@@ -1313,6 +1345,8 @@ export const ja: Record<TranslationKey, string> = {
   'mapping.import.warning.uncoveredCols': '現在のプロジェクトの TO-BE DDL の次のカラムがマッピング定義書に記載されていません: {cols}。マッピング定義書を補完してください。',
   'mapping.binding.noSourceHint':       'この TO-BE テーブルに紐づく AS-IS ソースがありません。[Add source] から追加してください。',
   'mapping.binding.whereHint':          'この TO-BE に含める行の条件。空欄なら全行。',
+  'mapping.binding.groupByHint':        'Row N:1 集計時に記入。空欄なら row-preserving (1:1) 変換。例: EXTRACT(MONTH FROM t.txn_date), t.account',
+  'mapping.binding.expandHint':         'Row 1:N 展開時に記入。空欄なら row-preserving (1:1) 変換。例: CROSS JOIN LATERAL (VALUES (\'phone\', t.PHONE), (\'email\', t.EMAIL)) AS u(channel, value)',
   'mapping.report.loading':             'Report 実行中…',
   'mapping.report.error.expressionFailed': 'カラム "{column}" の変換式でエラーが発生しました。',
   'mapping.report.error.fromFailed':       'AS-IS データの読み込み、または JOIN/WHERE 句でエラーが発生しました。',

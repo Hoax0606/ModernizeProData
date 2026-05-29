@@ -305,7 +305,10 @@ public class SnapshotController {
                 MappingRule e = new MappingRule();
                 e.setId(UUID.randomUUID().toString());
                 e.setProjectId(projectId);
-                e.setImportId(null);
+                // 옛 snapshot (importId 필드 추가 전) 은 r.importId() == null — 그땐 null 그대로.
+                // 새 snapshot 부턴 원본 import trace 가 보존됨. mapping_imports FK 는
+                // ON DELETE SET NULL 이라 import 가 지워져도 안전.
+                e.setImportId(r.importId());
                 e.setTobeSchema(r.tobeSchema());
                 e.setTobeTable(r.tobeTable());
                 e.setTobeColumn(r.tobeColumn());
@@ -358,6 +361,8 @@ public class SnapshotController {
                 e.setWhereFilter(b.whereFilter());
                 e.setBindingOrigin(b.bindingOrigin());
                 e.setSharedFromProjectId(b.sharedFromProjectId());
+                e.setGroupByExpr(b.groupByExpr());
+                e.setExpandExpr(b.expandExpr());
                 e.setCreatedBy(b.createdBy() != null ? b.createdBy() : userId);
                 e.setCreatedAt(b.createdAt() != null ? b.createdAt() : now);
                 e.setUpdatedBy(userId);

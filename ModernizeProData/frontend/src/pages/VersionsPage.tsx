@@ -5,6 +5,9 @@ import { useSnapshotsStore, usePinnedSnapshotsStore, isPinEligible, type Snapsho
 import { useAuthStore } from '../store/auth';
 import { useActiveProjectReadOnly } from '../store/readOnly';
 import { useAuditLogStore } from '../store/auditLog';
+import { useExecutionPreflightStore, type PreflightSnapshotResult } from '../store/executionPreflight';
+import { useTobeDdlStore } from '../store/tobeDdl';
+import { isAllPass } from '../lib/preflightValidation';
 import { useT, type TranslationKey } from '../i18n';
 
 /**
@@ -23,6 +26,26 @@ export function VersionsPage() {
   const project = useMemo(
     () => projects.find((p) => p.id === activeProjectId) ?? null,
     [projects, activeProjectId],
+  );
+
+  /* Per-snapshot preflight result cache — populated by Execution page only.
+     Versions reads it as a gate for Request Review.  Fallback は undefined にして
+     매 render 마다 새 reference 가 되는 무한 루프 회피. */
+  const preflightBySnapshot = useExecutionPreflightStore(
+    (s) => activeProjectId ? s.byProject[activeProjectId]?.bySnapshot : undefined,
+  ) as Record<string, PreflightSnapshotResult> | undefined;
+
+  /* TO-BE DDL — Request Review ゲートで「cache が全テーブル覆ってるか」を判定するのに必要.
+     Execution 側でも同じ store を使っているのでキャッシュヒットが期待できる. */
+  const tobeSchema = useTobeDdlStore((s) => activeProjectId ? s.schemasByProject[activeProjectId] : undefined);
+  const fetchTobeDdl = useTobeDdlStore((s) => s.fetch);
+  useEffect(() => {
+    if (!activeProjectId) return;
+    if (!tobeSchema) fetchTobeDdl(activeProjectId).catch(() => { /* DDL 미등록 — 게이트가 잠긴 채로 표시 */ });
+  }, [activeProjectId, tobeSchema, fetchTobeDdl]);
+  const allTobeTableNames = useMemo(
+    () => (tobeSchema?.tables ?? []).map((t) => t.table.physicalName),
+    [tobeSchema],
   );
 
   const allSnapshots = useSnapshotsStore((s) => s.snapshots);
@@ -96,6 +119,22 @@ export function VersionsPage() {
     () => snapshots.find((s) => s.id === selectedSnapshotId) ?? null,
     [snapshots, selectedSnapshotId],
   );
+
+  /* Request Review ゲート用に 3 つの flag を計算:
+     - exists: その snapshot に対して preflight cache がある
+     - passed: cache の全 check が pass
+     - coversAll: cache の selectedTables が DDL の全 TO-BE テーブルを覆っている
+     仕様: 3 つ全部 true でないと Request Review 不可. */
+  const requestReviewGate = useMemo(() => {
+    if (!selectedSnapshot) return { exists: false, passed: false, coversAll: false };
+    const cached = preflightBySnapshot?.[selectedSnapshot.id];
+    const exists = !!cached;
+    const passed = !!cached && isAllPass(cached.results);
+    const coversAll = !!cached
+      && allTobeTableNames.length > 0
+      && allTobeTableNames.every((name) => cached.selectedTables.includes(name));
+    return { exists, passed, coversAll };
+  }, [selectedSnapshot, preflightBySnapshot, allTobeTableNames]);
 
   // 페이지 첫 진입 시 한 번만 최신 snapshot 자동 선택.
   // polling / 외부 변경으로 snapshots 가 갱신돼도 사용자가 보고 있던 화면을 강제 전환하지 않음
@@ -435,6 +474,9 @@ export function VersionsPage() {
               isPinned={pinnedIds.includes(selectedSnapshot.id)}
               pinEligible={isPinEligible(selectedSnapshot, project.phase)}
               onTogglePin={() => togglePin(selectedSnapshot.id)}
+              preflightResultExists={requestReviewGate.exists}
+              preflightPassed={requestReviewGate.passed}
+              preflightCoversAllTables={requestReviewGate.coversAll}
             />
           ) : (
             <div style={styles.noSelectionMessage}>
@@ -672,7 +714,10 @@ function ChangeRow({ kind, category, rawKey, detail, fieldChanges }: {
   );
 }
 
-function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligible, onTogglePin }: {
+function SnapshotDetailView({
+  snapshot, onRequest, readOnly, isPinned, pinEligible, onTogglePin,
+  preflightResultExists, preflightPassed, preflightCoversAllTables,
+}: {
   snapshot: {
     id: string;
     name: string;
@@ -695,10 +740,27 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
   isPinned: boolean;
   pinEligible: boolean;
   onTogglePin: () => void;
+  /** Execution 画面でこの snapshot に対して preflight を走らせた結果が cache されているか. */
+  preflightResultExists: boolean;
+  /** その結果が all-pass か. */
+  preflightPassed: boolean;
+  /** cache の selectedTables が DDL の全 TO-BE テーブルを覆っているか. */
+  preflightCoversAllTables: boolean;
 }) {
   const t = useT();
   const user = useAuthStore((s) => s.user);
   const [confirmingRequest, setConfirmingRequest] = useState(false);
+
+  /* Request Review ゲート: Execution 画面側で「全テーブル × 全 preflight pass」cache 必須.
+     優先度: cache 不在 > 部分選択 > 失敗あり. */
+  const requestBlockedReason = !preflightResultExists
+    ? t('versions.preflight.notRun')
+    : !preflightCoversAllTables
+      ? t('versions.preflight.partialSelection')
+      : !preflightPassed
+        ? t('versions.preflight.blocked')
+        : '';
+  const canRequest = !readOnly && preflightPassed && preflightCoversAllTables;
 
   return (
     <div style={styles.detailContent}>
@@ -766,11 +828,21 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
               } : {}),
             }}>
               <div style={styles.statusContent}>
-                <div style={styles.statusDesc}>
-                  {confirmingRequest
-                    ? <>{t('versions.confirmRequestPre')}<b>{snapshot.name}</b>{t('versions.confirmRequestPost')}</>
-                    : t('versions.statusDesc.draftReady')}
-                </div>
+                {/* 確認中はそのまま confirm prompt. 通常時は canRequest で
+                    「準備完了 (緑)」と「ブロック理由 (amber)」を排他表示. */}
+                {confirmingRequest ? (
+                  <div style={styles.statusDesc}>
+                    {t('versions.confirmRequestPre')}<b>{snapshot.name}</b>{t('versions.confirmRequestPost')}
+                  </div>
+                ) : canRequest ? (
+                  <div style={styles.statusDesc}>
+                    {t('versions.statusDesc.draftReady')}
+                  </div>
+                ) : (
+                  <div style={{ ...styles.statusDesc, color: 'var(--amber)' }}>
+                    ⚠ {requestBlockedReason}
+                  </div>
+                )}
               </div>
               {confirmingRequest ? (
                 <div style={{ display: 'flex', gap: 8 }}>
@@ -779,8 +851,9 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
                       setConfirmingRequest(false);
                       onRequest();
                     }}
-                    style={{ ...styles.btnPrimary, ...(readOnly ? styles.btnDisabled : {}) }}
-                    disabled={readOnly}
+                    style={{ ...styles.btnPrimary, ...(canRequest ? {} : styles.btnDisabled) }}
+                    disabled={!canRequest}
+                    title={requestBlockedReason}
                   >
                     Confirm
                   </button>
@@ -789,7 +862,12 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
                   </button>
                 </div>
               ) : (
-                <button onClick={() => setConfirmingRequest(true)} style={{ ...styles.btnPrimary, ...(readOnly ? styles.btnDisabled : {}) }} disabled={readOnly}>
+                <button
+                  onClick={() => setConfirmingRequest(true)}
+                  style={{ ...styles.btnPrimary, ...(canRequest ? {} : styles.btnDisabled) }}
+                  disabled={!canRequest}
+                  title={requestBlockedReason}
+                >
                   Request Review
                 </button>
               )}
@@ -1366,7 +1444,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   statusCard: {
     display: 'flex',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: 10,
     padding: '11px 12px',
     background: 'var(--panel-2)',

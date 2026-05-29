@@ -427,6 +427,10 @@ export const ko = {
   'versions.pin.toggleTitleIneligible': '현재 phase 에서는 pin 불가',
   'versions.pin.iconAria':           'Pinned to top',
 
+  'versions.preflight.blocked':           'Execution 화면에서 이 스냅샷을 pin 하고 preflight 를 모두 pass 시켜야 Request Review 가 가능합니다',
+  'versions.preflight.notRun':            'Execution 화면에서 이 스냅샷을 pin 한 후 preflight 를 실행해주세요',
+  'versions.preflight.partialSelection':  'Execution 화면에서 전체 테이블을 선택해 preflight 를 실행해야 합니다',
+
   // CHANGES section (versions detail panel)
   'versions.changes.title':           'Changes',                          // *.title — 영문 통일
   'versions.changes.status.added':    'ADDED',                            // *.status.* — 영문 통일
@@ -535,7 +539,7 @@ export const ko = {
   'execution.run.abortReason':        '사용자가 중단함',
   'execution.run.tablesSummary':      '{n} tables',
   'execution.run.errorBanner':        '{stage}단계 ({name}) 실패 — {reason}',
-  'execution.run.demo.triggerFail':   '⚡ 실패 시뮬레이션',
+  'execution.run.errorBannerNoStage': '실행 실패 — {reason}',
 
   /* Pre-flight */
   'execution.preflight.title':                             'Pre-flight',
@@ -575,14 +579,39 @@ export const ko = {
   'execution.preflight.check.asisUnmapped.pass':           '모든 AS-IS 컬럼 매핑됨',
   'execution.preflight.check.unmappedCols.title':          '모든 TO-BE 테이블의 컬럼 unmapped 여부',
   'execution.preflight.check.unmappedCols.pass':           '모든 TO-BE 컬럼에 소스 지정됨',
-  'execution.preflight.demo.indicator':                    'Preview',
-  'execution.preflight.demo.exit':                         '실데이터로 보기',
-  'execution.preflight.demo.connTobe.fail':                'latency 412 ms · 응답 지연',
-  'execution.preflight.demo.tobeBindings.fail':            '2개 TO-BE 테이블이 AS-IS 소스 미연결',
-  'execution.preflight.demo.asisUnmapped.fail':            '3개 AS-IS 컬럼이 미매핑',
-  'execution.preflight.demo.csvArrived.fail':              '추출 파일 미도착 (시연용)',
-  'execution.preflight.demo.unmappedCols.fail':            '4개 TO-BE 컬럼 매핑 누락 (시연용)',
-  'execution.preflight.demo.passDetail':                   'OK (시연용)',
+
+  /* Pre-flight — per-table 化 new keys */
+  'execution.preflight.check.csvArrived.failNoPath':       'CSV 경로가 Site 설정에 등록되어 있지 않습니다',
+  'execution.preflight.check.csvArrived.passOne':          'OK: {tables}',
+  'execution.preflight.check.csvArrived.failOne':          '미도착 {n} 건: {tables}',
+  'execution.preflight.check.csvArrived.skipNoBinding':    '바인딩이 없어 검증 대상이 없음',
+  'execution.preflight.check.connTobe.passConfigured':     '{env} 환경 TO-BE DB 연결 OK',
+  'execution.preflight.check.connTobe.failMissing':        '{env} 환경 TO-BE DB host/database/username 미설정',
+  'execution.preflight.check.connTobe.failUnreachable':    '{env} 환경 TO-BE DB 연결 실패: {msg}',
+  'execution.preflight.check.connTobe.failUntested':       '{env} 환경 TO-BE DB 연결 미테스트',
+  'execution.preflight.check.tobeBindings.passOne':        '바인딩 OK',
+  'execution.preflight.check.tobeBindings.failOne':        'AS-IS 소스에 바인딩되지 않음',
+  'execution.preflight.check.unmappedCols.passOne':        '전체 {n}개 컬럼 매핑됨',
+  'execution.preflight.check.unmappedCols.failOne':        '미매핑 컬럼 {n}개: {cols}',
+  'execution.preflight.check.unmappedCols.skipNoDdl':      'TO-BE DDL 에 해당 테이블 없음',
+  'execution.preflight.check.asisUnmapped.passOne':        'AS-IS 컬럼 사용 OK',
+  'execution.preflight.check.asisUnmapped.failOne':        '미사용 AS-IS 컬럼 {n}개: {cols}',
+  'execution.preflight.check.asisUnmapped.skipNoBinding':  '바인딩이 없어 검증 대상이 없음',
+
+  'execution.preflight.aggregate.notRun':                  '아직 실행되지 않음',
+  'execution.preflight.aggregate.allPass':                 '전체 {n}개 테이블 pass',
+  'execution.preflight.aggregate.skipped':                 '{skip}/{total} skip',
+  'execution.preflight.aggregate.mixed':                   '{pass} pass · {fail} fail / {total}',
+  'execution.preflight.aggregate.statusPass':              'pass',
+  'execution.preflight.aggregate.statusFail':              'fail',
+  'execution.preflight.aggregate.statusSkip':              'skip',
+  'execution.preflight.aggregate.noTables':                '대상 테이블이 없습니다',
+  'execution.preflight.trigger.disabledNoPin':             'Versions 화면에서 스냅샷을 핀해야 합니다',
+
+  'execution.run.startBlocked.noPin':                      '실행하려면 Versions 화면에서 스냅샷을 핀하세요',
+  'execution.run.startBlocked.phaseEnv':                   '{env} 환경 + {phase} 단계에서는 run 을 시작할 수 없습니다',
+  'execution.run.startBtn.cutover':                        'Start cutover',
+  'execution.run.startBtn.rehearsal':                      'Start rehearsal',
 
   /* Overall progress */
   'execution.progress.title':         'Overall progress',
@@ -815,6 +844,8 @@ export const ko = {
   'artifacts.empty.title':        'No artifacts yet',
   'artifacts.empty.hint':         '매핑·스냅샷·실행이 진행되면 산출물이 여기에 나타납니다.',
   'artifacts.empty.noItems':      '(no items yet)',
+  'artifacts.diff.noRun':         '아직 실행된 run 이 없어요. Execution 에서 run 을 돌려 성공한 테이블이 생기면 여기 표시돼요.',
+  'artifacts.diff.notInLatestRun':'최근 run 에서 성공하지 못해 미활성',
   'artifacts.cat.dashboard':      'Dashboard snapshot',
   'artifacts.cat.diff':           'Schema diff',
   'artifacts.cat.ddl':            'DDL scripts',
@@ -1264,7 +1295,7 @@ export const ko = {
   'logs.quarantine.pick.all':      '항목 선택…',
   'logs.quarantine.rowsBadge':     '{n} ROWS',
   'logs.quarantine.colProject':    'PROJECT_NAME',
-  'logs.quarantine.colTable':      'TABLE_NAME',
+  'logs.quarantine.colTable':      'ROW',
   'logs.quarantine.colAsIs':       'AS-IS',
   'logs.quarantine.colToBe':       'TO-BE',
 
@@ -1298,6 +1329,7 @@ export const ko = {
   'logs.quarantine.act.rerunTable':    '이 테이블만 다시 이행',
   'logs.quarantine.act.openMapping':   '매핑 열기',
   'logs.quarantine.act.openInspector': '스트림에서 보기',
+  'logs.quarantine.act.downloadParquet': '⬇ 위반 row 다운로드',
 
   'siteQuarantine.eyebrow':         'SITE QUARANTINE',
   'siteQuarantine.empty.noSite':    '사이트를 먼저 선택하세요.',
@@ -1313,6 +1345,8 @@ export const ko = {
   'mapping.import.warning.uncoveredCols': '현재 프로젝트 TO-BE DDL 의 다음 컬럼이 맵핑정의서에 명세되어 있지 않습니다: {cols}. 맵핑정의서를 보완하세요.',
   'mapping.binding.noSourceHint':       '이 TO-BE 테이블에 연결된 AS-IS 소스가 없습니다. [Add source] 로 추가하세요.',
   'mapping.binding.whereHint':          '이 TO-BE 에 포함할 행 조건. 비우면 전체 rows.',
+  'mapping.binding.groupByHint':        'Row N:1 집계 시 채움. 비우면 row-preserving (1:1) 변환. 예: EXTRACT(MONTH FROM t.txn_date), t.account',
+  'mapping.binding.expandHint':         'Row 1:N 펼침 시 채움. 비우면 row-preserving (1:1) 변환. 예: CROSS JOIN LATERAL (VALUES (\'phone\', t.PHONE), (\'email\', t.EMAIL)) AS u(channel, value)',
   'mapping.report.loading':             'Report 실행 중…',
   'mapping.report.error.expressionFailed': '컬럼 "{column}" 의 변환식에서 오류가 발생했습니다.',
   'mapping.report.error.fromFailed':       'AS-IS 데이터 로드 또는 JOIN/WHERE 절에서 오류가 발생했습니다.',

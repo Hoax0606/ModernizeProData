@@ -7,7 +7,8 @@ import { useUsersStore } from '../store/users';
 import { useAuthStore } from '../store/auth';
 import { useSnapshotsStore } from '../store/snapshots';
 import { useMappingEditsStore, type RowEdit, type TableBindingEdit } from '../store/mappingEdits';
-import { useExecutionPreflightStore, type ActiveRunState } from '../store/executionPreflight';
+import { useQuery } from '@tanstack/react-query';
+import { runsApi, type RunHistoryDto } from '../api/runs';
 import { CreateSiteModal } from '../components/CreateSiteModal';
 import { CreateProjectModal } from '../components/CreateProjectModal';
 import { DdlImportButton } from '../components/DdlImportButton';
@@ -173,8 +174,15 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
     [allSnapshots, project.id],
   );
 
-  // ACTIVE RUN card — ExecutionPage と同じ store を参照.
-  const activeRun = useExecutionPreflightStore((s) => s.byProject[project.id]?.activeRun ?? null);
+  // RUN STATUS card — BE 의 run_history 최신 1건을 10s polling 으로 가져와 표시.
+  // (이전 demo 모드는 store 의 mock activeRun 참조; 이번 PoC1 real 모드 wiring 으로 교체.)
+  const runsQuery = useQuery({
+    queryKey: ['run-history', project.id],
+    queryFn: () => runsApi.listByProject(project.id),
+    refetchInterval: 10_000,
+    staleTime: 5_000,
+  });
+  const activeRun: RunHistoryDto | null = runsQuery.data?.[0] ?? null;
 
   // mapping edits store — TO-BE table 別の bindings / row mapping (mapped 数 と AS-IS source の出所).
   const tableBindings = useMappingEditsStore((s) => s.tableBindingEdits[project.id]) as
@@ -294,7 +302,7 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
         <Stat
           label="RUN STATUS"
           value={activeRun ? activeRunDisplay(activeRun).label : '—'}
-          sub={activeRun ? activeRun.runId : 'no active run'}
+          sub={activeRun ? activeRun.id : 'no active run'}
           tone={activeRun ? activeRunDisplay(activeRun).tone : 'idle'}
           mono
           small={!!activeRun}
@@ -429,15 +437,15 @@ function AsisSourceCell({ tables }: { tables: string[] }) {
 }
 
 /**
- * Active run の表示ラベル + 色. ExecutionPage の StatusBadge と同じマッピング:
- *   failed → err / aborted → warn / completed → idle / paused → warn / running → ok
+ * 최신 run 의 표시 라벨 + 색. ExecutionPage 의 StatusBadge 와 같은 매핑:
+ *   failed/timed_out → err / aborted → warn / success(=completed) → idle / paused → warn / running/pending → ok
  */
-function activeRunDisplay(ar: ActiveRunState): { label: string; tone: 'ok' | 'warn' | 'err' | 'idle' } {
-  if (ar.runStatus === 'failed') return { label: 'failed', tone: 'err' };
-  if (ar.runStatus === 'aborted') return { label: 'aborted', tone: 'warn' };
-  if (ar.runStatus === 'completed') return { label: 'completed', tone: 'idle' };
-  const paused = ar.pausedAt !== null;
-  return paused ? { label: 'paused', tone: 'warn' } : { label: 'running', tone: 'ok' };
+function activeRunDisplay(run: RunHistoryDto): { label: string; tone: 'ok' | 'warn' | 'err' | 'idle' } {
+  if (run.status === 'failed' || run.status === 'timed_out') return { label: 'failed', tone: 'err' };
+  if (run.status === 'aborted') return { label: 'aborted', tone: 'warn' };
+  if (run.status === 'success') return { label: 'completed', tone: 'idle' };
+  if (run.status === 'paused') return { label: 'paused', tone: 'warn' };
+  return { label: 'running', tone: 'ok' };
 }
 
 /**
