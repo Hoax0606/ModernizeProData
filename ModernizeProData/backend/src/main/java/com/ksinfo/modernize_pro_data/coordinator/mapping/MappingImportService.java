@@ -265,20 +265,34 @@ public class MappingImportService {
                         continue;
                     }
                     if (row.asisColumn == null || row.asisColumn.length == 0 || row.asisTable == null) continue;
-                    // multi-source (combine) — 자동 transform_sql 생성 불가. 사용자가 row editor 에서
-                    // MAKE_DATE / CONCAT 같은 식을 직접 입력하는 것을 기대.
-                    if (row.asisColumn.length > 1) continue;
                     String tobeKey = (row.tobeSchema == null ? "" : row.tobeSchema) + "|" + row.tobeTable;
                     Map<String, String> aliasMap = aliasMaps.getOrDefault(tobeKey, Map.of());
                     String alias = aliasMap.get(row.asisTable);
                     if (alias == null) continue;
-                    String onlyCol = row.asisColumn[0];
-                    String src = alias + "." + onlyCol;
                     String asisTypeFirst = (row.asisType != null && row.asisType.length > 0)
                             ? row.asisType[0] : null;
 
+                    // single source 면 alias.col, multi-source (combine) 면 alias.col1 || alias.col2 || ...
+                    // 사용자가 row editor 에서 의도에 맞게 수정 (MAKE_DATE / CONCAT with delimiter 등).
+                    String src;
+                    if (row.asisColumn.length == 1) {
+                        src = alias + "." + row.asisColumn[0];
+                    } else {
+                        StringBuilder concat = new StringBuilder();
+                        for (int i = 0; i < row.asisColumn.length; i++) {
+                            String c = row.asisColumn[i] == null ? "" : row.asisColumn[i].trim();
+                            if (c.isEmpty()) continue;
+                            if (concat.length() > 0) concat.append(" || ");
+                            concat.append(alias).append(".").append(c);
+                        }
+                        if (concat.length() == 0) continue;
+                        src = concat.toString();
+                    }
+
                     // code_domain 이 지정돼있고 해당 domain 의 entries 가 있으면 CASE 자동 생성
-                    if (row.codeDomain != null && codeByDomain.containsKey(row.codeDomain)) {
+                    // (multi-source 에는 code_domain 의도가 보통 없지만 single source 일 때만 동작)
+                    if (row.codeDomain != null && codeByDomain.containsKey(row.codeDomain)
+                            && row.asisColumn.length == 1) {
                         row.transformSql = buildCaseFromCodeMap(src, codeByDomain.get(row.codeDomain));
                     } else if (row.tobeType == null || row.tobeType.isBlank()
                             || "string".equals(typeCategory(row.tobeType))) {
@@ -286,8 +300,10 @@ public class MappingImportService {
                         row.transformSql = src;
                     } else {
                         // tobe 가 non-string — 실제 input 은 VARCHAR (all_varchar) 이므로 항상 변환 필요.
-                        // CHAR(8) YYYYMMDD 같은 컨벤션 hint 가 있으면 STRPTIME, 아니면 명시적 CAST.
-                        String strDateSql = tryStringToDateSql(src, asisTypeFirst, row.tobeType);
+                        // CHAR(8) YYYYMMDD 같은 컨벤션 hint 가 있으면 STRPTIME (single source 일 때만),
+                        // 아니면 명시적 CAST.
+                        String strDateSql = row.asisColumn.length == 1
+                                ? tryStringToDateSql(src, asisTypeFirst, row.tobeType) : null;
                         row.transformSql = strDateSql != null ? strDateSql
                                 : "CAST(" + src + " AS " + (row.tobeType != null ? row.tobeType : "VARCHAR") + ")";
                     }

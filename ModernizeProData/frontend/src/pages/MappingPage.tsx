@@ -2357,6 +2357,26 @@ type RowEdit = { savedSrc?: string[]; savedRule?: string; savedDefault?: string;
  * row editor / 자동완성이 expand alias.column 도 source 후보로 보여줄 수 있게 한다.
  * type 정보는 expand_expr 에 없으므로 VARCHAR fallback.
  */
+/** Inspector 의 RULE 칸 aggregate template 종류 — Row N:1 집계 시점에 자주 쓰는 패턴들. */
+type AggregateTemplateKind = 'count_star' | 'sum' | 'avg' | 'min' | 'max' | 'cond_sum';
+
+/**
+ * Row N:1 집계용 aggregate SQL boilerplate 생성. alias / column 자동 인식 — 없으면 marker.
+ * 사용자 수정 부분은 {...} 마커로 표시.
+ */
+function generateAggregateTemplate(kind: AggregateTemplateKind, sourceAlias: string, sourceCol?: string): string {
+  const a = sourceAlias || 't';
+  const col = sourceCol || '{col}';
+  switch (kind) {
+    case 'count_star': return 'COUNT(*)';
+    case 'sum':        return `SUM(CAST(${a}.${col} AS DECIMAL(20,2)))`;
+    case 'avg':        return `AVG(CAST(${a}.${col} AS DECIMAL(20,2)))`;
+    case 'min':        return `MIN(${a}.${col})`;
+    case 'max':        return `MAX(${a}.${col})`;
+    case 'cond_sum':   return `SUM(CASE WHEN ${a}.{cond_col} = '{cond_val}' THEN CAST(${a}.${col} AS DECIMAL(20,2)) ELSE 0 END)`;
+  }
+}
+
 /** EXPAND template kind — dropdown 의 선택 항목. null = Clear. */
 type ExpandTemplateKind = 'wide_to_long' | 'array_unnest';
 
@@ -2490,6 +2510,94 @@ const menuItemStyle: React.CSSProperties = {
   color: 'var(--text)',
   cursor: 'pointer',
 };
+
+/**
+ * Row N:1 aggregate template dropdown — Inspector 의 RULE 입력 칸 위에 표시.
+ * COUNT / SUM / AVG / MIN / MAX / SUM with CASE. kind=null 은 Clear.
+ */
+function AggregateTemplateMenu({ onPick, disabled }: {
+  onPick: (kind: AggregateTemplateKind | null) => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener('mousedown', onDocClick);
+    return () => window.removeEventListener('mousedown', onDocClick);
+  }, [open]);
+  const pick = (kind: AggregateTemplateKind | null) => {
+    onPick(kind);
+    setOpen(false);
+  };
+  return (
+    <div ref={wrapRef} style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          background: 'transparent',
+          border: '1px solid var(--border)',
+          padding: '2px 8px',
+          fontSize: 10.5,
+          fontFamily: 'var(--mono)',
+          color: 'var(--text-2)',
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          opacity: disabled ? 0.5 : 1,
+          borderRadius: 2,
+        }}
+      >
+        {t('mapping.inspector.aggregate.button')}
+      </button>
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '100%',
+            right: 0,
+            marginTop: 2,
+            background: 'var(--panel)',
+            border: '1px solid var(--border)',
+            borderRadius: 2,
+            boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
+            zIndex: 100,
+            minWidth: 220,
+            padding: '4px 0',
+          }}
+        >
+          <button type="button" onClick={() => pick('count_star')} style={menuItemStyle}>
+            {t('mapping.inspector.aggregate.count')}
+          </button>
+          <button type="button" onClick={() => pick('sum')} style={menuItemStyle}>
+            {t('mapping.inspector.aggregate.sum')}
+          </button>
+          <button type="button" onClick={() => pick('avg')} style={menuItemStyle}>
+            {t('mapping.inspector.aggregate.avg')}
+          </button>
+          <button type="button" onClick={() => pick('min')} style={menuItemStyle}>
+            {t('mapping.inspector.aggregate.min')}
+          </button>
+          <button type="button" onClick={() => pick('max')} style={menuItemStyle}>
+            {t('mapping.inspector.aggregate.max')}
+          </button>
+          <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+          <button type="button" onClick={() => pick('cond_sum')} style={menuItemStyle}>
+            {t('mapping.inspector.aggregate.condSum')}
+          </button>
+          <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+          <button type="button" onClick={() => pick(null)} style={{ ...menuItemStyle, color: 'var(--text-3)' }}>
+            {t('mapping.inspector.aggregate.clear')}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function resolveSrcType(s: string, sources: TobeTable['sources'], expandExpr?: string): string {
   if (!s) return '—';
@@ -2908,18 +3016,23 @@ function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, 
 
   // 슬롯 i 의 source 값을 새 값으로 바꾸고, 첫 번째 슬롯이면 CAST 자동 입력 갱신.
   // editValue 가 비어있거나 이전 자동 CAST 와 같을 때만 덮어써서 사용자 수동 입력은 보존.
-  const computeAutoCast = (firstSrc: string | undefined): string => {
-    if (!firstSrc || !active) return '';
-    // alias 포함된 형태 그대로 사용 (예: "u.channel", "c.CUST_ID"). SQL 안전상 alias 필수.
-    if (!active.tgtType || active.tgtType === '—') return firstSrc;
+  const computeAutoCast = (srcs: string | string[] | undefined): string => {
+    if (!active) return '';
+    // 단일 source 면 그대로, multi-source 면 || (concat) 로 합침.
+    // 사용자가 row editor 에서 의도에 맞게 수정 (MAKE_DATE / CONCAT with delimiter 등).
+    const arr = Array.isArray(srcs) ? srcs : (srcs ? [srcs] : []);
+    const filtered = arr.filter((s) => s && s.trim());
+    if (!filtered.length) return '';
+    const expr = filtered.length === 1 ? filtered[0] : filtered.join(' || ');
+    if (!active.tgtType || active.tgtType === '—') return expr;
     // ExtractStage 의 all_varchar=true 로 실데이터 input 이 모두 VARCHAR. asis_type 무시 —
     // tgtType 만 보고 결정 (backend MappingImportService 의 자동 생성 logic 과 일관).
-    //   tgtType 이 string 카테고리 → src 그대로 (VARCHAR → VARCHAR no-op)
+    //   tgtType 이 string 카테고리 → expr 그대로 (VARCHAR → VARCHAR no-op)
     //   그 외 → CAST 박음 (VARCHAR → tgtType 변환 필요)
     const tt = active.tgtType.toUpperCase().trim();
     const isString = tt.startsWith('VARCHAR') || tt.startsWith('CHAR')
       || tt === 'TEXT' || tt === 'CLOB' || tt.startsWith('NVARCHAR');
-    return isString ? firstSrc : `CAST(${firstSrc} AS ${active.tgtType})`;
+    return isString ? expr : `CAST(${expr} AS ${active.tgtType})`;
   };
 
   const handleEdit = () => {
@@ -2938,18 +3051,19 @@ function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, 
     });
     const filledSrcs = cleanedSrc.filter((s) => s && s.trim() !== '');
 
-    // 자동 CAST 생성:
-    //   - source 가 2개 이상 (combine) → editValue 는 빈 칸. placeholder 가 '-- combine' 안내 표시.
-    //     클릭 시 placeholder 사라지고 사용자가 바로 입력 가능.
-    //   - source 1개 → computeAutoCast 로 dialect 변환표 적용한 CAST 를 editValue 에 채움 (편집 시작점)
-    //   - source 0개 → 빈 자동값 (computeAutoCast 가 '' 반환)
+    // 자동 CAST 생성: computeAutoCast 가 single / multi-source 모두 처리
+    //   - source ≥ 2 → 모든 source 를 || 로 concat 후 tobe_type 으로 CAST. 사용자가 row editor
+    //     에서 의도에 맞게 수정 (MAKE_DATE 같은 specific 함수로)
+    //   - source 1 → 단일 src 로 CAST
+    //   - source 0 → 빈 자동값
     let initialAutoCast: string;
-    if (filledSrcs.length > 1) {
-      initialAutoCast = '';
+    if (filledSrcs.length > 0) {
+      initialAutoCast = computeAutoCast(filledSrcs);
+    } else if (active.src !== '—') {
+      const fallback = active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src;
+      initialAutoCast = computeAutoCast(fallback);
     } else {
-      const firstSrcForCast = filledSrcs[0]
-        || (active.src !== '—' ? (active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src) : undefined);
-      initialAutoCast = computeAutoCast(firstSrcForCast);
+      initialAutoCast = '';
     }
     prevAutoCastRef.current = initialAutoCast;
     setEditValue(savedRule ?? initialAutoCast);
@@ -2993,15 +3107,8 @@ function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, 
     // 어느 슬롯 변경이든 자동 식을 다시 평가 (combine 추가/제거 시점 캐치).
     // 단, editValue 가 이전 자동값과 다르면 = 사용자가 손댄 식이므로 보존.
     const filledSrcs = nextEditSrc.filter((s) => s && s.trim() !== '');
-    let newAutoCast: string;
-    if (filledSrcs.length > 1) {
-      // combine — 빈 칸으로 두고 placeholder 가 '-- combine' 안내 표시.
-      newAutoCast = '';
-    } else if (filledSrcs.length === 1) {
-      newAutoCast = computeAutoCast(filledSrcs[0]);
-    } else {
-      newAutoCast = '';
-    }
+    // single / multi-source 모두 computeAutoCast 가 처리 (multi 면 || concat 후 CAST)
+    const newAutoCast = filledSrcs.length > 0 ? computeAutoCast(filledSrcs) : '';
     if (editValue === prevAutoCastRef.current) {
       setEditValue(newAutoCast);
     }
