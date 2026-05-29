@@ -74,6 +74,10 @@ export interface MappingRuleDto {
   notNullOverride: boolean;
   ruleOrigin: 'imported' | 'manual';
   notes: string | null;
+  /** 백엔드 응답에 timestamp 가 포함됨 (이전엔 FE 인터페이스에서 누락). Dashboard Tables 의
+   *  Last update 컬럼에서 max(updatedAt ?? createdAt) 으로 사용. */
+  createdAt?: string | null;
+  updatedAt?: string | null;
 }
 
 export interface MappingTableBindingDto {

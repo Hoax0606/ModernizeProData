@@ -1189,6 +1189,8 @@ export const ja: Record<TranslationKey, string> = {
 
   'siteExport.preview.summary':     'Site summary',
   'siteExport.preview.manifest':    'Manifest ({n})',
+  'siteExport.preview.copyToast':   '✓ コピーしました',
+  'siteExport.preview.resetTitle':  'Site summary に戻る',
 
   'siteExport.empty.title':         'No projects',
   'siteExport.empty.desc':          'このサイトにプロジェクトがありません。先にプロジェクトを作成してください。',

@@ -1183,6 +1183,8 @@ export const en: Record<TranslationKey, string> = {
 
   'siteExport.preview.summary':     'Site summary',
   'siteExport.preview.manifest':    'Manifest ({n})',
+  'siteExport.preview.copyToast':   '✓ Copied',
+  'siteExport.preview.resetTitle':  'Reset to Site summary',
 
   'siteExport.empty.title':         'No projects',
   'siteExport.empty.desc':          'No projects in this site. Create a project first.',

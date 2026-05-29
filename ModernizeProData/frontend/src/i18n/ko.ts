@@ -1187,6 +1187,8 @@ export const ko = {
 
   'siteExport.preview.summary':     'Site summary',
   'siteExport.preview.manifest':    'Manifest ({n})',
+  'siteExport.preview.copyToast':   '✓ 복사되었습니다',
+  'siteExport.preview.resetTitle':  'Site summary 로 돌아가기',
 
   'siteExport.empty.title':         'No projects',
   'siteExport.empty.desc':          '이 사이트에 프로젝트가 없습니다. 먼저 프로젝트를 만들어주세요.',
