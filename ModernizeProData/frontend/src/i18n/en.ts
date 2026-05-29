@@ -59,7 +59,7 @@ export const en: Record<TranslationKey, string> = {
   'scheduler.history.col.finished':    'Finished',
   'scheduler.history.col.duration':    'Duration',
   'scheduler.history.col.actions':     'Actions',
-  'scheduler.history.tables.all':      'all',
+  'scheduler.history.tables.all':      'All bindings (no specific table list — scheduler / bulk run)',
 
   'scheduler.action.abort':            'Abort',
   'scheduler.tooltip.abort':           'Abort — stop the run and reset to idle (status=aborted)',
@@ -1069,7 +1069,7 @@ export const en: Record<TranslationKey, string> = {
   'projectSettings.schedule.history.col.tables':   'Tables',
   'projectSettings.schedule.history.col.status':   'Status',
   'projectSettings.schedule.history.col.duration': 'Duration',
-  'projectSettings.schedule.history.tables.all':   'all',
+  'projectSettings.schedule.history.tables.all':   'All bindings (no specific table list — scheduler / bulk run)',
   'projectSettings.schedule.history.drilldown.loading':       'Loading per-table results…',
   'projectSettings.schedule.history.drilldown.error':         'Failed to load per-table results',
   'projectSettings.schedule.history.drilldown.empty':         'No per-table results yet for this run',

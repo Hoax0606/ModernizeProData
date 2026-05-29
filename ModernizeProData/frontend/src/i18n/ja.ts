@@ -65,7 +65,7 @@ export const ja: Record<TranslationKey, string> = {
   'scheduler.history.col.finished':    'Finished',
   'scheduler.history.col.duration':    'Duration',
   'scheduler.history.col.actions':     'Actions',
-  'scheduler.history.tables.all':      'all',
+  'scheduler.history.tables.all':      '全 binding (個別 table 指定なし — scheduler / 一括 trigger)',
 
   'scheduler.action.abort':            'Abort',
   'scheduler.tooltip.abort':           'Abort — run を中止し idle に復旧 (status=aborted)',
@@ -1075,7 +1075,7 @@ export const ja: Record<TranslationKey, string> = {
   'projectSettings.schedule.history.col.tables':   'Tables',
   'projectSettings.schedule.history.col.status':   'Status',
   'projectSettings.schedule.history.col.duration': 'Duration',
-  'projectSettings.schedule.history.tables.all':   '全テーブル',
+  'projectSettings.schedule.history.tables.all':   '全 binding (個別 table 指定なし — scheduler / 一括 trigger)',
   'projectSettings.schedule.history.drilldown.loading':       'テーブル別結果を読み込み中…',
   'projectSettings.schedule.history.drilldown.error':         'テーブル別結果の取得に失敗',
   'projectSettings.schedule.history.drilldown.empty':         'この run はまだテーブル別結果がありません',

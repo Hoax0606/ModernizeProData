@@ -823,15 +823,19 @@ export function SchedulerPage() {
                       <td style={styles.td}>{h.workerId ?? '-'}</td>
                       <td style={styles.td}>
                         {s.total === 0 ? (
-                          h.tables == null
-                            ? <span style={{ color: 'var(--text-4)' }}>{t('scheduler.history.tables.all')}</span>
-                            : <span title={h.tables.join('\n')} style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>
-                                {h.tables.length} ({h.tables.slice(0, 3).join(', ')}
-                                {h.tables.length > 3 ? ' …' : ''})
-                              </span>
+                          <span
+                            title={h.tables == null
+                              ? t('scheduler.history.tables.all')
+                              : `partial: ${h.tables.length}\n${h.tables.join('\n')}`}
+                            style={{ color: 'var(--text-4)', fontFamily: 'var(--mono)', fontSize: 11 }}
+                          >
+                            —
+                          </span>
                         ) : (
                           <span
-                            title={h.tables == null ? t('scheduler.history.tables.all') : h.tables.join('\n')}
+                            title={h.tables == null
+                              ? t('scheduler.history.tables.all')
+                              : `partial: ${h.tables.length}\n${h.tables.join('\n')}`}
                             style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--mono)', fontSize: 11 }}
                           >
                             <span style={{ color: 'var(--text-3)' }}>{s.total}</span>

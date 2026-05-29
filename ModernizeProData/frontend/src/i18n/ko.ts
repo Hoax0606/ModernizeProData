@@ -63,7 +63,7 @@ export const ko = {
   'scheduler.history.col.finished':    'Finished',
   'scheduler.history.col.duration':    'Duration',
   'scheduler.history.col.actions':     'Actions',
-  'scheduler.history.tables.all':      'all',
+  'scheduler.history.tables.all':      '전 binding (개별 table 미지정 — scheduler / 일괄 trigger)',
 
   'scheduler.action.abort':            'Abort',
   'scheduler.tooltip.abort':           'Abort — run 을 중단하고 idle 로 復旧 (status=aborted)',
@@ -1073,7 +1073,7 @@ export const ko = {
   'projectSettings.schedule.history.col.tables':   'Tables',
   'projectSettings.schedule.history.col.status':   'Status',
   'projectSettings.schedule.history.col.duration': 'Duration',
-  'projectSettings.schedule.history.tables.all':   '전체 테이블',
+  'projectSettings.schedule.history.tables.all':   '전 binding (개별 table 미지정 — scheduler / 일괄 trigger)',
   'projectSettings.schedule.history.drilldown.loading':       '테이블별 결과 로드 중…',
   'projectSettings.schedule.history.drilldown.error':         '테이블별 결과 조회 실패',
   'projectSettings.schedule.history.drilldown.empty':         '이 run 은 아직 테이블별 결과가 없습니다',
