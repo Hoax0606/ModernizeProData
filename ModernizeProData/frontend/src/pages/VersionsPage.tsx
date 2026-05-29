@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { useWorkspaceStore, type ProjectPhase } from '../store/workspace';
 import { snapshotApi } from '../api/workspace';
 import { useSnapshotsStore, usePinnedSnapshotsStore, isPinEligible, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
 import { useAuthStore } from '../store/auth';
 import { useActiveProjectReadOnly } from '../store/readOnly';
 import { useAuditLogStore } from '../store/auditLog';
-import { useExecutionPreflightStore, type PreflightSnapshotResult } from '../store/executionPreflight';
-import { useTobeDdlStore } from '../store/tobeDdl';
-import { isAllPass } from '../lib/preflightValidation';
+import { runsApi, type ProjectRunReadinessDto } from '../api/runs';
 import { useT, type TranslationKey } from '../i18n';
 
 /**
@@ -29,25 +28,18 @@ export function VersionsPage() {
     [projects, activeProjectId],
   );
 
-  /* Per-snapshot preflight result cache — populated by Execution page only.
-     Versions reads it as a gate for Request Review.  Fallback は undefined にして
-     매 render 마다 새 reference 가 되는 무한 루프 회피. */
-  const preflightBySnapshot = useExecutionPreflightStore(
-    (s) => activeProjectId ? s.byProject[activeProjectId]?.bySnapshot : undefined,
-  ) as Record<string, PreflightSnapshotResult> | undefined;
-
-  /* TO-BE DDL — Request Review ゲートで「cache が全テーブル覆ってるか」を判定するのに必要.
-     Execution 側でも同じ store を使っているのでキャッシュヒットが期待できる. */
-  const tobeSchema = useTobeDdlStore((s) => activeProjectId ? s.schemasByProject[activeProjectId] : undefined);
-  const fetchTobeDdl = useTobeDdlStore((s) => s.fetch);
-  useEffect(() => {
-    if (!activeProjectId) return;
-    if (!tobeSchema) fetchTobeDdl(activeProjectId).catch(() => { /* DDL 미등록 — 게이트가 잠긴 채로 표시 */ });
-  }, [activeProjectId, tobeSchema, fetchTobeDdl]);
-  const allTobeTableNames = useMemo(
-    () => (tobeSchema?.tables ?? []).map((t) => t.table.physicalName),
-    [tobeSchema],
-  );
+  /* Request Review ゲート: project の全 TO-BE テーブルの最新 run が success なら通る.
+     2026-05-28 仕様変更で「snapshot 別 preflight cache pass」から差し替え.
+     BE が判定材料 (allReady / completedTables / failedTables / notRunTables) を集約して返す.
+     polling は不要 — run 完了時に FE 側で invalidate (usePipelineProgress の WS 또는
+     refreshOnMount 程度で良い). 5 秒 stale で充分新鮮. */
+  const { data: runReadiness } = useQuery<ProjectRunReadinessDto>({
+    queryKey: ['run-readiness', activeProjectId],
+    enabled: !!activeProjectId,
+    queryFn: () => runsApi.runReadiness(activeProjectId!),
+    refetchInterval: 5_000,
+    staleTime: 2_000,
+  });
 
   const allSnapshots = useSnapshotsStore((s) => s.snapshots);
   const fetchByProject = useSnapshotsStore((s) => s.fetchByProject);
@@ -139,21 +131,25 @@ export function VersionsPage() {
     [snapshots, selectedSnapshotId],
   );
 
-  /* Request Review ゲート用に 3 つの flag を計算:
-     - exists: その snapshot に対して preflight cache がある
-     - passed: cache の全 check が pass
-     - coversAll: cache の selectedTables が DDL の全 TO-BE テーブルを覆っている
-     仕様: 3 つ全部 true でないと Request Review 不可. */
+  /* Request Review ゲート: BE が返す readiness 集計を flag に展開.
+     - hasData       : readiness データが取得済 (loading 初回は false)
+     - allReady      : 全テーブルの最新 run が success
+     - completedCount/total : Approval Status カードの表示用
+     - failedTables / notRunTables : ブロック理由のテキスト組立用 */
   const requestReviewGate = useMemo(() => {
-    if (!selectedSnapshot) return { exists: false, passed: false, coversAll: false };
-    const cached = preflightBySnapshot?.[selectedSnapshot.id];
-    const exists = !!cached;
-    const passed = !!cached && isAllPass(cached.results);
-    const coversAll = !!cached
-      && allTobeTableNames.length > 0
-      && allTobeTableNames.every((name) => cached.selectedTables.includes(name));
-    return { exists, passed, coversAll };
-  }, [selectedSnapshot, preflightBySnapshot, allTobeTableNames]);
+    if (!runReadiness) {
+      return { hasData: false, allReady: false, total: 0, completed: 0,
+               failedTables: [] as string[], notRunTables: [] as string[] };
+    }
+    return {
+      hasData: true,
+      allReady: runReadiness.allReady,
+      total: runReadiness.totalTables,
+      completed: runReadiness.completedTables,
+      failedTables: runReadiness.failedTables,
+      notRunTables: runReadiness.notRunTables,
+    };
+  }, [runReadiness]);
 
   // 페이지 첫 진입 시 한 번만 최신 snapshot 자동 선택.
   // polling / 외부 변경으로 snapshots 가 갱신돼도 사용자가 보고 있던 화면을 강제 전환하지 않음
@@ -495,9 +491,12 @@ export function VersionsPage() {
               isPinned={pinnedIds.includes(selectedSnapshot.id)}
               pinEligible={isPinEligible(selectedSnapshot, project.phase)}
               onTogglePin={() => togglePin(selectedSnapshot.id)}
-              preflightResultExists={requestReviewGate.exists}
-              preflightPassed={requestReviewGate.passed}
-              preflightCoversAllTables={requestReviewGate.coversAll}
+              runReadinessLoaded={requestReviewGate.hasData}
+              runReadinessAllReady={requestReviewGate.allReady}
+              runReadinessTotal={requestReviewGate.total}
+              runReadinessCompleted={requestReviewGate.completed}
+              runReadinessFailedTables={requestReviewGate.failedTables}
+              runReadinessNotRunTables={requestReviewGate.notRunTables}
             />
           ) : (
             <div style={styles.noSelectionMessage}>
@@ -737,7 +736,8 @@ function ChangeRow({ kind, category, rawKey, detail, fieldChanges }: {
 
 function SnapshotDetailView({
   snapshot, onRequest, readOnly, isPinned, pinEligible, onTogglePin,
-  preflightResultExists, preflightPassed, preflightCoversAllTables,
+  runReadinessLoaded, runReadinessAllReady, runReadinessTotal, runReadinessCompleted,
+  runReadinessFailedTables, runReadinessNotRunTables,
 }: {
   snapshot: {
     id: string;
@@ -761,27 +761,43 @@ function SnapshotDetailView({
   isPinned: boolean;
   pinEligible: boolean;
   onTogglePin: () => void;
-  /** Execution 画面でこの snapshot に対して preflight を走らせた結果が cache されているか. */
-  preflightResultExists: boolean;
-  /** その結果が all-pass か. */
-  preflightPassed: boolean;
-  /** cache の selectedTables が DDL の全 TO-BE テーブルを覆っているか. */
-  preflightCoversAllTables: boolean;
+  /** /run-readiness API のレスポンスが取得済み. false = 初回 loading 中. */
+  runReadinessLoaded: boolean;
+  /** 全 TO-BE テーブルで最新 run が success. true なら Request Review 可. */
+  runReadinessAllReady: boolean;
+  /** project の TO-BE テーブル数. 0 なら DDL 未取込. */
+  runReadinessTotal: number;
+  /** 最新 run が success の TO-BE テーブル数. */
+  runReadinessCompleted: number;
+  /** 最新 run が失敗状態の TO-BE テーブル (failed/aborted/timed_out). */
+  runReadinessFailedTables: string[];
+  /** まだ一度も run に含まれた事のない TO-BE テーブル. */
+  runReadinessNotRunTables: string[];
 }) {
   const t = useT();
   const user = useAuthStore((s) => s.user);
   const [confirmingRequest, setConfirmingRequest] = useState(false);
 
-  /* Request Review ゲート: Execution 画面側で「全テーブル × 全 preflight pass」cache 必須.
-     優先度: cache 不在 > 部分選択 > 失敗あり. */
-  const requestBlockedReason = !preflightResultExists
-    ? t('versions.preflight.notRun')
-    : !preflightCoversAllTables
-      ? t('versions.preflight.partialSelection')
-      : !preflightPassed
-        ? t('versions.preflight.blocked')
+  /* Request Review ゲート: 「全 TO-BE テーブルの最新 run が success」が条件.
+     失敗 / 中断 / 未実行 はゲート的に全部「完了していない」と同列なので、
+     1 つのリストに統合して 1 種類の文言で表示 (詳細を見たい時は Run History で確認).
+     ブロック理由の優先度: loading > DDL 未取込 > 未完了あり. */
+  const notCompletedTables = useMemo(
+    () => [...runReadinessFailedTables, ...runReadinessNotRunTables],
+    [runReadinessFailedTables, runReadinessNotRunTables],
+  );
+  const requestBlockedReason = !runReadinessLoaded
+    ? t('versions.runReadiness.loading')
+    : runReadinessTotal === 0
+      ? t('versions.runReadiness.noTables')
+      : notCompletedTables.length > 0
+        ? t('versions.runReadiness.notCompleted', {
+            count: String(notCompletedTables.length),
+            tables: notCompletedTables.slice(0, 3).join(', ')
+              + (notCompletedTables.length > 3 ? ' …' : ''),
+          })
         : '';
-  const canRequest = !readOnly && preflightPassed && preflightCoversAllTables;
+  const canRequest = !readOnly && runReadinessAllReady;
 
   return (
     <div style={styles.detailContent}>
@@ -857,7 +873,10 @@ function SnapshotDetailView({
                   </div>
                 ) : canRequest ? (
                   <div style={styles.statusDesc}>
-                    {t('versions.statusDesc.draftReady')}
+                    {t('versions.statusDesc.draftRunReady', {
+                      completed: String(runReadinessCompleted),
+                      total: String(runReadinessTotal),
+                    })}
                   </div>
                 ) : (
                   <div style={{ ...styles.statusDesc, color: 'var(--amber)' }}>

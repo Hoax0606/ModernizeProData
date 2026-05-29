@@ -8,6 +8,7 @@ import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository;
 import com.ksinfo.modernize_pro_data.coordinator.load.PgCopyManager;
 import com.ksinfo.modernize_pro_data.coordinator.load.PgDdlGenerator;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
@@ -74,6 +75,7 @@ public class LoadStage implements StageRunner {
     private final DdlColumnRepository ddlColumnRepo;
     private final DuckDbService duckDbService;
     private final PgCopyManager pgCopyManager;
+    private final QuarantineService quarantineService;
     private final RunLogIngestService runLogIngest;
 
     @Override
@@ -189,6 +191,7 @@ public class LoadStage implements StageRunner {
         OffsetDateTime tableStart = OffsetDateTime.now();
         String tobeSchema = binding.getTobeSchema() == null ? "" : binding.getTobeSchema();
         String tobeTable  = binding.getTobeTable();
+        String tableLabel = tobeSchema.isBlank() ? tobeTable : tobeSchema + "." + tobeTable;
 
         StageTableResult result = stageTableResultRepo
                 .findByStageInstanceIdAndBindingId(stage.getId(), binding.getId())
@@ -269,8 +272,13 @@ public class LoadStage implements StageRunner {
             result.setErrorDetail(detail);
             finish(result, tableStart);
             stageTableResultRepo.save(result);
+
+            /* Step 1 — PG COPY 실패 (NOT NULL / FK / 타입 변환 등) 를 Quarantine 카드로. */
+            StageHelpers.recordStageFailureQuarantine(ctx, quarantineService, stage, binding,
+                    tableLabel, "Load", "load.failure", e.getMessage());
+
             log.warn("LoadStage failed for {}: {}", tobeTable, e.getMessage());
-            ingest(ctx, "Load failed for " + tobeTable + ": " + e.getMessage(), false);
+            ingest(ctx, "Load failed for " + tableLabel + ": " + e.getMessage(), false);
             return false;
         }
     }

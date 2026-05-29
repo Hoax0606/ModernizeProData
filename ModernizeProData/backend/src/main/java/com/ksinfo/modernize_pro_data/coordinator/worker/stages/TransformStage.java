@@ -6,6 +6,8 @@ import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingCodeMapRepositor
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRule;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRuleRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunType;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
@@ -64,6 +66,7 @@ public class TransformStage implements StageRunner {
     private final MappingRuleRepository mappingRuleRepo;
     private final MappingCodeMapRepository mappingCodeMapRepo;
     private final DuckDbService duckDbService;
+    private final QuarantineService quarantineService;
     private final RunLogIngestService runLogIngest;
 
     @Override
@@ -97,6 +100,8 @@ public class TransformStage implements StageRunner {
             OffsetDateTime tableStart = OffsetDateTime.now();
             String tobeSchema = binding.getTobeSchema() == null ? "" : binding.getTobeSchema();
             String tobeTable  = binding.getTobeTable();
+            /* Quarantine 표시용 — schema 있으면 'banksys.customers' 식 식별성 강한 라벨. */
+            String tableLabel = tobeSchema.isBlank() ? tobeTable : tobeSchema + "." + tobeTable;
 
             StageTableResult result = stageTableResultRepo
                     .findByStageInstanceIdAndBindingId(stage.getId(), binding.getId())
@@ -152,8 +157,12 @@ public class TransformStage implements StageRunner {
                 result.setDurationMs(Duration.between(tableStart, tableEnd).toMillis());
                 stageTableResultRepo.save(result);
 
+                /* 구조적 stage 실패도 Quarantine 카드로 노출 — 공통 헬퍼 사용. */
+                StageHelpers.recordStageFailureQuarantine(ctx, quarantineService, stage, binding,
+                        tableLabel, "Transform", "transform.failure", e.getMessage());
+
                 log.warn("TransformStage failed for {} : {}", tobeTable, e.getMessage());
-                ingest(ctx, "Transform failed for " + tobeTable + ": " + e.getMessage(), false);
+                ingest(ctx, "Transform failed for " + tableLabel + ": " + e.getMessage(), false);
                 failedCount++;
             }
         }

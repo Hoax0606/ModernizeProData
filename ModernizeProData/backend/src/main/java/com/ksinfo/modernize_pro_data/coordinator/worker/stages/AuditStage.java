@@ -55,7 +55,18 @@ import java.util.Map;
 public class AuditStage implements StageRunner {
 
     private static final String STAGE_KEY = "audit";
-    private static final int SAMPLE_LIMIT = 5;
+    /**
+     * quarantine sample row 상한.
+     * 2026-05-29: 팀장 지시로 5 → 전수 표시. fetchSamples / checkPkUniqueness 의 LIMIT 절이
+     * Integer.MAX_VALUE 가 되어 사실상 cap 없이 모든 위반 row 가 DB JSONB 에 저장됨.
+     *
+     * 위험 (PoC1 데모 환경엔 nominal, 본운영 진입 전 재검토 필수):
+     *   - 메타 DB JSONB 폭주 (1만 row × 20 col ≈ 10 MB / 그룹).
+     *   - HTTP 응답 / 브라우저 렌더링 폭주 (대량 환경).
+     * 자세한 결정 배경 + 본운영 대안 (Sample DB + parquet streaming UI 등):
+     *   docs/handoff/2026-05-29-quarantine-show-all-decision.md
+     */
+    private static final int SAMPLE_LIMIT = Integer.MAX_VALUE;
 
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
@@ -92,11 +103,14 @@ public class AuditStage implements StageRunner {
 
         int successCount = 0;
         int failedCount = 0;
-        // cutover 는 본운영 — 위반이 있으면 분리 없이 fail 시켜 downstream gate(LocalWorkerExecutor)에 맡긴다.
-        // test / rehearsal 은 데이터 검증·시연 목적이므로 위반 row 를 DuckDB tobe_ 에서 분리해
-        // Load 가 정상 row 만 적재하도록 한다 (PoC1 row-level Quarantine separation, sample 5행은
-        // QuarantineService 가 이미 기록).
-        boolean separateViolations = ctx.getRunHistory().getRunType() != RunType.cutover;
+        // 위반 발생 binding 수 — stage 자체의 status 표시용 (StageTableResult 는 success 유지, Load 는 정상 진행).
+        // FE 에 "Audit 에서 위반 발견" 을 즉시 보여주기 위해 stage.status=failed 마킹의 근거.
+        int quarantinedCount = 0;
+        // row-level Quarantine separation — 위반 row 를 DuckDB tobe_ 에서 DELETE 분리,
+        // 정상 row 만 Load 까지. sample 5행은 QuarantineService 가 이미 기록, 전수는 parquet 보존.
+        // 2026-05-29: cutover 도 동일 적용 (이전엔 cutover 만 strict — 분리 없이 fail).
+        // 근거: green-field 배포 모델에선 분리 후 정상 row 적재가 합리적. docs/ONBOARDING.md §Cutover 참조.
+        boolean separateViolations = true;
 
         for (MappingTableBinding binding : ctx.getBindings()) {
             OffsetDateTime tableStart = OffsetDateTime.now();
@@ -166,6 +180,7 @@ public class AuditStage implements StageRunner {
                             detail.put("quarantineParquet", quarantineParquet.toString());
                         }
                         result.setErrorDetail(detail);
+                        quarantinedCount++;
                     }
                     successCount++;
                 }
@@ -192,11 +207,20 @@ public class AuditStage implements StageRunner {
         stage.setDurationMs(Duration.between(startedAt, finishedAt).toMillis());
         stage.setTablesSuccess(successCount);
         stage.setTablesFailed(failedCount);
-        stage.setStatus(failedCount == 0 ? StageStatus.success : StageStatus.failed);
+        /* stage.status — failedCount > 0 (실패) OR quarantinedCount > 0 (위반 발견) 면 failed 표시.
+           StageTableResult 는 success 유지 (Load 의 upstreamFailed 통과 → 정상 row 적재).
+           "AuditStage 가 위반 발견" 을 ExecutionPage pipeline 칩에 즉시 노출 (2026-05-29). */
+        boolean hasIssues = failedCount > 0 || quarantinedCount > 0;
+        stage.setStatus(hasIssues ? StageStatus.failed : StageStatus.success);
+        if (quarantinedCount > 0 && failedCount == 0) {
+            stage.setErrorSummary(quarantinedCount + " table(s) with violations — rows quarantined, downstream continues");
+        }
         stageInstanceRepo.save(stage);
 
-        ingest(ctx, "Stage audit completed — " + successCount + " success, " + failedCount + " failed", true);
-        log.info("AuditStage success={} failed={}", successCount, failedCount);
+        ingest(ctx, "Stage audit completed — " + successCount + " success, " + failedCount + " failed, "
+                + quarantinedCount + " with violations", true);
+        log.info("AuditStage success={} failed={} quarantined={}",
+                successCount, failedCount, quarantinedCount);
     }
 
     /**

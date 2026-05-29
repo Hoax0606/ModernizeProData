@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -21,16 +22,26 @@ import java.util.stream.Collectors;
  * Spring 이 모든 StageRunner @Service bean 을 autowire 하고, stageKey() 로 registry 구성.
  * RunService.startRun 끝에 호출.
  *
- * 에러 모델 = 하이브리드:
- *   - 단계 안에서는 continue-on-error (각 stage 가 테이블별 try/catch 로 일부 실패해도 나머지 처리).
- *   - 단계 사이엔 게이트: stage 가 throw(구조적 실패) 하면 항상 downstream skip;
- *     cutover 면 stage 실패(tables_failed>0)도 downstream skip (본운영에 깨진 데이터 방지).
+ * 에러 모델 = continue-on-error (모든 runType 공통):
+ *   - 단계 안에서는 테이블별 try/catch — 일부 실패해도 나머지 처리.
+ *   - 단계 사이에는 throw(구조적 실패) 시에만 downstream skip — 다음 stage 가 깨진 input 위에서 돌아 cascade 오염되는 것 방지.
+ *   - **이전 분리되었던 cutover strict gate (stage 실패 → downstream skip) 는 제거 (2026-05-29).**
+ *     이유: 첫 배포 현장이 green-field (빈 DB 채우고 swap-out) 모델 — 부분 실패해도 옛 DB 가 살아있어 rollback 비용 거의 0.
+ *     "한 번에 모든 실패 발견 → 한 번에 fix" 의 시연 효율이 strict 보호보다 가치. live-swap (in-place 갱신)
+ *     현장이 추후 필요하면 site-level 정책(`cutover_policy`)으로 재도입. 자세한 근거는 docs/ONBOARDING.md §"Cutover gate policy".
  *   - 게이트 발동 시 IllegalStateException 으로 run 을 failed 처리 (RunExecutionListener catch).
  */
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class LocalWorkerExecutor implements WorkerExecutor {
+
+    /**
+     * Non-blocking stage 화이트리스트 (2026-05-30) — 이 stage 들은 status=failed 여도 run 을
+     * 실패 처리하지 않는다. validation 은 SUM/MIN/MAX/NULL aggregate 의 정보성 보고서 stage 라
+     * fail 이 자체로 데이터 손상을 의미하지 않음 — pipeline UI 에 빨간 tile 만 띄우고 run 은 통과.
+     */
+    private static final Set<String> NON_BLOCKING_STAGES = Set.of("validation");
 
     private final List<StageRunner> stageRunners;
     private final RunControlRegistry runControlRegistry;
@@ -48,9 +59,11 @@ public class LocalWorkerExecutor implements WorkerExecutor {
     @Override
     public void execute(StageContext ctx) {
         String runId = ctx.getRunHistory().getId();
-        boolean isCutover = ctx.getRunHistory().getRunType() == RunType.cutover;
-        log.info("Run execution started runId={} cutover={} stages={}",
-                runId, isCutover,
+        // cutover-specific strict gate 는 2026-05-29 에 제거됨 — green-field 모델에선 over-protective.
+        // 로깅 용도로 runType 만 유지 (gate 로직엔 안 씀).
+        RunType runType = ctx.getRunHistory().getRunType();
+        log.info("Run execution started runId={} runType={} stages={}",
+                runId, runType,
                 ctx.getStages().stream().map(StageInstance::getStageKey).toList());
 
         String gateReason = null;
@@ -60,8 +73,7 @@ public class LocalWorkerExecutor implements WorkerExecutor {
                 log.info("Stage '{}' already done (stage-cache) — skip runId={}", stage.getStageKey(), runId);
                 continue;
             }
-            // 일시정지 대기 (stage 경계). abort/timeout 으로 cancel 되면 이후 stage 중단.
-            runControlRegistry.awaitWhilePaused(runId);
+            // abort/timeout 으로 cancel 되면 이후 stage 중단 (stage 경계 반응).
             if (runControlRegistry.isCancelled(runId)) {
                 log.warn("Run cancelled — stopping before stage '{}' runId={}", stage.getStageKey(), runId);
                 break;
@@ -81,11 +93,11 @@ public class LocalWorkerExecutor implements WorkerExecutor {
             /* 실시간 진행 알림 — FE 의 /topic/run/{id}/progress 구독자가 invalidate 한다.
                옵션 채널 — STOMP 끊겨도 FE 의 polling(2s)이 fallback. */
             broadcastStage(runId, stage, threw);
-            // 하이브리드 게이트 (단계 사이): 구조적 실패(throw)면 항상, cutover 면 stage 실패도 downstream 중단.
-            boolean stageFailed = threw || stage.getStatus() == StageStatus.failed;
-            if (threw || (isCutover && stageFailed)) {
-                gateReason = "gated at stage '" + stage.getStageKey() + "' ("
-                        + (threw ? "threw" : "failed") + ") — downstream stages skipped";
+            // 게이트 (단계 사이): 구조적 실패(throw)에서만 downstream 중단.
+            // 이전엔 cutover 도 stage 실패(tables_failed>0) 시 추가로 게이트 발동했으나 2026-05-29 제거.
+            // 근거: green-field 배포 모델에선 strict 의 보호 가치 < "한 번에 모두 발견" 효율.
+            if (threw) {
+                gateReason = "gated at stage '" + stage.getStageKey() + "' (threw) — downstream stages skipped";
                 log.warn("Run gate triggered runId={}: {}", runId, gateReason);
                 break;
             }
@@ -98,8 +110,10 @@ public class LocalWorkerExecutor implements WorkerExecutor {
         }
         // 게이트 안 났어도 어떤 stage 라도 failed 면 run 도 failed (모든 stage success 일 때만 run.status=success).
         // continue-on-error 로 luna 통과해도 결과를 사용자에게 정확히 알려야 함 — 화면 "COMPLETED" 인데 실제는 0건 적재 같은 혼동 방지.
+        // NON_BLOCKING_STAGES (예: validation) 는 fail 여도 run 을 fail 시키지 않음 — 정보성 stage.
         long failedStages = ctx.getStages().stream()
                 .filter(s -> s.getStatus() == StageStatus.failed)
+                .filter(s -> !NON_BLOCKING_STAGES.contains(s.getStageKey()))
                 .count();
         if (failedStages > 0) {
             String reason = failedStages + " stage(s) failed during run";

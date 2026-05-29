@@ -68,6 +68,9 @@ public class DuckDbService {
             UdfRegistry.registerAll(connection);
             // encodings 확장 — Shift-JIS/EUC-JP 등 비 UTF-8 CSV 적재용 (ExtractStage encoding=).
             loadEncodingsExtension(connection);
+            // icu 확장 — '+09:00' 같은 timezone offset 인식 (TransformStage 의 TIMESTAMPTZ CAST / STRPTIME).
+            // 없으면 DuckDB 가 'Unknown TimeZone "+09:00"' 로 reject → Transform / Audit / Load / Verify cascade ERROR.
+            loadIcuExtension(connection);
             // 대용량 spill — operator(JOIN/sort/aggregation) + 파일모드 테이블 RAM 초과분 디스크로.
             configureSpill(connection);
         }
@@ -139,6 +142,25 @@ public class DuckDbService {
             log.info("DuckDB encodings extension loaded");
         } catch (SQLException e) {
             log.warn("DuckDB encodings extension 로드 실패 — 비 UTF-8 CSV 적재 불가 "
+                    + "(폐쇄망이면 확장 바이너리 동봉 필요): {}", e.getMessage());
+        }
+    }
+
+    /**
+     * DuckDB icu 확장 로드 — timezone offset 인식. {@code TIMESTAMP WITH TIME ZONE} CAST 또는
+     * '+09:00' 같은 offset 포함 timestamp 문자열 파싱에 필요. 없으면
+     * "Conversion Error: Unknown TimeZone '+09:00'!" 로 reject 됨.
+     *
+     * 폐쇄망(air-gapped) 노트: encodings 와 동일하게 INSTALL 이 인터넷 다운로드. 본운영 현장은
+     * 인스톨러에 바이너리 동봉 + 로컬 경로 INSTALL 로 교체 필요 (encoding 확장과 같은 후속).
+     */
+    private void loadIcuExtension(Connection conn) {
+        try (Statement st = conn.createStatement()) {
+            st.execute("INSTALL icu");
+            st.execute("LOAD icu");
+            log.info("DuckDB icu extension loaded");
+        } catch (SQLException e) {
+            log.warn("DuckDB icu extension 로드 실패 — timezone 포함 timestamp 파싱 불가 "
                     + "(폐쇄망이면 확장 바이너리 동봉 필요): {}", e.getMessage());
         }
     }

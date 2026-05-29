@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useQuery } from '@tanstack/react-query';
@@ -10,10 +10,10 @@ import {
   type RunLogLevel,
   type RunLogLine,
 } from '../api/runLogs';
-import { runsApi, type RunHistoryDto } from '../api/runs';
+import { runsApi, type RunHistoryDto, type RunTableResult } from '../api/runs';
 import { quarantineApi } from '../api/quarantine';
 import { useSnapshotsStore, usePinnedSnapshotsStore } from '../store/snapshots';
-import { formatTimestamp, formatDuration } from '../lib/formatters';
+import { formatTimestamp, formatTimeMs, formatDuration } from '../lib/formatters';
 import { stageColor } from './logViewerMock';
 import {
   humanizeQuarantineDetail,
@@ -89,6 +89,15 @@ export function LogViewerPage() {
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
   /** STEP(=stage) 필터. null = 전체, 문자열 = 그 stage 만. */
   const [stepFilter, setStepFilter] = useState<string | null>(null);
+  /** Run History の drill-down 展開行 (複数同時展開可). */
+  const [expandedRunIds, setExpandedRunIds] = useState<Set<string>>(new Set());
+  const toggleExpandedRun = useCallback((runId: string) => {
+    setExpandedRunIds((cur) => {
+      const next = new Set(cur);
+      if (next.has(runId)) next.delete(runId); else next.add(runId);
+      return next;
+    });
+  }, []);
   /** 화면 모드. stream = 전체 로그 tail, quarantine = 규칙 위반 group 카드 뷰, history = run 履歴. */
   const [view, setView] = useState<'stream' | 'quarantine' | 'history'>('stream');
   /** Quarantine 화면의 severity 필터. */
@@ -113,13 +122,15 @@ export function LogViewerPage() {
       .catch((e) => { console.error('runLog fetch failed', e); setAllLines([]); });
   }, [runId]);
 
-  /** Stream 모드 라인 — 검색/level/step 필터 적용. Quarantine 모드는 별도 데이터 소스(아래 groups)로 동작. */
+  /** Stream 모드 라인 — 검색/level/step 필터 적용. Quarantine 모드는 별도 데이터 소스(아래 groups)로 동작.
+   *  stepFilter 매치는 정확 일치 또는 family prefix (예: 'validate' → 'validate.notnull') 둘 다 허용 —
+   *  quarantine 점프 시 그룹의 dotted stage 가 stream 의 family 라인과 매칭되지 않는 문제 회피. */
   const lines = useMemo(() => {
     const q = debouncedSearch.trim().toLowerCase();
     return allLines.filter((l) => {
       const name: RunLogLevel = l.level === 2 ? 'ERROR' : l.level === 1 ? 'WARN' : 'INFO';
       if (!levelFilter[name]) return false;
-      if (stepFilter && l.stage !== stepFilter) return false;
+      if (stepFilter && l.stage !== stepFilter && !l.stage.startsWith(stepFilter + '.')) return false;
       if (!q) return true;
       return l.message.toLowerCase().includes(q) || l.stage.toLowerCase().includes(q);
     });
@@ -490,33 +501,69 @@ export function LogViewerPage() {
                 <table style={styles.historyTable}>
                   <thead>
                     <tr>
+                      <th style={{ ...styles.historyTh, width: 22, padding: '6px 4px' }} aria-label="expand"></th>
+                      <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.runId')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.started')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.finished')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.type')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.trigger')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.worker')}</th>
+                      <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.tables')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.status')}</th>
-                      <th style={{ ...styles.historyTh, textAlign: 'right' }}>
+                      <th
+                        style={{ ...styles.historyTh, textAlign: 'right' }}
+                        title={t('projectSettings.schedule.history.col.duration.tooltip')}
+                      >
                         {t('projectSettings.schedule.history.col.duration')}
                       </th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredHistoryRows.map((h) => (
-                      <tr key={h.id}>
-                        <td style={styles.historyTd}>{formatTimestamp(h.startedAt)}</td>
-                        <td style={styles.historyTd}>{h.finishedAt ? formatTimestamp(h.finishedAt) : '-'}</td>
-                        <td style={styles.historyTd}>{h.runType}</td>
-                        <td style={styles.historyTd}>{h.triggerSource}</td>
-                        <td style={styles.historyTd}>{h.workerId ?? '-'}</td>
-                        <td style={styles.historyTd}>
-                          <span style={historyStatusStyle(h.status)}>{h.status}</span>
-                        </td>
-                        <td style={{ ...styles.historyTd, textAlign: 'right', fontFamily: 'var(--mono)' }}>
-                          {formatDuration(h.durationMs)}
-                        </td>
-                      </tr>
-                    ))}
+                    {filteredHistoryRows.map((h) => {
+                      const expanded = expandedRunIds.has(h.id);
+                      const canExpand = h.tableSummary.total > 0;
+                      return (
+                        <Fragment key={h.id}>
+                          <tr
+                            onClick={canExpand ? () => toggleExpandedRun(h.id) : undefined}
+                            style={{ cursor: canExpand ? 'pointer' : 'default' }}
+                          >
+                            <td style={{ ...styles.historyTd, padding: '4px 4px', textAlign: 'center' }}>
+                              {canExpand && (
+                                <span style={{ color: 'var(--text-3)', fontSize: 11, userSelect: 'none' }}>
+                                  {expanded ? '▾' : '▸'}
+                                </span>
+                              )}
+                            </td>
+                            <td style={styles.historyTd}><code style={{ fontSize: 10, color: 'var(--text-3)' }}>{h.id}</code></td>
+                            <td style={styles.historyTd}>{formatTimestamp(h.startedAt)}</td>
+                            <td style={styles.historyTd}>{h.finishedAt ? formatTimestamp(h.finishedAt) : '-'}</td>
+                            <td style={styles.historyTd}>{h.runType}</td>
+                            <td style={styles.historyTd}>{h.triggerSource}</td>
+                            <td style={styles.historyTd}>{h.workerId ?? '-'}</td>
+                            <td style={styles.historyTd}>
+                              <HistoryTablesCell h={h} t={t} />
+                            </td>
+                            <td style={styles.historyTd}>
+                              <span style={historyStatusStyle(h.status)}>{h.status}</span>
+                            </td>
+                            <td
+                              style={{ ...styles.historyTd, textAlign: 'right', fontFamily: 'var(--mono)' }}
+                              title={t('projectSettings.schedule.history.col.duration.tooltip')}
+                            >
+                              {formatDuration(h.durationMs)}
+                            </td>
+                          </tr>
+                          {expanded && (
+                            <tr>
+                              <td colSpan={10} style={{ padding: 0, background: 'var(--panel-2)' }}>
+                                <HistoryRunDrilldown runId={h.id} t={t} />
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               )}
@@ -582,19 +629,51 @@ export function LogViewerPage() {
                     open={openGroupId === g.id}
                     runId={runId}
                     onToggle={() => setOpenGroupId((cur) => (cur === g.id ? null : g.id))}
-                    onOpenMapping={() => navigate('/mapping')}
+                    onOpenMapping={() => {
+                      // 매핑 row highlight 대상 컬럼명 추출 — 3 단계로 robust 하게 시도.
+                      // 1) 'violated' role 컬럼 우선 (정상 BE 응답)
+                      // 2) 그게 placeholder ('error'/'unknown'/빈값) 면 g.columns 전체에서 다시 필터
+                      // 3) 그래도 없으면 g.detail / g.reason 텍스트에서 'source column XXX' / 't.XXX' / 'OF XXX' 같은
+                      //    SQL 에러 패턴으로 컬럼명 보충 (예: 'casting from source column TXN_DTTM').
+                      const PLACEHOLDER = new Set(['error', 'unknown', '']);
+                      const isReal = (c: string) => c && !PLACEHOLDER.has(c.toLowerCase());
+
+                      let cols = g.columns
+                        .filter((_, i) => g.columnRoles[i] === 'violated')
+                        .filter(isReal);
+                      if (cols.length === 0) {
+                        cols = g.columns.filter(isReal);
+                      }
+                      if (cols.length === 0) {
+                        const text = `${g.detail || ''} ${g.reason || ''}`;
+                        const found = new Set<string>();
+                        // 'source column XXX' / 'column XXX' (대소문자 무관).
+                        for (const m of text.matchAll(/\b(?:source\s+)?column\s+([A-Za-z_][A-Za-z0-9_]*)/gi)) {
+                          found.add(m[1]);
+                        }
+                        // 't.XXX' / 'a.XXX' / 'src.XXX' alias 패턴 (SQL CAST/SELECT 안에 자주 등장).
+                        for (const m of text.matchAll(/\b[a-z]\w*\.([A-Z_][A-Z0-9_]+)\b/g)) {
+                          found.add(m[1]);
+                        }
+                        cols = [...found];
+                      }
+                      navigate('/mapping', {
+                        state: { focusRule: { tobeTable: g.table, tobeColumns: cols } },
+                      });
+                    }}
                     onOpenInspector={() => {
-                      // Quarantine group → Stream 모드로 점프. 그 group 의 stage 와 severity 로
-                      // 필터를 좁혀 해당 라인들만 보인다. ERROR 자동 선택 effect 가 동작.
+                      // Quarantine group → Stream 모드로 점프.
+                      //
+                      // 자동 stage/severity 좁힘은 폐기 — quarantine group 의 stage (validate.type 등)
+                      // 와 실제 RunLog 라인의 stage 가 매치된다는 보장이 없음 (백엔드/데이터에 따라 다름).
+                      // 좁힌 결과가 0 라인이면 "필터 조건에 맞는 로그가 없습니다" 만 떠서 빈 화면.
+                      // 그래서 stepFilter / search 는 풀고 level 만 모두 켠 채 stream 으로 전환 —
+                      // 그 run 의 전체 라인을 그대로 보여주고, 사용자가 STEP dropdown 으로 직접 좁힘.
                       setView('stream');
-                      setStepFilter(g.stage);
+                      setStepFilter(null);
                       setSearch('');
                       setDebouncedSearch('');
-                      setLevelFilter({
-                        INFO:  false,
-                        WARN:  g.severity === 'warning',
-                        ERROR: g.severity === 'error',
-                      });
+                      setLevelFilter({ INFO: true, WARN: true, ERROR: true });
                       setOpenGroupId(null);
                     }}
                   />
@@ -868,17 +947,32 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, 
               >
                 {t('logs.quarantine.act.openMapping')}
               </button>
-              {/* 위반 row 전수 parquet 다운로드 — BE 가 bindingId 채운 경우만 노출. */}
+              {/* 위반 row 전수 parquet 다운로드 — BE 가 bindingId 채운 경우만 노출.
+                  fetch 로 blob 받아 직접 다운로드 — 4xx 응답이 새 탭의 빈 페이지로
+                  표시되던 문제 회피. 파일 미생성 / audit stage 미실행 등은 alert 으로 안내. */}
               {runId && g.bindingId && (
-                <a
-                  href={`/api/v1/runs/${runId}/quarantine/${g.bindingId}/download`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  download
-                  style={{ ...styles.actLink, textDecoration: 'none' }}
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const { blob, filename } = await quarantineApi.downloadBinding(runId, g.bindingId!);
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = filename;
+                      document.body.appendChild(a);
+                      a.click();
+                      a.remove();
+                      URL.revokeObjectURL(url);
+                    } catch (e: unknown) {
+                      console.error('quarantine parquet download failed', e);
+                      alert(t('logs.quarantine.act.downloadFailed'));
+                    }
+                  }}
+                  style={{ ...styles.actLink, background: 'transparent', border: 'none', cursor: 'pointer' }}
                 >
                   {t('logs.quarantine.act.downloadParquet')}
-                </a>
+                </button>
               )}
               <div style={{ flex: 1 }} />
               <button
@@ -922,6 +1016,122 @@ function Hl({ text, q }: { text: string; q: string }) {
   }
   return <>{out}</>;
 }
+
+/**
+ * Run history の Tables セル. tableSummary (per-table 結果集計) を badge 表示.
+ * "4 tables: 3✓ 1✗" の形.  partial run (h.tables 設定あり) は tooltip に対象 table 一覧を出す.
+ * stage_table_result がまだ無い (新規/aborted) run は "—" 表示.
+ */
+function HistoryTablesCell({ h, t }: { h: RunHistoryDto; t: (k: string, v?: Record<string, string>) => string }) {
+  const s = h.tableSummary;
+  const tooltipLines: string[] = [];
+  if (h.tables == null) tooltipLines.push(t('projectSettings.schedule.history.tables.all'));
+  else if (h.tables.length > 0) {
+    tooltipLines.push(`partial: ${h.tables.length}`);
+    tooltipLines.push(...h.tables);
+  }
+  const tooltip = tooltipLines.join('\n');
+  if (s.total === 0) {
+    return <span title={tooltip} style={{ color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>—</span>;
+  }
+  return (
+    <span title={tooltip} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--mono)', fontSize: 11 }}>
+      <span style={{ color: 'var(--text-3)' }}>{s.total}</span>
+      {s.success > 0 && (
+        <span style={{ ...summaryBadgeStyle, color: '#166534', background: '#dcfce7', borderColor: '#86efac' }}>
+          {s.success}✓
+        </span>
+      )}
+      {s.failed > 0 && (
+        <span style={{ ...summaryBadgeStyle, color: '#991b1b', background: '#fee2e2', borderColor: '#fca5a5' }}>
+          {s.failed}✗
+        </span>
+      )}
+      {s.running > 0 && (
+        <span style={{ ...summaryBadgeStyle, color: '#92400e', background: '#fef3c7', borderColor: '#fcd34d' }}>
+          {s.running}…
+        </span>
+      )}
+    </span>
+  );
+}
+
+const summaryBadgeStyle: React.CSSProperties = {
+  display: 'inline-block', padding: '0 5px', borderRadius: 3,
+  fontSize: 10, fontWeight: 700, border: '1px solid', lineHeight: '14px',
+};
+
+/**
+ * Run history drill-down sub-row 中身. 展開時に BE から per-table 結果を取得して
+ * status / rows / duration / error を 1 table = 1 行で表示.
+ */
+function HistoryRunDrilldown({ runId, t }: { runId: string; t: (k: string, v?: Record<string, string>) => string }) {
+  const { data, isLoading, isError } = useQuery<RunTableResult[]>({
+    queryKey: ['run-table-results', runId],
+    queryFn: () => runsApi.tableResults(runId),
+    staleTime: 5_000,
+  });
+  if (isLoading) {
+    return <div style={drillStyles.loading}>{t('projectSettings.schedule.history.drilldown.loading')}</div>;
+  }
+  if (isError) {
+    return <div style={drillStyles.error}>{t('projectSettings.schedule.history.drilldown.error')}</div>;
+  }
+  if (!data || data.length === 0) {
+    return <div style={drillStyles.loading}>{t('projectSettings.schedule.history.drilldown.empty')}</div>;
+  }
+  return (
+    <div style={drillStyles.wrap}>
+      <table style={drillStyles.table}>
+        <thead>
+          <tr>
+            <th style={drillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.status')}</th>
+            <th style={drillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.table')}</th>
+            <th style={{ ...drillStyles.th, textAlign: 'right' }}>{t('projectSettings.schedule.history.drilldown.col.rows')}</th>
+            <th style={drillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.started')}</th>
+            <th style={drillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.finished')}</th>
+            <th style={{ ...drillStyles.th, textAlign: 'right' }}>{t('projectSettings.schedule.history.drilldown.col.duration')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.map((r) => {
+            const fullName = r.tobeSchema ? `${r.tobeSchema}.${r.tobeTable}` : r.tobeTable;
+            const statusColor = r.status === 'success' ? '#166534'
+              : r.status === 'failed' ? '#991b1b'
+              : '#92400e';
+            const statusIcon = r.status === 'success' ? '✓'
+              : r.status === 'failed' ? '✗'
+              : '…';
+            return (
+              <tr key={fullName}>
+                <td style={{ ...drillStyles.td, color: statusColor, fontWeight: 700 }}>
+                  {statusIcon} {r.status}
+                </td>
+                <td style={drillStyles.td}>{fullName}</td>
+                <td style={{ ...drillStyles.td, textAlign: 'right' }}>{r.rows.toLocaleString()}</td>
+                <td style={drillStyles.td}>{r.startedAt ? formatTimeMs(r.startedAt) : '—'}</td>
+                <td style={drillStyles.td}>{r.finishedAt ? formatTimeMs(r.finishedAt) : '—'}</td>
+                <td style={{ ...drillStyles.td, textAlign: 'right' }}>{formatDuration(r.durationMs)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+const drillStyles: Record<string, React.CSSProperties> = {
+  wrap: { padding: '8px 12px 12px 36px', background: 'var(--panel-2)' },
+  table: { width: '100%', borderCollapse: 'collapse', fontSize: 11, fontFamily: 'var(--mono)' },
+  th: {
+    textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--border)',
+    color: 'var(--text-3)', fontWeight: 600, fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5,
+  },
+  td: { padding: '3px 8px', borderBottom: '1px dashed var(--border)', color: 'var(--text-2)' },
+  loading: { padding: '8px 12px 8px 36px', color: 'var(--text-3)', fontSize: 11, fontStyle: 'italic' },
+  error: { padding: '8px 12px 8px 36px', color: 'var(--red)', fontSize: 11 },
+};
 
 /* ─────────────────── helpers ────────────────────────── */
 /** Run history 行 status 배지 색 — SettingsPage / PSSchedule 의 historyStatusStyle 그대로 移植. */

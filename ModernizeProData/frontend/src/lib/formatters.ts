@@ -22,6 +22,22 @@ export function formatTimestamp(iso: string): string {
 }
 
 /**
+ * ISO timestamp → "HH:mm:ss.SSS" (ms 精度の時刻のみ. 日付は含めない).
+ * Run History drill-down のように同一 run 内 (= 同一日内) の細粒度差分を見たい時に使う.
+ * finishedAt - startedAt = durationMs が見て分かる桁数で表示.
+ */
+export function formatTimeMs(iso: string): string {
+  try {
+    const d = new Date(iso);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    const ms = String(d.getMilliseconds()).padStart(3, '0');
+    return `${hh}:${mm}:${ss}.${ms}`;
+  } catch { return iso; }
+}
+
+/**
  * Duration (ms) → 人が読める形.
  *   < 1s    → "Xms"
  *   < 1m    → "X.Xs"

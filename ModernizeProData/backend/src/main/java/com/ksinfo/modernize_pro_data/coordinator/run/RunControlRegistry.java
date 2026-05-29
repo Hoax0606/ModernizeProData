@@ -7,23 +7,23 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 실행 중 run 의 in-memory 제어 플래그 (pause / cancel).
+ * 실행 중 run 의 in-memory 제어 플래그 (cancel).
  *
- * LocalWorkerExecutor 가 stage 경계마다 {@link #awaitWhilePaused} 를 호출해 paused 동안 대기하고,
- * cancelled 면 즉시 빠져나온다. pause/resume/abort endpoint 가 다른 thread 에서 플래그를 set.
+ * LocalWorkerExecutor 가 stage 경계마다 {@link #isCancelled} 를 체크해 cancelled 면
+ * 즉시 break. abort / timeout endpoint 가 다른 thread 에서 플래그를 set.
  * (동기 실행이라 stage 중간엔 못 멈춤 — 다음 경계에서 반응.)
  *
- * 메타 DB 상태(run_history.status)와 별개로, 실행 thread 를 깨우/멈추기 위한 휘발성 신호.
+ * 메타 DB 상태(run_history.status)와 별개로, 실행 thread 를 멈추기 위한 휘발성 신호.
  * 프로세스 재시작 시 사라짐 — run 도 같이 끝나므로 무방.
+ *
+ * 2026-05-29: pause/resume/awaitWhilePaused 제거. Stop + Retry (resume-from-failed-stage) 가
+ * 기능 동치라 UI 단순화 결정. project_pause_removed 메모리 참조.
  */
 @Component
 @Slf4j
 public class RunControlRegistry {
 
-    private static final long POLL_MS = 500;
-
     private static final class Control {
-        volatile boolean paused;
         volatile boolean cancelled;
     }
 
@@ -39,17 +39,7 @@ public class RunControlRegistry {
         controls.remove(runId);
     }
 
-    public void pause(String runId) {
-        Control c = controls.get(runId);
-        if (c != null) c.paused = true;
-    }
-
-    public void resume(String runId) {
-        Control c = controls.get(runId);
-        if (c != null) c.paused = false;
-    }
-
-    /** abort/timeout 시 호출 — paused 로 대기 중인 executor 를 깨워 중단시킨다. */
+    /** abort / timeout 시 호출 — executor 가 다음 stage 경계에서 break. */
     public void cancel(String runId) {
         Control c = controls.get(runId);
         if (c != null) c.cancelled = true;
@@ -58,19 +48,5 @@ public class RunControlRegistry {
     public boolean isCancelled(String runId) {
         Control c = controls.get(runId);
         return c != null && c.cancelled;
-    }
-
-    /** paused 동안 대기 (poll). cancelled 되면 즉시 반환. 미등록이면 즉시 반환. */
-    public void awaitWhilePaused(String runId) {
-        Control c = controls.get(runId);
-        if (c == null) return;
-        while (c.paused && !c.cancelled) {
-            try {
-                Thread.sleep(POLL_MS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            }
-        }
     }
 }
