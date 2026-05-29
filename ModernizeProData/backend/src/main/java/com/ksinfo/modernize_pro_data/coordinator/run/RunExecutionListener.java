@@ -14,6 +14,7 @@ import com.ksinfo.modernize_pro_data.coordinator.site.SiteRepository;
 import com.ksinfo.modernize_pro_data.coordinator.worker.RunOutputPathResolver;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageContext;
 import com.ksinfo.modernize_pro_data.coordinator.worker.WorkerExecutor;
+import com.ksinfo.modernize_pro_data.coordinator.dispatch.WorkerDispatcher;
 import com.ksinfo.modernize_pro_data.coordinator.worker.WorkerNodeService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -61,6 +62,7 @@ public class RunExecutionListener {
     private final RunControlRegistry runControlRegistry;
     private final RunStageCacheService stageCacheService;
     private final WorkerNodeService workerNodeService;
+    private final WorkerDispatcher workerDispatcher;
 
     @Value("${modernize.mode:coordinator}")
     private String mode;
@@ -82,9 +84,19 @@ public class RunExecutionListener {
             RunHistory rh = runRepo.findById(runId).orElse(null);
             String assignee = rh == null ? null : rh.getWorkerId();
             boolean isSelf = assignee != null && assignee.equals(coordinatorSelfUsername);
-            if (assignee != null && !isSelf
+            if (rh != null && assignee != null && !isSelf
                     && workerNodeService.findOnlineForUsername(assignee).isPresent()) {
+                // Worker daemon 이 등록·online 상태 → 그 worker 로 WS push.
+                // 이 시점은 startRun transaction 의 AFTER_COMMIT 이라 run_history 가 이미 DB
+                // 에 박혀있다 — Worker 가 받자마자 runRepo.findById(runId) 해도 안전하다.
                 log.info("Run delegated to worker {} (skipping local execution) runId={}", assignee, runId);
+                try {
+                    workerDispatcher.dispatchRunStart(rh);
+                } catch (Exception e) {
+                    log.error("WS dispatch failed runId={} — fallback to Coordinator local execution",
+                            runId, e);
+                    executeRun(runId);
+                }
                 return;
             }
         }

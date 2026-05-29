@@ -372,6 +372,8 @@ export const ja: Record<TranslationKey, string> = {
   'versions.empty.noProject': 'プロジェクトが選択されていません。',
   'versions.empty':           'まだスナップショットがありません。準備ができたら + New snapshot で作成してください。',
   'versions.create':          '+ New snapshot',
+  'versions.noChangesHint':   '直前 snapshot 以降にマッピングの変更がないため新 snapshot を作成できません',
+  'versions.noRunHint':       'Execution で run を一度実行すると cutover snapshot を作成できます',
   'versions.cancelCreate':    'Cancel',
   'versions.create.name':     'Snapshot name',
   'versions.create.namePh':   '例: v1.0 · 2026-05-13 baseline',

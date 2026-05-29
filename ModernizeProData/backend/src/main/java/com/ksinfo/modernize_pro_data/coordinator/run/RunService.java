@@ -210,18 +210,10 @@ public class RunService {
             stageInstanceRepo.save(StageInstance.create(rh.getId(), stageKey, seq++, tablesTotal));
         }
 
-        // 6. WS dispatch — Worker へ RUN_START
-        try {
-            workerDispatcher.dispatchRunStart(rh);
-        } catch (Exception e) {
-            // WS push 失敗時はトランザクション巻き戻しを誘発するため例外を伝播
-            // → run_history INSERT も project.run_status='running' もロールバックされる
-            log.error("WS dispatch failed for runId={}, rolling back", rh.getId(), e);
-            throw new RuntimeException("Failed to dispatch run to Worker: " + e.getMessage(), e);
-        }
-
-        // 7. Local stage 실행 trigger — transaction commit 후 별 thread 에서 7-stage 실행.
-        //    @TransactionalEventListener(AFTER_COMMIT) + @Async (RunExecutionListener).
+        // 6. 실행 트리거 — transaction commit 후 RunExecutionListener 가 dispatch / local 분기.
+        //    이 transaction 안에서 직접 WS push 하면 Worker 가 메시지 받은 시점에 run_history
+        //    INSERT 가 아직 commit 전이라 runRepo.findById 가 null → "run not found" race.
+        //    @TransactionalEventListener(AFTER_COMMIT) 이 listener 가 push 와 local 실행 둘 다 처리.
         eventPublisher.publishEvent(new RunStartedEvent(rh.getId(), projectId));
 
         log.info("startRun started runId={} projectId={} runType={} trigger={}",
@@ -354,6 +346,16 @@ public class RunService {
         if (rh.getRunType() == RunType.rehearsal) {
             project.setScheduleLastRunAt(OffsetDateTime.now());
         }
+
+        // cutover 成功完了 → phase を hypercare へ自動遷移 (one-way).
+        // 失敗/abort/timeout の場合は cutover phase に留まり、再試行を許す.
+        if (rh.getRunType() == RunType.cutover && finalStatus == RunStatus.success
+                && "cutover".equals(project.getPhase())) {
+            log.info("Phase auto-advance projectId={} cutover -> hypercare (runId={})",
+                    project.getId(), runId);
+            project.setPhase("hypercare");
+        }
+
         projectRepo.save(project);
 
         log.info("finishRun runId={} status={} durationMs={}", runId, finalStatus, durationMs);
@@ -376,27 +378,27 @@ public class RunService {
      * Project phase 로부터 scheduler 가 起動해야 할 runType 을 결정.
      * 스케줄러 (내부 Quartz / 외부 bulk / 외부 single runType 省略時) 가 사용.
      *
-     * Phase semantics (2026-05-24 update):
+     * Phase semantics (2026-05-29 update):
      *   - test       → RunType.test       (dry-run test 実行可)
+     *   - sign-off   → RunType.rehearsal  (sign-off で Run すると rehearsal 起動 + phase 進行)
      *   - rehearsal  → RunType.rehearsal  (dry-run rehearsal 実行可)
      *   - ready      → RunType.cutover    (cutover 実行準備完了 — 本番切替を起動)
-     *   - cutover    → empty              (= 既に cutover 実行中、新 run は受け付けない)
-     *   - その他 (planning / analysis / sign-off / hypercare / done) → empty
+     *   - cutover    → RunType.cutover    (cutover 中の新 run は startRun 側でガード)
+     *   - その他 (planning / analysis / hypercare / done) → RunType.test
      *
-     * cutover 終了後は phase が hypercare に遷移する想定.
+     * cutover 終了後は phase が hypercare に遷移 (finishRun で実施).
      */
     /**
      * Project phase 로부터 default runType 결정.
+     *   - sign-off  → RunType.rehearsal (sign-off + Run = rehearsal advance)
      *   - rehearsal → RunType.rehearsal
      *   - ready     → RunType.cutover (단 prod 환경 가드 통과 필요)
-     *   - 그 외 (planning/analysis/test/sign-off/cutover/hypercare/done) → RunType.test
-     *
-     * Env-based 정책: non-prod 모든 phase 에서 default=test runType 으로 trigger 가능.
-     * Pre-flight 가 frontend 에서 미준비 상태 막음.
+     *   - 그 외     → RunType.test
      */
     public static Optional<RunType> resolveRunTypeFromPhase(String phase) {
         if (phase == null) return Optional.empty();
         return switch (phase) {
+            case "sign-off"  -> Optional.of(RunType.rehearsal);
             case "rehearsal" -> Optional.of(RunType.rehearsal);
             case "ready"     -> Optional.of(RunType.cutover);
             default          -> Optional.of(RunType.test);
@@ -433,8 +435,8 @@ public class RunService {
     /**
      * Run 起動 시 phase 자동 진행. 현재보다 앞으로만 이동, 후퇴 없음.
      *   - test     → 'test'
-     *   - rehearsal → 'rehearsal'
-     *   - cutover  → no-op (이미 'ready' 가드 통과 — cutover 라이프사이클은 별도 작업)
+     *   - rehearsal → 'rehearsal' (sign-off 에서 Run 시 rehearsal 로 진행)
+     *   - cutover  → 'cutover'   (ready 에서 Run 시 cutover 로 진행 — 종료 시 finishRun 이 hypercare 로 추가 advance)
      * 데모 모드 FE 가 자체적으로 하던 setProjectPhaseAndRunStatus 의 phase 부분을 BE 로 이관.
      * 참고 선례: DdlImportService.importDdl 의 planning → analysis 자동 전이.
      */
@@ -442,9 +444,8 @@ public class RunService {
         String desired = switch (runType) {
             case test -> "test";
             case rehearsal -> "rehearsal";
-            case cutover -> null;
+            case cutover -> "cutover";
         };
-        if (desired == null) return;
         int curIdx = PHASE_ORDER.indexOf(project.getPhase());
         int desIdx = PHASE_ORDER.indexOf(desired);
         if (curIdx >= 0 && desIdx > curIdx) {

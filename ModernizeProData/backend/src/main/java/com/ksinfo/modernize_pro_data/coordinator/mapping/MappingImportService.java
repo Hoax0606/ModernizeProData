@@ -125,7 +125,15 @@ public class MappingImportService {
                         .map(t -> (t.getSchemaName() == null ? "" : t.getSchemaName().toLowerCase())
                                 + "|" + (t.getPhysicalName() == null ? "" : t.getPhysicalName().toLowerCase()))
                         .collect(java.util.stream.Collectors.toSet());
-                parsed = parseColumnCsv(columnTmp, projectAsisKeys);
+                // TO-BE DDL 도 동일하게 cross-check — CSV 가 DDL 에 없는 TO-BE table 의 row 를
+                // 들고 있어도 bindings/rules 로 들어가지 않게. 안 그러면 Load stage 에서 PG
+                // 에 그 table 이 없어서 통째로 fail (UI 가 "N 중 X 실패" 로 표시).
+                java.util.Set<String> projectTobeKeys = ddlTableRepo
+                        .findByProjectIdAndSideOrderByOrdinalAsc(projectId, "tobe").stream()
+                        .map(t -> (t.getSchemaName() == null ? "" : t.getSchemaName().toLowerCase())
+                                + "|" + (t.getPhysicalName() == null ? "" : t.getPhysicalName().toLowerCase()))
+                        .collect(java.util.stream.Collectors.toSet());
+                parsed = parseColumnCsv(columnTmp, projectAsisKeys, projectTobeKeys);
                 // 테이블 단위 적용이면 그 TO-BE 테이블의 룰만 남긴다.
                 if (tobeTableFilter != null) {
                     List<RuleRow> only = new ArrayList<>();
@@ -343,16 +351,20 @@ public class MappingImportService {
      * 그룹의 변환 ロジック / default / code_domain / notes 등 메타는 **첫 row 의 값만** 사용한다.
      */
     private ParsedRules parseColumnCsv(Path csv) {
-        return parseColumnCsv(csv, null);
+        return parseColumnCsv(csv, null, null);
     }
 
     /**
      * @param projectAsisKeys 이 project 의 AS-IS DDL 에 등록된 (schema_lower|table_lower) set.
-     *                       null 이면 검증 안 함 (모든 row 통과). 값 있으면 그 set 의 asis_table 만
-     *                       parsed.rules 에 포함 — site 통합 csv 에서 다른 project row 의 잘못된
-     *                       combine 방지.
+     *                       null 이면 검증 안 함. 값 있으면 그 set 의 asis_table 만 parsed.rules 에
+     *                       포함 — site 통합 csv 에서 다른 project row 의 잘못된 combine 방지.
+     * @param projectTobeKeys 이 project 의 TO-BE DDL 에 등록된 (schema_lower|table_lower) set.
+     *                       null 이면 검증 안 함. 값 있으면 그 set 에 없는 tobe_table 의 row 는
+     *                       skip — DDL 에 없는 TO-BE table 이 mapping 으로 들어와 Load 단계에서
+     *                       통째로 fail 되는 케이스 방지.
      */
-    private ParsedRules parseColumnCsv(Path csv, java.util.Set<String> projectAsisKeys) {
+    private ParsedRules parseColumnCsv(Path csv, java.util.Set<String> projectAsisKeys,
+                                       java.util.Set<String> projectTobeKeys) {
         Map<String, Integer> headers = new HashMap<>();
         // LinkedHashMap — 입력 순서 보존 (셀결합 흉내가 의미 있으려면 순서가 중요).
         LinkedHashMap<String, RuleRow> grouped = new LinkedHashMap<>();
@@ -413,6 +425,14 @@ public class MappingImportService {
                         if (!projectAsisKeys.contains(checkKey)) {
                             continue;
                         }
+                    }
+                }
+                // project TO-BE DDL 검증: DDL 에 없는 TO-BE table 의 row 는 skip — 그렇지
+                // 않으면 mapping 만 만들어지고 Load 단계에서 PG 에 그 table 이 없어 통째로 fail.
+                if (projectTobeKeys != null) {
+                    String checkKey = tobeSchema.toLowerCase() + "|" + tobeTable.toLowerCase();
+                    if (!projectTobeKeys.contains(checkKey)) {
+                        continue;
                     }
                 }
 

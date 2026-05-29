@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useWorkspaceStore, type ProjectPhase } from '../store/workspace';
+import { snapshotApi } from '../api/workspace';
 import { useSnapshotsStore, usePinnedSnapshotsStore, isPinEligible, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
 import { useAuthStore } from '../store/auth';
 import { useActiveProjectReadOnly } from '../store/readOnly';
@@ -74,6 +75,24 @@ export function VersionsPage() {
       void fetchByProject(activeProjectId);
     }
   }, [activeProjectId, fetchByProject]);
+
+  /* 버튼 활성화 — backend has-changes 응답.
+     - hasChanges: + New (mapping) snapshot 활성 기준 (mapping 변경 여부).
+     - hasRun:     + Cutover snapshot 활성 기준 (run 이력 있으면 mapping 변경 무관 활성). */
+  const [hasChanges, setHasChanges] = useState<boolean>(true);
+  const [hasRun, setHasRun] = useState<boolean>(false);
+  useEffect(() => {
+    if (!activeProjectId) { setHasChanges(true); setHasRun(false); return; }
+    let alive = true;
+    snapshotApi.hasChanges(activeProjectId)
+      .then((r) => {
+        if (!alive) return;
+        setHasChanges(r.hasChanges);
+        setHasRun(r.hasRun);
+      })
+      .catch(() => { if (alive) { setHasChanges(true); setHasRun(false); } });
+    return () => { alive = false; };
+  }, [activeProjectId, snapshots.length]);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createType, setCreateType] = useState<SnapshotType>('mapping');
@@ -302,15 +321,17 @@ export function VersionsPage() {
           <>
             <button
               onClick={() => openCreate('mapping')}
-              style={{ ...styles.btnPrimary, ...(readOnly ? styles.btnDisabled : {}) }}
-              disabled={readOnly}
+              style={{ ...styles.btnPrimary, ...((readOnly || !hasChanges) ? styles.btnDisabled : {}) }}
+              disabled={readOnly || !hasChanges}
+              title={!hasChanges ? t('versions.noChangesHint') : undefined}
             >
               {t('versions.create')}
             </button>
             <button
               onClick={() => openCreate('cutover')}
-              style={{ ...styles.btnCutover, ...(readOnly ? styles.btnDisabled : {}) }}
-              disabled={readOnly}
+              style={{ ...styles.btnCutover, ...((readOnly || !hasRun) ? styles.btnDisabled : {}) }}
+              disabled={readOnly || !hasRun}
+              title={!hasRun ? t('versions.noRunHint') : undefined}
             >
               {t('versions.createCutover')}
             </button>

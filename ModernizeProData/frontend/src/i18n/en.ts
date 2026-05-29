@@ -366,6 +366,8 @@ export const en: Record<TranslationKey, string> = {
   'versions.empty.noProject': 'No project selected.',
   'versions.empty':           'No snapshots yet. When your mapping is ready, use + New snapshot.',
   'versions.create':          '+ New snapshot',
+  'versions.noChangesHint':   'No mapping changes since the latest snapshot — nothing to capture',
+  'versions.noRunHint':       'Run from Execution at least once to enable cutover snapshot',
   'versions.cancelCreate':    'Cancel',
   'versions.create.name':     'Snapshot name',
   'versions.create.namePh':   'e.g., v1.0 · 2026-05-13 baseline',

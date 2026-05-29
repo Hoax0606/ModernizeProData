@@ -36,6 +36,7 @@ export function ExecutionOverviewPage() {
   const activeSiteId = useWorkspaceStore((s) => s.activeSiteId);
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const setProjectExecutionAssignee = useWorkspaceStore((s) => s.setProjectExecutionAssignee);
+  const fetchProjects = useWorkspaceStore((s) => s.fetchProjects);
 
   const site = useMemo(() => sites.find((s) => s.id === activeSiteId) ?? null, [sites, activeSiteId]);
   // assignee 변경에도 행 순서가 바뀌지 않도록 createdAt asc 로 명시 정렬.
@@ -118,11 +119,16 @@ export function ExecutionOverviewPage() {
   useEffect(() => { loadMetrics(); }, [loadMetrics]);
   // (A) 자동 갱신 — Execution 단일 페이지와 동일한 5초 polling. 다른 페이지로 떠나면 cleanup.
   // run 시작 / 종료 / abort 후 사용자가 Refresh 안 눌러도 화면이 따라온다.
+  // metrics 만이 아니라 projects 도 같이 refetch — finishRun 이 cutover→hypercare 로
+  // phase 를 advance 하므로 chip 색상도 같이 따라와야 한다.
   useEffect(() => {
     if (!activeSiteId) return;
-    const id = window.setInterval(() => loadMetrics(), 5000);
+    const id = window.setInterval(() => {
+      loadMetrics();
+      fetchProjects(activeSiteId);
+    }, 5000);
     return () => window.clearInterval(id);
-  }, [activeSiteId, loadMetrics]);
+  }, [activeSiteId, loadMetrics, fetchProjects]);
 
   // worker_nodes — master 만 fetch (endpoint 가 master only). assignee 별 online dot 용.
   // 90s heartbeat timeout. 동일 5초 polling.
@@ -283,6 +289,9 @@ export function ExecutionOverviewPage() {
     }
     setSelected(new Set());
     loadMetrics();
+    // Run 起動と同時に backend が phase advance (sign-off→rehearsal, ready→cutover) +
+    // run_status='running' に変えるので、projects も refetch して chip / 行状態を即反映.
+    if (activeSiteId) fetchProjects(activeSiteId);
   };
   const handleAbort = async () => {
     if (!isMaster) return;
@@ -294,6 +303,7 @@ export function ExecutionOverviewPage() {
       .map((m) => m.latestRunId!);
     await Promise.allSettled(runIds.map((rid) => runsApi.abort(rid, 'aborted from overview')));
     loadMetrics();
+    if (activeSiteId) fetchProjects(activeSiteId);
   };
 
   // KPI 집계 — phase 기준 (running/done counter 용).
@@ -321,7 +331,12 @@ export function ExecutionOverviewPage() {
       : failedRuns > 0
         ? t('executionOverview.statusFailed', { n: failedRuns })
         : t('executionOverview.statusAllDone');
-  const totalTables = siteProjects.reduce((a, p) => a + p.tableCount, 0);
+  /* "전체 tables" 는 그 project 가 run 에서 처리한 테이블 수 기준 (metric.tablesTotal).
+     run 박제가 없으면 project.tableCount (= DDL TO-BE 수) 로 fallback. DDL 에는 5 테이블이
+     있어도 mapping 이 3 만 정의돼있고 그 3 만 run 했다면 "3/3" 으로 보여야 자연스럽다. */
+  const totalTables = siteProjects.reduce(
+    (a, p) => a + (metrics[p.id]?.tablesTotal ?? p.tableCount ?? 0), 0,
+  );
   const totalRows = siteProjects.reduce((a, p) => a + (metrics[p.id]?.rows ?? 0), 0);
   const totalTablesDone = siteProjects.reduce((a, p) => a + (metrics[p.id]?.tablesDone ?? 0), 0);
   const totalErrors = siteProjects.reduce((a, p) => a + (metrics[p.id]?.errorCount ?? 0), 0);
@@ -484,7 +499,7 @@ export function ExecutionOverviewPage() {
                       <span style={{ ...styles.projName, ...(dimColor ? { color: dimColor } : {}) }}>{p.name}</span>
                     </td>
                     <td style={styles.td}>
-                      <span style={{ ...styles.phaseChip, ...phaseChipColor(p.phase, p.runStatus) }}>{p.phase}</span>
+                      <span style={{ ...styles.phaseChip, ...phaseChipColor(p.phase, metrics[p.id]?.runStatus ?? p.runStatus) }}>{p.phase}</span>
                     </td>
                     <td style={styles.td}>
                       {(() => {

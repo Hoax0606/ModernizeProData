@@ -370,6 +370,8 @@ export const ko = {
   'versions.empty.noProject': '프로젝트가 선택되지 않았습니다.',
   'versions.empty':           '아직 스냅샷이 없습니다. 매핑이 준비되면 + New snapshot 으로 생성하세요.',
   'versions.create':          '+ New snapshot',
+  'versions.noChangesHint':   '직전 snapshot 이후 변경된 매핑이 없어서 새 snapshot 을 만들 수 없어요',
+  'versions.noRunHint':       'Execution 에서 run 을 한 번이라도 돌려야 cutover snapshot 을 만들 수 있어요',
   'versions.cancelCreate':    'Cancel',
   'versions.create.name':     'Snapshot name',
   'versions.create.namePh':   '예: v1.0 · 2026-05-13 baseline',
