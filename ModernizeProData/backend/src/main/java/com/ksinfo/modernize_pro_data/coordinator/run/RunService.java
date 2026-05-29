@@ -73,6 +73,7 @@ public class RunService {
     private final ApplicationEventPublisher eventPublisher;
     private final RunControlRegistry runControlRegistry;
     private final SimpMessagingTemplate stomp;
+    private final com.ksinfo.modernize_pro_data.coordinator.site.SnapshotExecutionContextService snapshotExecutionContextService;
 
     /**
      * Run を起動する. 3 系統 (Nightly Quartz / CLI / REST) のすべてがこの入口を通る.
@@ -331,6 +332,11 @@ public class RunService {
         rh.setErrorMessage(errorMessage);
         runHistoryRepo.save(rh);
 
+        // Snapshot 박제 — run 이 snapshot_id 와 함께 시작됐다면 그 snapshot 의 execution_context
+        // 를 이 run 결과로 덮어쓴다. 성공/실패/abort/timeout 어떤 경로든 동일 hook.
+        // 사용자 결정: 같은 snapshot 으로 여러 번 run 시 매번 덮어쓰기.
+        snapshotExecutionContextService.recordExecutionContext(rh);
+
         // project.run_status を idle へ戻す (ロック解放)
         Project project = projectRepo.findByIdForUpdate(rh.getProjectId())
                 .orElseThrow(() -> new IllegalStateException("project disappeared: " + rh.getProjectId()));
@@ -440,17 +446,31 @@ public class RunService {
         }
     }
 
+    /**
+     * 어느 snapshot 으로 run 하는지 결정. 우선순위:
+     *   1. 프로젝트에 baseline (pinned) snapshot 이 있으면 그것 — 사용자가 명시적으로 고정한 것.
+     *   2. cutover runType 이면 latest approved cutover snapshot.
+     *   3. rehearsal runType 이면 latest approved mapping snapshot.
+     *   4. test runType 이면 latest mapping snapshot (approved 아니어도) — test 는 ad-hoc 이지만
+     *      그래도 snapshot 과 연결해서 그 snapshot 의 execution_context 에 박제될 수 있도록.
+     *
+     * cutover 만 snapshot 필수 (caller 가 null 면 reject). 다른 runType 은 snapshot 이 없어도 진행.
+     */
     private String resolveSnapshotId(String projectId, RunType runType) {
-        String snapshotType = switch (runType) {
-            case rehearsal -> "mapping";
-            case cutover   -> "cutover";
-            case test      -> null;
-        };
-        if (snapshotType == null) {
-            return null;
+        // 1) baseline pinned snapshot 우선 — 사용자 선택을 그대로 존중.
+        Optional<Snapshot> pinned = snapshotRepo.findByProjectIdAndBaselineTrue(projectId);
+        if (pinned.isPresent()) {
+            return pinned.get().getId();
         }
-        Optional<Snapshot> latest = snapshotRepo.findLatestApprovedByProjectIdAndType(projectId, snapshotType);
-        return latest.map(Snapshot::getId).orElse(null);
+        // 2) 없으면 runType 별 fallback.
+        return switch (runType) {
+            case cutover -> snapshotRepo.findLatestApprovedByProjectIdAndType(projectId, "cutover")
+                    .map(Snapshot::getId).orElse(null);
+            case rehearsal -> snapshotRepo.findLatestApprovedByProjectIdAndType(projectId, "mapping")
+                    .map(Snapshot::getId).orElse(null);
+            case test -> snapshotRepo.findLatestByProjectIdAndType(projectId, "mapping")
+                    .map(Snapshot::getId).orElse(null);
+        };
     }
 
     // ============================================================

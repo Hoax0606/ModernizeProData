@@ -95,8 +95,6 @@ export function ExecutionPage() {
     if (!project) return;
     useExecutionPreflightStore.getState().setActiveRunId(project.id, runId);
   };
-  const { run, stages: stageViews } = usePipelineProgress(activeRunId);
-
   /* TO-BE / AS-IS DDL schemas — used for table selector + preflight validation. */
   const tobeSchema = useTobeDdlStore((s) => project ? s.schemasByProject[project.id] : undefined);
   const asisSchema = useAsisDdlStore((s) => project ? s.schemasByProject[project.id] : undefined);
@@ -124,6 +122,31 @@ export function ExecutionPage() {
   const pinnedSnapshot = useMemo(
     () => projectSnapshots.find((s) => pinnedIds.includes(s.id)) ?? null,
     [projectSnapshots, pinnedIds],
+  );
+  /* Pipeline fallback — pinned snapshot 우선, 없으면 가장 최근 mapping snapshot.
+     사용자가 pin 을 옛 snapshot 으로 옮기면 그 시점 execution_context 로 자동 전환. */
+  const fallbackSnapshot = useMemo<MappingSnapshot | null>(() => {
+    if (pinnedSnapshot && pinnedSnapshot.type === 'mapping') return pinnedSnapshot;
+    const projectMapping = projectSnapshots.filter((s) => s.type === 'mapping');
+    return [...projectMapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
+  }, [pinnedSnapshot, projectSnapshots]);
+  /* pinned snapshot 의 id 가 변경되면 stale activeRunId 는 clear.
+     예: Test 1 run → activeRunId=run1, pin 을 Test 2(아직 run X)로 옮기면 run1 은 더 이상
+     이 snapshot 의 것이 아님 → clear 하면 fallback(빈 또는 그 snapshot 박제) 으로 자동 전환.
+     deps 는 pinnedSnapshot.id 만 — pinned 의 executionContext 가 갱신될 뿐인 경우(같은 snapshot
+     으로 run 끝남) 에는 clear 하지 않는다. */
+  useEffect(() => {
+    if (!project) return;
+    if (!pinnedSnapshot) return; // pin 없으면 activeRunId 그대로 (test ad-hoc 등).
+    const expectedRunId = pinnedSnapshot.executionContext?.runId ?? null;
+    if (activeRunId && activeRunId !== expectedRunId) {
+      setActiveRunId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinnedSnapshot?.id, project?.id]);
+  const { run, stages: stageViews } = usePipelineProgress(
+    activeRunId,
+    fallbackSnapshot?.executionContext ?? null,
   );
 
   const entrySelected = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.selectedTables : undefined);
@@ -756,10 +779,10 @@ function SnapshotDisplay({ t, pinned }: { t: T; pinned: MappingSnapshot | null }
     ? t('execution.snapshot.value', { name: pinned.name, version: pinned.version, status: pinned.status })
     : t('execution.snapshot.empty');
   return (
-    <div style={{ ...styles.section, background: pinned ? 'var(--panel)' : 'var(--amber-50)' }}>
+    <div style={{ ...styles.section, background: pinned ? 'var(--panel)' : 'var(--red-50)' }}>
       <div style={{ padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 10 }}>
         <span style={styles.sectionLabel}>{t('execution.snapshot.title')}</span>
-        <span style={{ fontSize: 11, color: pinned ? 'var(--text-2)' : 'var(--amber)', fontFamily: 'var(--mono)', fontWeight: pinned ? 400 : 600 }}>
+        <span style={{ fontSize: 11, color: pinned ? 'var(--text-2)' : 'var(--red)', fontFamily: 'var(--mono)', fontWeight: pinned ? 400 : 600 }}>
           {label}
         </span>
       </div>

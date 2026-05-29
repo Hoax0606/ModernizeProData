@@ -853,6 +853,8 @@ export const ko = {
   'artifacts.empty.title':        'No artifacts yet',
   'artifacts.empty.hint':         '매핑·스냅샷·실행이 진행되면 산출물이 여기에 나타납니다.',
   'artifacts.empty.noItems':      '(no items yet)',
+  'artifacts.diff.noRun':         '아직 실행된 run 이 없어요. Execution 에서 run 을 돌려 성공한 테이블이 생기면 여기 표시돼요.',
+  'artifacts.diff.notInLatestRun':'최근 run 에서 성공하지 못해 미활성',
   'artifacts.cat.dashboard':      'Dashboard snapshot',
   'artifacts.cat.diff':           'Schema diff',
   'artifacts.cat.ddl':            'DDL scripts',

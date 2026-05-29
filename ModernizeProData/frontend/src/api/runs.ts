@@ -48,6 +48,9 @@ export interface TableResultView {
   rowCount?: number;
   durationMs?: number;
   errorDetail?: string;
+  /** TransformStage 가 박제한 CREATE OR REPLACE TABLE ... AS SELECT ... 텍스트.
+   *  transform 외 stage 는 null. ArtifactsPage 의 MIGRATION SQL 카테고리에서 표시. */
+  compiledSql?: string;
 }
 
 /** 1 run の 1 stage の進捗 (BE: StageView, GET /api/v1/runs/{id}/stages の戻り値要素). */

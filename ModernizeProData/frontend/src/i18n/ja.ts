@@ -855,6 +855,8 @@ export const ja: Record<TranslationKey, string> = {
   'artifacts.empty.title':        'No artifacts yet',
   'artifacts.empty.hint':         'マッピング・スナップショット・実行が進むと成果物がここに表示されます。',
   'artifacts.empty.noItems':      '(no items yet)',
+  'artifacts.diff.noRun':         'まだ実行された run がありません。Execution で run を実行して成功したテーブルが出るとここに表示されます。',
+  'artifacts.diff.notInLatestRun':'最新 run で成功していない (非アクティブ)',
   'artifacts.cat.dashboard':      'Dashboard snapshot',
   'artifacts.cat.diff':           'Schema diff',
   'artifacts.cat.ddl':            'DDL scripts',

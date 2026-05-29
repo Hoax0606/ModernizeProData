@@ -2,6 +2,7 @@ import JSZip from 'jszip';
 import ExcelJS from 'exceljs';
 import type { Site, Project } from '../store/workspace';
 import type { DdlSchema } from '../api/asisDdl';
+import { buildDiff, reconstructDdl, buildXlsxBlob, SHEETS, type DiffRule } from '../pages/ArtifactsPage';
 
 /* Site export — manifest 생성 + client-side zip bundle 생성.
  * 백엔드 export job 이 아직 없으므로 .sql 은 stub 텍스트,
@@ -72,9 +73,12 @@ interface BuildManifestArgs {
   selectedFormats: SelectedFormats;
   /** zip 내부 최상위 폴더명 (`/` 없이). 보통 zip 파일명 stem 과 동일하게 전달. */
   bundleStem: string;
+  /** projectId → 활성 snapshot 의 박제 / frozen rules 기반 실 table 명 목록 (lowercase).
+   *  있으면 paddedTableName(i) 대신 실 명 사용 — manifest preview 와 zip 내 파일명이 일치한다. */
+  tablesByProject?: Record<string, string[]>;
 }
 
-export function buildManifest({ projects, schemaCounts, selectedFormats, bundleStem }: BuildManifestArgs): ManifestEntry[] {
+export function buildManifest({ projects, schemaCounts, selectedFormats, bundleStem, tablesByProject }: BuildManifestArgs): ManifestEntry[] {
   const entries: ManifestEntry[] = [];
   const prefix = `${bundleStem}/`;
 
@@ -87,7 +91,10 @@ export function buildManifest({ projects, schemaCounts, selectedFormats, bundleS
   };
 
   for (const p of projects) {
-    const tc = tableCountOf(p);
+    const realTables = tablesByProject?.[p.id];
+    const tc = realTables?.length ?? tableCountOf(p);
+    const tableLabelAt = (i: number): string =>
+      realTables?.[i] ? pathSafeName(realTables[i]) : paddedTableName(i);
     // 폴더명은 한글/일본어 보존을 위해 pathSafeName 사용 (slugify 는 비-ASCII 를 다 깎는다).
     const pslug = pathSafeName(p.name);
 
@@ -95,7 +102,7 @@ export function buildManifest({ projects, schemaCounts, selectedFormats, bundleS
       for (let i = 0; i < tc; i++) {
         entries.push({
           cat: 'Migration SQL',
-          path: `${prefix}${pslug}/migration/${paddedTableName(i)}.up.sql`,
+          path: `${prefix}${pslug}/migration/${tableLabelAt(i)}.up.sql`,
           kind: 'sql',
         });
       }
@@ -104,7 +111,7 @@ export function buildManifest({ projects, schemaCounts, selectedFormats, bundleS
       for (let i = 0; i < tc; i++) {
         entries.push({
           cat: 'Mapping',
-          path: `${prefix}${pslug}/mapping/${paddedTableName(i)}.map.xlsx`,
+          path: `${prefix}${pslug}/mapping/${tableLabelAt(i)}.map.xlsx`,
           kind: 'xlsx',
         });
       }
@@ -113,7 +120,7 @@ export function buildManifest({ projects, schemaCounts, selectedFormats, bundleS
       for (let i = 0; i < tc; i++) {
         entries.push({
           cat: 'Validation',
-          path: `${prefix}${pslug}/validation/${paddedTableName(i)}.report.xlsx`,
+          path: `${prefix}${pslug}/validation/${tableLabelAt(i)}.report.xlsx`,
           kind: 'xlsx',
         });
       }
@@ -141,6 +148,22 @@ export function groupManifest(manifest: ManifestEntry[]): Record<string, Manifes
   return grouped;
 }
 
+/** 활성 snapshot 기준 한 project 의 실 데이터 묶음. SiteExportPage 가 fetch 해서 전달. */
+export interface ProjectArtifactData {
+  /** activated snapshot (pinned > latest mapping). null 이면 그 project 는 placeholder. */
+  snapshotId: string | null;
+  /** snapshotApi.getMapping 의 rules — 활성 snapshot 의 frozen rules. */
+  rules: DiffRule[];
+  /** AS-IS DDL — reconstructDdl + buildDiff 의 type 정보. */
+  asisSchema: DdlSchema | null;
+  /** TO-BE DDL. */
+  tobeSchema: DdlSchema | null;
+  /** snapshot.executionContext.transform 에서 success 인 TOBE 테이블 (lowercase). null = 박제 X. */
+  successTables: Set<string> | null;
+  /** snapshot.executionContext.load 의 합성 SQL — TOBE 테이블 (lowercase) → SQL. */
+  compiledSqlByTable: Record<string, string>;
+}
+
 interface BuildZipArgs {
   site: Site;
   /** site 의 모든 프로젝트 — Site summary 워크북 빌드에 사용 */
@@ -150,45 +173,90 @@ interface BuildZipArgs {
   manifest: ManifestEntry[];
   /** 'YYYY-MM-DD HH:MM JST' 같은 표기 — stub / placeholder 본문에 박는다 */
   generatedAt: string;
+  /** projectId → 활성 snapshot 의 실 데이터. 없으면 placeholder 로 fallback. */
+  projectArtifacts?: Record<string, ProjectArtifactData>;
 }
 
 export async function generateZipBundle({
-  site, projects, schemas, manifest, generatedAt,
+  site, projects, schemas, manifest, generatedAt, projectArtifacts,
 }: BuildZipArgs): Promise<Blob> {
   const zip = new JSZip();
 
   // path 안의 project slug → Project 매칭 (Mapping/Validation 워크북 메타에 사용).
   const projectBySlug = new Map(projects.map(p => [pathSafeName(p.name), p]));
 
+  // path "<stem>/<pslug>/..." 에서 pslug → Project 추출.
+  const projectOfEntry = (entry: ManifestEntry): Project | null => {
+    const parts = entry.path.split('/');
+    return parts.length >= 2 ? (projectBySlug.get(parts[1]) ?? null) : null;
+  };
+  // entry path 의 파일명에서 table stem ("tbl_001" / "customers" 등) 추출.
+  const tableStemOfEntry = (entry: ManifestEntry): string => {
+    const fileName = entry.path.split('/').pop() ?? 'table';
+    return fileName.replace(/\.(up\.)?sql$/, '').replace(/\.(map|report|pipeline)?\.xlsx$/, '');
+  };
+
   for (const entry of manifest) {
-    if (entry.kind === 'sql') {
-      // 짧은 stub DDL/Migration 본문. 실제 SQL 은 백엔드 wiring 후.
-      const tableName = entry.path.split('/').pop()?.replace(/\.(up\.)?sql$/, '') ?? 'table';
-      const body =
-        `-- ${entry.cat}\n` +
-        `-- ${entry.path}\n` +
-        `-- generated ${generatedAt}\n` +
-        `-- NOTE: placeholder. real content arrives when the backend export job is wired.\n` +
-        `\n` +
-        `-- TODO: ${tableName}\n`;
+    const project = projectOfEntry(entry);
+    const data = project && projectArtifacts ? projectArtifacts[project.id] : undefined;
+    const tableStem = tableStemOfEntry(entry);
+
+    if (entry.kind === 'sql' && entry.cat === 'Migration SQL') {
+      // 활성 snapshot 의 박제된 합성 SQL — table 별 .up.sql.
+      const sql = data?.compiledSqlByTable[tableStem.toLowerCase()];
+      const body = sql
+        ? `-- Migration SQL — ${tableStem}\n-- generated ${generatedAt}\n-- snapshot ${data!.snapshotId ?? '(none)'}\n\n${sql}\n`
+        : `-- Migration SQL — ${tableStem}\n-- generated ${generatedAt}\n-- NOTE: no run yet for this snapshot — table missing in execution_context.\n`;
+      zip.file(entry.path, body);
+    } else if (entry.kind === 'sql') {
+      // 기타 sql (현재 없음) — placeholder.
+      const body = `-- ${entry.cat}\n-- ${entry.path}\n-- generated ${generatedAt}\n-- TODO: ${tableStem}\n`;
       zip.file(entry.path, body);
     } else if (entry.cat === 'Site summary') {
-      // 사이트 단위 단일 워크북. 화면의 Site summary preview 와 1:1.
       const buf = await buildSiteSummaryWorkbook({ site, projects, schemas, generatedAt });
       zip.file(entry.path, buf);
+    } else if (entry.cat === 'Mapping' && data) {
+      // 활성 snapshot 의 frozen rules + DDL 로 buildDiff → 그 table 의 Diff/Summary 시트만.
+      const diff = buildDiff(data.rules, data.asisSchema, data.tobeSchema, data.successTables);
+      const tableMatch = diff.tables.find((t) => t.toLowerCase() === tableStem.toLowerCase());
+      try {
+        const blob = await buildXlsxBlob('diff', SHEETS.diff, (sheet) => {
+          if (!tableMatch) return [];
+          if (sheet === 'Diff') return diff.rows.filter((r) => String(r[1]) === tableMatch);
+          if (sheet === 'Summary') return diff.summaryByTable[tableMatch] ?? [];
+          return [];
+        });
+        zip.file(entry.path, await blob.arrayBuffer());
+      } catch {
+        const buf = await buildEmptyArtifactWorkbook({
+          category: entry.cat, projectName: project?.name ?? 'project', tableName: tableStem, generatedAt,
+        });
+        zip.file(entry.path, buf);
+      }
     } else {
-      // Mapping / Validation 등: 빈 .xlsx 워크북 (1 시트 Cover, 가짜 데이터 없음).
-      // 라벨이 .xlsx 라 약속한 대로 진짜 .xlsx 가 떨어지되, 본문은 "Not yet populated" 안내.
-      const fileName = entry.path.split('/').pop() ?? 'artifact';
-      const tableName = fileName.replace(/\.(map|report|pipeline)?\.xlsx$/, '');
-      const project = projectBySlug.get(entry.path.split('/')[1]) ?? null;
+      // Mapping (data 없음) / Validation 등: 기존 placeholder.
       const buf = await buildEmptyArtifactWorkbook({
         category: entry.cat,
         projectName: project?.name ?? 'project',
-        tableName,
+        tableName: tableStem,
         generatedAt,
       });
       zip.file(entry.path, buf);
+    }
+  }
+
+  // DDL (asis / tobe) 도 활성 snapshot 의 reconstruct 결과로 추가 — manifest 에는 없지만
+  // bundle 안엔 포함 (사용자 의도: 전체 프로젝트 산출물).
+  if (projectArtifacts) {
+    const bundleStem = manifest[0]?.path.split('/')[0] ?? 'site-export';
+    for (const project of projects) {
+      const data = projectArtifacts[project.id];
+      if (!data) continue;
+      const pslug = pathSafeName(project.name);
+      const asisDdl = reconstructDdl(data.asisSchema);
+      const tobeDdl = reconstructDdl(data.tobeSchema);
+      if (asisDdl) zip.file(`${bundleStem}/${pslug}/ddl/asis.ddl.sql`, asisDdl);
+      if (tobeDdl) zip.file(`${bundleStem}/${pslug}/ddl/tobe.ddl.sql`, tobeDdl);
     }
   }
 

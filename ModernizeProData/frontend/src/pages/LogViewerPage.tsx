@@ -12,6 +12,7 @@ import {
 } from '../api/runLogs';
 import { runsApi, type RunHistoryDto, type RunTableResult } from '../api/runs';
 import { quarantineApi } from '../api/quarantine';
+import { useSnapshotsStore, usePinnedSnapshotsStore } from '../store/snapshots';
 import { formatTimestamp, formatTimeMs, formatDuration } from '../lib/formatters';
 import { stageColor } from './logViewerMock';
 import {
@@ -54,7 +55,31 @@ export function LogViewerPage() {
     refetchOnWindowFocus: true,
     staleTime: 2_000,
   });
-  const runId = runHistory?.[0]?.id ?? '';
+  /* runHistory 가 비었거나 아직 로딩 중일 때 활성 snapshot 의 박제된 executionContext.runId
+     로 fallback. 활성 snapshot 우선순위: (1) pinned, (2) 가장 최근 mapping. 사용자가 pin 을
+     옛 snapshot 으로 옮기면 그 snapshot 의 logs 가 자동으로 보인다.
+     박제 안 된 snapshot 이면 runId 가 '' → empty state 표시 (사용자 결정). */
+  const snapshots = useSnapshotsStore((s) => s.snapshots);
+  const fetchSnapshots = useSnapshotsStore((s) => s.fetchByProject);
+  const pinnedIds = usePinnedSnapshotsStore((s) => s.pinnedIds);
+  useEffect(() => {
+    if (activeProjectId) void fetchSnapshots(activeProjectId);
+  }, [activeProjectId, fetchSnapshots]);
+  const snapshotFallbackRunId = useMemo(() => {
+    const projectMapping = snapshots.filter(
+      (s) => s.projectId === activeProjectId && s.type === 'mapping',
+    );
+    const pinned = projectMapping.find((s) => pinnedIds.includes(s.id));
+    const active = pinned
+      ?? [...projectMapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    return active?.executionContext?.runId ?? '';
+  }, [snapshots, activeProjectId, pinnedIds]);
+  /* 활성 snapshot 의 박제된 runId 가 있으면 그것 우선. 박제 없으면 — 그 snapshot 으로 한 번도
+     run 안 됐다는 뜻이라 empty 가 맞다 (사용자 결정 — 다른 snapshot 의 run logs 가 잘못 보이면 안 됨).
+     runHistory[0] (가장 최근 run) 은 fallback 으로도 안 씀: pin 을 옛 snapshot 으로 옮기면
+     runHistory[0] 는 새 snapshot 의 run 이라 stale. */
+  const runId = snapshotFallbackRunId;
+  void runHistory; // useQuery 는 다른 부수효과 (WS invalidate 캐시 키) 를 위해 유지.
 
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');

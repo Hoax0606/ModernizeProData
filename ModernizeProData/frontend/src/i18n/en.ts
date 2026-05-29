@@ -849,6 +849,8 @@ export const en: Record<TranslationKey, string> = {
   'artifacts.empty.title':        'No artifacts yet',
   'artifacts.empty.hint':         'Artifacts will appear here once mapping, snapshots and runs are in place.',
   'artifacts.empty.noItems':      '(no items yet)',
+  'artifacts.diff.noRun':         'No run yet. Once you run from Execution and tables succeed, they appear here.',
+  'artifacts.diff.notInLatestRun':'Not in latest run (disabled)',
   'artifacts.cat.dashboard':      'Dashboard snapshot',
   'artifacts.cat.diff':           'Schema diff',
   'artifacts.cat.ddl':            'DDL scripts',
