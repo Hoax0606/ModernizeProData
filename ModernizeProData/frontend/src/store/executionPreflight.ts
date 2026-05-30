@@ -208,7 +208,9 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
       // v3 → v4 (2026-05-26): PreflightCheck 가 per-table 化, selectedSnapshotId 撤去.
       // v4 → v5 (2026-05-26): preflightResults 撤去 — bySnapshot[snapshotId] が唯一의 真実.
       // v5 → v6 (2026-05-28): mock simulation 用 activeRun + runCounter 撤去 (BE 폴링이 진실).
-      version: 6,
+      // v6 → v7 (2026-05-30): TableCheckResult.detail (pre-resolved string) → detailKey + detailVars
+      //                       に変更. 旧 cache の bySnapshot は形が違うため drop し再 run を促す.
+      version: 7,
       migrate: (persistedState: unknown, _version: number) => {
         if (!persistedState || typeof persistedState !== 'object') return persistedState;
         const state = persistedState as { byProject?: Record<string, Partial<PreflightEntry> & { activeRun?: unknown; runCounter?: unknown; selectedSnapshotId?: unknown; preflightResults?: unknown }> };
@@ -216,12 +218,14 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
         const fixed: Record<string, PreflightEntry> = {};
         for (const id in state.byProject) {
           const entry = state.byProject[id];
-          /* activeRun, runCounter, selectedSnapshotId, preflightResults 모두 drop. */
+          /* activeRun, runCounter, selectedSnapshotId, preflightResults, bySnapshot 全て drop.
+             bySnapshot は旧 detail 形式が混じるため再 run を強制. */
           fixed[id] = {
             selectedTables: entry.selectedTables ?? [],
             preflightPhase: 'idle',
             isStale: false,
-            bySnapshot: entry.bySnapshot ?? {},
+            bySnapshot: {},
+            activeRunId: entry.activeRunId,
           };
         }
         return { ...state, byProject: fixed };

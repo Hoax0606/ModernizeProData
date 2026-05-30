@@ -579,9 +579,9 @@ export const ko = {
   'execution.preflight.check.connTobe.pass':               'latency 12 ms · 접속 정상',
   'execution.preflight.check.tobeBindings.title':          '모든 TO-BE 테이블 소스 바인딩',
   'execution.preflight.check.tobeBindings.pass':           '{n}개 테이블 모두 AS-IS 소스 바인딩 완료',
-  'execution.preflight.check.asisUnmapped.title':          '선택된 AS-IS 테이블의 컬럼 unmapped 여부',
+  'execution.preflight.check.asisUnmapped.title':          '모든 AS-IS 테이블의 컬럼 mapped',
   'execution.preflight.check.asisUnmapped.pass':           '모든 AS-IS 컬럼 매핑됨',
-  'execution.preflight.check.unmappedCols.title':          '모든 TO-BE 테이블의 컬럼 unmapped 여부',
+  'execution.preflight.check.unmappedCols.title':          '모든 TO-BE 테이블의 컬럼 mapped',
   'execution.preflight.check.unmappedCols.pass':           '모든 TO-BE 컬럼에 소스 지정됨',
 
   /* Pre-flight — per-table 化 new keys */

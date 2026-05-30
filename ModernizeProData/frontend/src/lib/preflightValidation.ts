@@ -18,7 +18,10 @@ export interface TableCheckResult {
   /** TO-BE physicalName, or '*' for project-wide rows. */
   table: string;
   status: CheckStatus;
-  detail: string;
+  /** i18n キーと vars.  PreflightResultPanel が render 時に t(...) で解決する.
+   *  ラベル変更 / 言語切替を再 run なしに反映するため pre-resolved 文字列ではなく key を保持. */
+  detailKey: TranslationKey;
+  detailVars?: Record<string, string | number>;
 }
 
 export interface PreflightCheckResult {
@@ -83,6 +86,24 @@ const ORDER: PreflightCheckId[] = [
   'unmapped-cols',
   'asis-unmapped',
 ];
+
+/**
+ * Check id → i18n title key.  PreflightResultPanel が cache に固定された `title` 文字列ではなく
+ * id から都度 t(...) で解決できるようにするための写像.  (i18n 文言を変えても再 run なしに反映される.)
+ */
+const TITLE_KEY_BY_ID: Record<PreflightCheckId, TranslationKey> = {
+  'csv-arrived':   'execution.preflight.check.csvArrived.title',
+  'ddl-asis':      'execution.preflight.check.ddlAsis.title',
+  'ddl-tobe':      'execution.preflight.check.ddlTobe.title',
+  'conn-tobe':     'execution.preflight.check.connTobe.title',
+  'tobe-bindings': 'execution.preflight.check.tobeBindings.title',
+  'unmapped-cols': 'execution.preflight.check.unmappedCols.title',
+  'asis-unmapped': 'execution.preflight.check.asisUnmapped.title',
+};
+
+export function titleKeyForId(id: PreflightCheckId): TranslationKey {
+  return TITLE_KEY_BY_ID[id];
+}
 
 export function runPreflight(input: PreflightInput): PreflightCheckResult[] {
   const ctx = buildContext(input);
@@ -173,7 +194,7 @@ function checkCsvArrived(ctx: Context): PreflightCheckResult {
       aggregate: 'fail',
       perTable: [{
         table: '*', status: 'fail',
-        detail: t('execution.preflight.check.csvArrived.failNoPath'),
+        detailKey: 'execution.preflight.check.csvArrived.failNoPath',
       }],
     };
   }
@@ -196,7 +217,7 @@ function checkCsvArrived(ctx: Context): PreflightCheckResult {
     if (asisTables.length === 0) {
       return {
         table: name, status: 'skip',
-        detail: t('execution.preflight.check.csvArrived.skipNoBinding'),
+        detailKey: 'execution.preflight.check.csvArrived.skipNoBinding',
       };
     }
     const missing: string[] = [];
@@ -207,14 +228,16 @@ function checkCsvArrived(ctx: Context): PreflightCheckResult {
     return missing.length === 0
       ? {
           table: name, status: 'pass',
-          detail: t('execution.preflight.check.csvArrived.passOne', { tables: asisTables.join(', ') }),
+          detailKey: 'execution.preflight.check.csvArrived.passOne',
+          detailVars: { tables: asisTables.join(', ') },
         }
       : {
           table: name, status: 'fail',
-          detail: t('execution.preflight.check.csvArrived.failOne', {
+          detailKey: 'execution.preflight.check.csvArrived.failOne',
+          detailVars: {
             n: missing.length,
             tables: missing.slice(0, 5).join(', '),
-          }),
+          },
         };
   });
   return {
@@ -239,9 +262,10 @@ function checkDdlAsis(ctx: Context): PreflightCheckResult {
     perTable: [{
       table: '*',
       status: pass ? 'pass' : 'fail',
-      detail: pass
-        ? t('execution.preflight.check.ddlAsis.pass', { n })
-        : t('execution.preflight.check.ddlAsis.fail'),
+      detailKey: pass
+        ? 'execution.preflight.check.ddlAsis.pass'
+        : 'execution.preflight.check.ddlAsis.fail',
+      detailVars: pass ? { n } : undefined,
     }],
   };
 }
@@ -258,9 +282,10 @@ function checkDdlTobe(ctx: Context): PreflightCheckResult {
     perTable: [{
       table: '*',
       status: pass ? 'pass' : 'fail',
-      detail: pass
-        ? t('execution.preflight.check.ddlTobe.pass', { n })
-        : t('execution.preflight.check.ddlTobe.fail'),
+      detailKey: pass
+        ? 'execution.preflight.check.ddlTobe.pass'
+        : 'execution.preflight.check.ddlTobe.fail',
+      detailVars: pass ? { n } : undefined,
     }],
   };
 }
@@ -283,7 +308,8 @@ function checkConnTobe(ctx: Context): PreflightCheckResult {
       aggregate: 'fail',
       perTable: [{
         table: '*', status: 'fail',
-        detail: t('execution.preflight.check.connTobe.failMissing', { env }),
+        detailKey: 'execution.preflight.check.connTobe.failMissing',
+        detailVars: { env },
       }],
     };
   }
@@ -299,7 +325,8 @@ function checkConnTobe(ctx: Context): PreflightCheckResult {
       aggregate: 'fail',
       perTable: [{
         table: '*', status: 'fail',
-        detail: t('execution.preflight.check.connTobe.failUntested', { env }),
+        detailKey: 'execution.preflight.check.connTobe.failUntested',
+        detailVars: { env },
       }],
     };
   }
@@ -311,9 +338,10 @@ function checkConnTobe(ctx: Context): PreflightCheckResult {
     perTable: [{
       table: '*',
       status: r.success ? 'pass' : 'fail',
-      detail: r.success
-        ? t('execution.preflight.check.connTobe.passConfigured', { env })
-        : t('execution.preflight.check.connTobe.failUnreachable', { env, msg: r.message }),
+      detailKey: r.success
+        ? 'execution.preflight.check.connTobe.passConfigured'
+        : 'execution.preflight.check.connTobe.failUnreachable',
+      detailVars: r.success ? { env } : { env, msg: r.message },
     }],
   };
 }
@@ -345,8 +373,8 @@ function checkTobeBindings(ctx: Context): PreflightCheckResult {
       return (b.sources?.length ?? 0) > 0;
     });
     return hasReal
-      ? { table: name, status: 'pass', detail: t('execution.preflight.check.tobeBindings.passOne') }
-      : { table: name, status: 'fail', detail: t('execution.preflight.check.tobeBindings.failOne') };
+      ? { table: name, status: 'pass', detailKey: 'execution.preflight.check.tobeBindings.passOne' }
+      : { table: name, status: 'fail', detailKey: 'execution.preflight.check.tobeBindings.failOne' };
   });
   return {
     id: 'tobe-bindings',
@@ -374,7 +402,7 @@ function checkUnmappedCols(ctx: Context): PreflightCheckResult {
   const perTable: TableCheckResult[] = tables.map((name) => {
     const tobeTable = ctx.tobeTableByName.get(name);
     if (!tobeTable) {
-      return { table: name, status: 'skip', detail: t('execution.preflight.check.unmappedCols.skipNoDdl') };
+      return { table: name, status: 'skip', detailKey: 'execution.preflight.check.unmappedCols.skipNoDdl' };
     }
     /* Mapping UI / Dashboard と同じ規約: 全カラムが mapping 要. ただし strategy='skip'
        の rule がついているカラムは「明示的に除외」なので OK 扱い. */
@@ -397,14 +425,19 @@ function checkUnmappedCols(ctx: Context): PreflightCheckResult {
       (c) => !mappedCols.has(c.physicalName) && !skippedCols.has(c.physicalName),
     );
     return missing.length === 0
-      ? { table: name, status: 'pass', detail: t('execution.preflight.check.unmappedCols.passOne', { n: totalCols }) }
+      ? {
+          table: name, status: 'pass',
+          detailKey: 'execution.preflight.check.unmappedCols.passOne',
+          detailVars: { n: totalCols },
+        }
       : {
           table: name,
           status: 'fail',
-          detail: t('execution.preflight.check.unmappedCols.failOne', {
+          detailKey: 'execution.preflight.check.unmappedCols.failOne',
+          detailVars: {
             n: missing.length,
             cols: missing.slice(0, 5).map((c) => c.physicalName).join(', '),
-          }),
+          },
         };
   });
   return {
@@ -418,10 +451,8 @@ function checkUnmappedCols(ctx: Context): PreflightCheckResult {
 
 function checkAsisUnmapped(ctx: Context): PreflightCheckResult {
   const t = ctx.t;
-  const tables = ctx.selectedTables;
-  const ready = ctx.tobeSchema && ctx.tobeSchema.tables.length > 0
-    && ctx.asisSchema && ctx.asisSchema.tables.length > 0;
-  if (!ready || tables.length === 0) {
+  const ready = ctx.asisSchema && ctx.asisSchema.tables.length > 0;
+  if (!ready) {
     return {
       id: 'asis-unmapped',
       title: t('execution.preflight.check.asisUnmapped.title'),
@@ -446,26 +477,14 @@ function checkAsisUnmapped(ctx: Context): PreflightCheckResult {
     }
   }
 
-  /* per-table 行은 AS-IS テーブル単位 (per-TO-BE ではない). Fix routing が AS-IS 측
-     MappingPage 를 열기 때문에、行の table = AS-IS physical name にしておく必要. */
-  const asisInScope = new Set<string>();
-  for (const name of tables) {
-    const bindings = ctx.bindingsByTobe.get(name) ?? [];
-    for (const asis of collectAsisTables(bindings)) asisInScope.add(asis);
-  }
-  if (asisInScope.size === 0) {
-    return {
-      id: 'asis-unmapped',
-      title: t('execution.preflight.check.asisUnmapped.title'),
-      scope: 'per-table',
-      aggregate: 'skip',
-      perTable: [],
-    };
-  }
-  const perTable: TableCheckResult[] = [...asisInScope].map((asis) => {
+  /* 2026-05-30: scope を 'selectedTables の bindings 経由 AS-IS' から
+     'AS-IS DDL に登録された全テーブル' へ変更.  unused AS-IS カラム検出は
+     project 全体で行うべき(=selection に依存させない)という方針合わせ. */
+  const asisInScope = ctx.asisSchema!.tables.map((tc) => tc.table.physicalName);
+  const perTable: TableCheckResult[] = asisInScope.map((asis) => {
     const def = ctx.asisTableByName.get(asis);
     if (!def) {
-      return { table: asis, status: 'skip', detail: t('execution.preflight.check.asisUnmapped.skipNoBinding') };
+      return { table: asis, status: 'skip', detailKey: 'execution.preflight.check.asisUnmapped.skipNoBinding' };
     }
     const unusedCols: string[] = [];
     for (const col of def.columns) {
@@ -473,14 +492,15 @@ function checkAsisUnmapped(ctx: Context): PreflightCheckResult {
       if (!usedAsisCols.has(key)) unusedCols.push(col.physicalName);
     }
     return unusedCols.length === 0
-      ? { table: asis, status: 'pass', detail: t('execution.preflight.check.asisUnmapped.passOne') }
+      ? { table: asis, status: 'pass', detailKey: 'execution.preflight.check.asisUnmapped.passOne' }
       : {
           table: asis,
           status: 'fail',
-          detail: t('execution.preflight.check.asisUnmapped.failOne', {
+          detailKey: 'execution.preflight.check.asisUnmapped.failOne',
+          detailVars: {
             n: unusedCols.length,
             cols: unusedCols.slice(0, 5).join(', '),
-          }),
+          },
         };
   });
   return {

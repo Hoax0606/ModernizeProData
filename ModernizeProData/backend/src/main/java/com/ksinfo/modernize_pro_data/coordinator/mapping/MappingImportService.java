@@ -1072,42 +1072,93 @@ public class MappingImportService {
     }
 
     /**
-     * AS-IS 가 string 인데 TO-BE 가 DATE/TIMESTAMP 인 경우 — 단순 CAST 로는 변환 안 됨
-     * (DuckDB 가 'YYYYMMDD' 같은 임의 포맷 캐스트 못 함). 컬럼 길이로 Oracle 의 흔한
-     * 포맷 추론해서 STRPTIME 사용.
-     *  - CHAR(8)  → 'YYYYMMDD'
-     *  - CHAR(14) → 'YYYYMMDDHH24MISS'
-     *  - CHAR(10) → 'YYYY-MM-DD'
-     *  - CHAR(19) → 'YYYY-MM-DD HH:MI:SS'
-     * 매칭 안 되면 null 리턴 → 호출부가 일반 CAST 로 폴백.
+     * AS-IS column → TO-BE DATE/TIMESTAMP 변환 SQL 생성.
+     *
+     * <p><b>Architecture 가정</b>: ExtractStage 가 {@code read_csv(all_varchar=true)} 로 CSV 적재
+     * — DuckDB asis_X 의 모든 컬럼은 실제로는 VARCHAR. asisType (DDL 선언) 은 문서/메타.
+     * 따라서 CAST 보다 STRPTIME 으로 명시 파싱이 안전.
+     *
+     * <p><b>asisType 분기</b> (2026-05-30, 가드 제거 후):
+     * <ul>
+     *   <li>TIMESTAMP WITH TIME ZONE — Oracle/SQLserver export 의 offset 포함 형식
+     *       ("YYYY-MM-DD HH:MM:SS.ffffff +HH:MM"). DuckDB CAST 가 '+09:00' 같은 offset 못 파싱 →
+     *       STRPTIME '%z' 직접 적용</li>
+     *   <li>TIMESTAMP (naive) — "YYYY-MM-DD HH:MM:SS[.ffffff]" 형식. STRPTIME 후 필요시 TIMESTAMPTZ cast</li>
+     *   <li>DATE — "YYYY-MM-DD" 형식</li>
+     *   <li>VARCHAR/CHAR — 길이 기반 추측 (기존 로직 유지)</li>
+     *   <li>기타 (numeric/boolean) — null 리턴 → CAST 폴백</li>
+     * </ul>
+     *
+     * <p><b>tobeType 가드</b>: target 이 DATE/TIMESTAMP/TIMESTAMPTZ 아니면 null (strptime 무의미).
+     *
+     * <p>매칭 안 되면 null 리턴 → 호출부가 일반 CAST 로 폴백.
      */
     private static String tryStringToDateSql(String src, String asisType, String tobeType) {
         if (asisType == null || tobeType == null) return null;
-        if (!"string".equals(typeCategory(asisType))) return null;
-        String t = tobeType.toUpperCase().trim();
-        boolean isDate = t.equals("DATE");
-        boolean isTimestampTz = t.contains("WITH TIME ZONE") || t.equals("TIMESTAMPTZ");
-        boolean isTimestamp = t.startsWith("TIMESTAMP");
-        if (!isDate && !isTimestamp) return null;
+        String aT = asisType.toUpperCase().trim();
+        String bT = tobeType.toUpperCase().trim();
 
-        int len = extractCharLength(asisType);
-        String fmt;
-        switch (len) {
-            case 8:  fmt = "%Y%m%d"; break;
-            case 14: fmt = "%Y%m%d%H%M%S"; break;
-            case 10: fmt = "%Y-%m-%d"; break;
-            case 19: fmt = "%Y-%m-%d %H:%M:%S"; break;
-            default:
-                // TIMESTAMPTZ target + 길이 >=25 → microsec + offset 포함 timestamp 문자열 가정.
-                // 운영팀 export 의 일반적 형식 "YYYY-MM-DD HH:MM:SS.ffffff +HH:MM" 를 strptime 으로 파싱.
-                if (isTimestampTz && len >= 25) {
-                    fmt = "%Y-%m-%d %H:%M:%S.%f %z";
-                    break;
-                }
-                return null;  // unknown — fallback to CAST
+        boolean targetIsDate = bT.equals("DATE");
+        boolean targetIsTimestampTz = bT.contains("WITH TIME ZONE") || bT.equals("TIMESTAMPTZ");
+        boolean targetIsTimestamp = bT.startsWith("TIMESTAMP");
+        if (!targetIsDate && !targetIsTimestamp) return null;
+
+        boolean asisIsString = "string".equals(typeCategory(asisType));
+        boolean asisIsTimestampTz = aT.contains("WITH TIME ZONE") || aT.contains("TIMESTAMPTZ");
+        boolean asisIsTimestamp = aT.startsWith("TIMESTAMP");
+        boolean asisIsDate = aT.equals("DATE");
+
+        /* DuckDB STRPTIME 은 list 형식 받아 첫 매칭 fmt 사용 — 같은 컬럼 내 변종 row 흡수.
+           예: Oracle DATE (DDL) 가 실제로는 시간 포함 export, 또는 microsec 유/무, offset 공백 유/무 등. */
+        String fmts;
+        boolean fmtHasTz;
+        if (asisIsTimestampTz) {
+            // 4 변종 — microsec ± offset 공백
+            fmts = "['%Y-%m-%d %H:%M:%S.%f %z', '%Y-%m-%d %H:%M:%S.%f%z', "
+                 + "'%Y-%m-%d %H:%M:%S %z', '%Y-%m-%d %H:%M:%S%z']";
+            fmtHasTz = true;
+        } else if (asisIsTimestamp) {
+            // Naive TIMESTAMP — microsec 유/무
+            fmts = "['%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S']";
+            fmtHasTz = false;
+        } else if (asisIsDate) {
+            // Oracle DATE = 실제로 timestamp (시간 포함) — date-only / date+time 둘 다 흡수.
+            // ::DATE 가 truncate 하므로 time 부분은 무시됨.
+            fmts = "['%Y-%m-%d', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M:%S.%f']";
+            fmtHasTz = false;
+        } else if (asisIsString) {
+            // 기존 length-based hint (VARCHAR(N) 의 N) — 단일 fmt.
+            int len = extractCharLength(asisType);
+            String fmt;
+            switch (len) {
+                case 8:  fmt = "%Y%m%d"; break;
+                case 14: fmt = "%Y%m%d%H%M%S"; break;
+                case 10: fmt = "%Y-%m-%d"; break;
+                case 19: fmt = "%Y-%m-%d %H:%M:%S"; break;
+                default:
+                    if (targetIsTimestampTz && len >= 25) {
+                        fmt = "%Y-%m-%d %H:%M:%S.%f %z";
+                        break;
+                    }
+                    return null;
+            }
+            fmts = "'" + fmt + "'";
+            fmtHasTz = fmt.contains("%z");
+        } else {
+            // numeric / boolean / etc. — strptime 의미 없음
+            return null;
         }
-        String parsed = "STRPTIME(" + src + ", '" + fmt + "')";
-        return isDate ? parsed + "::DATE" : parsed;
+
+        String parsed = "STRPTIME(" + src + ", " + fmts + ")";
+        if (targetIsDate) {
+            return parsed + "::DATE";
+        }
+        // TIMESTAMPTZ target with naive source (no %z) — 세션 TZ 가정으로 cast. 사용자가 다른 TZ
+        // 의도면 row editor 에서 명시 (예: STRPTIME(...) AT TIME ZONE 'Asia/Tokyo').
+        if (targetIsTimestampTz && !fmtHasTz) {
+            return parsed + "::TIMESTAMPTZ";
+        }
+        return parsed;
     }
 
     /** "CHAR(8)" / "VARCHAR2(60 CHAR)" 같은 형식에서 숫자 부분만 추출. */

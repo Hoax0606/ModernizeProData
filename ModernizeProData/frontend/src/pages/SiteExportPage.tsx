@@ -11,6 +11,7 @@ import {
 } from '../store/snapshots';
 import { snapshotApi } from '../api/workspace';
 import { runsApi, type TableResultView } from '../api/runs';
+import { validationApi, type ValidationReportDto } from '../api/validation';
 import {
   buildManifest,
   DEFAULT_FORMATS,
@@ -295,7 +296,7 @@ export function SiteExportPage() {
           ]);
           projectArtifacts[p.id] = {
             snapshotId: null, rules: [], asisSchema: asis, tobeSchema: tobe,
-            successTables: null, compiledSqlByTable: {},
+            successTables: null, compiledSqlByTable: {}, validationByTable: {},
           };
           return;
         }
@@ -315,6 +316,16 @@ export function SiteExportPage() {
             if (tr.compiledSql) compiledSqlByTable[tr.tobeTable.toLowerCase()] = tr.compiledSql;
           }
         }
+        /* validation_reports — snapshot 의 박제된 run 의 결과. runId 가 없으면 빈 map. */
+        const validationByTable: Record<string, ValidationReportDto> = {};
+        if (ctx?.runId) {
+          try {
+            const list = await validationApi.listByRun(ctx.runId);
+            for (const r of list) validationByTable[r.tobeTable] = r;
+          } catch {
+            /* 404 / 그 외 — run 이 너무 옛것이라 validation_reports row 없을 수도. silent. */
+          }
+        }
         projectArtifacts[p.id] = {
           snapshotId: active.id,
           rules: (mappingData?.rules ?? []) as unknown as DiffRule[],
@@ -322,6 +333,7 @@ export function SiteExportPage() {
           tobeSchema: tobe,
           successTables,
           compiledSqlByTable,
+          validationByTable,
         };
       }));
       // snapshots 변수는 의도적으로 사용 안 함 — getState() 직접 호출로 최신 보장.
