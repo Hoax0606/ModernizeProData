@@ -141,14 +141,16 @@ export function NotificationToast() {
               justifyContent: 'center',
               borderRadius: 2,
               lineHeight: 1,
-              fontSize: 10,
+              fontSize: 14,
+              fontWeight: 600,
             }}
             onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--panel-2)'; e.currentTarget.style.color = 'var(--text)'; }}
             onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-3)'; }}
+            aria-label="Close"
           >
-            {/* FontAwesome fa-xmark — inline SVG stroke (WebView 의 옛 WebKit 에서 불안정) 회피.
-                FontAwesome free 가 npm 패키지로 bundle 되어 폐쇄망에서도 동작. */}
-            <i className="fa-solid fa-xmark" aria-hidden="true" />
+            {/* Unicode ×. inline SVG stroke (WebView 옛 WebKit 불안정) 와 FontAwesome
+                (전역 CSS 충돌) 둘 다 회피. WebView 도 unicode glyph 는 안정. */}
+            ×
           </button>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 4 }}>
             <span style={{ fontWeight: 700 }}>{t.title}</span>

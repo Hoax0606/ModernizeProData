@@ -31,20 +31,23 @@ export function usePipelineProgress(
 ) {
   const queryClient = useQueryClient();
 
+  /* polling interval 2s → 4s (2026-05-30) — JavaFX WebView (WebKit ~v608) 가 빠른
+     polling + 큰 React tree re-render 누적에서 native crash. WebSocket subscribe 가
+     즉시 신호를 받으므로 polling 은 fallback 역할만 — 4s 도 사용자 체감 OK. */
   const runQuery = useQuery<RunHistoryDto>({
     queryKey: ['run', runId],
     enabled: !!runId,
     queryFn: () => runsApi.get(runId!),
-    refetchInterval: (q) => (isTerminal(q.state.data?.status) ? false : 2000),
-    staleTime: 1500,
+    refetchInterval: (q) => (isTerminal(q.state.data?.status) ? false : 4000),
+    staleTime: 3500,
   });
 
   const stagesQuery = useQuery<StageView[]>({
     queryKey: ['run-stages', runId],
     enabled: !!runId,
     queryFn: () => runsApi.stages(runId!),
-    refetchInterval: () => (isTerminal(runQuery.data?.status) ? false : 2000),
-    staleTime: 1500,
+    refetchInterval: () => (isTerminal(runQuery.data?.status) ? false : 4000),
+    staleTime: 3500,
   });
 
   /* WebSocket 옵션 채널 — STOMP `/topic/run/{id}/progress` 메시지 수신 시 즉시 invalidate.

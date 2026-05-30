@@ -1,12 +1,18 @@
-/* 한국어·영문 = Pretendard Variable (SF Pro 영감, 가변 가중치, 단일 파일).
+/* 모든 web font 를 npm 패키지에서 import — vite build 가 .woff2 를 dist 에 bundle 해서
+   폐쇄망 jpackage WebView 에서도 동작. 2026-05-30 회귀 fix — CDN @import 가 폐쇄망
+   에서 미접근 → 10s timeout 후 serif fallback (Times New Roman) 으로 표시되던 문제.
+   한국어·영문 = Pretendard Variable (SF Pro 영감, 가변 가중치, 단일 파일).
    일본어     = Noto Sans JP (가나·한자 표준).
-   코드      = JetBrains Mono. */
-@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.css');
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
-/* FontAwesome — local bundle. CDN 이 아니라 npm 패키지에서 import 해야 폐쇄망 jpackage
-   WebView 에서도 아이콘 (fa-folder-open / fa-trash / fa-link 등) 이 렌더링된다.
-   2026-05-30 회귀 fix — 이전엔 fa-solid 클래스만 박혀있고 font 자체 로드 누락. */
-@import '@fortawesome/fontawesome-free/css/all.min.css';
+   코드      = JetBrains Mono.
+   icon      = FontAwesome 부분 import (base utility + solid family). */
+@import 'pretendard/dist/web/variable/pretendardvariable.css';
+/* variable font (가변 가중치, 단일 woff2) — 옛 fontsource 의 weight 별 multi-subset
+   @font-face 정의는 WebKit 가 모든 subset 평가하느라 첫 paint 가 지연됐다. variable
+   은 단일 파일이라 즉시 사용 가능. */
+@import '@fontsource-variable/noto-sans-jp';
+@import '@fontsource-variable/jetbrains-mono';
+@import '@fortawesome/fontawesome-free/css/fontawesome.min.css';
+@import '@fortawesome/fontawesome-free/css/solid.min.css';
 
 :root, [data-theme="light"] {
   --bg: #f9fafb;
