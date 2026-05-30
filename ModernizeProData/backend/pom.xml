@@ -54,9 +54,21 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-validation</artifactId>
 		</dependency>
+		<!-- spring-boot-starter-web — Tomcat 대신 Undertow 사용 (부팅 -0.5~1s).
+		     Undertow = Wildfly 기반 lightweight servlet container. tomcat 와 동일 servlet API. -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-web</artifactId>
+			<exclusions>
+				<exclusion>
+					<groupId>org.springframework.boot</groupId>
+					<artifactId>spring-boot-starter-tomcat</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-undertow</artifactId>
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -113,18 +125,14 @@
 			<version>23.4.0.24.05</version>
 		</dependency>
 
-		<!-- JavaFX — jpackage 인스톨러의 native 창 (WebView 로 React 렌더링).
+		<!-- JavaFX — Stage/Scene 골격 (Worker wizard 의 URL+credentials form 만).
+		     UI rendering 은 OS 의 Edge (Chromium chrome-less window, app 모드) 사용 —
+		     JavaFX WebView/JCEF 모두 폐기 (2026-05-30). MSI 200MB 감소.
 		     scope=provided: fat jar 에 포함하지 않음. 런타임 모듈은 build.ps1 이
 		     JavaFX SDK 를 다운로드해서 jpackage 의 module-path 로 주입. -->
 		<dependency>
 			<groupId>org.openjfx</groupId>
 			<artifactId>javafx-controls</artifactId>
-			<version>${javafx.version}</version>
-			<scope>provided</scope>
-		</dependency>
-		<dependency>
-			<groupId>org.openjfx</groupId>
-			<artifactId>javafx-web</artifactId>
 			<version>${javafx.version}</version>
 			<scope>provided</scope>
 		</dependency>
