@@ -242,6 +242,20 @@ function demoteToAnalysisOnEdit(projectId: string | null) {
     void useWorkspaceStore.getState().setProjectPhase(projectId, 'analysis');
   }
 }
+
+/**
+ * binding 편집 시 baseline pin 해제. 편집된 mapping 상태가 frozen snapshot 과 달라졌으니
+ * baseline 유지하면 has-changes / 신규 snapshot 생성이 막힘. clearPin 가 backend
+ * snapshots.is_baseline=false 도 sync.
+ */
+function unpinBaselineOnEdit(projectId: string | null) {
+  if (!projectId) return;
+  const pinnedIds = usePinnedSnapshotsStore.getState().pinnedIds;
+  const baseline = useSnapshotsStore.getState().snapshots.find(
+    (s) => s.projectId === projectId && pinnedIds.includes(s.id),
+  );
+  if (baseline) usePinnedSnapshotsStore.getState().clearPin(baseline.id);
+}
 const EMPTY_SKIP_COLS: Record<string, Record<string, boolean>> = Object.freeze({}) as Record<string, Record<string, boolean>>;
 const EMPTY_ROW_EDITS: Record<string, RowEdit> = Object.freeze({}) as Record<string, RowEdit>;
 
@@ -597,6 +611,7 @@ export function MappingPage() {
       expandExpr: edit.expandExpr ?? null,
     }).catch((e) => console.warn('[mapping] upsertBinding failed', e));
     demoteToAnalysisOnEdit(activeProjectId);
+    unpinBaselineOnEdit(activeProjectId);
   }, [activeProjectId, readOnly]);
 
   const handleToggleAsisSkip = useCallback((tableName: string, colName: string, nextSkip: boolean) => {
@@ -1182,6 +1197,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
         expandExpr: newSharedFromProjectId ? undefined : bindingExpand,
         sharedFromProjectId: newSharedFromProjectId ?? undefined,
       });
+      demoteToAnalysisOnEdit(activeProjectIdForRow);
+      unpinBaselineOnEdit(activeProjectIdForRow);
       setLinkModalOpen(false);
     } catch (e) {
       console.warn('[mapping] applyLink failed', e);
@@ -3679,6 +3696,8 @@ function rulesEqual(a: FrozenRule[], b: MappingRuleDto[]): boolean {
 function bindingSignature(b: {
   tobeSchema: string; tobeTable: string;
   compositionKind: string; whereFilter?: string | null;
+  groupByExpr?: string | null; expandExpr?: string | null;
+  sharedFromProjectId?: string | null;
   sources: Array<{
     ordinal: number; asisSchema?: string | null; asisTable: string;
     alias: string; role: string; joinType?: string | null; joinOn?: string | null;
@@ -3692,6 +3711,9 @@ function bindingSignature(b: {
     k: `${b.tobeSchema}|${b.tobeTable}`,
     ck: b.compositionKind,
     wf: b.whereFilter ?? null,
+    gb: b.groupByExpr ?? null,
+    ex: b.expandExpr ?? null,
+    sf: b.sharedFromProjectId ?? null,
     srcs,
   });
 }
