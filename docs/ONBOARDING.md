@@ -937,6 +937,11 @@ failed tables need to be re-run.
 - `per-table` rows are expandable, showing the per-table breakdown.
 - `asis-unmapped` keys per-table rows by AS-IS physical name (not TO-BE) so
   the Fix button can navigate to the AS-IS side of MappingPage.
+- **`asis-unmapped` scope is project-wide (2026-05-30):** every AS-IS DDL
+  table is checked, not just AS-IS tables referenced by the currently
+  selected TO-BE tables' bindings. Rationale: unused AS-IS columns are a
+  project-level concern (mapping coverage), independent of which subset of
+  TO-BE tables the user happens to run this time.
 
 ### 18.3 Pin requirement
 
@@ -972,6 +977,15 @@ When the pinned snapshot changes on Execution, the display automatically
 switches to that snapshot's cached result (or empty = "not run yet"). No
 separate state reset needed.
 
+**Live i18n (persist v7, 2026-05-30):** `TableCheckResult` no longer carries
+a pre-resolved `detail: string`. Instead it stores `detailKey: TranslationKey`
++ `detailVars?: Record<string, string|number>`, and `PreflightResultPanel`
+calls `t(detailKey, detailVars)` at render. The check title is likewise
+resolved via `titleKeyForId(check.id)` (exported from `preflightValidation`).
+Result: changing an i18n label or switching language reflects on cached
+results immediately, no re-run required. Persist `v6 → v7` migration drops
+the old-shape `bySnapshot` (forces one re-run on upgrade).
+
 ### 18.6 Fix routing
 
 | Check id | Destination |
@@ -981,6 +995,13 @@ separate state reset needed.
 | `conn-tobe` | SiteSettings → TO-BE DB section |
 | `tobe-bindings` / `unmapped-cols` | `/mapping` with `state.fixTarget = { kind, table }`. MappingPage matches by qualified name / internalName / physicalName (`tt.short`). |
 | `asis-unmapped` | same as above but `kind: 'unmapped-asis'`, table = AS-IS physical name |
+
+**Aggregate Fix visibility (2026-05-30):** the Fix button on the aggregate
+row is shown only when `scope === 'project'` OR `fixIsProjectWide` is true.
+For per-table checks where per-table Fix buttons are already visible
+(`tobe-bindings` / `unmapped-cols` / `asis-unmapped`) the aggregate Fix is
+hidden as redundant — the per-table Fix already routes each failing row to
+the right destination with the correct `table` argument.
 
 ### 18.7 Demo modes
 

@@ -575,7 +575,7 @@ export const en: Record<TranslationKey, string> = {
   'execution.preflight.check.connTobe.pass':               'latency 12 ms · connection ok',
   'execution.preflight.check.tobeBindings.title':          'All TO-BE tables source-bound',
   'execution.preflight.check.tobeBindings.pass':           '{n} tables bound to AS-IS source',
-  'execution.preflight.check.asisUnmapped.title':          'Selected AS-IS tables column unmapped check',
+  'execution.preflight.check.asisUnmapped.title':          'All AS-IS tables column unmapped check',
   'execution.preflight.check.asisUnmapped.pass':           'All AS-IS columns mapped',
   'execution.preflight.check.unmappedCols.title':          'All TO-BE tables column unmapped check',
   'execution.preflight.check.unmappedCols.pass':           'All TO-BE columns have a source assigned',

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useT, type TranslationKey } from '../i18n';
 import type { PreflightCheck, CheckStatus } from '../store/executionPreflight';
+import { titleKeyForId } from '../lib/preflightValidation';
 
 type T = (key: TranslationKey, vars?: Record<string, string | number>) => string;
 
@@ -77,7 +78,8 @@ function CheckRow({
   const failCount = check.perTable.filter((r) => r.status === 'fail').length;
   const skipCount = check.perTable.filter((r) => r.status === 'skip').length;
   const total = check.perTable.length;
-  const projectDetail = !isPerTable ? (check.perTable[0]?.detail ?? '') : '';
+  const projectDetailRow = !isPerTable ? check.perTable[0] : undefined;
+  const projectDetail = projectDetailRow ? t(projectDetailRow.detailKey, projectDetailRow.detailVars) : '';
 
   const aggregateColor =
     check.aggregate === 'fail' ? 'var(--red)' :
@@ -104,7 +106,8 @@ function CheckRow({
             project 行でも chev セルを空 span として描画しないと、grid が 4 アイテムで
             列が前詰めになり Fix の X 位置が per-table 行とずれる. */}
         <StatusDot status={check.aggregate} />
-        <span style={styles.title}>{check.title}</span>
+        {/* cache に固定された check.title ではなく id から t() で都度解決 — i18n 変更が再 run なしに反映. */}
+        <span style={styles.title}>{t(titleKeyForId(check.id))}</span>
         <span
           style={{
             ...styles.detailInline,
@@ -116,7 +119,13 @@ function CheckRow({
         <span style={styles.chev} aria-hidden={!isPerTable}>
           {isPerTable ? (expanded ? '▾' : '▸') : ''}
         </span>
-        {check.aggregate === 'fail' && showFix && onFix ? (
+        {/* aggregate Fix は per-table Fix が表示されない場合のみ出す:
+            - project scope: per-table 行が無いので aggregate Fix のみ
+            - per-table + fixIsProjectWide=true (csv-arrived): per-table Fix を隠す造りなので aggregate Fix で代替
+            - per-table + fixIsProjectWide=false (tobe-bindings/unmapped-cols/asis-unmapped):
+              各行に per-table Fix があるため aggregate Fix は冗長 → 非表示 */}
+        {check.aggregate === 'fail' && showFix && onFix
+          && (check.scope === 'project' || check.fixIsProjectWide) ? (
           <button
             type="button"
             style={styles.fixBtn}
@@ -140,7 +149,7 @@ function CheckRow({
               <div key={row.table} style={styles.expandRow}>
                 <StatusDot status={row.status} small />
                 <span style={styles.expandTable}>{row.table}</span>
-                <span style={{ ...styles.expandDetail, color: detailColor(row.status) }}>{row.detail}</span>
+                <span style={{ ...styles.expandDetail, color: detailColor(row.status) }}>{t(row.detailKey, row.detailVars)}</span>
                 {/* fixIsProjectWide なチェック (例: csv-arrived) は per-table Fix を出さない —
                     全 fail 行が同じ project-wide 設定画面に飛ぶので冗長. aggregate Fix だけ残す. */}
                 {row.status === 'fail' && showFix && onFix && !check.fixIsProjectWide ? (
