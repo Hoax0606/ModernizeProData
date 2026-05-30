@@ -1282,6 +1282,11 @@ const ARGB_BY_VERDICT: Record<string, { bg: string; fg: string }> = {
   '✗ FAIL': { bg: 'FFF3D3D3', fg: 'FFA00000' },
   '✗':      { bg: 'FFF3D3D3', fg: 'FFA00000' },
   FAIL:     { bg: 'FFF3D3D3', fg: 'FFA00000' },
+  /* WARN (Talend Data Stewardship 패턴) — 표현 차이로 인한 false-positive 또는 canonical
+     비교 일치인 row. 노란 amber tint. ExcelJS 다운로드와 in-app preview 모두 사용. */
+  '⚠ WARN': { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  '⚠':      { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  WARN:     { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
 };
 
 /* ExcelJS 셀에 fill + font color 한번에 적용하는 헬퍼. */

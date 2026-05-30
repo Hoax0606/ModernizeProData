@@ -223,8 +223,12 @@ public class ValidationReportService implements StageRunner {
 
         long duckRows;
         long pgRows;
-        String duckChecksum = null;
-        String pgChecksum   = null;
+        /* raw = col::text (DBMS native). canonical = timestamp 컬럼은 통일 포맷, 나머지는 raw 와 동일.
+           PASS = raw 동일, WARN = canonical 동일 but raw 다름 (format-only diff), FAIL = canonical 도 다름. */
+        String duckChecksumRaw   = null;
+        String duckChecksumCanon = null;
+        String pgChecksumRaw     = null;
+        String pgChecksumCanon   = null;
 
         try (Statement duckSt = duckDbService.statement();
              Connection pgConn = pgCopyManager.openConnection(dbConfig);
@@ -264,22 +268,66 @@ public class ValidationReportService implements StageRunner {
             }
 
             for (DdlColumn c : dateCols) {
+                /* 3-level verdict (Talend Data Stewardship 패턴):
+                   PASS = raw 표현 동일 (DBMS 가 같은 형식으로 출력)
+                   WARN = canonical (TIMESTAMP type) 비교는 일치, raw 만 다름 — 표현 차이뿐 값은 동일
+                   FAIL = canonical 도 다름 — 실 데이터 차이
+                   양쪽 4 컬럼 한 query 로 가져옴: raw Min, raw Max, canonical Min, canonical Max. */
                 String col = quote(c.getPhysicalName());
-                String duckQ = "SELECT MIN(" + col + "), MAX(" + col + ") FROM " + fqDuck;
-                String pgQ   = "SELECT MIN(" + col + "), MAX(" + col + ") FROM " + fqPg;
-                String[] duckPair = scalarPair(duckSt, duckQ);
-                String[] pgPair   = scalarPair(pgSt,   pgQ);
+                String duckRaw   = col;
+                String pgRaw     = col;
+                String duckCanon = canonicalDateSql(c, false);
+                String pgCanon   = canonicalDateSql(c, true);
+
+                String duckQ = "SELECT MIN(" + duckRaw + ")::text, MAX(" + duckRaw + ")::text, "
+                             + "MIN(" + duckCanon + "), MAX(" + duckCanon + ") FROM " + fqDuck;
+                String pgQ   = "SELECT MIN(" + pgRaw   + ")::text, MAX(" + pgRaw   + ")::text, "
+                             + "MIN(" + pgCanon   + "), MAX(" + pgCanon   + ") FROM " + fqPg;
+                String[] duckQuad;
+                String[] pgQuad;
+                String tzWarnNote = null;
+                try {
+                    duckQuad = scalarN(duckSt, duckQ, 4);
+                    pgQuad   = scalarN(pgSt,   pgQ,   4);
+                } catch (Exception tzEx) {
+                    /* ICU 미설치 등으로 TIMESTAMPTZ 의 AT TIME ZONE 'UTC' 가 실패하면
+                       canonical 비교 skip, raw 만으로 PASS/FAIL 판정 (보수적). */
+                    log.warn("Date canonical compare failed for {} — falling back to raw only: {}",
+                            c.getPhysicalName(), tzEx.getMessage());
+                    String[] duckRawPair = scalarPair(duckSt,
+                            "SELECT MIN(" + duckRaw + ")::text, MAX(" + duckRaw + ")::text FROM " + fqDuck);
+                    String[] pgRawPair = scalarPair(pgSt,
+                            "SELECT MIN(" + pgRaw + ")::text, MAX(" + pgRaw + ")::text FROM " + fqPg);
+                    duckQuad = new String[]{duckRawPair[0], duckRawPair[1], duckRawPair[0], duckRawPair[1]};
+                    pgQuad   = new String[]{pgRawPair[0],   pgRawPair[1],   pgRawPair[0],   pgRawPair[1]};
+                    tzWarnNote = "TZ canonical compare unavailable (ICU extension may be missing) — raw comparison only";
+                }
+
+                boolean rawMin = eqStr(duckQuad[0], pgQuad[0]);
+                boolean rawMax = eqStr(duckQuad[1], pgQuad[1]);
+                boolean canonMin = eqStr(duckQuad[2], pgQuad[2]);
+                boolean canonMax = eqStr(duckQuad[3], pgQuad[3]);
+
+                String verdict;
+                String note = tzWarnNote;
+                if (rawMin && rawMax) {
+                    verdict = "PASS";
+                } else if (canonMin && canonMax) {
+                    verdict = "WARN";
+                    if (note == null) note = "values match in canonical form — display format differs between DuckDB/PG";
+                } else {
+                    verdict = "FAIL";
+                }
 
                 Map<String, Object> mm = new LinkedHashMap<>();
                 mm.put("column", c.getPhysicalName());
                 mm.put("type", displayType(c));
-                mm.put("asisMin", duckPair[0]);
-                mm.put("asisMax", duckPair[1]);
-                mm.put("tobeMin", pgPair[0]);
-                mm.put("tobeMax", pgPair[1]);
-                mm.put("verdict",
-                        (eqStr(duckPair[0], pgPair[0]) && eqStr(duckPair[1], pgPair[1]))
-                                ? "PASS" : "FAIL");
+                mm.put("asisMin", duckQuad[0]);
+                mm.put("asisMax", duckQuad[1]);
+                mm.put("tobeMin", pgQuad[0]);
+                mm.put("tobeMax", pgQuad[1]);
+                mm.put("verdict", verdict);
+                if (note != null) mm.put("note", note);
                 minMax.add(mm);
             }
 
@@ -299,48 +347,101 @@ public class ValidationReportService implements StageRunner {
 
             if (!pkCols.isEmpty() && !cols.isEmpty()) {
                 String orderBy = pkCols.stream().map(ValidationReportService::quote).collect(Collectors.joining(", "));
-                String concat  = cols.stream()
+
+                /* Raw concat (양쪽 동일 expression — col::text) */
+                String rawConcat = cols.stream()
                         .map(c -> "COALESCE(" + quote(c.getPhysicalName()) + "::text, '')")
                         .collect(Collectors.joining(", '|', "));
-                String rowHashExpr = "md5(concat(" + concat + "))";
-                String duckQ = "SELECT md5(string_agg(" + rowHashExpr + ", '' ORDER BY " + orderBy + ")) FROM " + fqDuck;
-                String pgQ   = "SELECT md5(string_agg(" + rowHashExpr + ", '' ORDER BY " + orderBy + ")) FROM " + fqPg;
-                duckChecksum = scalarString(duckSt, duckQ);
-                pgChecksum   = scalarString(pgSt,   pgQ);
+                /* Canonical concat — timestamp/date 는 통일 포맷, boolean 은 LOWER(::text), 나머지는 raw. */
+                String duckCanonConcat = cols.stream()
+                        .map(c -> {
+                            if (isDate(c))    return "COALESCE(" + canonicalDateSql(c, false) + ", '')";
+                            if (isBoolean(c)) return "COALESCE(" + canonicalBooleanSql(c)     + ", '')";
+                            return "COALESCE(" + quote(c.getPhysicalName()) + "::text, '')";
+                        })
+                        .collect(Collectors.joining(", '|', "));
+                String pgCanonConcat = cols.stream()
+                        .map(c -> {
+                            if (isDate(c))    return "COALESCE(" + canonicalDateSql(c, true) + ", '')";
+                            if (isBoolean(c)) return "COALESCE(" + canonicalBooleanSql(c)    + ", '')";
+                            return "COALESCE(" + quote(c.getPhysicalName()) + "::text, '')";
+                        })
+                        .collect(Collectors.joining(", '|', "));
+
+                String duckRawQ   = "SELECT md5(string_agg(md5(concat(" + rawConcat       + ")), '' ORDER BY " + orderBy + ")) FROM " + fqDuck;
+                String pgRawQ     = "SELECT md5(string_agg(md5(concat(" + rawConcat       + ")), '' ORDER BY " + orderBy + ")) FROM " + fqPg;
+                String duckCanonQ = "SELECT md5(string_agg(md5(concat(" + duckCanonConcat + ")), '' ORDER BY " + orderBy + ")) FROM " + fqDuck;
+                String pgCanonQ   = "SELECT md5(string_agg(md5(concat(" + pgCanonConcat   + ")), '' ORDER BY " + orderBy + ")) FROM " + fqPg;
+
+                duckChecksumRaw = scalarString(duckSt, duckRawQ);
+                pgChecksumRaw   = scalarString(pgSt,   pgRawQ);
+                try {
+                    duckChecksumCanon = scalarString(duckSt, duckCanonQ);
+                    pgChecksumCanon   = scalarString(pgSt,   pgCanonQ);
+                } catch (Exception tzEx) {
+                    /* ICU 미설치 등으로 TIMESTAMPTZ 처리 실패 — canonical 비교 skip. */
+                    log.warn("Checksum canonical compare failed for {} — raw only: {}",
+                            tobeTable, tzEx.getMessage());
+                    duckChecksumCanon = duckChecksumRaw;
+                    pgChecksumCanon   = pgChecksumRaw;
+                }
             }
         }
 
         Map<String, Object> rowCount = orderedMap(
                 "asis", duckRows, "tobe", pgRows,
                 "verdict", duckRows == pgRows ? "PASS" : "FAIL");
+
+        /* Checksum verdict — 3-level (PASS/WARN/FAIL):
+           - PK 없음 (cols 자체가 hash 못 만듦) → WARN
+           - raw 동일 → PASS
+           - canonical 동일 but raw 다름 → WARN (timestamp format diff 등)
+           - canonical 도 다름 → FAIL (실 데이터 차이) */
+        String checksumVerdict;
+        if (duckChecksumRaw == null) {
+            checksumVerdict = "WARN";
+        } else if (duckChecksumRaw.equals(pgChecksumRaw)) {
+            checksumVerdict = "PASS";
+        } else if (duckChecksumCanon != null && duckChecksumCanon.equals(pgChecksumCanon)) {
+            checksumVerdict = "WARN";
+        } else {
+            checksumVerdict = "FAIL";
+        }
         Map<String, Object> checksum = orderedMap(
-                "asis", duckChecksum == null ? "" : duckChecksum,
-                "tobe", pgChecksum   == null ? "" : pgChecksum,
-                "verdict",
-                duckChecksum == null ? "WARN" :
-                        (duckChecksum.equals(pgChecksum) ? "PASS" : "FAIL"));
+                "asis", duckChecksumRaw == null ? "" : duckChecksumRaw,
+                "tobe", pgChecksumRaw   == null ? "" : pgChecksumRaw,
+                "verdict", checksumVerdict);
+        if ("WARN".equals(checksumVerdict) && duckChecksumRaw != null) {
+            checksum.put("note", "values match in canonical form — display format differs (e.g., timestamp .0 padding)");
+        }
 
         List<Map<String, Object>> overview = new ArrayList<>();
         overview.add(orderedMap("item", "Row count", "asis", duckRows, "tobe", pgRows,
                 "verdict", duckRows == pgRows ? "PASS" : "FAIL"));
         overview.add(orderedMap("item", "Checksum SHA-256",
-                "asis", duckChecksum == null ? "(no PK)" : shortHash(duckChecksum),
-                "tobe", pgChecksum   == null ? "(no PK)" : shortHash(pgChecksum),
+                "asis", duckChecksumRaw == null ? "(no PK)" : shortHash(duckChecksumRaw),
+                "tobe", pgChecksumRaw   == null ? "(no PK)" : shortHash(pgChecksumRaw),
                 "verdict", checksum.get("verdict")));
         overview.add(orderedMap("item", "Sum reconciliation (" + numericCols.size() + " cols)",
                 "asis", numericCols.size() + " cols", "tobe", numericCols.size() + " cols",
-                "verdict", allPass(sumRecon) ? "PASS" : "FAIL"));
+                "verdict", rollupVerdict(sumRecon)));
         overview.add(orderedMap("item", "NULL parity (" + nullableCols.size() + " cols)",
                 "asis", nullableCols.size() + " cols", "tobe", nullableCols.size() + " cols",
-                "verdict", allPass(nullParity) ? "PASS" : "FAIL"));
+                "verdict", rollupVerdict(nullParity)));
         overview.add(orderedMap("item", "Min/Max parity (" + (numericCols.size() + dateCols.size()) + " cols)",
                 "asis", (numericCols.size() + dateCols.size()) + " cols",
                 "tobe", (numericCols.size() + dateCols.size()) + " cols",
-                "verdict", allPass(minMax) ? "PASS" : "FAIL"));
+                "verdict", rollupVerdict(minMax)));
         overview.add(orderedMap("item", "PK uniqueness", "asis", "OK", "tobe", "OK", "verdict", "PASS"));
 
         int totalChecks = overview.size();
-        int passedChecks = (int) overview.stream().filter(m -> "PASS".equals(m.get("verdict"))).count();
+        /* WARN 은 passed 로 카운트 — 실 데이터 동일 (format diff only) 이므로 audit 통과.
+           run-level "X of Y passed" 표시는 PASS+WARN. FAIL 만 실 손상. */
+        int passedChecks = (int) overview.stream()
+                .filter(m -> {
+                    String v = String.valueOf(m.get("verdict"));
+                    return "PASS".equals(v) || "WARN".equals(v);
+                }).count();
 
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("overview", overview);
@@ -371,6 +472,21 @@ public class ValidationReportService implements StageRunner {
         return dt.contains("timestamp") || dt.contains("datetime") || dt.contains("date");
     }
 
+    /** Boolean 컬럼 — DuckDB / PG 의 ::text 표현 차이 (TRUE/FALSE vs true/false, t/f 등) 정규화 필요. */
+    private static boolean isBoolean(DdlColumn c) {
+        if (c.getDataType() == null) return false;
+        String dt = c.getDataType().toLowerCase();
+        return dt.equals("boolean") || dt.equals("bool") || dt.equals("bit");
+    }
+
+    /** Boolean canonical — 양쪽 LOWER(::text) 로 통일. 'TRUE'/'FALSE'/'true'/'false'/'t'/'f' 등 변종 흡수.
+     *  단 BOOLEAN type 이 아니면서 VARCHAR 에 'TRUE'/'FALSE' 가 들어있는 경우도 cover (Transform CASE
+     *  WHEN 결과가 string 인 경우 — TO-BE DDL 은 BOOLEAN 인데 DuckDB tobe_ 는 VARCHAR 일 수 있음). */
+    private static String canonicalBooleanSql(DdlColumn c) {
+        String col = quote(c.getPhysicalName());
+        return "LOWER(NULLIF(" + col + "::text, ''))";
+    }
+
     private static String displayType(DdlColumn c) {
         String raw = c.getDataTypeRaw();
         return raw == null || raw.isBlank() ? c.getDataType() : raw;
@@ -386,6 +502,52 @@ public class ValidationReportService implements StageRunner {
             if (!"PASS".equals(r.get("verdict"))) return false;
         }
         return true;
+    }
+
+    /** 자식 row 들의 verdict 를 roll-up: any FAIL → FAIL, else any WARN → WARN, else PASS.
+     *  3-level (Talend Data Stewardship) 패턴. */
+    private static String rollupVerdict(List<Map<String, Object>> rows) {
+        boolean hasWarn = false;
+        for (Map<String, Object> r : rows) {
+            String v = String.valueOf(r.get("verdict"));
+            if ("FAIL".equals(v)) return "FAIL";
+            if ("WARN".equals(v)) hasWarn = true;
+        }
+        return hasWarn ? "WARN" : "PASS";
+    }
+
+    /** TO-BE DDL 의 date/timestamp/timestamptz 컬럼을 양쪽 dialect 에서 동일 string 으로 정규화.
+     *  DATE → 'YYYY-MM-DD'
+     *  TIMESTAMP → 'YYYY-MM-DD HH:MM:SS.uuuuuu' (6-digit microseconds, both DBMS)
+     *  TIMESTAMPTZ → UTC 변환 후 위와 동일 포맷 (양쪽 동일 wall-clock UTC)
+     *
+     *  Min/Max 비교 + Checksum hash input 둘 다 같은 helper 사용 — 일관성 보장. */
+    private static String canonicalDateSql(DdlColumn c, boolean pg) {
+        String t = c.getDataType() == null ? "" : c.getDataType().toUpperCase();
+        String col = quote(c.getPhysicalName());
+        if (pg) {
+            if (t.equals("DATE")) return "TO_CHAR(" + col + ", 'YYYY-MM-DD')";
+            if (t.contains("TIMESTAMPTZ") || t.contains("TIME ZONE")) {
+                return "TO_CHAR((" + col + ") AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US')";
+            }
+            return "TO_CHAR(CAST(" + col + " AS TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS.US')";
+        }
+        // DuckDB
+        if (t.equals("DATE")) return "STRFTIME(" + col + ", '%Y-%m-%d')";
+        if (t.contains("TIMESTAMPTZ") || t.contains("TIME ZONE")) {
+            return "STRFTIME(CAST(" + col + " AS TIMESTAMP WITH TIME ZONE) AT TIME ZONE 'UTC', '%Y-%m-%d %H:%M:%S.%f')";
+        }
+        return "STRFTIME(TRY_CAST(" + col + " AS TIMESTAMP), '%Y-%m-%d %H:%M:%S.%f')";
+    }
+
+    /** N 개 컬럼을 한 query 로 가져옴 — string 배열 반환. */
+    private static String[] scalarN(Statement st, String sql, int n) throws Exception {
+        try (ResultSet rs = st.executeQuery(sql)) {
+            rs.next();
+            String[] out = new String[n];
+            for (int i = 0; i < n; i++) out[i] = rs.getString(i + 1);
+            return out;
+        }
     }
 
     private static Map<String, Object> orderedMap(Object... pairs) {
