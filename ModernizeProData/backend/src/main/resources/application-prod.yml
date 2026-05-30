@@ -6,6 +6,16 @@
 # 환경 변수 DB_URL / DB_USER / DB_PASSWORD 로 override 가능.
 
 spring:
+  # 부팅 시간 단축 — bean 들 lazy 초기화. 첫 HTTP 요청 시 해당 bean 만 init (-3~5s).
+  # production desktop 앱 = backend 단일 사용자 + 1 process 라 lazy 안전.
+  main:
+    lazy-initialization: true
+
+  # Quartz 부팅 시 자동 시작 안 함 — 실제 trigger 등록 시점에 SchedulerInitializer 가
+  # 명시적으로 .start() 호출. 부팅 -0.5~1s.
+  quartz:
+    auto-startup: false
+
   datasource:
     url:      ${DB_URL:jdbc:postgresql://localhost:5432/mpd_meta}
     username: ${DB_USER:mpd}

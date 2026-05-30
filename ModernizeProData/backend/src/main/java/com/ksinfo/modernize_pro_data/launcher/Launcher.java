@@ -5,29 +5,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ksinfo.modernize_pro_data.ModernizeProDataApplication;
 import javafx.application.Application;
 import javafx.application.Platform;
-import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
-import javafx.scene.control.Alert;
-import javafx.scene.control.Alert.AlertType;
 import javafx.scene.control.Button;
-import javafx.scene.control.ButtonType;
 import javafx.scene.control.Label;
 import javafx.scene.control.PasswordField;
 import javafx.scene.control.TextField;
-import javafx.scene.control.TextInputDialog;
 import javafx.scene.image.Image;
 import javafx.scene.layout.BorderPane;
-import javafx.scene.layout.GridPane;
 import javafx.scene.layout.VBox;
-import javafx.scene.web.WebEngine;
-import javafx.scene.web.WebView;
-import javafx.stage.FileChooser;
 import javafx.stage.Stage;
-import javafx.stage.StageStyle;
-import netscape.javascript.JSObject;
 
-import java.util.Optional;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -71,7 +59,9 @@ public class Launcher {
             if ("worker".equalsIgnoreCase(mode)) {
                 WorkerApp.launch(args);
             } else {
-                GuiApp.launch(args);
+                // 2026-05-30 — Coordinator GUI 를 JavaFX WebView (옛 WebKit) 에서 JCEF
+                // (Chromium) 기반 Swing 으로 교체. modern React 앱 안정 + crash 차단.
+                new SwingGuiApp().start(args);
             }
         } else {
             SpringApplication app = new SpringApplication(ModernizeProDataApplication.class);
@@ -104,21 +94,8 @@ public class Launcher {
         } catch (Exception ignored) {}
     }
 
-    /** Build a fresh, temporary user-data-directory for the WebView so its
-     *  WebKit cache / localStorage / cookies don't leak between runs.
-     *  Without this, a stale /api/v1/health/info response from a previous
-     *  session can pin the UI to /login even after the server changed to
-     *  licenseStatus=MISSING. */
-    private static void wireFreshUserData(WebView webView) {
-        try {
-            File dir = Files.createTempDirectory("mpd-webview-").toFile();
-            dir.deleteOnExit();
-            webView.getEngine().setUserDataDirectory(dir);
-            System.out.println("WebView userDataDir = " + dir.getAbsolutePath());
-        } catch (Exception e) {
-            System.out.println("setUserDataDirectory failed: " + e.getMessage());
-        }
-    }
+    // wireFreshUserData 제거 (2026-05-30) — JavaFX WebView 폐기. Edge `--app` 의
+    // --user-data-dir 가 동일 역할 (EdgeAppLauncher 안).
 
     private static void readInstallerChoicesFromRegistry() {
         if (!System.getProperty("os.name", "").toLowerCase().contains("win")) return;
@@ -170,188 +147,11 @@ public class Launcher {
         } catch (Exception ignored) { /* default Windows icon is fine */ }
     }
 
-    /**
-     * JavaFX WebView's defaults silently swallow {@code window.confirm()} /
-     * {@code window.alert()} / {@code window.prompt()} -- confirm returns
-     * false, alert is dropped on the floor. Without these handlers every
-     * confirm() in the React app behaves as if the user clicked Cancel,
-     * which is why buttons like "Clear license" appeared to do nothing.
-     */
-    private static void wireJsDialogs(WebEngine engine, Stage owner) {
-        engine.setConfirmHandler(message -> {
-            Alert a = new Alert(AlertType.CONFIRMATION, message, ButtonType.OK, ButtonType.CANCEL);
-            a.setHeaderText(null);
-            a.initOwner(owner);
-            Optional<ButtonType> r = a.showAndWait();
-            return r.isPresent() && r.get() == ButtonType.OK;
-        });
-        engine.setOnAlert(evt -> {
-            Alert a = new Alert(AlertType.INFORMATION, evt.getData(), ButtonType.OK);
-            a.setHeaderText(null);
-            a.initOwner(owner);
-            a.showAndWait();
-        });
-        engine.setPromptHandler(data -> {
-            // Bridge — JS calls window.prompt('OPEN_LICENSE_FILE') to trigger
-            // a native FileChooser. We hijack the prompt handler because
-            // JavaFX 21's JSObject.setMember() exposes Java instances but
-            // does not surface their methods to JS (deep-reflection limit on
-            // unnamed modules). The prompt handler is the simplest channel
-            // that lets us synchronously return a String to JS.
-            if ("OPEN_LICENSE_FILE".equals(data.getMessage())) {
-                FileChooser fc = new FileChooser();
-                fc.setTitle("Select license file");
-                fc.getExtensionFilters().addAll(
-                        new FileChooser.ExtensionFilter("License (*.lic)", "*.lic"),
-                        new FileChooser.ExtensionFilter("JSON (*.json)", "*.json"),
-                        new FileChooser.ExtensionFilter("All files", "*.*"));
-                File f = fc.showOpenDialog(owner);
-                if (f == null) return null;
-                try {
-                    return Files.readString(f.toPath());
-                } catch (Exception ex) {
-                    System.out.println("readString failed: " + ex.getMessage());
-                    return null;
-                }
-            }
-            TextInputDialog d = new TextInputDialog(data.getDefaultValue());
-            d.setHeaderText(null);
-            d.setContentText(data.getMessage());
-            d.initOwner(owner);
-            return d.showAndWait().orElse(null);
-        });
-    }
+    // wireJsDialogs / wireJavaBridge / JavaConnector / loadingHtml 모두 제거 (2026-05-30).
+    // 옛 JavaFX WebView 의 JS dialog handler / license file bridge — Edge `--app` 의 Chromium
+    // 가 native dialog + file input 직접 처리.
 
-    /**
-     * Exposes a `window.javaConnector` JS object so the React UI can invoke
-     * native JavaFX dialogs (e.g. FileChooser). JavaFX 21 WebView does not
-     * surface a native file picker on `<input type="file">`, so we bridge it
-     * explicitly. Re-attached on every document load so SPA + full reloads
-     * both retain the binding.
-     */
-    private static void wireJavaBridge(WebEngine engine, Stage owner) {
-        engine.documentProperty().addListener((obs, oldDoc, newDoc) -> {
-            if (newDoc == null) return;
-            try {
-                JSObject window = (JSObject) engine.executeScript("window");
-                window.setMember("javaConnector", new JavaConnector(owner));
-                System.out.println("javaConnector bridge attached");
-            } catch (Exception e) {
-                System.out.println("javaConnector wiring failed: " + e.getMessage());
-            }
-        });
-    }
-
-    /**
-     * Public surface called from JS via {@code window.javaConnector.<method>()}.
-     * Methods run on the JavaFX Application Thread (the WebView JS engine
-     * already executes there), so we can open dialogs synchronously and
-     * return the chosen value.
-     */
-    public static class JavaConnector {
-        private final Stage owner;
-        JavaConnector(Stage owner) { this.owner = owner; }
-
-        /** Opens a native FileChooser, reads the selected file as UTF-8,
-         *  returns its content. Returns null if the user cancels. */
-        public String openLicenseFile() {
-            try {
-                FileChooser fc = new FileChooser();
-                fc.setTitle("Select license file");
-                fc.getExtensionFilters().addAll(
-                        new FileChooser.ExtensionFilter("License (*.lic)", "*.lic"),
-                        new FileChooser.ExtensionFilter("JSON (*.json)", "*.json"),
-                        new FileChooser.ExtensionFilter("All files", "*.*"));
-                File f = fc.showOpenDialog(owner);
-                if (f == null) return null;
-                return Files.readString(f.toPath());
-            } catch (Exception e) {
-                System.out.println("openLicenseFile error: " + e.getMessage());
-                return null;
-            }
-        }
-    }
-
-    /** Coordinator / Standalone -- own Spring Boot + PG + WebView 가 localhost. */
-    public static class GuiApp extends Application {
-        private static String[] startArgs = new String[0];
-
-        public static void launch(String[] args) {
-            startArgs = args;
-            Application.launch(GuiApp.class, args);
-        }
-
-        private ConfigurableApplicationContext springCtx;
-
-        @Override
-        public void start(Stage stage) {
-            WebView webView = new WebView();
-            wireFreshUserData(webView);
-            webView.getEngine().locationProperty().addListener((o, oldUrl, newUrl) ->
-                    System.out.println("WebView nav: " + newUrl));
-            webView.getEngine().loadContent(loadingHtml());
-            wireJsDialogs(webView.getEngine(), stage);
-            wireJavaBridge(webView.getEngine(), stage);
-
-            stage.setTitle("ModernizeProData");
-            tryLoadIcon(stage);
-            BorderPane root = new BorderPane(webView);
-            root.setStyle("-fx-font-family: 'Hoax Mono JP', 'Segoe UI', sans-serif;");
-            stage.setScene(new Scene(root, 1200, 760));
-            applyStandardWindowChrome(stage);
-            stage.setOnCloseRequest(e -> shutdown());
-            stage.show();
-            stage.centerOnScreen();
-
-            Thread bootThread = new Thread(() -> {
-                springCtx = new SpringApplicationBuilder(ModernizeProDataApplication.class)
-                        .headless(false)
-                        .listeners((ApplicationReadyEvent ev) ->
-                                Platform.runLater(() ->
-                                        // Cache-bust query so JavaFX WebView's WebKit cache can't
-                                        // serve a stale LICENSE_MISSING JSON from a previous run.
-                                        webView.getEngine().load(
-                                                "http://localhost:8080/?_=" + System.currentTimeMillis())))
-                        .run(startArgs);
-            }, "spring-boot-launcher");
-            bootThread.setDaemon(false);
-            bootThread.start();
-        }
-
-        private void shutdown() {
-            if (springCtx != null) {
-                try { SpringApplication.exit(springCtx, () -> 0); } catch (Exception ignored) {}
-            }
-            Platform.exit();
-            System.exit(0);
-        }
-
-        private String loadingHtml() {
-            return """
-                    <!doctype html>
-                    <html><head><meta charset="utf-8"><title>ModernizeProData</title>
-                    <style>
-                      body { font-family: 'Segoe UI', system-ui, sans-serif;
-                        display: flex; align-items: center; justify-content: center;
-                        height: 100vh; margin: 0; background: #f9fafb; color: #0e7268; }
-                      .panel { text-align: center; }
-                      .brand { margin: 0 0 24px; font-weight: 600; font-size: 28px; }
-                      .spinner { width: 48px; height: 48px; margin: 0 auto 18px;
-                        border: 4px solid #d4eae6; border-top-color: #0e7268;
-                        border-radius: 50%; animation: spin 0.9s linear infinite; }
-                      @keyframes spin { to { transform: rotate(360deg); } }
-                      .status { margin: 0; color: #678b86; font-size: 14px; }
-                      .hint { margin-top: 18px; color: #9bb5b0; font-size: 12px; max-width: 340px; }
-                    </style></head>
-                    <body><div class="panel">
-                      <div class="spinner"></div>
-                      <h1 class="brand">ModernizeProData</h1>
-                      <p class="status">Starting…</p>
-                      <p class="hint">backend, database, and UI are warming up.</p>
-                    </div></body></html>
-                    """;
-        }
-    }
+    // Coordinator / Standalone GUI = SwingGuiApp (2026-05-30).
 
     /**
      * Tiny i18n bag for the Worker wizard. WorkerApp is not part of the
@@ -899,64 +699,35 @@ public class Launcher {
                 }, "worker-spring-boot").start();
             }
 
-            WebView webView = new WebView();
-            wireFreshUserData(webView);
-            wireJsDialogs(webView.getEngine(), stage);
-
-            // worker 의 로그아웃은 WebView 안 React 의 "Sign out" 하나로 통일.
-            // React 가 Sign out → authApi.logout() (backend 세션 정리) → /login 으로
-            // 이동하는데, JavaFX 쪽 heartbeat 가 살아 있으면 60초 후 401 → 자동
-            // 재로그인으로 세션이 되살아난다. 그래서 WebView 가 /login 으로 가는
-            // 순간 (단, 한 번 앱에 진입한 뒤) heartbeat 를 끊고 credentials 화면으로
-            // 되돌린다. reachedApp 플래그로 초기 부팅 중 잠깐 스치는 /login 은 무시.
-            final boolean[] reachedApp = {false};
-            webView.getEngine().locationProperty().addListener((o, oldUrl, newUrl) -> {
-                System.out.println("WorkerWebView nav: " + newUrl);
-                if (newUrl == null || !newUrl.startsWith("http")) return;
-                if (newUrl.contains("/login")) {
-                    if (reachedApp[0]) {
-                        Platform.runLater(() -> {
-                            if (heartbeatThread != null) heartbeatThread.interrupt();
-                            jwt = null;
-                            authData = null;
-                            showCredentialsStep(coordUrl, username, null);
-                        });
-                    }
-                } else {
-                    reachedApp[0] = true;
-                }
-            });
-
-            // If the WebView fails to load the Coordinator URL (process died,
-            // network dropped mid-handshake, …), bail back to the credentials
-            // step with the failure reason — otherwise the user just sees a
-            // blank white panel.
-            webView.getEngine().getLoadWorker().stateProperty().addListener((o, oldS, newS) -> {
-                if (newS == javafx.concurrent.Worker.State.FAILED) {
-                    Throwable ex = webView.getEngine().getLoadWorker().getException();
-                    String reason = ex == null ? "unknown"
-                            : (ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage());
-                    Platform.runLater(() -> {
-                        if (heartbeatThread != null) heartbeatThread.interrupt();
-                        showCredentialsStep(coordUrl, username,
-                                WorkerI18n.t("worker.loadFailed", java.util.Map.of("reason", reason)));
-                    });
-                }
-            });
-
-            root.setCenter(webView);
-            // Cache-bust so a previously-blocked LICENSE_MISSING response can't
-            // be served by the WebView cache. bootstrap_* params hand the
-            // JWT/user info from the JavaFX form's login over to the React
-            // app's zustand store (read by src/bootstrap-from-url.ts) so
-            // the user doesn't have to sign in a second time.
+            // 2026-05-30 — JavaFX WebView 폐기, OS Edge `--app` (Chromium chrome-less window) 사용.
+            // bootstrap_* query 로 JWT/user 핸드오프 (React 의 bootstrap-from-url.ts 가 read).
             String sep = coordUrl.contains("?") ? "&" : "?";
             String bootstrap = buildBootstrapQuery();
-            webView.getEngine().load(coordUrl + sep + "_=" + System.currentTimeMillis() + bootstrap);
+            String fullUrl = coordUrl + sep + "_=" + System.currentTimeMillis() + bootstrap;
+
+            // wizard Stage 는 숨김 (Edge 가 main UI). Edge 종료 시 backend 도 stop.
+            Platform.runLater(() -> stage.setIconified(true));
+            Process edgeProc = EdgeAppLauncher.launch(fullUrl, "edge-app-worker");
+            if (edgeProc != null) {
+                new Thread(() -> {
+                    try {
+                        edgeProc.waitFor();
+                        System.out.println("Worker Edge process exited, shutting down");
+                        Platform.runLater(() -> {
+                            serverLogout();
+                            Platform.exit();
+                            System.exit(0);
+                        });
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    }
+                }, "worker-edge-watcher").start();
+            } else {
+                // Edge/Chrome 미발견 + default browser fallback. Stage 유지 (Stop 용).
+                Platform.runLater(() -> stage.setIconified(false));
+            }
 
             // selfRegister / heartbeat 은 Spring WorkerBootstrap 이 담당 (분산 실행 모드).
-            // 401 시 자동 재로그인도 WorkerBootstrap 의 heartbeat loop 에서 처리.
-            // 영구 credential 변경 같은 hard-fail 케이스는 운영자가 manual restart.
         }
 
         private JsonNode post(String coordUrl, String path, String body, boolean authed) throws Exception {

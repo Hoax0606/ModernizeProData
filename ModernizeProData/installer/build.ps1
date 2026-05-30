@@ -179,7 +179,23 @@ if ($jfxDllCount -eq 0) {
 }
 Write-Host "  Bundled $jfxDllCount JavaFX native DLLs into staging" -ForegroundColor Green
 
-if (Test-Path $Dest) { Remove-Item -Recurse -Force $Dest }
+# dist/ 안의 옛 MSI 가 install 중이라 file-lock 가능 — 최대 30 초 retry 후 fail.
+if (Test-Path $Dest) {
+    $attempts = 0
+    while ($attempts -lt 6) {
+        try {
+            Remove-Item -Recurse -Force $Dest -ErrorAction Stop
+            break
+        } catch {
+            $attempts++
+            if ($attempts -ge 6) {
+                throw "Cannot clear dist/ — file locked by another process (msiexec / install 중)? $($_.Exception.Message)"
+            }
+            Write-Host "  dist/ locked, waiting 5s (attempt $attempts/6)..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 5
+        }
+    }
+}
 New-Item -ItemType Directory -Path $Dest | Out-Null
 
 # === [6] Icon ===
@@ -329,6 +345,9 @@ function Invoke-JpackageForLang {
         '--java-options', "-Dspring.profiles.active=$profiles"
         '--java-options', '-Dmpd.gui.enabled=true'
         '--java-options', "-Dmpd.default-lang=$Lang"
+        # 부팅 시간 단축 — JIT 를 C1 (tier 1) 까지만 컴파일. 부팅 -1~2s. desktop 단일
+        # 사용자 환경에서 runtime perf 영향 미미.
+        '--java-options', '-XX:TieredStopAtLevel=1'
         # JavaFX native DLLs live alongside the fat jar inside $APPDIR.
         '--java-options', '-Djava.library.path=$APPDIR'
         '--win-per-user-install'
