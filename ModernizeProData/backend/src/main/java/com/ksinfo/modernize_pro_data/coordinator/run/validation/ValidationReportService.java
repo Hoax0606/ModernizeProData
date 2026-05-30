@@ -7,6 +7,8 @@ import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTable;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository;
 import com.ksinfo.modernize_pro_data.coordinator.load.PgCopyManager;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
@@ -44,9 +46,10 @@ import java.util.stream.Collectors;
  *
  * 일본 금융권 이행은 잔액·거래액 SUM 일치가 감사 법적 요건 — 이 stage 가 그 증빙물.
  *
- * <b>비파괴 stage</b>: 이 stage 가 failed 표시되어도 run status 는 영향 X.
- * LocalWorkerExecutor 가 'validation' 을 non-blocking 화이트리스트로 처리 (2026-05-30). 사용자가
- * 의도적으로 정한 "Validation report fail 은 정보성, Verify 와 audit trail 분리" 정책.
+ * <b>합병 정책 (2026-05-30)</b>: 다른 stage 와 동일 취급.
+ * FAIL 시 stage.status=failed → run.status=failed. WARN 은 stage.status=success (format diff only).
+ * 또한 FAIL 인 체크별로 {@link QuarantineService#record} 호출 — AuditStage 와 같은 quarantine 채널
+ * 에서 노출. stageLabel='validate.*' 로 구분. V-7 의 분리 정책 revert.
  */
 @Service
 @RequiredArgsConstructor
@@ -63,6 +66,7 @@ public class ValidationReportService implements StageRunner {
     private final RunLogIngestService runLogIngest;
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
+    private final QuarantineService quarantineService;
 
     @Override
     public String stageKey() {
@@ -113,7 +117,8 @@ public class ValidationReportService implements StageRunner {
                     .orElseGet(() -> ValidationReport.create(runId, binding.getId(), tobeSchema, tobeTable));
 
             try {
-                Map<String, Object> data = computeOne(schema, tobeSchema, tobeTable, cols, dbConfig);
+                Map<String, Object> data = computeOne(ctx, stage, binding, tableLabel,
+                        schema, tobeSchema, tobeTable, cols, dbConfig);
                 report.setReportData(data);
                 report.setTotalChecks(asInt(data.get("totalChecks")));
                 report.setPassedChecks(asInt(data.get("passedChecks")));
@@ -174,11 +179,11 @@ public class ValidationReportService implements StageRunner {
         stage.setDurationMs(Duration.between(startedAt, finishedAt).toMillis());
         stage.setTablesSuccess(successCount);
         stage.setTablesFailed(failedCount);
-        /* validation 은 non-blocking — failedCount > 0 라도 LocalWorkerExecutor 의 run-fail 체크에서
-           제외되므로 run status 영향 X. UI 에서는 stage tile 이 빨간색으로 보임 — 사용자 인지용. */
+        /* 2026-05-30 합병 정책: validation 도 다른 stage 와 동일 — failedCount>0 면 run 도 failed.
+           각 FAIL 항목별 quarantine entry 도 발생 (computeOne 안에서 record). */
         stage.setStatus(failedCount == 0 ? StageStatus.success : StageStatus.failed);
         if (failedCount > 0) {
-            stage.setErrorSummary(failedCount + " table(s) with validation issues — informational, run continues");
+            stage.setErrorSummary(failedCount + " table(s) with validation FAIL — see quarantine entries (stageLabel='validate.*')");
         }
         stageInstanceRepo.save(stage);
 
@@ -198,9 +203,11 @@ public class ValidationReportService implements StageRunner {
         stageInstanceRepo.save(stage);
     }
 
-    /* ---------- per-binding 계산 (변경 X) ---------- */
+    /* ---------- per-binding 계산 (2026-05-30 합병 정책 — FAIL 시 quarantine record) ---------- */
 
-    private Map<String, Object> computeOne(String duckSchema,
+    private Map<String, Object> computeOne(StageContext ctx, StageInstance stage,
+                                           MappingTableBinding binding, String tableLabel,
+                                           String duckSchema,
                                            String tobeSchema, String tobeTable,
                                            List<DdlColumn> cols,
                                            Map<String, Object> dbConfig) throws Exception {
@@ -245,15 +252,29 @@ public class ValidationReportService implements StageRunner {
                 String[] pgTriple   = scalarTriple(pgSt,   pgQ);
 
                 String typeLabel = displayType(c);
+                boolean sumPass = numericEq(duckTriple[0], pgTriple[0]);
                 Map<String, Object> sr = new LinkedHashMap<>();
                 sr.put("column", c.getPhysicalName());
                 sr.put("type", typeLabel);
                 sr.put("asisSum", numOrNull(duckTriple[0]));
                 sr.put("tobeSum", numOrNull(pgTriple[0]));
                 sr.put("deltaPercent", deltaPercent(duckTriple[0], pgTriple[0]));
-                sr.put("verdict", numericEq(duckTriple[0], pgTriple[0]) ? "PASS" : "FAIL");
+                sr.put("verdict", sumPass ? "PASS" : "FAIL");
                 sumRecon.add(sr);
+                if (!sumPass) {
+                    recordQuarantine(ctx, stage, binding, tableLabel,
+                            "validate.sum_recon", "Validation SUM mismatch — " + c.getPhysicalName(),
+                            List.of("column", "ASIS SUM", "TOBE SUM", "delta %"),
+                            List.of("metric", "asis_value", "tobe_value", "delta"),
+                            List.of(List.of(c.getPhysicalName(),
+                                    duckTriple[0] == null ? "" : duckTriple[0],
+                                    pgTriple[0] == null ? "" : pgTriple[0],
+                                    String.valueOf(deltaPercent(duckTriple[0], pgTriple[0])))),
+                            1);
+                }
 
+                boolean minMaxPass = numericEq(duckTriple[1], pgTriple[1])
+                                  && numericEq(duckTriple[2], pgTriple[2]);
                 Map<String, Object> mm = new LinkedHashMap<>();
                 mm.put("column", c.getPhysicalName());
                 mm.put("type", typeLabel);
@@ -261,10 +282,20 @@ public class ValidationReportService implements StageRunner {
                 mm.put("asisMax", numOrNull(duckTriple[2]));
                 mm.put("tobeMin", numOrNull(pgTriple[1]));
                 mm.put("tobeMax", numOrNull(pgTriple[2]));
-                mm.put("verdict",
-                        (numericEq(duckTriple[1], pgTriple[1]) && numericEq(duckTriple[2], pgTriple[2]))
-                                ? "PASS" : "FAIL");
+                mm.put("verdict", minMaxPass ? "PASS" : "FAIL");
                 minMax.add(mm);
+                if (!minMaxPass) {
+                    recordQuarantine(ctx, stage, binding, tableLabel,
+                            "validate.min_max", "Validation MIN/MAX mismatch — " + c.getPhysicalName(),
+                            List.of("column", "ASIS min/max", "TOBE min/max"),
+                            List.of("metric", "asis_value", "tobe_value"),
+                            List.of(List.of(c.getPhysicalName(),
+                                    (duckTriple[1] == null ? "" : duckTriple[1]) + " / "
+                                            + (duckTriple[2] == null ? "" : duckTriple[2]),
+                                    (pgTriple[1] == null ? "" : pgTriple[1]) + " / "
+                                            + (pgTriple[2] == null ? "" : pgTriple[2]))),
+                            1);
+                }
             }
 
             for (DdlColumn c : dateCols) {
@@ -329,20 +360,41 @@ public class ValidationReportService implements StageRunner {
                 mm.put("verdict", verdict);
                 if (note != null) mm.put("note", note);
                 minMax.add(mm);
+                /* WARN 은 format diff only — quarantine 발생 X. FAIL 만 record. */
+                if ("FAIL".equals(verdict)) {
+                    recordQuarantine(ctx, stage, binding, tableLabel,
+                            "validate.min_max", "Validation date MIN/MAX mismatch — " + c.getPhysicalName(),
+                            List.of("column", "ASIS min/max", "TOBE min/max"),
+                            List.of("metric", "asis_value", "tobe_value"),
+                            List.of(List.of(c.getPhysicalName(),
+                                    nullSafe(duckQuad[0]) + " / " + nullSafe(duckQuad[1]),
+                                    nullSafe(pgQuad[0])   + " / " + nullSafe(pgQuad[1]))),
+                            1);
+                }
             }
 
             for (DdlColumn c : nullableCols) {
                 String col = quote(c.getPhysicalName());
                 long duckNulls = scalarLong(duckSt, "SELECT COUNT(*) FROM " + fqDuck + " WHERE " + col + " IS NULL");
                 long pgNulls   = scalarLong(pgSt,   "SELECT COUNT(*) FROM " + fqPg   + " WHERE " + col + " IS NULL");
+                boolean nullPass = duckNulls == pgNulls;
                 Map<String, Object> np = new LinkedHashMap<>();
                 np.put("column", c.getPhysicalName());
                 np.put("type", displayType(c));
                 np.put("asisNulls", duckNulls);
                 np.put("tobeNulls", pgNulls);
                 np.put("delta", duckNulls - pgNulls);
-                np.put("verdict", duckNulls == pgNulls ? "PASS" : "FAIL");
+                np.put("verdict", nullPass ? "PASS" : "FAIL");
                 nullParity.add(np);
+                if (!nullPass) {
+                    recordQuarantine(ctx, stage, binding, tableLabel,
+                            "validate.null_parity", "Validation NULL count mismatch — " + c.getPhysicalName(),
+                            List.of("column", "ASIS NULLS", "TOBE NULLS"),
+                            List.of("metric", "asis_value", "tobe_value"),
+                            List.of(List.of(c.getPhysicalName(),
+                                    String.valueOf(duckNulls), String.valueOf(pgNulls))),
+                            Math.abs(duckNulls - pgNulls));
+                }
             }
 
             if (!pkCols.isEmpty() && !cols.isEmpty()) {
@@ -388,9 +440,18 @@ public class ValidationReportService implements StageRunner {
             }
         }
 
+        boolean rowCountPass = duckRows == pgRows;
         Map<String, Object> rowCount = orderedMap(
                 "asis", duckRows, "tobe", pgRows,
-                "verdict", duckRows == pgRows ? "PASS" : "FAIL");
+                "verdict", rowCountPass ? "PASS" : "FAIL");
+        if (!rowCountPass) {
+            recordQuarantine(ctx, stage, binding, tableLabel,
+                    "validate.row_count", "Validation row count mismatch — " + tableLabel,
+                    List.of("table", "ASIS rows", "TOBE rows"),
+                    List.of("metric", "asis_value", "tobe_value"),
+                    List.of(List.of(tableLabel, String.valueOf(duckRows), String.valueOf(pgRows))),
+                    Math.abs(duckRows - pgRows));
+        }
 
         /* Checksum verdict — 3-level (PASS/WARN/FAIL):
            - PK 없음 (cols 자체가 hash 못 만듦) → WARN
@@ -413,6 +474,16 @@ public class ValidationReportService implements StageRunner {
                 "verdict", checksumVerdict);
         if ("WARN".equals(checksumVerdict) && duckChecksumRaw != null) {
             checksum.put("note", "values match in canonical form — display format differs (e.g., timestamp .0 padding)");
+        }
+        if ("FAIL".equals(checksumVerdict)) {
+            recordQuarantine(ctx, stage, binding, tableLabel,
+                    "validate.checksum", "Validation SHA-256 checksum mismatch — " + tableLabel,
+                    List.of("table", "ASIS hash", "TOBE hash"),
+                    List.of("metric", "asis_value", "tobe_value"),
+                    List.of(List.of(tableLabel,
+                            duckChecksumRaw == null ? "" : duckChecksumRaw,
+                            pgChecksumRaw   == null ? "" : pgChecksumRaw)),
+                    1);
         }
 
         List<Map<String, Object>> overview = new ArrayList<>();
@@ -455,6 +526,39 @@ public class ValidationReportService implements StageRunner {
         data.put("passedChecks", passedChecks);
         return data;
     }
+
+    /* ---------- Quarantine record helper (2026-05-30 합병 정책) ---------- */
+
+    /** FAIL 인 validation 체크별로 quarantine_entries 1 row 발생. AuditStage 의 record 패턴.
+     *  WARN 은 호출하지 않음 (format diff only — audit 무관). */
+    private void recordQuarantine(StageContext ctx, StageInstance stage,
+                                  MappingTableBinding binding, String tableLabel,
+                                  String stageLabel, String reason,
+                                  List<String> columns, List<String> columnRoles,
+                                  List<List<Object>> sampleRows, long rowCount) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("reason", reason);
+        data.put("detail", tableLabel + " — " + stageLabel);
+        data.put("severity", "error");
+        data.put("stageLabel", stageLabel);
+        data.put("table", tableLabel);
+        data.put("columns", columns);
+        data.put("columnRoles", columnRoles);
+        data.put("sampleRows", sampleRows);
+        quarantineService.record(
+                ctx.getRunHistory().getId(),
+                stage.getId(),
+                binding.getId(),
+                null,
+                reason,
+                QuarantineSeverity.error,
+                data,
+                rowCount,
+                ctx.getLogLineSeqCursor());
+    }
+
+    /** null 안전 toString — sampleRows 안의 String 변환용. */
+    private static String nullSafe(String s) { return s == null ? "" : s; }
 
     /* ---------- 유틸 (변경 X) ---------- */
 

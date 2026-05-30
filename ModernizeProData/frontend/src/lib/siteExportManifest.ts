@@ -2,12 +2,15 @@ import JSZip from 'jszip';
 import ExcelJS from 'exceljs';
 import type { Site, Project } from '../store/workspace';
 import type { DdlSchema } from '../api/asisDdl';
-import { buildDiff, reconstructDdl, buildXlsxBlob, SHEETS, type DiffRule } from '../pages/ArtifactsPage';
+import { buildDiff, reconstructDdl, buildXlsxBlob, SHEETS, validationRowsFor, type DiffRule } from '../pages/ArtifactsPage';
+import type { ValidationReportDto } from '../api/validation';
 
 /* Site export — manifest 생성 + client-side zip bundle 생성.
- * 백엔드 export job 이 아직 없으므로 .sql 은 stub 텍스트,
- * Mapping / Validation 의 .xlsx 자리는 placeholder.txt 로 zip.
- * Site summary 만은 TO-BE DDL 데이터로 실제 .xlsx 를 ExcelJS 로 만든다. */
+ * 2026-05-30 update: 4 카테고리 모두 실 데이터 wire.
+ * - Migration SQL: stage_table_results.compiled_sql
+ * - Mapping: buildDiff() 결과 .xlsx
+ * - Validation: validation_reports → validationRowsFor() .xlsx
+ * - Site summary: TO-BE DDL 기반 .xlsx (변경 X) */
 
 export type ArtifactCat =
   | 'Migration SQL'
@@ -162,6 +165,9 @@ export interface ProjectArtifactData {
   successTables: Set<string> | null;
   /** snapshot.executionContext.load 의 합성 SQL — TOBE 테이블 (lowercase) → SQL. */
   compiledSqlByTable: Record<string, string>;
+  /** validation_reports — snapshot.executionContext.runId 의 per-binding report.
+   *  key = tobe_table (case-sensitive). run 없거나 binding 미포함 시 비어있음. */
+  validationByTable: Record<string, ValidationReportDto>;
 }
 
 interface BuildZipArgs {
@@ -233,8 +239,25 @@ export async function generateZipBundle({
         });
         zip.file(entry.path, buf);
       }
+    } else if (entry.cat === 'Validation' && data) {
+      /* 2026-05-30: validation_reports 실 데이터 → 5 시트 (Overview / Sum recon / NULL parity /
+         Min Max / Range). table 명으로 lookup. */
+      const validationDto = data.validationByTable[tableStem]
+                         ?? Object.entries(data.validationByTable)
+                                  .find(([k]) => k.toLowerCase() === tableStem.toLowerCase())?.[1]
+                         ?? null;
+      try {
+        const blob = await buildXlsxBlob('validation', SHEETS.validation,
+            (sheet) => validationRowsFor(validationDto, sheet));
+        zip.file(entry.path, await blob.arrayBuffer());
+      } catch {
+        const buf = await buildEmptyArtifactWorkbook({
+          category: entry.cat, projectName: project?.name ?? 'project', tableName: tableStem, generatedAt,
+        });
+        zip.file(entry.path, buf);
+      }
     } else {
-      // Mapping (data 없음) / Validation 등: 기존 placeholder.
+      // Mapping (data 없음) 등: fallback placeholder.
       const buf = await buildEmptyArtifactWorkbook({
         category: entry.cat,
         projectName: project?.name ?? 'project',

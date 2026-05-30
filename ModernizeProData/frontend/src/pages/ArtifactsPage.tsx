@@ -41,7 +41,7 @@ export interface Category {
 export const CATEGORIES: Category[] = [
   { key: 'dashboard',  labelKey: 'artifacts.cat.dashboard',  suffix: '.dashboard.xlsx', icon: '▣', single: true, downloadType: 'xlsx' },
   /* 구 'Schema diff' — 사용자 노출 라벨은 'Mapping', 파일 확장자도 .map.xlsx 로 통일.
-     내부 key 는 'diff' 그대로 유지 (코드 전반의 SHEETS.diff / MOCK_ROWS.diff / 등이 참조). */
+     내부 key 는 'diff' 그대로 유지 (코드 전반의 SHEETS.diff / buildDiff 등이 참조). */
   { key: 'diff',       labelKey: 'artifacts.cat.mapping',    suffix: '.map.xlsx',       icon: '◨', downloadType: 'xlsx' },
   { key: 'ddl',        labelKey: 'artifacts.cat.ddl',        suffix: '.ddl.sql',        icon: '▤', single: true, viewType: 'sql' },
   { key: 'sql',        labelKey: 'artifacts.cat.sql',        suffix: '.migrate.sql',    icon: '↦', viewType: 'sql' },
@@ -170,251 +170,9 @@ export const SHEETS: Record<CategoryKey, SheetSchema[]> = {
   ],
 };
 
-/* ───────────────────────────────────────────────────────────────
-   Mock data — 실제 산출물 데이터가 없을 때 데모용으로 사용.
-   실데이터 wiring 이 완료되면 MOCK_ROWS / MOCK_FORMULA_CTX 와
-   ExcelWorkbook 안의 mock 참조를 제거하면 된다.
-   ─────────────────────────────────────────────────────────────── */
 
 export type Cell = string | number | boolean | null;
 
-const MOCK_ROWS: Record<CategoryKey, Record<string, Cell[][]>> = {
-  dashboard: {
-    Overview: [
-      ['Dashboard snapshot', null, null, null],
-      ['Captured', '2026-04-21 09:41 JST', null, null],
-      ['Run',      'run-2026-0421-0914',  null, null],
-      ['Author',   'KS Info System',       null, null],
-      ['Metric',           'Value',         'Unit',    'Note'],
-      ['Tables',           18,              'count',   '10 complete / 5 active'],
-      ['Rows total',       '1,555,760,862', 'rows',    'all selected tables'],
-      ['Rows migrated',    '509,883,778',   'rows',    '32.77% overall'],
-      ['Overall progress', '32.77%',        'percent', 'sum of done ÷ sum of rows'],
-      ['Mapping rules',    574,             'count',   'applied across tables'],
-      ['Open issues',      7,               'count',   'see Issues sheet'],
-    ],
-    Tables: [
-      ['ACCT_MASTER',       'PROD_LEG', 38_400_000,  38_400_000,  '100%',   42, 0, 'done',    '2026-04-20 22:14'],
-      ['TXN_JOURNAL_2023',  'PROD_LEG', 220_510_000, 120_400_000, '54.60%', 68, 2, 'running', '2026-04-21 09:30'],
-      ['TXN_JOURNAL_2024',  'PROD_LEG', 185_300_000, 120_400_000, '64.97%', 68, 0, 'running', '2026-04-21 09:30'],
-      ['CUST_PROFILE',      'PROD_LEG', 4_250_000,   4_250_000,   '100%',   35, 0, 'done',    '2026-04-20 22:14'],
-      ['KYC_DOCUMENT',      'PROD_LEG', 890_000,     0,           '0%',     24, 1, 'blocked', '2026-04-19 14:00'],
-      ['LOAN_APPLICATION',  'PROD_LEG', 2_300_000,   2_300_000,   '100%',   48, 0, 'done',    '2026-04-20 22:14'],
-      ['LOAN_DISBURSEMENT', 'PROD_LEG', 1_800_000,   1_100_000,   '61.11%', 41, 0, 'running', '2026-04-21 09:35'],
-      ['LOAN_REPAYMENT',    'PROD_LEG', 15_400_000,  8_900_000,   '57.79%', 56, 0, 'running', '2026-04-21 09:35'],
-      ['CARD_MASTER',       'PROD_LEG', 3_200_000,   3_200_000,   '100%',   32, 0, 'done',    '2026-04-20 22:14'],
-      ['CARD_AUTH_LOG',     'PROD_LEG', 450_000_000, 280_500_000, '62.33%', 29, 0, 'running', '2026-04-21 09:30'],
-      ['FX_RATE_DAILY',     'PROD_LEG', 450_000,     450_000,     '100%',   18, 0, 'done',    '2026-04-20 22:14'],
-      ['FX_POSITION',       'PROD_LEG', 120_000,     120_000,     '100%',   25, 0, 'done',    '2026-04-20 22:14'],
-      ['GL_ENTRY',          'PROD_LEG', 608_220_862, 140_393_778, '23.08%', 88, 4, 'warn',    '2026-04-21 09:35'],
-    ],
-    Issues: [
-      ['TXN_JOURNAL_2023', 'running', 2, 'see logs for detail'],
-      ['KYC_DOCUMENT',     'blocked', 1, 'migration halted — needs triage'],
-      ['GL_ENTRY',         'warn',    4, 'encoded with warnings'],
-    ],
-  },
-  /* diff/validation 은 child 테이블 별로 다른 데이터를 가져야 해서 별도 상수 MOCK_ROWS_BY_TABLE 로 분리.
-     여기서는 비워둠 — lookup 이 MOCK_ROWS_BY_TABLE 를 먼저 본다. */
-  diff: {},
-  /* ddl 은 SQL 뷰 — grid 데이터가 아니라 reconstructDdl 로 만든 SQL 문자열을 사용. */
-  ddl: {},
-  sql: {
-    'Migration SQL': [
-      [1, 'CREATE',       'm_user',  'CREATE TABLE m_user (id BIGINT PRIMARY KEY, ...)',  true,  '2026-05-23 14:30:00'],
-      [2, 'INSERT',       'm_user',  'INSERT INTO m_user SELECT ... FROM legacy_user',    true,  '2026-05-23 14:30:15'],
-      [3, 'ALTER',        'm_order', 'ALTER TABLE m_order ADD COLUMN status VARCHAR(20)', true,  '2026-05-23 14:31:02'],
-      [4, 'INSERT',       'm_order', 'INSERT INTO m_order SELECT ... FROM legacy_order',  false, null],
-      [5, 'CREATE INDEX', 'm_user',  'CREATE INDEX idx_user_email ON m_user(email)',      false, null],
-    ],
-  },
-  /* validation 은 child 테이블 별로 다른 데이터 — MOCK_ROWS_BY_TABLE 로 분리. */
-  validation: {},
-};
-
-/* ───────────────────────────────────────────────────────────────
-   MOCK_ROWS_BY_TABLE — diff/validation 의 child 테이블별 mock 데이터.
-   사이드바에서 테이블을 바꾸면 각 sheet 의 행이 바뀌어서, 어떤 항목이 변하는지
-   바로 보인다. 실데이터 wiring 시 이 자리를 백엔드 응답으로 교체.
-   ─────────────────────────────────────────────────────────────── */
-const MOCK_ROWS_BY_TABLE: Record<'diff' | 'validation', Record<string, Record<string, Cell[][]>>> = {
-  diff: {
-    acct_master: {
-      Diff: [
-        ['typed',     'ACCT_MASTER', 'ACCT_ID',     'VARCHAR2(20)',  'NO',  'account_id',     'VARCHAR(20)',   'NO',  'rename + lower'],
-        ['typed',     'ACCT_MASTER', 'BAL_AMT',     'NUMBER(15,2)',  'NO',  'balance_amount', 'NUMERIC(15,2)', 'NO',  'cast NUMBER → NUMERIC'],
-        ['typed',     'ACCT_MASTER', 'KYC_LV',      'NUMBER(2)',     'NO',  'kyc_level',      'SMALLINT',      'NO',  'cast NUMBER(2) → SMALLINT'],
-        ['typed',     'ACCT_MASTER', 'AML_FLG',     'CHAR(1)',       'NO',  'aml_flag',       'BOOLEAN',       'NO',  "case 'Y'/'N' → BOOLEAN"],
-        ['unchanged', 'ACCT_MASTER', 'CUST_ID',     'VARCHAR2(20)',  'NO',  'customer_id',    'VARCHAR(20)',   'NO',  'rename'],
-        ['unchanged', 'ACCT_MASTER', 'BRANCH_CD',   'CHAR(3)',       'NO',  'branch_code',    'CHAR(3)',       'NO',  'rename'],
-        ['unchanged', 'ACCT_MASTER', 'STATUS',      'VARCHAR2(8)',   'NO',  'status',         'VARCHAR(8)',    'NO',  'rename'],
-        ['added',     'ACCT_MASTER', null,          null,            null,  'tenant_id',      'VARCHAR(8)',    'NO',  "default 'T01'"],
-      ],
-      Summary: [
-        ['Schema diff summary', null, null, null],
-        ['ASIS table',     'CORE_ACCT_MASTER', null, null],
-        ['TOBE table',     'public.account',   null, null],
-        ['ASIS columns',   17,                 null, null],
-        ['TOBE columns',   18,                 null, null],
-        ['Kind',           'Count', '% of TOBE', 'Note'],
-        ['+ added',        1,       '5.56%',     'tenant_id'],
-        ['→ renamed',      4,       '22.22%',    'ACCT_ID, CUST_ID, BRANCH_CD, STATUS'],
-        ['~ typed',        2,       '11.11%',    'BAL_AMT, KYC_LV (cast)'],
-        ['unchanged',      13,      '72.22%',    null],
-      ],
-    },
-    cust_profile: {
-      Diff: [
-        ['renamed',   'CUST_PROFILE', 'CUST_NM',    'VARCHAR2(120)', 'NO',  'customer_name', 'VARCHAR(120)', 'NO',  'rename'],
-        ['renamed',   'CUST_PROFILE', 'BIRTH_DT',   'DATE',          'YES', 'birth_date',    'DATE',         'YES', 'rename'],
-        ['renamed',   'CUST_PROFILE', 'EMAIL',      'VARCHAR2(120)', 'YES', 'email',         'VARCHAR(120)', 'YES', 'rename'],
-        ['renamed',   'CUST_PROFILE', 'ADDR_LINE1', 'VARCHAR2(200)', 'YES', 'address_line1', 'VARCHAR(200)', 'YES', 'rename'],
-        ['renamed',   'CUST_PROFILE', 'ADDR_LINE2', 'VARCHAR2(200)', 'YES', 'address_line2', 'VARCHAR(200)', 'YES', 'rename'],
-        ['renamed',   'CUST_PROFILE', 'CITY_CD',    'VARCHAR2(8)',   'YES', 'city_code',     'VARCHAR(8)',   'YES', 'rename'],
-        ['unchanged', 'CUST_PROFILE', 'CUST_ID',    'VARCHAR2(20)',  'NO',  'CUST_ID',       'VARCHAR(20)',  'NO',  ''],
-        ['unchanged', 'CUST_PROFILE', 'GENDER',     'CHAR(1)',       'YES', 'GENDER',        'CHAR(1)',      'YES', ''],
-        ['unchanged', 'CUST_PROFILE', 'PHONE',      'VARCHAR2(20)',  'YES', 'PHONE',         'VARCHAR(20)',  'YES', ''],
-        ['unchanged', 'CUST_PROFILE', 'STATUS',     'VARCHAR2(8)',   'NO',  'STATUS',        'VARCHAR(8)',   'NO',  ''],
-        ['unchanged', 'CUST_PROFILE', 'CREATED_AT', 'TIMESTAMP',     'NO',  'CREATED_AT',    'TIMESTAMP',    'NO',  ''],
-      ],
-      Summary: [
-        ['Schema diff summary', null, null, null],
-        ['ASIS table',     'CORE_CUST_PROFILE', null, null],
-        ['TOBE table',     'public.customer',   null, null],
-        ['ASIS columns',   11,                  null, null],
-        ['TOBE columns',   11,                  null, null],
-        ['Kind',           'Count', '% of TOBE', 'Note'],
-        ['→ renamed',      6,       '54.55%',    'CUST_NM, BIRTH_DT, EMAIL, ADDR_LINE1, ADDR_LINE2, CITY_CD'],
-        ['unchanged',      5,       '45.45%',    'CUST_ID, GENDER, PHONE, STATUS, CREATED_AT'],
-      ],
-    },
-    txn_journal_2024: {
-      Diff: [
-        ['unchanged', 'TXN_JOURNAL_2024', 'TXN_ID',       'VARCHAR(32)',    'NO',  'TXN_ID',        'VARCHAR(32)',    'NO',  ''],
-        ['typed',     'TXN_JOURNAL_2024', 'ACCT_ID',      'VARCHAR(20)',    'NO',  'account_id',    'VARCHAR(20)',    'NO',  'rename + lower'],
-        ['typed',     'TXN_JOURNAL_2024', 'AMT',          'NUMBER(15,2)',   'NO',  'amount',        'NUMERIC(18,2)',  'NO',  'cast NUMBER → NUMERIC'],
-        ['removed',   'TXN_JOURNAL_2024', 'BAL_AMT',      'NUMBER(15,2)',   'NO',  null,            null,             null,  'DROP'],
-        ['typed',     'TXN_JOURNAL_2024', 'EXEC_TM',      'DATE',           'NO',  'executed_at',   'TIMESTAMP',      'NO',  'cast DATE → TIMESTAMP'],
-        ['typed',     'TXN_JOURNAL_2024', 'BR_ID',        'VARCHAR(8)',     'NO',  'branch_id',     'VARCHAR(8)',     'NO',  'rename'],
-        ['unchanged', 'TXN_JOURNAL_2024', 'OPR_ID',       'VARCHAR(12)',    'YES', 'OPR_ID',        'VARCHAR(12)',    'YES', ''],
-        ['typed',     'TXN_JOURNAL_2024', 'CHANNEL_CD',   'CHAR(3)',        'NO',  'channel_code',  'VARCHAR(8)',     'NO',  'widen + rename'],
-        ['unchanged', 'TXN_JOURNAL_2024', 'MEMO',         'VARCHAR(255)',   'YES', 'MEMO',          'VARCHAR(255)',   'YES', ''],
-        ['unchanged', 'TXN_JOURNAL_2024', 'REF_NO',       'VARCHAR(40)',    'YES', 'reference_no',  'VARCHAR(40)',    'YES', 'rename'],
-        ['unchanged', 'TXN_JOURNAL_2024', 'CURRENCY_CD',  'CHAR(3)',        'NO',  'currency_code', 'CHAR(3)',        'NO',  'rename'],
-        ['unchanged', 'TXN_JOURNAL_2024', 'STATUS',       'VARCHAR(8)',     'NO',  'status',        'VARCHAR(8)',     'NO',  'rename'],
-        ['added',     'TXN_JOURNAL_2024', null,           null,             null,  'tenant_id',     'VARCHAR(8)',     'NO',  "default 'T01'"],
-      ],
-      Summary: [
-        ['Schema diff summary', null, null, null],
-        ['ASIS table',     'CORE_TXN_JOURNAL_2024',   null, null],
-        ['TOBE table',     'public.transaction_2024', null, null],
-        ['ASIS columns',   11,                        null, null],
-        ['TOBE columns',   12,                        null, null],
-        ['Kind',           'Count', '% of TOBE', 'Note'],
-        ['+ added',        1,       '8.33%',     'tenant_id'],
-        ['- removed',      1,       '',          'BAL_AMT'],
-        ['~ typed',        5,       '41.67%',    'ACCT_ID, AMT, EXEC_TM, BR_ID, CHANNEL_CD'],
-        ['unchanged',      6,       '50%',       null],
-      ],
-    },
-    transaction_unified: {
-      Diff: [
-        ['typed',     'TRANSACTION_UNIFIED', 'TXN_ID',    'VARCHAR(32)',   'NO',  'transaction_id', 'VARCHAR(32)',   'NO',  'union 2023∪2024 + rename'],
-        ['typed',     'TRANSACTION_UNIFIED', 'ACCT_ID',   'VARCHAR(20)',   'NO',  'account_id',     'VARCHAR(20)',   'NO',  'rename'],
-        ['typed',     'TRANSACTION_UNIFIED', 'AMT',       'NUMBER(18,2)',  'NO',  'amount',         'NUMERIC(18,2)', 'NO',  'cast NUMBER → NUMERIC'],
-        ['removed',   'TRANSACTION_UNIFIED', 'BAL_AMT',   'NUMBER(15,2)',  'NO',  null,             null,            null,  'DROP (not in 2024 schema)'],
-        ['typed',     'TRANSACTION_UNIFIED', 'EXEC_TM',   'DATE',          'NO',  'transaction_at', 'TIMESTAMP',     'NO',  'cast DATE → TIMESTAMP'],
-        ['typed',     'TRANSACTION_UNIFIED', 'BR_ID',     'VARCHAR(8)',    'NO',  'branch_id',      'VARCHAR(8)',    'NO',  'rename'],
-        ['unchanged', 'TRANSACTION_UNIFIED', 'REF_NO',    'VARCHAR(40)',   'YES', 'reference_no',   'VARCHAR(40)',   'YES', 'rename'],
-        ['unchanged', 'TRANSACTION_UNIFIED', 'STATUS',    'VARCHAR(8)',    'NO',  'status',         'VARCHAR(8)',    'NO',  'rename'],
-        ['added',     'TRANSACTION_UNIFIED', null,        null,            null,  'source_year',    'SMALLINT',      'NO',  'from source table name (2023|2024)'],
-      ],
-      Summary: [
-        ['Schema diff summary', null, null, null],
-        ['ASIS table',     'CORE_TXN_JOURNAL_2023 ∪ CORE_TXN_JOURNAL_2024', null, null],
-        ['TOBE table',     'public.transaction',                            null, null],
-        ['ASIS columns',   9,    null, null],
-        ['TOBE columns',   10,   null, null],
-        ['Kind',           'Count', '% of TOBE', 'Note'],
-        ['+ added',        1,       '10.00%',    'source_year'],
-        ['- removed',      1,       '',          'BAL_AMT (2023 only)'],
-        ['~ typed',        5,       '50.00%',    'TXN_ID, ACCT_ID, AMT, EXEC_TM, BR_ID'],
-        ['unchanged',      4,       '40.00%',    null],
-      ],
-    },
-    loan: {
-      Diff: [
-        ['unchanged', 'LOAN', 'LOAN_ID',   'VARCHAR2(20)', 'NO',  'LOAN_ID',       'VARCHAR(20)',   'NO', ''],
-        ['renamed',   'LOAN', 'CUST_ID',   'VARCHAR2(20)', 'NO',  'customer_id',   'VARCHAR(20)',   'NO', 'rename'],
-        ['unchanged', 'LOAN', 'PRINCIPAL', 'NUMBER(15,2)', 'NO',  'principal',     'NUMERIC(15,2)', 'NO', 'rename'],
-        ['typed',     'LOAN', 'INT_RATE',  'NUMBER(5,3)',  'NO',  'interest_rate', 'NUMERIC(5,3)',  'NO', 'rename + cast'],
-        ['renamed',   'LOAN', 'TERM_M',    'NUMBER(3)',    'NO',  'term_months',   'SMALLINT',      'NO', 'rename + cast'],
-        ['renamed',   'LOAN', 'ISSUE_DT',  'DATE',         'NO',  'issued_at',     'DATE',          'NO', 'rename'],
-        ['unchanged', 'LOAN', 'STATUS',    'VARCHAR2(8)',  'NO',  'status',        'VARCHAR(8)',    'NO', 'rename'],
-      ],
-      Summary: [
-        ['Schema diff summary', null, null, null],
-        ['ASIS table',     'CORE_LOAN',   null, null],
-        ['TOBE table',     'public.loan', null, null],
-        ['ASIS columns',   7,             null, null],
-        ['TOBE columns',   7,             null, null],
-        ['Kind',           'Count', '% of TOBE', 'Note'],
-        ['→ renamed',      3,       '42.86%',    'CUST_ID, TERM_M, ISSUE_DT'],
-        ['~ typed',        1,       '14.29%',    'INT_RATE'],
-        ['unchanged',      3,       '42.86%',    'LOAN_ID, PRINCIPAL, STATUS'],
-      ],
-    },
-    card: {
-      Diff: [
-        ['renamed',   'CARD', 'CARD_NO',   'VARCHAR2(16)', 'NO', 'card_number', 'VARCHAR(16)', 'NO', 'rename'],
-        ['renamed',   'CARD', 'CUST_ID',   'VARCHAR2(20)', 'NO', 'customer_id', 'VARCHAR(20)', 'NO', 'rename'],
-        ['renamed',   'CARD', 'CARD_TYPE', 'VARCHAR2(8)',  'NO', 'card_type',   'VARCHAR(8)',  'NO', 'rename'],
-        ['unchanged', 'CARD', 'ISSUE_DT',  'DATE',         'NO', 'issued_at',   'DATE',        'NO', 'rename'],
-        ['unchanged', 'CARD', 'EXPIRE_DT', 'DATE',         'NO', 'expires_at',  'DATE',        'NO', 'rename'],
-        ['unchanged', 'CARD', 'STATUS',    'VARCHAR2(8)',  'NO', 'status',      'VARCHAR(8)',  'NO', 'rename'],
-      ],
-      Summary: [
-        ['Schema diff summary', null, null, null],
-        ['ASIS table',     'CORE_CARD',   null, null],
-        ['TOBE table',     'public.card', null, null],
-        ['ASIS columns',   6,             null, null],
-        ['TOBE columns',   6,             null, null],
-        ['Kind',           'Count', '% of TOBE', 'Note'],
-        ['→ renamed',      3,       '50.00%',    'CARD_NO, CUST_ID, CARD_TYPE'],
-        ['unchanged',      3,       '50.00%',    'ISSUE_DT, EXPIRE_DT, STATUS'],
-      ],
-    },
-    fx_position: {
-      Diff: [
-        ['renamed', 'FX_POSITION', 'POS_DT',       'DATE',         'NO', 'position_date',   'DATE',          'NO', 'rename'],
-        ['renamed', 'FX_POSITION', 'CCY_CD',       'CHAR(3)',      'NO', 'currency_code',   'CHAR(3)',       'NO', 'rename'],
-        ['renamed', 'FX_POSITION', 'POSITION_AMT', 'NUMBER(18,4)', 'NO', 'position_amount', 'NUMERIC(18,4)', 'NO', 'rename + cast'],
-      ],
-      Summary: [
-        ['Schema diff summary', null, null, null],
-        ['ASIS table',     'CORE_FX_POSITION',   null, null],
-        ['TOBE table',     'public.fx_position', null, null],
-        ['ASIS columns',   3,                    null, null],
-        ['TOBE columns',   3,                    null, null],
-        ['Kind',           'Count', '% of TOBE', 'Note'],
-        ['→ renamed',      3,       '100.00%',   'POS_DT, CCY_CD, POSITION_AMT'],
-      ],
-    },
-  },
-  validation: {},
-};
-
-/* 사이드바 트리에서 카테고리 펼쳤을 때 보일 mock 테이블 목록.
-   실제로는 프로젝트의 ASIS/TOBE 테이블 목록을 백엔드에서 가져온다. */
-const MOCK_TABLES = [
-  'acct_master',
-  'cust_profile',
-  'txn_journal_2024',
-  'transaction_unified',
-  'loan',
-  'card',
-  'fx_position',
-];
 
 /* 프로젝트 이름을 파일명에 안전하게 쓸 수 있는 slug 로. 비-ASCII 는 보존하지 않고
    소문자/숫자/언더스코어 만 남긴다 (file-name 호환성 우선). */
@@ -428,12 +186,15 @@ function projectSlug(name: string): string {
    Dashboard / DDL Scripts 는 프로젝트 단위 단일 산출물 (child 1개).
    DDL Scripts 의 child 이름은 프로젝트명에서 파생 (projectname.ddl.sql 형태). */
 function childTablesFor(projectName: string): Record<CategoryKey, string[]> {
+  /* diff / sql / validation 의 child 테이블 목록은 호출부 (childTables useMemo)에서
+     실 데이터 (diff.tables / validationByTable) 로 override. 여기서는 빈 array 가 기본 — run
+     안 됐을 때 사이드바 비어있는 게 정확 (mock fake table 안 보임). */
   return {
     dashboard:  ['dashboard-snapshot'],
-    diff:       MOCK_TABLES,
+    diff:       [],
     ddl:        [projectSlug(projectName)],
-    sql:        MOCK_TABLES,
-    validation: MOCK_TABLES,
+    sql:        [],
+    validation: [],
   };
 }
 
@@ -1235,7 +996,7 @@ function validationRangeRows(dto: ValidationReportDto): Cell[][] {
 }
 
 /** Sheet 이름 → 해당 시트의 Cell[][] 행. dto null 또는 sheet 매칭 없으면 빈 배열. */
-function validationRowsFor(dto: ValidationReportDto | null | undefined, sheetName: string): Cell[][] {
+export function validationRowsFor(dto: ValidationReportDto | null | undefined, sheetName: string): Cell[][] {
   if (!dto) return [];
   switch (sheetName) {
     case 'Overview':    return validationOverviewRows(dto);
@@ -2004,7 +1765,7 @@ function ExcelWorkbook({
      - DASHBOARD: DDL+mapping 커버리지(Overview/Tables/Issues) — 실데이터
      - MAPPING(diff): Diff = buildDiff rows(선택 테이블 필터), Summary = 테이블별 집계 — 실데이터
      - VALIDATION: pinned snapshot 의 박제 run 의 validation_reports — 실데이터
-     - MIGRATION SQL: MOCK_ROWS (의도적 mock — viewType='sql' 이라 grid 미사용) */
+     - DDL / SQL: viewType='sql' 이라 grid 미사용 — dataRows 빈 array (sqlText path) */
   const validationDto = (category.key === 'validation' && selectedTable)
     ? validationByTable?.[selectedTable] ?? null
     : null;
@@ -2017,7 +1778,7 @@ function ExcelWorkbook({
           ? ((selectedTable ? (diff?.summaryByTable[selectedTable] ?? []) : (diff?.summaryAll ?? [])))
           : category.key === 'validation' && selectedTable
             ? validationRowsFor(validationDto, activeSheet)
-            : MOCK_ROWS[category.key]?.[activeSheet] ?? [];
+            : [];
 
   /* viewType='sql' 인 두 카테고리:
        - DDL SCRIPTS: ddlText[activeSheet] ('AS-IS' / 'TO-BE')
@@ -2070,7 +1831,7 @@ function ExcelWorkbook({
       if (category.key === 'validation' && selectedTable) {
         return validationRowsFor(validationByTable?.[selectedTable] ?? null, sheetName);
       }
-      return MOCK_ROWS[category.key]?.[sheetName] ?? [];
+      return [];  // ddl / sql 은 viewType='sql' — xlsx grid 미사용
     };
     void downloadWorkbookAsXlsx(dlName, category.key, sheets, getRows);
   };
