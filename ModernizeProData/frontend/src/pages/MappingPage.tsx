@@ -345,6 +345,9 @@ export function MappingPage() {
   // window.history.replaceState だけだと React Router の location.state は更新されず, 結果として
   // schema 再 fetch (= hydrationTick++) のたびに同じテーブルへ強制リセットされていた.
   const consumedFocusKeyRef = useRef<string | null>(null);
+  // fixTarget 도 同じ理由でガード. hydrationTick 変動のたびに highlight が再適用されると
+  // 1 秒後に消える内側 timer よりも先に外側 timer が再スケジュールされ, ハイライトが永続化する.
+  const consumedFixTargetKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const state = location.state as {
       fixTarget?: { kind: 'unmapped-tobe' | 'unmapped-asis' | 'unbound-tobe'; table?: string };
@@ -444,6 +447,10 @@ export function MappingPage() {
     const kind = state?.fixTarget?.kind;
     const targetTable = state?.fixTarget?.table;
     if (!kind) return;
+    // location.key 를 키に含めて, 同じ Fix を続けて押した場合は (key 가 다른 location 으로 처리되어)
+    // 다시 ハイライト が走るが, 같은 location 内의 hydrationTick 再発火에서는 skip 한다.
+    const fixKey = `${location.key}|${kind}|${targetTable ?? ''}`;
+    if (consumedFixTargetKeyRef.current === fixKey) return;
     // unmapped-asis: AS-IS 사이드로 자동 전환해야 AsisTableDetail 이 mount 되고
     // [data-fix-row="asis-unmapped"] 마커가 DOM 에 등장. table 명시 시 그 AS-IS table, 없으면 첫번째.
     // matcher: qualified name (`schema.physical`) / physical name (`short`) 둘 다 받기.
@@ -479,6 +486,9 @@ export function MappingPage() {
           : '[data-fix-row="tobe-unmapped"]';
       const els = document.querySelectorAll<HTMLElement>(sel);
       if (els.length === 0) return;
+      // DOM 마커가 등장한 시점에만 consumed 로 마킹 — schema 가 아직 hydrate 되지 않은 채
+      // 早期 fire 가 일어났을 때는 다시 시도할 여지를 남긴다.
+      consumedFixTargetKeyRef.current = fixKey;
       // 첫 element 만 화면 중앙으로 스크롤 — 여러 곳 동시 점프는 혼란.
       els[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
       // 강조는 모든 matching element 에 동시에.
@@ -487,7 +497,6 @@ export function MappingPage() {
         els.forEach((el) => el.classList.remove('mpd-fix-highlight'));
       }, 1000);
     }, 200);
-    window.history.replaceState({}, '');
     return () => window.clearTimeout(id);
     // effectiveTobe 는 closure 로 캡처 — deps 에 넣으면 binding 편집마다 effect 재실행됨.
     // eslint-disable-next-line react-hooks/exhaustive-deps
