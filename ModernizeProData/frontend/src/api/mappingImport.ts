@@ -272,4 +272,22 @@ export const mappingImportApi = {
     unwrap(api.delete<ApiResponse<void>>(
       `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/bindings`,
     )),
+
+  /** AS-IS 컬럼 단위 skip 마킹 list. */
+  listAsisSkips: (projectId: string): Promise<Array<{ asisSchema: string; asisTable: string; asisColumn: string }>> =>
+    unwrap(api.get<ApiResponse<Array<{ asisSchema: string; asisTable: string; asisColumn: string }>>>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/asis-skips`,
+    )),
+
+  /** AS-IS 컬럼 단위 skip 마킹 upsert. skipped=false 면 마킹 해제. */
+  upsertAsisSkip: (projectId: string, payload: {
+    asisSchema: string | null;
+    asisTable: string;
+    asisColumn: string;
+    skipped: boolean;
+  }): Promise<void> =>
+    unwrap(api.post<ApiResponse<void>>(
+      `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/asis-skips`,
+      payload,
+    )),
 };

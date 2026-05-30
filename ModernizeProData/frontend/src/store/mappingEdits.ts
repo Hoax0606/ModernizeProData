@@ -55,6 +55,8 @@ interface MappingEditsState {
   /** 임포트/hydrate 후 DB 의 mapping_rules 로 해당 project 의 row edits 전체 교체. */
   replaceRowEdits: (projectId: string, edits: Record<string, Record<string, RowEdit>>) => void;
   setAsisSkip: (projectId: string, tableName: string, colName: string, nextSkip: boolean) => void;
+  /** batch replace — backend listAsisSkips → store. table.col → true 인 entry 만 들어옴. */
+  replaceAsisSkips: (projectId: string, skipsByTable: Record<string, Record<string, boolean>>) => void;
   clearProject: (projectId: string) => void;
 }
 
@@ -110,6 +112,10 @@ export const useMappingEditsStore = create<MappingEditsState>()(
           },
         };
       }),
+
+      replaceAsisSkips: (projectId, skipsByTable) => set((s) => ({
+        asisSkippedCols: { ...s.asisSkippedCols, [projectId]: skipsByTable },
+      })),
 
       clearProject: (projectId) => set((s) => {
         const { [projectId]: _b, ...restBindings } = s.tableBindingEdits;
