@@ -179,6 +179,18 @@ public class SnapshotDiffService {
         List<SnapshotChanges.FieldChange> out = new ArrayList<>();
         out.add(new SnapshotChanges.FieldChange("compositionKind", UNASSIGNED, fmt(c.compositionKind())));
         out.add(new SnapshotChanges.FieldChange("sources",         UNASSIGNED, sourcesToString(c.sources())));
+        if (c.whereFilter() != null && !c.whereFilter().isBlank()) {
+            out.add(new SnapshotChanges.FieldChange("whereFilter", UNASSIGNED, fmt(c.whereFilter())));
+        }
+        if (c.groupByExpr() != null && !c.groupByExpr().isBlank()) {
+            out.add(new SnapshotChanges.FieldChange("groupByExpr", UNASSIGNED, fmt(c.groupByExpr())));
+        }
+        if (c.expandExpr() != null && !c.expandExpr().isBlank()) {
+            out.add(new SnapshotChanges.FieldChange("expandExpr", UNASSIGNED, fmt(c.expandExpr())));
+        }
+        if (c.sharedFromProjectId() != null) {
+            out.add(new SnapshotChanges.FieldChange("sharedFromProjectId", UNASSIGNED, fmt(c.sharedFromProjectId())));
+        }
         return out;
     }
 
@@ -186,6 +198,18 @@ public class SnapshotDiffService {
         List<SnapshotChanges.FieldChange> out = new ArrayList<>();
         out.add(new SnapshotChanges.FieldChange("compositionKind", fmt(p.compositionKind()),    UNASSIGNED));
         out.add(new SnapshotChanges.FieldChange("sources",         sourcesToString(p.sources()), UNASSIGNED));
+        if (p.whereFilter() != null && !p.whereFilter().isBlank()) {
+            out.add(new SnapshotChanges.FieldChange("whereFilter", fmt(p.whereFilter()), UNASSIGNED));
+        }
+        if (p.groupByExpr() != null && !p.groupByExpr().isBlank()) {
+            out.add(new SnapshotChanges.FieldChange("groupByExpr", fmt(p.groupByExpr()), UNASSIGNED));
+        }
+        if (p.expandExpr() != null && !p.expandExpr().isBlank()) {
+            out.add(new SnapshotChanges.FieldChange("expandExpr", fmt(p.expandExpr()), UNASSIGNED));
+        }
+        if (p.sharedFromProjectId() != null) {
+            out.add(new SnapshotChanges.FieldChange("sharedFromProjectId", fmt(p.sharedFromProjectId()), UNASSIGNED));
+        }
         return out;
     }
 
@@ -197,6 +221,10 @@ public class SnapshotDiffService {
         if (!Objects.equals(sa, sb)) {
             out.add(new SnapshotChanges.FieldChange("sources", sa, sb));
         }
+        cmpStr(out, "whereFilter", a.whereFilter(), b.whereFilter());
+        cmpStr(out, "groupByExpr", a.groupByExpr(), b.groupByExpr());
+        cmpStr(out, "expandExpr",  a.expandExpr(),  b.expandExpr());
+        cmpStr(out, "sharedFromProjectId", a.sharedFromProjectId(), b.sharedFromProjectId());
         return out;
     }
 

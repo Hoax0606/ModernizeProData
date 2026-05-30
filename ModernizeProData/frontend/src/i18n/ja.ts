@@ -581,7 +581,7 @@ export const ja: Record<TranslationKey, string> = {
   'execution.preflight.check.connTobe.pass':               'latency 12 ms · 接続正常',
   'execution.preflight.check.tobeBindings.title':          '全ての TO-BE テーブルのソースバインディング',
   'execution.preflight.check.tobeBindings.pass':           '{n} テーブル全て AS-IS ソースバインディング完了',
-  'execution.preflight.check.asisUnmapped.title':          '選択された AS-IS テーブルのカラム unmapped 検査',
+  'execution.preflight.check.asisUnmapped.title':          '全ての AS-IS テーブルのカラム unmapped 検査',
   'execution.preflight.check.asisUnmapped.pass':           '全ての AS-IS カラムがマッピング済み',
   'execution.preflight.check.unmappedCols.title':          '全ての TO-BE テーブルのカラム unmapped 検査',
   'execution.preflight.check.unmappedCols.pass':           '全ての TO-BE カラムにソースが割当て済み',
