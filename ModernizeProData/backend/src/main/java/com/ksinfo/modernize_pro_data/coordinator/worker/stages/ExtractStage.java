@@ -2,6 +2,7 @@ package com.ksinfo.modernize_pro_data.coordinator.worker.stages;
 
 import com.ksinfo.modernize_pro_data.common.duckdb.DuckDbService;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingSource;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
@@ -55,6 +56,7 @@ public class ExtractStage implements StageRunner {
 
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
+    private final MappingTableBindingRepository bindingRepo;
     private final DuckDbService duckDbService;
     private final QuarantineService quarantineService;
     private final RunLogIngestService runLogIngest;
@@ -91,15 +93,26 @@ public class ExtractStage implements StageRunner {
         int successCount = 0;
         int failedCount = 0;
 
-        for (MappingTableBinding binding : bindings) {
+        for (MappingTableBinding childBinding : bindings) {
+            // 자식 link swap — sources 가 master 에 있으므로 csv → parquet 도 master sources 기준.
+            MappingTableBinding binding = childBinding;
+            if (childBinding.getSharedFromProjectId() != null) {
+                String masterPid = childBinding.getSharedFromProjectId();
+                String mSchema = childBinding.getTobeSchema() == null ? "" : childBinding.getTobeSchema();
+                MappingTableBinding mb = bindingRepo
+                        .findByProjectIdAndTobeSchemaAndTobeTable(masterPid, mSchema, childBinding.getTobeTable())
+                        .orElse(null);
+                if (mb != null) binding = mb;
+            }
+            String childBindingId = childBinding.getId();
             OffsetDateTime tableStart = OffsetDateTime.now();
             String tobeSchema = binding.getTobeSchema() == null ? "" : binding.getTobeSchema();
             String tobeTable  = binding.getTobeTable();
             String tableLabel = tobeSchema.isBlank() ? tobeTable : tobeSchema + "." + tobeTable;
 
             StageTableResult result = stageTableResultRepo
-                    .findByStageInstanceIdAndBindingId(stage.getId(), binding.getId())
-                    .orElseGet(() -> StageTableResult.create(stage.getId(), binding.getId(), tobeSchema, tobeTable));
+                    .findByStageInstanceIdAndBindingId(stage.getId(), childBindingId)
+                    .orElseGet(() -> StageTableResult.create(stage.getId(), childBindingId, tobeSchema, tobeTable));
             result.setStartedAt(tableStart);
 
             try {
@@ -145,7 +158,7 @@ public class ExtractStage implements StageRunner {
                     /* Step 3 — DuckDB 가 invalid byte 만났을 때 throw 안 하고 U+FFFD (대체 문자) 로
                        silent 치환. 정상 read 통과한 것 같지만 데이터 일부 손상.
                        각 asis 컬럼에 U+FFFD 있나 COUNT — 발견 시 quarantine 카드 (stageLabel='encode'). */
-                    scanForReplacementChars(ctx, stage, binding, tableLabel, schema, asisTable);
+                    scanForReplacementChars(ctx, stage, childBindingId, tableLabel, schema, asisTable);
                     ingest(ctx, "Extracted source " + asisTable + " (binding " + tobeTable + ")", true);
                 }
 
@@ -170,10 +183,10 @@ public class ExtractStage implements StageRunner {
                 stageTableResultRepo.save(result);
 
                 /* Step 1 — binding-level 실패를 Quarantine 카드로 노출. */
-                StageHelpers.recordStageFailureQuarantine(ctx, quarantineService, stage, binding,
+                StageHelpers.recordStageFailureQuarantine(ctx, quarantineService, stage, childBinding,
                         tableLabel, "Extract", "extract.failure", e.getMessage());
 
-                log.warn("ExtractStage failed for binding {} ({}): {}", binding.getId(), tobeTable, e.getMessage());
+                log.warn("ExtractStage failed for binding {} ({}): {}", childBindingId, tobeTable, e.getMessage());
                 ingest(ctx, "Extract failed for " + tableLabel + ": " + e.getMessage(), false);
                 failedCount++;
             }
@@ -225,7 +238,7 @@ public class ExtractStage implements StageRunner {
      * 명시. 본격 Source Reader SPI (PoC2) 에선 invalid byte 발견 시점에 정확한 line / column / 원본 byte 보고.
      */
     private void scanForReplacementChars(StageContext ctx, StageInstance stage,
-                                         MappingTableBinding binding, String tableLabel,
+                                         String childBindingId, String tableLabel,
                                          String schema, String asisTable) {
         String fqTable = quoteIdent(schema) + "." + quoteIdent("asis_" + asisTable);
         try (Statement st = duckDbService.statement()) {
@@ -289,7 +302,7 @@ public class ExtractStage implements StageRunner {
             quarantineService.record(
                     ctx.getRunHistory().getId(),
                     stage.getId(),
-                    binding.getId(),
+                    childBindingId,
                     null,
                     "Encoding corruption — " + tableLabel,
                     com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity.error,

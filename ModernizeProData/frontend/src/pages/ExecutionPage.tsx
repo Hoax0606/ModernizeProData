@@ -15,6 +15,7 @@ import {
 import { runPreflight, isAllPass, type TableCheckResult } from '../lib/preflightValidation';
 import { tobeDbApi } from '../api/tobeDb';
 import { csvPreviewApi } from '../api/csvPreview';
+import { mappingImportApi } from '../api/mappingImport';
 import { runsApi, type RunHistoryDto, type StageView } from '../api/runs';
 import { usePipelineProgress, isTerminal } from '../hooks/usePipelineProgress';
 import { PreflightResultPanel } from '../components/PreflightResultPanel';
@@ -342,12 +343,65 @@ export function ExecutionPage() {
         }
       }
 
+      // 자식 link binding 의 master project 의 binding + rules lookup 미리 fetch.
+      // key = `${masterProjectId}|${schema}|${table}` (lowercase).
+      const masterBindingHasSources: Record<string, boolean> = {};
+      const masterRulesByKey: Record<string, import('../store/snapshots').FrozenRule[]> = {};
+      const masterIds = new Set<string>();
+      for (const b of snapshotData.bindings ?? []) {
+        if (b.sharedFromProjectId) masterIds.add(b.sharedFromProjectId);
+      }
+      if (masterIds.size > 0) {
+        for (const masterId of masterIds) {
+          try {
+            const [masterBindings, masterRules] = await Promise.all([
+              mappingImportApi.listBindings(masterId),
+              mappingImportApi.listRules(masterId),
+            ]);
+            for (const mb of masterBindings) {
+              const key = `${masterId}|${(mb.tobeSchema ?? '').toLowerCase()}|${mb.tobeTable.toLowerCase()}`;
+              masterBindingHasSources[key] = (mb.sources?.length ?? 0) > 0;
+            }
+            for (const r of masterRules) {
+              const key = `${masterId}|${(r.tobeSchema ?? '').toLowerCase()}|${r.tobeTable.toLowerCase()}`;
+              const arr = masterRulesByKey[key] ?? [];
+              // MappingRuleDto → FrozenRule shape. preflight 가 사용하는 필드만 채움.
+              arr.push({
+                id: r.id,
+                importId: r.importId,
+                tobeSchema: r.tobeSchema,
+                tobeTable: r.tobeTable,
+                tobeColumn: r.tobeColumn,
+                asisSchema: r.asisSchema,
+                asisTable: r.asisTable,
+                asisColumn: r.asisColumn,
+                asisType: r.asisType,
+                codeDomain: null,
+                strategy: r.strategy,
+                transformRule: r.transformRule,
+                transformSql: r.transformSql,
+                defaultValue: r.defaultValue,
+                notNullOverride: r.notNullOverride,
+                ruleOrigin: r.ruleOrigin,
+                notes: r.notes,
+                createdBy: null, createdAt: null, updatedBy: null, updatedAt: null,
+              });
+              masterRulesByKey[key] = arr;
+            }
+          } catch (e) {
+            console.warn('[preflight] master mapping fetch failed', masterId, e);
+          }
+        }
+      }
+
       const results = runPreflight({
         project, site, tobeSchema, asisSchema, snapshotData,
         selectedTables: tablesList,
         t,
         tobeDbReachable,
         csvFilesByAsisTable,
+        masterBindingHasSources,
+        masterRulesByKey,
       });
       /* 결과를 400ms 간격으로 bySnapshot[pinnedId].results 에 incremental append.
          setTimeout は이미 종료된 mount 후에도 발화하지만 store 가 살아있어 무해. */
