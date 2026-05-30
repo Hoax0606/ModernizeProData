@@ -6,6 +6,7 @@ import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingCodeMapRepositor
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRule;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRuleRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingRepository;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunType;
@@ -64,6 +65,7 @@ public class TransformStage implements StageRunner {
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
     private final MappingRuleRepository mappingRuleRepo;
+    private final MappingTableBindingRepository bindingRepo;
     private final MappingCodeMapRepository mappingCodeMapRepo;
     private final DuckDbService duckDbService;
     private final QuarantineService quarantineService;
@@ -96,7 +98,24 @@ public class TransformStage implements StageRunner {
         int successCount = 0;
         int failedCount = 0;
 
-        for (MappingTableBinding binding : ctx.getBindings()) {
+        for (MappingTableBinding childBinding : ctx.getBindings()) {
+            // 자식 link swap — sources + rules 모두 master 사용. MappingReportService 와 같은 패턴.
+            // binding 변수는 master entity 로 swap (SQL 생성 시 master 의 sources/whereFilter 등).
+            // childBinding 의 id 는 stage_table_results 키로 별도 보존.
+            MappingTableBinding binding = childBinding;
+            String ruleProjectId = projectId;
+            if (childBinding.getSharedFromProjectId() != null) {
+                String masterPid = childBinding.getSharedFromProjectId();
+                String mSchema = childBinding.getTobeSchema() == null ? "" : childBinding.getTobeSchema();
+                MappingTableBinding mb = bindingRepo
+                        .findByProjectIdAndTobeSchemaAndTobeTable(masterPid, mSchema, childBinding.getTobeTable())
+                        .orElse(null);
+                if (mb != null) {
+                    binding = mb;
+                    ruleProjectId = masterPid;
+                }
+            }
+            String childBindingId = childBinding.getId();
             OffsetDateTime tableStart = OffsetDateTime.now();
             String tobeSchema = binding.getTobeSchema() == null ? "" : binding.getTobeSchema();
             String tobeTable  = binding.getTobeTable();
@@ -104,12 +123,12 @@ public class TransformStage implements StageRunner {
             String tableLabel = tobeSchema.isBlank() ? tobeTable : tobeSchema + "." + tobeTable;
 
             StageTableResult result = stageTableResultRepo
-                    .findByStageInstanceIdAndBindingId(stage.getId(), binding.getId())
-                    .orElseGet(() -> StageTableResult.create(stage.getId(), binding.getId(), tobeSchema, tobeTable));
+                    .findByStageInstanceIdAndBindingId(stage.getId(), childBindingId)
+                    .orElseGet(() -> StageTableResult.create(stage.getId(), childBindingId, tobeSchema, tobeTable));
             result.setStartedAt(tableStart);
 
             try {
-                List<MappingRule> rules = mappingRuleRepo.findByProjectIdAndTobeTable(projectId, tobeTable);
+                List<MappingRule> rules = mappingRuleRepo.findByProjectIdAndTobeTable(ruleProjectId, tobeTable);
                 if (rules.isEmpty()) {
                     throw new IllegalStateException("no mapping rules for " + tobeTable);
                 }
@@ -158,7 +177,7 @@ public class TransformStage implements StageRunner {
                 stageTableResultRepo.save(result);
 
                 /* 구조적 stage 실패도 Quarantine 카드로 노출 — 공통 헬퍼 사용. */
-                StageHelpers.recordStageFailureQuarantine(ctx, quarantineService, stage, binding,
+                StageHelpers.recordStageFailureQuarantine(ctx, quarantineService, stage, childBinding,
                         tableLabel, "Transform", "transform.failure", e.getMessage());
 
                 log.warn("TransformStage failed for {} : {}", tobeTable, e.getMessage());

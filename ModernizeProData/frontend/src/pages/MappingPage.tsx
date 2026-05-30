@@ -242,6 +242,20 @@ function demoteToAnalysisOnEdit(projectId: string | null) {
     void useWorkspaceStore.getState().setProjectPhase(projectId, 'analysis');
   }
 }
+
+/**
+ * binding 편집 시 baseline pin 해제. 편집된 mapping 상태가 frozen snapshot 과 달라졌으니
+ * baseline 유지하면 has-changes / 신규 snapshot 생성이 막힘. clearPin 가 backend
+ * snapshots.is_baseline=false 도 sync.
+ */
+function unpinBaselineOnEdit(projectId: string | null) {
+  if (!projectId) return;
+  const pinnedIds = usePinnedSnapshotsStore.getState().pinnedIds;
+  const baseline = useSnapshotsStore.getState().snapshots.find(
+    (s) => s.projectId === projectId && pinnedIds.includes(s.id),
+  );
+  if (baseline) usePinnedSnapshotsStore.getState().clearPin(baseline.id);
+}
 const EMPTY_SKIP_COLS: Record<string, Record<string, boolean>> = Object.freeze({}) as Record<string, Record<string, boolean>>;
 const EMPTY_ROW_EDITS: Record<string, RowEdit> = Object.freeze({}) as Record<string, RowEdit>;
 
@@ -606,6 +620,7 @@ export function MappingPage() {
       expandExpr: edit.expandExpr ?? null,
     }).catch((e) => console.warn('[mapping] upsertBinding failed', e));
     demoteToAnalysisOnEdit(activeProjectId);
+    unpinBaselineOnEdit(activeProjectId);
   }, [activeProjectId, readOnly]);
 
   const handleToggleAsisSkip = useCallback((tableName: string, colName: string, nextSkip: boolean) => {
@@ -1191,6 +1206,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
         expandExpr: newSharedFromProjectId ? undefined : bindingExpand,
         sharedFromProjectId: newSharedFromProjectId ?? undefined,
       });
+      demoteToAnalysisOnEdit(activeProjectIdForRow);
+      unpinBaselineOnEdit(activeProjectIdForRow);
       setLinkModalOpen(false);
     } catch (e) {
       console.warn('[mapping] applyLink failed', e);
@@ -1751,6 +1768,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
         <ReportView
           table={table}
           rows={reportRows}
+          sources={bindingSources}
           onClose={() => setReportOpen(false)}
           onPickColumn={(tgt) => {
             const idx = visibleRows.findIndex((r) => r.tgt === tgt);
@@ -3687,6 +3705,8 @@ function rulesEqual(a: FrozenRule[], b: MappingRuleDto[]): boolean {
 function bindingSignature(b: {
   tobeSchema: string; tobeTable: string;
   compositionKind: string; whereFilter?: string | null;
+  groupByExpr?: string | null; expandExpr?: string | null;
+  sharedFromProjectId?: string | null;
   sources: Array<{
     ordinal: number; asisSchema?: string | null; asisTable: string;
     alias: string; role: string; joinType?: string | null; joinOn?: string | null;
@@ -3700,6 +3720,9 @@ function bindingSignature(b: {
     k: `${b.tobeSchema}|${b.tobeTable}`,
     ck: b.compositionKind,
     wf: b.whereFilter ?? null,
+    gb: b.groupByExpr ?? null,
+    ex: b.expandExpr ?? null,
+    sf: b.sharedFromProjectId ?? null,
     srcs,
   });
 }
@@ -4106,9 +4129,12 @@ function isNumericType(t: string): boolean {
     || u.startsWith('numeric') || u.startsWith('number') || u.startsWith('decimal');
 }
 
-function ReportView({ table, rows, onClose, onPickColumn }: {
+function ReportView({ table, rows, sources, onClose, onPickColumn }: {
   table: TobeTable;
   rows: MappingRow[];
+  /** Editor 가 현재 보유한 binding sources. table.sources (TOBE_TABLES) 가 module-level 이라
+   * binding edit 으로 추가된 source 가 반영 안 되어, 명시적으로 받아서 사용. */
+  sources: TobeTable['sources'];
   onClose: () => void;
   onPickColumn: (tgt: string) => void;
 }) {
@@ -4138,7 +4164,31 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
     report.headers.forEach((h, i) => m.set(h.trim().toLowerCase(), i));
     return m;
   }, [report]);
-  const dataRowCount = report ? Math.min(report.rows.length, PREVIEW_ROWS) : 0;
+
+  // viewMode: 'tobe' (기본, 변환 결과) / 'asis' (raw csv VARCHAR 그대로).
+  // ↶ 버튼 → asis 로 되돌리기 / ↷ 버튼 → tobe 로 앞으로.
+  const [viewMode, setViewMode] = useState<'tobe' | 'asis'>('tobe');
+  // binding edit 의 sources 우선, 없으면 module-level fallback.
+  const effectiveSources = sources && sources.length > 0 ? sources : table.sources;
+  const firstSource = effectiveSources[0];
+  const [asisPreview, setAsisPreview] = useState<CsvPreview | null>(null);
+  const [asisPreviewLoading, setAsisPreviewLoading] = useState(false);
+  useEffect(() => {
+    if (viewMode !== 'asis' || !firstSource || !activeSite) return;
+    if (asisPreview) return; // cache
+    let alive = true;
+    setAsisPreviewLoading(true);
+    csvPreviewApi.forTable(activeSite.id, firstSource.table, PREVIEW_ROWS)
+      .then((p) => { if (alive) setAsisPreview(p); })
+      .catch(() => { if (alive) setAsisPreview(null); })
+      .finally(() => { if (alive) setAsisPreviewLoading(false); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode, firstSource?.table, activeSite?.id]);
+
+  const dataRowCount = viewMode === 'tobe'
+    ? (report ? Math.min(report.rows.length, PREVIEW_ROWS) : 0)
+    : (asisPreview ? Math.min(asisPreview.rows.length, PREVIEW_ROWS) : 0);
   // 디버그 — 결과가 도착했을 때 한 번만 찍음
   useEffect(() => {
     if (!report) return;
@@ -4192,7 +4242,32 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
       <div style={styles.dbvToolbar}>
         {['📄','📂','💾'].map((s, i) => <span key={`g1-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
         <span style={styles.dbvToolSep} />
-        {['↶','↷'].map((s, i) => <span key={`g2-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
+        <button
+          type="button"
+          onClick={() => setViewMode('asis')}
+          disabled={viewMode === 'asis' || !firstSource}
+          title={viewMode === 'asis' ? '이미 AS-IS 원본 보기' : 'AS-IS 의 raw VARCHAR 값으로 되돌리기'}
+          style={{
+            ...styles.dbvToolBtn,
+            background: 'transparent',
+            border: 'none',
+            cursor: viewMode === 'asis' || !firstSource ? 'not-allowed' : 'pointer',
+            opacity: viewMode === 'asis' || !firstSource ? 0.35 : 1,
+          }}
+        >↶</button>
+        <button
+          type="button"
+          onClick={() => setViewMode('tobe')}
+          disabled={viewMode === 'tobe'}
+          title={viewMode === 'tobe' ? '이미 TO-BE 변환 결과' : 'TO-BE 변환 결과로 앞으로'}
+          style={{
+            ...styles.dbvToolBtn,
+            background: 'transparent',
+            border: 'none',
+            cursor: viewMode === 'tobe' ? 'not-allowed' : 'pointer',
+            opacity: viewMode === 'tobe' ? 0.35 : 1,
+          }}
+        >↷</button>
         <span style={styles.dbvToolSep} />
         {['▶','⏹'].map((s, i) => <span key={`g3-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
         <span style={styles.dbvToolSep} />
@@ -4233,9 +4308,24 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
       </div>
 
       {/* 상태 배너 — loading / error / 빈 결과 */}
-      {reportLoading && (
+      {viewMode === 'tobe' && reportLoading && (
         <div style={{ padding: '8px 14px', background: '#fff8e1', color: '#856404', borderBottom: '1px solid #e8e8e8', fontSize: 11.5 }}>
           ⏳ {t('mapping.report.loading')}
+        </div>
+      )}
+      {viewMode === 'asis' && asisPreviewLoading && (
+        <div style={{ padding: '8px 14px', background: '#fff8e1', color: '#856404', borderBottom: '1px solid #e8e8e8', fontSize: 11.5 }}>
+          ⏳ AS-IS raw CSV 로드 중…
+        </div>
+      )}
+      {viewMode === 'asis' && !asisPreviewLoading && !asisPreview && firstSource && (
+        <div style={{ padding: '8px 14px', background: '#fde2e2', color: '#a02020', borderBottom: '1px solid #e8e8e8', fontSize: 11.5 }}>
+          ⚠ AS-IS CSV ({firstSource.table}) 를 로드하지 못했습니다.
+        </div>
+      )}
+      {viewMode === 'asis' && firstSource && effectiveSources.length > 1 && (
+        <div style={{ padding: '6px 14px', background: '#eef4ff', color: '#3a5a8c', borderBottom: '1px solid #e8e8e8', fontSize: 10.5 }}>
+          ℹ {effectiveSources.length} source 중 첫 source ({firstSource.alias} = {firstSource.table}) 의 raw 값만 표시.
         </div>
       )}
 
@@ -4245,7 +4335,7 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
           <thead>
             <tr>
               <th style={styles.dbvGridCorner}> </th>
-              {rows.map((r) => (
+              {viewMode === 'tobe' ? rows.map((r) => (
                 <th
                   key={r.tgt}
                   onClick={() => onPickColumn(r.tgt)}
@@ -4258,11 +4348,26 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
                     <span style={styles.dbvColCaret}>▾</span>
                   </div>
                 </th>
-              ))}
+              )) : (asisPreview?.headers ?? []).map((h) => {
+                // AS-IS DDL 의 컬럼 type lookup (대소문자 무관 매칭).
+                const asisType = firstSource
+                  ? (ASIS_COLUMNS[firstSource.table] || []).find((c) => c.name.toLowerCase() === h.toLowerCase())?.type
+                  : undefined;
+                const typeLabel = asisType || 'VARCHAR';
+                return (
+                  <th key={h} title={`${h} (${typeLabel}) · AS-IS raw`} style={styles.dbvGridCol}>
+                    <div style={styles.dbvColHeaderInner}>
+                      <span style={styles.dbvColTypeIcon}>{typeIconLabel(typeLabel)}</span>
+                      <span>{h}</span>
+                      <span style={styles.dbvColCaret}>▾</span>
+                    </div>
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>
-            {report?.error ? (
+            {viewMode === 'tobe' && report?.error ? (
               <tr>
                 <td
                   colSpan={rows.length + 1}
@@ -4302,7 +4407,7 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
               return (
                 <tr key={i}>
                   <td style={styles.dbvRowNum}>{i + 1}</td>
-                  {rows.map((r) => {
+                  {viewMode === 'tobe' ? rows.map((r) => {
                     // TO-BE 컬럼명으로 report 결과에서 lookup
                     let v = '';
                     if (report && reportColIdx) {
@@ -4318,6 +4423,23 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
                           ...styles.dbvCell,
                           ...(zebra ? styles.dbvCellZebra : {}),
                           ...(numeric ? styles.dbvCellNum : {}),
+                        }}
+                      >
+                        {isNull
+                          ? <span style={styles.dbvCellNull}>[NULL]</span>
+                          : v}
+                      </td>
+                    );
+                  }) : (asisPreview?.headers ?? []).map((h, hi) => {
+                    // AS-IS raw csv 의 row 값 — string 그대로
+                    const v = asisPreview?.rows[i]?.[hi] ?? '';
+                    const isNull = v === '' || v === 'NULL';
+                    return (
+                      <td
+                        key={h}
+                        style={{
+                          ...styles.dbvCell,
+                          ...(zebra ? styles.dbvCellZebra : {}),
                         }}
                       >
                         {isNull

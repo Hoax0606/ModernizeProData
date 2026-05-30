@@ -61,6 +61,20 @@ export interface PreflightInput {
    * キーが無い = 検査対象外 (binding がない / csvPath 未設定でスキップした 等).
    */
   csvFilesByAsisTable: Record<string, { exists: boolean; error?: string }>;
+  /**
+   * 자식 link binding 의 master project 의 binding lookup.
+   * key = `${masterProjectId}|${tobeSchema}|${tobeTable}` (lowercase).
+   * value = master binding 의 sources 가 비어있지 않은지 여부.
+   * 呼び元 (startPreflight) 가 link 마커 있는 자식 binding 의 masterId 모아 미리 fetch.
+   */
+  masterBindingHasSources?: Record<string, boolean>;
+  /**
+   * 자식 link binding 의 master project 의 mapping_rules lookup.
+   * key = `${masterProjectId}|${tobeSchema}|${tobeTable}` (lowercase).
+   * value = master 의 같은 (schema, table) 의 rules.
+   * unmapped-cols / asis-unmapped 체크가 자식 link 시 master 의 rules 로 검증.
+   */
+  masterRulesByKey?: Record<string, FrozenRule[]>;
 }
 
 const ORDER: PreflightCheckId[] = [
@@ -345,9 +359,19 @@ function checkTobeBindings(ctx: Context): PreflightCheckResult {
       perTable: [],
     };
   }
+  const masterMap = ctx.masterBindingHasSources ?? {};
   const perTable: TableCheckResult[] = tables.map((name) => {
     const bs = ctx.bindingsByTobe.get(name) ?? [];
-    const hasReal = bs.some((b) => (b.sources?.length ?? 0) > 0);
+    // 자식 link binding (sharedFromProjectId 있음) → master project 의 같은 (schema, table)
+    // binding 의 sources 확인. master 가 sources 있으면 pass.
+    // 자체 정의 binding → 자기 sources 확인.
+    const hasReal = bs.some((b) => {
+      if (b.sharedFromProjectId) {
+        const key = `${b.sharedFromProjectId}|${(b.tobeSchema ?? '').toLowerCase()}|${b.tobeTable.toLowerCase()}`;
+        return masterMap[key] === true;
+      }
+      return (b.sources?.length ?? 0) > 0;
+    });
     return hasReal
       ? { table: name, status: 'pass', detailKey: 'execution.preflight.check.tobeBindings.passOne' }
       : { table: name, status: 'fail', detailKey: 'execution.preflight.check.tobeBindings.failOne' };
@@ -374,14 +398,22 @@ function checkUnmappedCols(ctx: Context): PreflightCheckResult {
       perTable: [],
     };
   }
+  const masterRulesMap = ctx.masterRulesByKey ?? {};
   const perTable: TableCheckResult[] = tables.map((name) => {
     const tobeTable = ctx.tobeTableByName.get(name);
     if (!tobeTable) {
       return { table: name, status: 'skip', detailKey: 'execution.preflight.check.unmappedCols.skipNoDdl' };
     }
     /* Mapping UI / Dashboard と同じ規約: 全カラムが mapping 要. ただし strategy='skip'
-       の rule がついているカラムは「明示的に除外」なので OK 扱い. */
-    const rules = ctx.rulesByTobe.get(name) ?? [];
+       の rule がついているカラムは「明示的に除외」なので OK 扱い. */
+    // 자식 link binding 이면 master 의 rules 사용. 자체 정의 binding 이면 자기 rules.
+    const bs = ctx.bindingsByTobe.get(name) ?? [];
+    const linkChild = bs.find((b) => b.sharedFromProjectId);
+    let rules: FrozenRule[] = ctx.rulesByTobe.get(name) ?? [];
+    if (linkChild) {
+      const key = `${linkChild.sharedFromProjectId}|${(linkChild.tobeSchema ?? '').toLowerCase()}|${linkChild.tobeTable.toLowerCase()}`;
+      rules = masterRulesMap[key] ?? [];
+    }
     const skippedCols = new Set<string>();
     const mappedCols = new Set<string>();
     for (const r of rules) {
@@ -430,9 +462,13 @@ function checkAsisUnmapped(ctx: Context): PreflightCheckResult {
     };
   }
   /* AS-IS columns referenced by any rule.  Cross-tobe lookup is fine here —
-     a column counts as "used" globally. */
+     a column counts as "used" globally. 자식 link 의 master rules 도 합산. */
   const usedAsisCols = new Set<string>();
-  for (const r of ctx.snapshotData.rules ?? []) {
+  const allRules: FrozenRule[] = [...(ctx.snapshotData.rules ?? [])];
+  for (const masterRules of Object.values(ctx.masterRulesByKey ?? {})) {
+    allRules.push(...masterRules);
+  }
+  for (const r of allRules) {
     if (!ruleProducesValue(r)) continue;
     if (!r.asisTable) continue;
     for (const col of r.asisColumn ?? []) {

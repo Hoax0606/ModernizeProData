@@ -247,6 +247,8 @@ public class MappingImportService {
                     cp.setTobeTable(lb.getTobeTable());
                     cp.setCompositionKind(lb.getCompositionKind());
                     cp.setWhereFilter(lb.getWhereFilter());
+                    cp.setGroupByExpr(lb.getGroupByExpr());
+                    cp.setExpandExpr(lb.getExpandExpr());
                     cp.setBindingOrigin(lb.getBindingOrigin());
                     cp.setSharedFromProjectId(lb.getSharedFromProjectId());
                     cp.setCreatedBy(lb.getCreatedBy());
@@ -722,6 +724,8 @@ public class MappingImportService {
             cp.setTobeTable(lb.getTobeTable());
             cp.setCompositionKind(lb.getCompositionKind());
             cp.setWhereFilter(lb.getWhereFilter());
+            cp.setGroupByExpr(lb.getGroupByExpr());
+            cp.setExpandExpr(lb.getExpandExpr());
             cp.setBindingOrigin(lb.getBindingOrigin());
             cp.setSharedFromProjectId(lb.getSharedFromProjectId());
             cp.setCreatedBy(lb.getCreatedBy());
