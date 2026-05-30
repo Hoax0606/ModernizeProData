@@ -107,7 +107,7 @@ export function LoginPage() {
         </div>
 
         {/* 로그인 카드 */}
-        <form style={styles.card} onSubmit={handleSubmit}>
+        <form style={styles.card} onSubmit={handleSubmit} autoComplete="off">
           <label style={styles.label}>
             <div style={styles.labelRow}>
               <span style={styles.labelText}>{t('login.username')}</span>
@@ -120,7 +120,7 @@ export function LoginPage() {
               style={styles.input}
               autoFocus
               required
-              autoComplete="username"
+              autoComplete="off"
             />
           </label>
 
@@ -132,7 +132,7 @@ export function LoginPage() {
               onChange={(e) => setPassword(e.target.value)}
               style={styles.input}
               required
-              autoComplete="current-password"
+              autoComplete="new-password"
             />
           </label>
 

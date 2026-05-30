@@ -353,7 +353,11 @@ public class SnapshotController {
         mappingRuleRepository.deleteAllByProjectId(projectId);
         mappingCodeMapRepository.deleteAllByProjectId(projectId);
         // 2) DELETE 반영 — 같은 트랜잭션 안 새 insert 가 1차 캐시 충돌하지 않도록.
-        snapshotRepository.flush();
+        //    삭제한 repo 들 (binding/rule/codeMap) 의 entity manager 가 flush 대상.
+        //    여기서는 EntityManager 차원 flush (모든 dirty entity).
+        mappingTableBindingRepository.flush();
+        mappingRuleRepository.flush();
+        mappingCodeMapRepository.flush();
 
         // 3) rules
         if (data.rules() != null) {

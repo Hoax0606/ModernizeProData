@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { licenseApi } from '../api/license';
@@ -9,16 +9,9 @@ import { useAuthStore } from '../store/auth';
 /**
  * First-boot license setup screen.
  *
- * Uses the `window.javaConnector.openLicenseFile()` bridge wired up in
- * Launcher.java instead of <input type="file"> because JavaFX 21 WebView
- * does not surface a native file picker on HTML file inputs.
+ * 2026-05-30 — Edge 의 native file picker 사용 (HTML5 input type=file).
+ * 옛 JavaFX WebView 의 prompt-handler trick 폐기.
  */
-declare global {
-  interface Window {
-    javaConnector?: { openLicenseFile(): string | null };
-  }
-}
-
 export function LicenseSetupPage() {
   const t = useT();
   const nav = useNavigate();
@@ -31,16 +24,18 @@ export function LicenseSetupPage() {
   const [content, setContent] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const onPick = () => {
-    // Bridge — Launcher.java's prompt handler intercepts the sentinel string
-    // 'OPEN_LICENSE_FILE' and shows a native JavaFX FileChooser instead of
-    // a text prompt. window.prompt() returns the file contents (or null on
-    // cancel). This sidesteps JavaFX 21's JSObject limitation where Java
-    // methods attached via setMember() are not callable from JS.
+    fileInputRef.current?.click();
+  };
+
+  const onFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // 같은 파일 재선택 가능하도록.
+    if (!file) return;
     try {
-      const text = window.prompt('OPEN_LICENSE_FILE');
-      if (text == null) return;
+      const text = await file.text();
       setContent(text);
       setError(null);
     } catch (err) {
@@ -113,6 +108,13 @@ export function LicenseSetupPage() {
 
           <div style={styles.label}>
             <span style={styles.labelText}>{t('licenseSetup.fileLabel')}</span>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".lic,.json,application/json,text/plain"
+              onChange={onFileChange}
+              style={{ display: 'none' }}
+            />
             <button type="button" onClick={onPick} style={styles.filePickerBtn}>
               <span style={loaded ? styles.fileNameSet : styles.fileNameEmpty}>
                 {loaded

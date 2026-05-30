@@ -179,24 +179,52 @@ if ($jfxDllCount -eq 0) {
 }
 Write-Host "  Bundled $jfxDllCount JavaFX native DLLs into staging" -ForegroundColor Green
 
-# dist/ 안의 옛 MSI 가 install 중이라 file-lock 가능 — 최대 30 초 retry 후 fail.
+# PostgreSQL 18 portable binaries — 모든 MSI 에 bundle (staging 은 한 번). Worker MSI
+# 도 같은 staging 쓰니까 PG 포함. Worker 는 ensureRunning 호출 안 함 (LocalAppData
+# 의 instance start 안 함, Coordinator PG 에 connect). MSI 크기 +200MB 수용.
+$pgZip = Join-Path $PSScriptRoot 'cache\postgresql-18.4-windows-x64-binaries.zip'
+if (-not (Test-Path $pgZip)) {
+    Write-Host "  Downloading PostgreSQL 18.4 portable binaries..." -ForegroundColor Cyan
+    $pgUrl = 'https://get.enterprisedb.com/postgresql/postgresql-18.4-1-windows-x64-binaries.zip'
+    Invoke-WebRequest -Uri $pgUrl -OutFile $pgZip -UseBasicParsing
+}
+# zip 그대로 stage — Java 가 첫 launch 시 user dir 에 extract (WiX 의 file count
+# 한계 회피, 5000+ 파일 = light.exe exit 103).
+$pgDst = Join-Path $StagingApp 'postgresql-portable.zip'
+Copy-Item -Force $pgZip $pgDst
+$pgSizeMB = [math]::Round((Get-Item $pgDst).Length / 1MB, 1)
+Write-Host "  Bundled PostgreSQL 18.4 zip ($pgSizeMB MB) into staging" -ForegroundColor Green
+
+# dist/ 안의 옛 MSI 가 install 중이거나 file watcher (VSCode chokidar /
+# Windows SearchIndexer) 가 폴더 handle 점유 가능. 1) 안의 file 먼저 비움
+# (대부분 충분), 2) 그래도 폴더 자체 lock 이면 jpackage 의 --dest 가
+# 기존 폴더 재사용 OK 이므로 rm skip.
 if (Test-Path $Dest) {
-    $attempts = 0
-    while ($attempts -lt 6) {
-        try {
-            Remove-Item -Recurse -Force $Dest -ErrorAction Stop
-            break
-        } catch {
-            $attempts++
-            if ($attempts -ge 6) {
-                throw "Cannot clear dist/ — file locked by another process (msiexec / install 중)? $($_.Exception.Message)"
+    Get-ChildItem -Path $Dest -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        $attempts = 0
+        while ($attempts -lt 6) {
+            try {
+                Remove-Item -Recurse -Force $_.FullName -ErrorAction Stop
+                break
+            } catch {
+                $attempts++
+                if ($attempts -ge 6) {
+                    throw "Cannot clear $($_.Name) in dist/ — locked by another process (msiexec / file watcher)? $($_.Exception.Message)"
+                }
+                Write-Host "  $($_.Name) locked, waiting 5s (attempt $attempts/6)..." -ForegroundColor Yellow
+                Start-Sleep -Seconds 5
             }
-            Write-Host "  dist/ locked, waiting 5s (attempt $attempts/6)..." -ForegroundColor Yellow
-            Start-Sleep -Seconds 5
         }
     }
+    # cleanup verify — file 의 silent skip 없었는지 확인 (그래야 jpackage 가 stale
+    # MSI 의 옆에 덧붙이지 않음).
+    $leftovers = Get-ChildItem -Path $Dest -Force -ErrorAction SilentlyContinue
+    if ($leftovers) {
+        throw "dist/ cleanup incomplete — leftover: $($leftovers.Name -join ', ')"
+    }
+} else {
+    New-Item -ItemType Directory -Path $Dest | Out-Null
 }
-New-Item -ItemType Directory -Path $Dest | Out-Null
 
 # === [6] Icon ===
 Write-Host "[6/8] Icon..." -ForegroundColor Cyan

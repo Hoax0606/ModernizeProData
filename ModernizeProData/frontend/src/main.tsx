@@ -36,3 +36,4 @@ try {
 } catch (e) {
   showErr('createRoot/render', e instanceof Error ? e.message + '\n' + (e.stack ?? '') : String(e));
 }
+
