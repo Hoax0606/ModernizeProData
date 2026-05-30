@@ -41,32 +41,45 @@ export function NotificationToast() {
 
   const seenIdsRef = useRef<Set<string>>(new Set());
   const initializedRef = useRef(false);
+  // baseline 이 어느 사이트 기준으로 잡혔는지. 사이트 전환 시 재설정 트리거.
+  const baselineSiteRef = useRef<string | undefined>(undefined);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
-  // 마운트 시 기존 entry 들을 'seen' 으로 표시 — 처음 로드 시 한꺼번에 뜨지 않도록.
   useEffect(() => {
-    if (initializedRef.current) return;
-    initializedRef.current = true;
-    seenIdsRef.current = new Set(allLogs.map((l) => l.id));
-  }, [allLogs]);
-
-  useEffect(() => {
-    if (!initializedRef.current) return;
-    if (!globalNotifEnabled) {
-      // 비활성화 중에 새로 쌓인 entry 들도 'seen' 으로 표시 — 다시 켰을 때 한꺼번에 토스트로 뜨지 않게.
-      for (const l of allLogs) seenIdsRef.current.add(l.id);
-      return;
-    }
     const siteProjIds = new Set(
       allProjects.filter((p) => p.siteId === activeSiteId).map((p) => p.id),
     );
+    // 활성 사이트에 속한 로그만 본다. (다른 사이트의 잔여 로그가 토스트로 새지 않게)
+    const siteLogs = allLogs.filter((l) => siteProjIds.has(l.projectId));
+
+    // 사이트가 바뀌면 baseline 을 다시 잡는다 — 새 사이트의 기존 로그가 한꺼번에 뜨지 않도록.
+    if (baselineSiteRef.current !== activeSiteId) {
+      baselineSiteRef.current = activeSiteId;
+      initializedRef.current = false;
+      seenIdsRef.current = new Set();
+    }
+
+    if (!globalNotifEnabled) {
+      // 비활성화 중에 쌓인 entry 들도 'seen' 으로 표시 — 다시 켰을 때 한꺼번에 토스트로 뜨지 않게.
+      for (const l of siteLogs) seenIdsRef.current.add(l.id);
+      return;
+    }
+
+    // baseline 미설정: 활성 사이트의 로그가 처음 도착하는 시점에 잡는다.
+    // (refresh 직후엔 fetchBySite 가 끝나기 전이라 allLogs 가 비어 있으므로,
+    //  여기서 기다렸다가 첫 비어있지 않은 로드를 baseline 으로 삼아야 한꺼번에 토스트가 뜨지 않는다.)
+    if (!initializedRef.current) {
+      if (siteLogs.length === 0) return;
+      initializedRef.current = true;
+      seenIdsRef.current = new Set(siteLogs.map((l) => l.id));
+      return;
+    }
+
     const projNameById = new Map(allProjects.map((p) => [p.id, p.name]));
     const newItems: ToastItem[] = [];
-    for (const l of allLogs) {
+    for (const l of siteLogs) {
       if (seenIdsRef.current.has(l.id)) continue;
       seenIdsRef.current.add(l.id);
-      // 활성 사이트의 프로젝트만
-      if (!siteProjIds.has(l.projectId)) continue;
       // Event subscription
       const eventKey = actionToEventKey(l.action);
       if (eventKey && !isEventEnabled(notifPrefSubs, l.projectId, eventKey)) continue;
