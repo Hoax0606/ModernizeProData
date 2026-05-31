@@ -14,6 +14,7 @@ import com.ksinfo.modernize_pro_data.coordinator.runlog.RunLogIngestService;
 import com.ksinfo.modernize_pro_data.coordinator.site.Site;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageContext;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageHelpers;
+import com.ksinfo.modernize_pro_data.coordinator.worker.StageProgressBroadcaster;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageRunner;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -59,6 +60,7 @@ public class CheckStage implements StageRunner {
     private final QuarantineService quarantineService;
     private final com.ksinfo.modernize_pro_data.common.duckdb.DuckDbService duckDbService;
     private final RunLogIngestService runLogIngest;
+    private final StageProgressBroadcaster broadcaster;
 
     @Override
     public String stageKey() {
@@ -126,6 +128,10 @@ public class CheckStage implements StageRunner {
                 successCount++;
             }
             stageTableResultRepo.save(result);
+            stage.setTablesSuccess(successCount);
+            stage.setTablesFailed(failedCount);
+            stageInstanceRepo.save(stage);
+            broadcaster.stageProgress(runId, stage);
         }
 
         OffsetDateTime finishedAt = OffsetDateTime.now();

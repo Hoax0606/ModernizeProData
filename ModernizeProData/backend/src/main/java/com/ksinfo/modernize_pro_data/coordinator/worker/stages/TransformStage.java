@@ -20,6 +20,7 @@ import com.ksinfo.modernize_pro_data.coordinator.runlog.RunLogIngestService;
 import com.ksinfo.modernize_pro_data.coordinator.worker.SqlComposer;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageContext;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageHelpers;
+import com.ksinfo.modernize_pro_data.coordinator.worker.StageProgressBroadcaster;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageRunner;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -70,6 +71,7 @@ public class TransformStage implements StageRunner {
     private final DuckDbService duckDbService;
     private final QuarantineService quarantineService;
     private final RunLogIngestService runLogIngest;
+    private final StageProgressBroadcaster broadcaster;
 
     @Override
     public String stageKey() {
@@ -166,6 +168,10 @@ public class TransformStage implements StageRunner {
 
                 ingest(ctx, "Transformed " + tobeTable + ": " + rowCount + " rows", true);
                 successCount++;
+                stage.setTablesSuccess(successCount);
+                stage.setTablesFailed(failedCount);
+                stageInstanceRepo.save(stage);
+                broadcaster.stageProgress(runId, stage);
             } catch (Exception e) {
                 OffsetDateTime tableEnd = OffsetDateTime.now();
                 result.setStatus(StageTableStatus.failed);
@@ -183,6 +189,10 @@ public class TransformStage implements StageRunner {
                 log.warn("TransformStage failed for {} : {}", tobeTable, e.getMessage());
                 ingest(ctx, "Transform failed for " + tableLabel + ": " + e.getMessage(), false);
                 failedCount++;
+                stage.setTablesSuccess(successCount);
+                stage.setTablesFailed(failedCount);
+                stageInstanceRepo.save(stage);
+                broadcaster.stageProgress(runId, stage);
             }
         }
 

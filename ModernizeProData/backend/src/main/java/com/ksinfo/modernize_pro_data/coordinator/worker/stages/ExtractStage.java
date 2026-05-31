@@ -15,6 +15,7 @@ import com.ksinfo.modernize_pro_data.coordinator.runlog.RunLogIngestService;
 import com.ksinfo.modernize_pro_data.coordinator.site.Site;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageContext;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageHelpers;
+import com.ksinfo.modernize_pro_data.coordinator.worker.StageProgressBroadcaster;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageRunner;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -60,6 +61,7 @@ public class ExtractStage implements StageRunner {
     private final DuckDbService duckDbService;
     private final QuarantineService quarantineService;
     private final RunLogIngestService runLogIngest;
+    private final StageProgressBroadcaster broadcaster;
 
     @Override
     public String stageKey() {
@@ -172,6 +174,10 @@ public class ExtractStage implements StageRunner {
                 ingest(ctx, "Extracted " + tobeTable + ": " + asisTableToSchema.size()
                         + " source(s), " + totalRows + " rows total", true);
                 successCount++;
+                stage.setTablesSuccess(successCount);
+                stage.setTablesFailed(failedCount);
+                stageInstanceRepo.save(stage);
+                broadcaster.stageProgress(runId, stage);
             } catch (Exception e) {
                 OffsetDateTime tableEnd = OffsetDateTime.now();
                 result.setStatus(StageTableStatus.failed);
@@ -189,6 +195,10 @@ public class ExtractStage implements StageRunner {
                 log.warn("ExtractStage failed for binding {} ({}): {}", childBindingId, tobeTable, e.getMessage());
                 ingest(ctx, "Extract failed for " + tableLabel + ": " + e.getMessage(), false);
                 failedCount++;
+                stage.setTablesSuccess(successCount);
+                stage.setTablesFailed(failedCount);
+                stageInstanceRepo.save(stage);
+                broadcaster.stageProgress(runId, stage);
             }
         }
 

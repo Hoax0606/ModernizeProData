@@ -19,6 +19,7 @@ import com.ksinfo.modernize_pro_data.coordinator.runlog.RunLogIngestService;
 import com.ksinfo.modernize_pro_data.coordinator.site.Site;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageContext;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageHelpers;
+import com.ksinfo.modernize_pro_data.coordinator.worker.StageProgressBroadcaster;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageRunner;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -77,6 +78,7 @@ public class LoadStage implements StageRunner {
     private final PgCopyManager pgCopyManager;
     private final QuarantineService quarantineService;
     private final RunLogIngestService runLogIngest;
+    private final StageProgressBroadcaster broadcaster;
 
     @Override
     public String stageKey() {
@@ -123,11 +125,16 @@ public class LoadStage implements StageRunner {
         AtomicInteger failed = new AtomicInteger();
         int parallelism = Math.max(1, loadParallelism);
 
+        String runId = ctx.getRunHistory().getId();
         if (parallelism <= 1 || bindings.size() <= 1) {
             // 순차 (기본)
             for (MappingTableBinding b : bindings) {
                 if (loadBinding(ctx, stage, b, dbConfig, tempDir, columnsByTable)) success.incrementAndGet();
                 else failed.incrementAndGet();
+                stage.setTablesSuccess(success.get());
+                stage.setTablesFailed(failed.get());
+                stageInstanceRepo.save(stage);
+                broadcaster.stageProgress(runId, stage);
             }
         } else {
             // 테이블(binding) 단위 병렬 적재. 각 task 가 자기 DuckDB/PG connection 사용.
@@ -140,6 +147,13 @@ public class LoadStage implements StageRunner {
                     futures.add(pool.submit(() -> {
                         if (loadBinding(ctx, stage, b, dbConfig, tempDir, columnsByTable)) success.incrementAndGet();
                         else failed.incrementAndGet();
+                        // stage entity save 경합 회피용 동기화 — Load 끝 broadcast.
+                        synchronized (stage) {
+                            stage.setTablesSuccess(success.get());
+                            stage.setTablesFailed(failed.get());
+                            stageInstanceRepo.save(stage);
+                            broadcaster.stageProgress(runId, stage);
+                        }
                     }));
                 }
                 for (Future<?> f : futures) {

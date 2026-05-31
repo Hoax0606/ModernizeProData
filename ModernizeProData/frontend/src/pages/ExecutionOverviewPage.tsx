@@ -302,7 +302,15 @@ export function ExecutionOverviewPage() {
   ).length;
 
   const runCount = selected.size;
-  const canRun = runCount > 0;
+  // 선택된 row 중 executionAssignee 미할당 (또는 draft 의 변경 도 unassigned) 이
+  // 하나라도 있으면 Run 금지 — Worker delegate 대상이 없는 row 는 RunService 가
+  // REJECTED 반환하므로 UI 에서 미리 차단해 혼란 방지.
+  const hasUnassignedSelected = [...selected].some((id) => {
+    const draft = assigneeDraft[id];
+    const effective = draft !== undefined ? draft : (siteProjects.find((p) => p.id === id)?.executionAssignee ?? '');
+    return !effective;
+  });
+  const canRun = runCount > 0 && !hasUnassignedSelected;
   const canAbort = selectedRunningCount > 0;
 
   const handleRefresh = () => { loadMetrics(); loadWorkers(); };

@@ -48,6 +48,19 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
+// Right-click context menu 차단 — Edge --app 모드의 chromeless 일관성. text
+// selection 등 시스템 컨텍스트 메뉴 (브라우저 / Inspect / View source) 가 도구
+// 사용 흐름과 무관하므로 전체 disable.
+window.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+});
+
+// 파일 다운로드 트리거 차단 — 도구 내부 다운로드 (export 등) 는 page 가 직접
+// blob → <a download> 클릭으로 처리하므로 user-initiated drag 외 외부 link
+// 의 download attribute 만 가로채는 건 의미 없음. 대신 download attr 의
+// click 을 가로채 새 탭 열림 등 chrome 다운로드 bar 노출 방지는 Edge 의
+// --disable-features 로 처리 (EdgeAppLauncher 의 flags).
+
 try {
   createRoot(document.getElementById('root')!).render(
     <StrictMode>

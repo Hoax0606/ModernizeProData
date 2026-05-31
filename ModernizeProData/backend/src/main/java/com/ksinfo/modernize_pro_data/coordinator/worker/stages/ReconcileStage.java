@@ -12,6 +12,7 @@ import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableStatus;
 import com.ksinfo.modernize_pro_data.coordinator.runlog.RunLogIngestService;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageContext;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageHelpers;
+import com.ksinfo.modernize_pro_data.coordinator.worker.StageProgressBroadcaster;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageRunner;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -43,6 +44,7 @@ public class ReconcileStage implements StageRunner {
     private final DuckDbService duckDbService;
     private final QuarantineService quarantineService;
     private final RunLogIngestService runLogIngest;
+    private final StageProgressBroadcaster broadcaster;
 
     @Override
     public String stageKey() {
@@ -56,6 +58,7 @@ public class ReconcileStage implements StageRunner {
         stage.setStartedAt(startedAt);
         stageInstanceRepo.save(stage);
 
+        String runId = ctx.getRunHistory().getId();
         String schema = ctx.getDuckdbSchema();
         ingest(ctx, "Stage reconcile started — " + ctx.getBindings().size() + " bindings", true);
 
@@ -100,6 +103,10 @@ public class ReconcileStage implements StageRunner {
 
                 ingest(ctx, "Reconciled " + tobeTable + ": " + rowCount + " rows", true);
                 successCount++;
+                stage.setTablesSuccess(successCount);
+                stage.setTablesFailed(failedCount);
+                stageInstanceRepo.save(stage);
+                broadcaster.stageProgress(runId, stage);
             } catch (Exception e) {
                 result.setStatus(StageTableStatus.failed);
                 Map<String, Object> detail = new HashMap<>();
@@ -116,6 +123,10 @@ public class ReconcileStage implements StageRunner {
 
                 ingest(ctx, "Reconcile failed for " + tableLabel + ": " + e.getMessage(), false);
                 failedCount++;
+                stage.setTablesSuccess(successCount);
+                stage.setTablesFailed(failedCount);
+                stageInstanceRepo.save(stage);
+                broadcaster.stageProgress(runId, stage);
             }
         }
 

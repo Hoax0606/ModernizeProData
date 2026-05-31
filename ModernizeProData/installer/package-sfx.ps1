@@ -19,16 +19,21 @@ foreach ($p in @($sevenZip, $sfxModule)) {
 
 $dist = (Resolve-Path 'dist').Path
 $launcher = Join-Path $dist 'Launcher.exe'
-$en  = Join-Path $dist 'ModernizeProData-en-1.0.0.msi'
-$ko  = Join-Path $dist 'ModernizeProData-ko-1.0.0.msi'
-$ja  = Join-Path $dist 'ModernizeProData-ja-1.0.0.msi'
-$wen = Join-Path $dist 'ModernizeProData-Worker-en-1.0.0.msi'
-$wko = Join-Path $dist 'ModernizeProData-Worker-ko-1.0.0.msi'
-$wja = Join-Path $dist 'ModernizeProData-Worker-ja-1.0.0.msi'
-$payload = @($launcher, $en, $ko, $ja, $wen, $wko, $wja)
-foreach ($f in $payload) {
-    if (-not (Test-Path $f)) { throw "Missing: $f. Build first." }
-}
+if (-not (Test-Path $launcher)) { throw "Missing: $launcher. Run build-launcher.ps1." }
+# Bundle whatever MSI subset build.ps1 produced (Combo can omit some locales).
+# Coordinator+Worker × ko/ja/en candidates; payload includes only the existing ones.
+$msiCandidates = @(
+    'ModernizeProData-en-1.0.0.msi',
+    'ModernizeProData-ko-1.0.0.msi',
+    'ModernizeProData-ja-1.0.0.msi',
+    'ModernizeProData-Worker-en-1.0.0.msi',
+    'ModernizeProData-Worker-ko-1.0.0.msi',
+    'ModernizeProData-Worker-ja-1.0.0.msi'
+) | ForEach-Object { Join-Path $dist $_ } | Where-Object { Test-Path $_ }
+if ($msiCandidates.Count -eq 0) { throw "No MSI in $dist. Run build.ps1 first." }
+$payload = @($launcher) + $msiCandidates
+Write-Host "Bundling Launcher + $($msiCandidates.Count) MSI:" -ForegroundColor Cyan
+foreach ($f in $payload) { Write-Host "  - $(Split-Path $f -Leaf)" }
 
 $staging = Join-Path $PSScriptRoot 'staging\sfx'
 if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }

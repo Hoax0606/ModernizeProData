@@ -81,10 +81,17 @@ public final class EdgeAppLauncher {
                         // password save / autofill prompt 비활성 — 우리 도구의 login
                         // form 이 web service 가 아니므로 browser 의 credential
                         // manager 가 끼어들 필요 없음.
+                        // password save / autofill / 다운로드 bubble & shelf / 번역 prompt /
+                        // Edge 의 Bing 통합 (사이드바·검색) / recovery dialog 비활성. 도구의
+                        // chromeless --app 일관성 — browser chrome UI 가 사용자에게 노출되지 않게.
                         "--disable-features=PasswordManagerOnboarding,"
                                 + "AutofillEnableAccountWalletStorage,"
-                                + "AutofillServerCommunication",
-                        "--password-store=basic"
+                                + "AutofillServerCommunication,"
+                                + "DownloadBubble,DownloadBubbleV2,DownloadShelfNotifier,"
+                                + "Translate,TranslateUI,"
+                                + "msEdgeBing,EdgeRecovery",
+                        "--password-store=basic",
+                        "--disable-translate"
                 ).redirectErrorStream(true).start();
             }
         }

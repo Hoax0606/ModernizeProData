@@ -11,6 +11,7 @@ import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableResult;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableResultRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableStatus;
+import com.ksinfo.modernize_pro_data.coordinator.site.AuditLogService;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.Site;
@@ -80,6 +81,7 @@ public class RunService {
     private final SimpMessagingTemplate stomp;
     private final com.ksinfo.modernize_pro_data.coordinator.site.SnapshotExecutionContextService snapshotExecutionContextService;
     private final com.ksinfo.modernize_pro_data.coordinator.runlog.RunLogRepository runLogRepository;
+    private final AuditLogService auditLogService;
 
     /**
      * Run を起動する. 3 系統 (Nightly Quartz / CLI / REST) のすべてがこの入口を通る.
@@ -278,6 +280,12 @@ public class RunService {
         //    @TransactionalEventListener(AFTER_COMMIT) 이 listener 가 push 와 local 실행 둘 다 처리.
         eventPublisher.publishEvent(new RunStartedEvent(rh.getId(), projectId));
 
+        // FE NotificationToast = audit_log 기반. run start/finish 알림은 여기서 audit_log entry 로.
+        auditLogService.record(project, requestedBy, "run started")
+                .target(runType.name())
+                .details(runType.name() + " run started (runId=" + rh.getId() + ")")
+                .save();
+
         log.info("startRun started runId={} projectId={} runType={} trigger={}",
                 rh.getId(), projectId, runType, triggerSource);
         return RunResult.started(rh.getId());
@@ -415,6 +423,14 @@ public class RunService {
         projectRepo.save(project);
 
         log.info("finishRun runId={} status={} durationMs={}", runId, finalStatus, durationMs);
+
+        // FE NotificationToast 용 — run 종료 알림. action 으로 success/failed/aborted/timed_out 구별.
+        auditLogService.record(project, rh.getRequestedBy() == null ? "system" : rh.getRequestedBy(),
+                "run " + finalStatus.name())
+                .target(rh.getRunType() == null ? null : rh.getRunType().name())
+                .details((rh.getRunType() == null ? "run" : rh.getRunType().name()) + " "
+                        + finalStatus.name() + (errorMessage == null ? "" : ": " + errorMessage))
+                .save();
 
         /* 실시간 진행 알림 — run 최종 상태 도달. FE 가 invalidate 해서 status chip / 버튼 즉시 갱신. */
         try {

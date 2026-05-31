@@ -21,6 +21,7 @@ import com.ksinfo.modernize_pro_data.coordinator.runlog.RunLogIngestService;
 import com.ksinfo.modernize_pro_data.coordinator.site.Site;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageContext;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageHelpers;
+import com.ksinfo.modernize_pro_data.coordinator.worker.StageProgressBroadcaster;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageRunner;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -70,6 +71,7 @@ public class ValidationReportService implements StageRunner {
     private final StageTableResultRepository stageTableResultRepo;
     private final QuarantineService quarantineService;
     private final QuarantineEntryRepository quarantineEntryRepo;
+    private final StageProgressBroadcaster broadcaster;
 
     @Override
     public String stageKey() {
@@ -144,6 +146,10 @@ public class ValidationReportService implements StageRunner {
                 if (allPassed) successCount++; else failedCount++;
                 ingest(ctx, "Validation " + tableLabel + ": " + report.getPassedChecks()
                         + "/" + report.getTotalChecks() + " PASS", allPassed);
+                stage.setTablesSuccess(successCount);
+                stage.setTablesFailed(failedCount);
+                stageInstanceRepo.save(stage);
+                broadcaster.stageProgress(runId, stage);
             } catch (Exception e) {
                 log.warn("ValidationReport compute failed for {} ({}): {}", tableLabel, binding.getId(), e.getMessage());
                 Map<String, Object> empty = new LinkedHashMap<>();
@@ -175,6 +181,10 @@ public class ValidationReportService implements StageRunner {
 
                 failedCount++;
                 ingest(ctx, "Validation failed " + tableLabel + ": " + e.getMessage(), false);
+                stage.setTablesSuccess(successCount);
+                stage.setTablesFailed(failedCount);
+                stageInstanceRepo.save(stage);
+                broadcaster.stageProgress(runId, stage);
             }
         }
 
