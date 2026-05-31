@@ -25,7 +25,14 @@ public record SnapshotExecutionContext(
         OffsetDateTime startedAt,
         OffsetDateTime finishedAt,
         Long durationMs,
-        List<StageSnapshot> stages
+        List<StageSnapshot> stages,
+        /**
+         * 박제 시점의 quarantine entry count (severity=error). null 가능 — 이 필드를 도입하기 전에
+         * 박제된 row 는 JSON 에 키가 없어 deserialize 시 null. FE 는 null → 0 fallback 으로 표시.
+         */
+        Long errorCount,
+        /** 박제 시점의 quarantine entry count (severity=warning). 同上 null 가능. */
+        Long warningCount
 ) {
     public record StageSnapshot(
             String stageKey,

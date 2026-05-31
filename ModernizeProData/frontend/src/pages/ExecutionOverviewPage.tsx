@@ -201,7 +201,12 @@ export function ExecutionOverviewPage() {
       const rows = loadStage
         ? loadStage.tables.reduce((a, t) => a + (t.rowCount ?? 0), 0)
         : 0;
-      const errorCount = ctx.stages.reduce((a, s) => a + (s.tablesFailed ?? 0), 0);
+      // KPI Errors/Warnings 의 정의를 live run 경로 (BE: quarantineRepo 카운트) 와 통일.
+      // ctx.errorCount/warningCount 는 SnapshotExecutionContextService.recordExecutionContext
+      // 가 박제 시점에 quarantineRepo.countByRunIdAndSeverity 로 query 한 값. 박제 도입 전
+      // snapshot 은 undefined → 0 fallback (재 run 하면 채워짐).
+      const errorCount = ctx.errorCount ?? 0;
+      const warningCount = ctx.warningCount ?? 0;
       const totalStages = ctx.stages.length;
       const progressPct = totalStages > 0
         ? ctx.stages.reduce((a, s) => a + (s.pct ?? 0), 0) / totalStages
@@ -215,8 +220,7 @@ export function ExecutionOverviewPage() {
         tablesTotal,
         tablesDone,
         errorCount,
-        // Quarantine warningCount 는 별도 fetch 필요 — 일단 apiMetrics 의 값 유지.
-        warningCount: apiMetrics[p.id]?.warningCount ?? 0,
+        warningCount,
         progressPct,
         // ctx.stages を渡して buildStagesFromStageViews 経路に乗せる。これが無いと
         // buildStagesFromMetric の fallback (progressPct 近似) に落ち、failed 段が常に
