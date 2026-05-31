@@ -41,6 +41,8 @@ interface ExecutionPreflightState {
 
   getEntry: (projectId: string | null | undefined) => PreflightEntry;
   setSelected: (projectId: string, tables: string[]) => void;
+  /** 自動同期 (pin の executionContext → selectedTables) 専用. ユーザー操作ではないので isStale を触らない. */
+  syncSelectedFromExecution: (projectId: string, tables: string[]) => void;
   setPhase: (projectId: string, phase: PreflightPhase) => void;
   resetForProject: (projectId: string) => void;
 
@@ -74,12 +76,35 @@ export const useExecutionPreflightStore = create<ExecutionPreflightState>()(
       setSelected: (projectId, tables) => {
         set((s) => {
           const prev = s.byProject[projectId] ?? EMPTY_ENTRY;
-          /* selection 변경 → 직전 done 결과가 stale 化. checking 중엔 마킹하지 않음. */
+          const next = [...tables];
+          const same = next.length === prev.selectedTables.length
+            && next.every((t) => prev.selectedTables.includes(t));
+          if (same) return s;
+          /* ユーザー操作による선택 변경 → 직전 done 결과가 stale 化. checking 중엔 마킹하지 않음. */
           const isStale = prev.preflightPhase === 'done';
           return {
             byProject: {
               ...s.byProject,
-              [projectId]: { ...prev, selectedTables: [...tables], isStale },
+              [projectId]: { ...prev, selectedTables: next, isStale },
+            },
+          };
+        });
+      },
+
+      syncSelectedFromExecution: (projectId, tables) => {
+        /* run 終了後の自動同期 (pin の executionContext.runId 更新時) で呼ばれる. ユーザー操作
+           ではないので isStale は触らない — そうしないと「自分で何も変更してないのに stale」になる
+           (2026-05-31 fix). 集合が同じならノーオペ. */
+        set((s) => {
+          const prev = s.byProject[projectId] ?? EMPTY_ENTRY;
+          const next = [...tables];
+          const same = next.length === prev.selectedTables.length
+            && next.every((t) => prev.selectedTables.includes(t));
+          if (same) return s;
+          return {
+            byProject: {
+              ...s.byProject,
+              [projectId]: { ...prev, selectedTables: next },
             },
           };
         });

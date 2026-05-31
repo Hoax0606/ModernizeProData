@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useWorkspaceStore } from '../store/workspace';
 import type { Project, ProjectPhase, ProjectEnvironment, Site } from '../store/workspace';
@@ -26,7 +26,7 @@ import {
   type Stage,
   type StageTone,
 } from '../lib/pipelineStages';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useT, type TranslationKey } from '../i18n';
 
 type T = (key: TranslationKey, vars?: Record<string, string | number>) => string;
@@ -83,6 +83,7 @@ export function ExecutionPage() {
 
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
+  const queryClient = useQueryClient();
 
   /* 활성 run id. start 성공 시 BE 반환값 보존 → usePipelineProgress 자동 polling.
      setActiveRunId(null) 로 polling 정지 + 표시 클리어.
@@ -125,34 +126,20 @@ export function ExecutionPage() {
     () => projectSnapshots.find((s) => pinnedIds.includes(s.id)) ?? null,
     [projectSnapshots, pinnedIds],
   );
-  /* Pipeline fallback — pinned snapshot 우선, 없으면 가장 최근 mapping snapshot.
-     사용자가 pin 을 옛 snapshot 으로 옮기면 그 시점 execution_context 로 자동 전환. */
-  const fallbackSnapshot = useMemo<MappingSnapshot | null>(() => {
-    if (pinnedSnapshot && pinnedSnapshot.type === 'mapping') return pinnedSnapshot;
-    const projectMapping = projectSnapshots.filter((s) => s.type === 'mapping');
-    return [...projectMapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
-  }, [pinnedSnapshot, projectSnapshots]);
-  /* "Discard" 한 snapshot id — 사용자가 활성 snapshot 의 fallback 표시를 명시적으로 끈 상태.
-     pinned 가 다른 snapshot 으로 옮겨가면 자동 reset (그 새 snapshot 은 Discard 적용 안 됨). */
+  /* Pipeline fallback — pin 中心統一 (2026-05-31): pin の executionContext のみを fallback
+     として使う. pin が無いプロジェクトでは fallback 無し. 旧仕様の「pin が無くても最新 mapping
+     snapshot を fallback」は ad-hoc run / 別 snapshot run を Execution 画面に映してしまうため廃止. */
+  const fallbackSnapshot: MappingSnapshot | null =
+    pinnedSnapshot && pinnedSnapshot.type === 'mapping' ? pinnedSnapshot : null;
+  /* Discard 済み snapshot id — ユーザーが「この pin の박제 run 表示をいったん消したい」と明示した状態.
+     pin が別 snapshot に変わったら自動 reset (= 新 pin に Discard 効果は持ち越さない). */
   const [discardedSnapshotId, setDiscardedSnapshotId] = useState<string | null>(null);
   useEffect(() => {
-    setDiscardedSnapshotId((cur) => (cur && cur !== fallbackSnapshot?.id ? null : cur));
-  }, [fallbackSnapshot?.id]);
-  const effectiveFallback = fallbackSnapshot?.id === discardedSnapshotId ? null : fallbackSnapshot;
-  /* pinned snapshot 의 id 가 변경되면 stale activeRunId 는 clear.
-     예: Test 1 run → activeRunId=run1, pin 을 Test 2(아직 run X)로 옮기면 run1 은 더 이상
-     이 snapshot 의 것이 아님 → clear 하면 fallback(빈 또는 그 snapshot 박제) 으로 자동 전환.
-     deps 는 pinnedSnapshot.id 만 — pinned 의 executionContext 가 갱신될 뿐인 경우(같은 snapshot
-     으로 run 끝남) 에는 clear 하지 않는다. */
-  useEffect(() => {
-    if (!project) return;
-    if (!pinnedSnapshot) return; // pin 없으면 activeRunId 그대로 (test ad-hoc 등).
-    const expectedRunId = pinnedSnapshot.executionContext?.runId ?? null;
-    if (activeRunId && activeRunId !== expectedRunId) {
-      setActiveRunId(null);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pinnedSnapshot?.id, project?.id]);
+    setDiscardedSnapshotId((cur) => (cur && cur !== pinnedSnapshot?.id ? null : cur));
+  }, [pinnedSnapshot?.id]);
+  const effectiveFallback = pinnedSnapshot?.id === discardedSnapshotId ? null : fallbackSnapshot;
+  /* pin 切替 effect は runHistoryData を参照するため宣言後 (下方) に移動. ここでは ref のみ宣言. */
+  const prevPinIdRef = useRef<string | undefined | null>(undefined);
   const { run, stages: stageViews } = usePipelineProgress(
     activeRunId,
     effectiveFallback?.executionContext ?? null,
@@ -167,30 +154,7 @@ export function ExecutionPage() {
   const preflightPhase: PreflightPhase = entryPhase ?? 'idle';
   const isStale: boolean = entryStale ?? false;
 
-  /* pinned snapshot 이 바뀔 때 그 snapshot 의 박제된 tables 로 selectedTables 동기.
-     - 박제 있음 → 그 run 에서 status='success' 인 tobeTable 만 자동 체크.
-       (실패한 tobeTable 까지 union 하면 다음 run 도 또 실패 — mapping 미정의 테이블이
-       반복적으로 selectedTables 에 끼는 사용자 함정 발생.)
-     - 박제 없음 (= 새 snapshot 이라 아직 한 번도 run 안 됨) → 빈 set.
-     deps 는 pinnedSnapshot.id + executionContext.runId — 같은 snapshot 으로 재실행
-     해서 executionContext 가 갱신된 경우도 따라간다. */
-  useEffect(() => {
-    if (!project) return;
-    if (!pinnedSnapshot) return; // pin 없으면 그대로 (test ad-hoc 등).
-    const ctx = pinnedSnapshot.executionContext;
-    if (!ctx) {
-      useExecutionPreflightStore.getState().setSelected(project.id, []);
-      return;
-    }
-    const tables = new Set<string>();
-    for (const st of ctx.stages) {
-      for (const t of st.tables) {
-        if (t.tobeTable && t.status === 'success') tables.add(t.tobeTable);
-      }
-    }
-    useExecutionPreflightStore.getState().setSelected(project.id, [...tables]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pinnedSnapshot?.id, pinnedSnapshot?.executionContext?.runId, project?.id]);
+  /* selectedTables 自動同期 effect は displayedActiveRun を参照するため宣言後 (下方) に移動. */
 
   const setSelectedTables = (next: Set<string>) => {
     if (!project) return;
@@ -232,6 +196,48 @@ export function ExecutionPage() {
 
   const displayedActiveRun: ActiveRunState | null = realActiveRun;
 
+  /* selectedTables 자동 동기는 **pin id が実際に切り替わった時のみ** 発火.
+     - pin 切替 (= pinnedSnapshot.id 変更) → 新 pin の executionContext.stages から success table 反映.
+       박제 없음이면 빈 set, 있으면 status='success' 인 tobeTable 만 자동 체크.
+       (실패 table 까지 union 하면 다음 run 도 또 실패 — mapping 미정의 테이블이 반복적으로 끼는
+       사용자 함정 발생.)
+     - 同じ pin で executionContext.runId 更新 (= run finish) → skip. RUN 起動時の選択を維持.
+       Discard 経由 or 手動で TableSelector を編集するまで selectedTables は不変.
+     - 初回マウント → persist 復元値をそのまま採用 (前回離脱時の選択維持).
+     ※ syncSelectedFromExecution を使う — ユーザー操作ではないので isStale 化しない.
+     (2026-05-31 fix: 旧版は executionContext.runId 変更でも自動同期していたため,
+     run finish 後 success table のみで上書きされて起動時の選択が失われた.) */
+  const prevSelectionPinIdRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!project) return;
+    if (!pinnedSnapshot) {
+      prevSelectionPinIdRef.current = undefined;
+      return;
+    }
+    const currentPinId = pinnedSnapshot.id;
+    const isInitialSet = prevSelectionPinIdRef.current === undefined;
+    const pinChanged = !isInitialSet && prevSelectionPinIdRef.current !== currentPinId;
+    prevSelectionPinIdRef.current = currentPinId;
+
+    // 初回 mount は persist 復元値そのまま. pin id が変わっていなければ何もしない.
+    if (!pinChanged) return;
+
+    // pin 切替: 新 pin の박제 success table で同期.
+    const ctx = pinnedSnapshot.executionContext;
+    if (!ctx) {
+      useExecutionPreflightStore.getState().syncSelectedFromExecution(project.id, []);
+      return;
+    }
+    const tables = new Set<string>();
+    for (const st of ctx.stages) {
+      for (const t of st.tables) {
+        if (t.tobeTable && t.status === 'success') tables.add(t.tobeTable);
+      }
+    }
+    useExecutionPreflightStore.getState().syncSelectedFromExecution(project.id, [...tables]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinnedSnapshot?.id, project?.id]);
+
   /* 実行履歴: real は BE fetch、demo は既存 mock. project が未確定なら disabled. */
   const runHistoryQuery = useQuery<RunHistoryDto[]>({
     queryKey: ['run-history', projectIdForReset],
@@ -242,15 +248,48 @@ export function ExecutionPage() {
   });
   const runHistoryData = runHistoryQuery.data;
 
-  /* 새로고침 후 pipeline 복원: store 의 activeRunId 가 undefined (한 번도 set 안 된 상태)
-     이고 BE 히스토리에 run 이 있으면 최신 run 으로 자동 복원. null (Discard) 은 사용자 의도
-     이므로 손대지 않는다. */
+  /* pin 切替 effect: pin の id が actually 変わったら新 pin の executionContext.runId に同期.
+     ・新 pin に박제あり → その run を ACTIVE RUN として描画 (= pin 中心メンタルモデル)
+     ・新 pin に박제なし → null = NO ACTIVE RUN
+     ・Discard 済み pin の場合は活性化しない.
+     ・初回マウント時の persisted activeRunId 扱い: その run が **現在の pin と紐づく** (= run.snapshotId
+       が現 pin.id と一致) なら尊重 ─ 「running 中 → ページ遷移 → 戻る」のとき新 run id が pin の
+       executionContext (まだ未更新) に巻き戻るのを防ぐ. 紐づかなければ pin の executionContext.runId
+       で初期化 ─ 別 pin で起動した古い run id が残り続けるのを防ぐ.
+     ※ runHistoryData 参照のため宣言後にここに置く. ref は上で宣言済み.
+     (2026-05-31 fix: 旧版は紐づかない場合も尊重していたため pin 切替後に前 pin の run が残った.) */
   useEffect(() => {
-    if (!projectIdForReset) return;
-    if (storedActiveRunId !== undefined) return;
-    if (!runHistoryData || runHistoryData.length === 0) return;
-    useExecutionPreflightStore.getState().setActiveRunId(projectIdForReset, runHistoryData[0].id);
-  }, [projectIdForReset, runHistoryData, storedActiveRunId]);
+    if (!project) return;
+    const currentPinId = pinnedSnapshot?.id ?? null;
+    const isInitialSet = prevPinIdRef.current === undefined;
+
+    // 初回判定は run history fetch を待つ (snapshotId 照合に必要).
+    if (isInitialSet && runHistoryData === undefined) return;
+
+    const pinChanged = !isInitialSet && prevPinIdRef.current !== currentPinId;
+    prevPinIdRef.current = currentPinId;
+
+    if (pinnedSnapshot && pinnedSnapshot.id === discardedSnapshotId) return;
+    const expectedRunId = pinnedSnapshot?.executionContext?.runId ?? null;
+
+    if (isInitialSet) {
+      // persisted activeRunId が現在 pin に紐づくなら尊重 (running 中の救済). それ以外は initialize.
+      if (activeRunId != null && runHistoryData) {
+        const r = runHistoryData.find((rh) => rh.id === activeRunId);
+        if (r && r.snapshotId === currentPinId) return;
+      }
+      if (activeRunId !== expectedRunId) {
+        setActiveRunId(expectedRunId);
+      }
+      return;
+    }
+
+    if (!pinChanged) return;
+    if (activeRunId !== expectedRunId) {
+      setActiveRunId(expectedRunId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinnedSnapshot?.id, project?.id, discardedSnapshotId, runHistoryData]);
 
   if (!project || !site) {
     return (
@@ -446,6 +485,15 @@ export function ExecutionPage() {
 
   const runs = (runHistoryData ?? []).map(beRunToRunCard);
 
+  /* Execution 페이지 전체 컨트롤 (table 선택 / preflight / Start) 권한.
+     master 또는 project executionAssignee 본인만. 비권한자는 DisabledOverlay
+     로 UI 잠그고 RunHeader 의 canStart 도 false 로. */
+  const isMyProject = !!user?.username && project?.executionAssignee === user.username;
+  const canControl = isMaster || isMyProject;
+
+  /* Discard が「テーブル選択アンロック + 履歴片付け」を兼ねる役割なので, activeRun 表示中は
+     TableSelector / Preflight をロックする (旧仕様維持). アンロックは Discard 経由.
+     さらに executionAssignee 본인 또는 master 만 컨트롤 가능 — canControl 게이트. */
   const controlsLocked = displayedActiveRun !== null || !hasPinnedSnapshot || !canControl;
 
   /* Real モードの run 起動本体 — start API 呼び出し + runId 保存.
@@ -457,6 +505,9 @@ export function ExecutionPage() {
       const result = await runsApi.start(project.id, mode, tables, opts);
       if (result.status === 'STARTED' && result.runId) {
         setActiveRunId(result.runId);
+        /* run history を即時 refetch — staleTime/refetchInterval (5s) の遅延で
+           runs.findIndex(activeRunId) が -1 になり #N 表示が最大 5 秒遅れるのを回避. */
+        void queryClient.invalidateQueries({ queryKey: ['run-history', project.id] });
       } else {
         /* REJECTED / LOCKED — alert 暫定. toast 化は別件. */
         console.warn('[execution] startRun rejected:', result.status, result.reason);
@@ -482,44 +533,44 @@ export function ExecutionPage() {
        새 run 시작 허용. 이전엔 activeRunId 만 체크해서 Start over 가 항상 noop 이었음 (2026-05-29 수정). */
     if (activeRunId && run && !isTerminal(run.status)) return;
     if (activeRunId) setActiveRunId(null);  // halted run UI 정리 후 새 run.
+    setDiscardedSnapshotId(null);  // 新 run 起動で Discard 状態クリア (次の run 結果は通常通り表示).
     await startRealRun(tables, runMode);
   };
 
   // handlePauseToggle 제거 (2026-05-29) — Pause 영구 제거. Stop + Retry 가 기능 동치.
 
-  // Stop / Retry / Discard 권한 (공통): 자기 project 인 assignee 본인은 자기 run 을
-  // 제어 가능. 단 그 run 이 master 가 /runs/all 로 일괄 시작한 bulk run
-  // (metadata.bulk === true) 이면 master 만. master 는 모든 경우 가능.
-  const isMyProject = !!user?.username && project?.executionAssignee === user.username;
-  const runIsBulk = run?.metadata != null && (run.metadata as Record<string, unknown>).bulk === true;
-  const canStop = isMaster || (isMyProject && !runIsBulk);
-  const canRetry = canStop;
-  const canDiscard = canStop;
-  /* Execution 페이지 전체 컨트롤 (table 선택 / preflight / Start) 권한.
-     master 또는 project executionAssignee 본인만. 비권한자는 DisabledOverlay
-     로 UI 잠그고 RunHeader 의 canStart 도 false 로. */
-  const canControl = isMaster || isMyProject;
-
   const handleRetry = async () => {
-    if (!canRetry) return;
     /* Retry = 실패한 run 의 **마지막 success stage 이후부터** 재개. BE 가 정합성 검증
        (snapshot / selectedTables 동일 + 옛 parquet 존재) → 자동 fallback 처음부터 if 부적합.
        opts.resumeFromRunId 로 옛 run id 전달. handleStartRun 의 guard 우회 위해 직접 호출. */
+    if (!canRetry) return;
     if (!runMode || selectedTables.size === 0) return;
     const oldRunId = activeRunId;   // null 가능 — 그 경우 처음부터.
     setActiveRunId(null);
+    setDiscardedSnapshotId(null);  // 同上.
     await startRealRun(Array.from(selectedTables), runMode,
         oldRunId ? { resumeFromRunId: oldRunId } : undefined);
   };
 
   const handleDiscard = () => {
     if (!canDiscard) return;
-    /* polling 停止 + UI 의 「현재 run」 제거. BE 의 run 자체는 history 에 남음.
-       추가로 fallback snapshot 의 executionContext 도 화면에서 끄기 — 안 그러면 activeRunId
-       가 null 되자마자 fallback 으로 다시 그려진다 (Discard 가 무효화돼 보임). */
+    /* halted run の表示をヘッダーから片付ける + pin 박제 fallback も殺す.
+       BE の run 자체는 history 에 남으므로 영향 없음. discardedSnapshotId 로 pin 切替 effect 의
+       재 注入을 막고, pin 을 別 snapshot 으로 옮기면 자동 reset. */
     setActiveRunId(null);
-    if (fallbackSnapshot) setDiscardedSnapshotId(fallbackSnapshot.id);
+    if (pinnedSnapshot) setDiscardedSnapshotId(pinnedSnapshot.id);
   };
+
+  // Stop 권한: 자기 project 인 assignee 본인은 자기 run 을 stop 가능. 단 그 run 이
+  // master 가 /runs/all 로 일괄 시작한 bulk run (metadata.bulk === true) 이면 master 만.
+  // master 는 모든 경우 stop 가능. (isMyProject / canControl 는 위 controlsLocked
+  // 정의 직전 블록 참조.)
+  const runIsBulk = run?.metadata != null && (run.metadata as Record<string, unknown>).bulk === true;
+  const canStop = isMaster || (isMyProject && !runIsBulk);
+  /* Retry / Discard も Stop と同じ権限 — bystander が他人の run を rewind / abort できないように.
+     (origin/dev 2026-05-31 取り込み) */
+  const canRetry = canStop;
+  const canDiscard = canStop;
 
   const handleStopRun = async () => {
     if (!canStop) return;
@@ -542,6 +593,7 @@ export function ExecutionPage() {
         runMode={runMode}
         activeRun={displayedActiveRun}
         runs={runs}
+        pinLastRunId={pinnedSnapshot?.executionContext?.runId ?? null}
         preflightPassed={preflightPassed}
         hasPinnedSnapshot={hasPinnedSnapshot}
         selectedTablesCount={selectedTables.size}
@@ -591,7 +643,7 @@ function DisabledOverlay({ disabled, children }: { disabled: boolean; children: 
 /* ───────────────────────── Run header ──────────────────────────── */
 
 function RunHeader({
-  t, project, site, runMode, activeRun, runs, preflightPassed, hasPinnedSnapshot,
+  t, project, site, runMode, activeRun, runs, pinLastRunId, preflightPassed, hasPinnedSnapshot,
   selectedTablesCount, onStart, onStop, canStop, canRetry, canDiscard, canControl, onRetry, onDiscard,
 }: {
   t: T;
@@ -600,6 +652,8 @@ function RunHeader({
   runMode: RunMode | null;
   activeRun: ActiveRunState | null;
   runs: Run[];
+  /** pin の executionContext.runId — Discard 直後の LAST RUN 表示に使う. null なら pin に박제なし. */
+  pinLastRunId: string | null;
   preflightPassed: boolean;
   hasPinnedSnapshot: boolean;
   selectedTablesCount: number;
@@ -607,7 +661,7 @@ function RunHeader({
   onStop: () => void;
   /** Stop 권한 — assignee 본인은 자기 run stop 가능, 단 bulk run (master 가 일괄 시작) 은 master 만. */
   canStop: boolean;
-  /** Retry/Discard 권한 — Stop 과 동일 (master 또는 assignee 본인 + non-bulk). */
+  /** Retry / Discard 도 Stop 과 동일 권한 (master 또는 assignee 본인 + non-bulk). */
   canRetry: boolean;
   canDiscard: boolean;
   /** Start 권한 — master 또는 executionAssignee 본인만. */
@@ -628,29 +682,70 @@ function RunHeader({
           ? t('execution.run.startBlockedHint')
           : t('execution.run.startReadyHint');
 
+  /* Start ボタンは no-active / halted 両方で出すので共有. */
+  const startButton = !isDone && (
+    <button
+      type="button"
+      onClick={() => { if (canStart) onStart(); }}
+      disabled={!canStart}
+      title={startTooltip}
+      style={canStart ? styles.btnPrimary : styles.btnDisabled}
+    >
+      ▶ {runMode === 'cutover' ? t('execution.run.startBtn.cutover') : runMode === 'rehearsal' ? t('execution.run.startBtn.rehearsal') : t('execution.run.startBtn')}
+    </button>
+  );
+
+  /* no-active ブランチに入るのは「pin なし」 or 「pin あり + 박제 run なし」or 「Discard 直後」.
+     Discard 直後は pinLastRunId (= pin.executionContext.runId) を引いて LAST RUN として描画
+     — 「ACTIVE RUN → アーカイブ化」のニュアンス. pin に박제なしなら NO ACTIVE RUN のみ.
+     pin と無関係に走った run は Run History 画面で見る前提なのでヘッダーには出さない. */
   if (!activeRun) {
-    const lastRun = runs[0] ?? null;
+    const pinLastRun = pinLastRunId ? runs.find((r) => r.id === pinLastRunId) ?? null : null;
+
+    if (!pinLastRun) {
+      const hasHistory = runs.length > 0;
+      return (
+        <section style={styles.runHeader}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={styles.runHeaderLabel}>{t('execution.run.noActive')}</div>
+            {!hasHistory && (
+              <div style={styles.runHeaderMono}>{t('execution.run.noHistory')}</div>
+            )}
+          </div>
+          {startButton}
+        </section>
+      );
+    }
+
+    /* LAST RUN ヘッダー — active 側と同じ 2 段構造で project.id · #N · status badge を出す. */
+    const lastTone: BadgeTone =
+      pinLastRun.result === 'failed'   ? 'err'
+      : pinLastRun.result === 'aborted' ? 'warn'
+      : pinLastRun.result === 'ok'     ? 'queued'
+      : 'ok';
+    const lastText =
+      pinLastRun.result === 'failed'   ? t('execution.run.status.failed')
+      : pinLastRun.result === 'aborted' ? t('execution.run.status.aborted')
+      : pinLastRun.result === 'ok'     ? t('execution.run.status.completed')
+      : t('execution.run.status.running');
+    const lastRunIdx = runs.findIndex((r) => r.id === pinLastRun.id);
+    const lastRunNumber = lastRunIdx >= 0 ? runs.length - lastRunIdx : null;
     return (
       <section style={styles.runHeader}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={styles.runHeaderLabel}>{t('execution.run.noActive')}</div>
-          <div style={styles.runHeaderMono}>
-            {lastRun
-              ? t('execution.run.lastRun', { id: lastRun.id, when: lastRun.startedAt, result: lastRun.result })
-              : t('execution.run.noHistory')}
+          <div style={styles.runHeaderLabel}>{t('execution.run.lastLabel')}</div>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 16, fontWeight: 600 }}>
+              {project.id}{lastRunNumber != null ? ` · #${lastRunNumber}` : ''}
+            </span>
+            <StatusBadge tone={lastTone}>{lastText}</StatusBadge>
+          </div>
+          <div style={{ fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: 3 }}>
+            <span>run </span><b style={{ color: 'var(--text-2)' }}>{pinLastRun.id}</b>
+            <span> · </span>{pinLastRun.startedAt}
           </div>
         </div>
-        {!isDone && (
-          <button
-            type="button"
-            onClick={() => { if (canStart) onStart(); }}
-            disabled={!canStart}
-            title={startTooltip}
-            style={canStart ? styles.btnPrimary : styles.btnDisabled}
-          >
-            ▶ {runMode === 'cutover' ? t('execution.run.startBtn.cutover') : runMode === 'rehearsal' ? t('execution.run.startBtn.rehearsal') : t('execution.run.startBtn')}
-          </button>
-        )}
+        {startButton}
       </section>
     );
   }
@@ -709,6 +804,9 @@ function RunHeader({
             <span> · {t('execution.run.tablesSummary', { n: selectedTablesCount })}</span>
           </div>
         </div>
+        {/* halted 時のボタン: failed/aborted = Discard + Retry / completed = Discard のみ.
+            新規 Start run は Discard 後の no-active ブランチで出る.
+            canDiscard / canRetry 권한 가드 — bystander 가 他人の run 을 rewind / abort 못 하도록. */}
         {isHalted && canDiscard && (
           <button
             type="button"
@@ -729,9 +827,7 @@ function RunHeader({
             ↻ {t('execution.run.retry')}
           </button>
         )}
-        {/* 2026-05-29: 버튼 set 단순화 — Pause/Resume / Start over / Reset 제거.
-            Halted = Discard + ↻ Retry (failed/aborted 만). Running = ⏹ Stop. */}
-        {!isHalted && canStop && (
+        {running && canStop && (
           <button type="button" onClick={onStop} style={styles.btnDanger}>
             ⏹ {t('execution.run.stop')}
           </button>

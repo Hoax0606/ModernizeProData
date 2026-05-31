@@ -187,58 +187,15 @@ export function ExecutionOverviewPage() {
     return Date.now() - new Date(w.lastSeenAt).getTime() <= ONLINE_TIMEOUT_MS;
   };
 
-  // (D) pinned snapshot 의 박제된 executionContext 가 있으면 그것을 우선 source 로.
-  // 사용자가 옛 snapshot 으로 pin 을 옮기면 Overview 도 그 시점 결과로 자동 전환.
-  // 박제 없으면 (= 그 snapshot 으로 한 번도 run 안 함) latest run 의 apiMetrics fallback.
-  const metrics = useMemo<Record<string, ProjectExecMetrics>>(() => {
-    const merged: Record<string, ProjectExecMetrics> = { ...apiMetrics };
-    for (const p of siteProjects) {
-      const pinned = pinnedByProject[p.id];
-      const ctx = pinned?.executionContext;
-      if (!ctx) continue;
-      const loadStage = ctx.stages.find((s) => s.stageKey === 'load');
-      const tablesTotal = ctx.stages.reduce((a, s) => Math.max(a, s.tablesTotal ?? 0), 0);
-      const tablesDone = loadStage?.tablesSuccess ?? 0;
-      const rows = loadStage
-        ? loadStage.tables.reduce((a, t) => a + (t.rowCount ?? 0), 0)
-        : 0;
-      // KPI Errors/Warnings 의 정의를 live run 경로 (BE: quarantineRepo 카운트) 와 통일.
-      // ctx.errorCount/warningCount 는 SnapshotExecutionContextService.recordExecutionContext
-      // 가 박제 시점에 quarantineRepo.countByRunIdAndSeverity 로 query 한 값. 박제 도입 전
-      // snapshot 은 undefined → 0 fallback (재 run 하면 채워짐).
-      const errorCount = ctx.errorCount ?? 0;
-      const warningCount = ctx.warningCount ?? 0;
-      const totalStages = ctx.stages.length;
-      const progressPct = totalStages > 0
-        ? ctx.stages.reduce((a, s) => a + (s.pct ?? 0), 0) / totalStages
-        : 0;
-      merged[p.id] = {
-        projectId: p.id,
-        projectName: p.name,
-        latestRunId: ctx.runId,
-        runStatus: ctx.status,
-        rows,
-        tablesTotal,
-        tablesDone,
-        errorCount,
-        warningCount,
-        progressPct,
-        // ctx.stages を渡して buildStagesFromStageViews 経路に乗せる。これが無いと
-        // buildStagesFromMetric の fallback (progressPct 近似) に落ち、failed 段が常に
-        // pct=100 で赤 full bar として描画され Execution 画面と幅が合わなくなる。
-        stages: ctx.stages.map((s) => ({
-          stageKey: s.stageKey,
-          seq: s.seq ?? 0,
-          status: s.status ?? 'pending',
-          pct: s.pct,
-          tablesTotal: s.tablesTotal ?? 0,
-          tablesSuccess: s.tablesSuccess ?? 0,
-          tablesFailed: s.tablesFailed ?? 0,
-        })),
-      };
-    }
-    return merged;
-  }, [apiMetrics, pinnedByProject, siteProjects]);
+  // (D) Overview の data 源は BE の apiMetrics 一本 (2026-05-31 simplify).
+  // BE 側で「baseline (pinned) snapshot で起動された最新 run」を返すように変更済み
+  // (ExecutionOverviewService.metricsFor) なので, pin 切替時はそれ自体が新 pin の最新 run に
+  // 切り替わり, time travel ユースケースも自然にカバーされる.
+  // 旧仕様は pin.executionContext (= finishRun 時の박제) で上書きしていたが,
+  //   - 박제 시点に stage runner が走行中だと未完了 status のまま固定
+  //   - その後 stage_instances が完走で update されても박제は据え置き
+  // で Execution 画面 (stage_instances live polling) と Overview の表示が乖離していた.
+  const metrics = apiMetrics;
 
   const errorCount = (p: Project) => metrics[p.id]?.errorCount ?? 0;
   const warningCount = (p: Project) => metrics[p.id]?.warningCount ?? 0;

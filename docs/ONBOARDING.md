@@ -1509,7 +1509,119 @@ needed** — see commit history around 2026-05-29.
 
 ---
 
-## 21. Further Reading
+## 22. Execution Overview — pin-centric data source (decided 2026-05-31)
+
+### Decision
+
+The Execution screen (per-project, live polling of `stage_instances`) and the
+Execution Overview screen (per-site, summary of latest run per project) must
+see **the same run and the same stage_instances**. Without this they drift:
+when a user stops a run mid-stage, the polling view shows the post-completion
+state while the overview shows a snapshot frozen at the abort instant.
+
+The agreement:
+
+- **Overview reads from the live `stage_instances` of the latest run that was
+  started with the pinned (baseline) snapshot.** Not from
+  `snapshots.execution_context` (which is frozen at `finishRun` and therefore
+  always at least one update behind).
+- **Execution screen reads from the live `stage_instances` of `activeRunId`.**
+  `activeRunId` is initialized from `pinnedSnapshot.executionContext.runId`
+  (frozen value just used as an id), but the screen never reads the frozen
+  stages — it always polls `runsApi.stages(runId)`.
+
+The frozen `executionContext` payload is still maintained (Versions / Artifacts
+screens look at it for "what was this snapshot's run state at finish time"),
+but is no longer the source of truth for live progress display.
+
+### Backend implementation
+
+`ExecutionOverviewService.metricsFor(Project p)`:
+
+```java
+Optional<Snapshot> baseline = snapshotRepo.findByProjectIdAndBaselineTrue(p.getId());
+RunHistory latest = baseline
+        .map(b -> runHistoryRepo.findFirstByProjectIdAndSnapshotIdOrderByStartedAtDesc(p.getId(), b.getId()))
+        .orElse(null);
+if (latest == null) {
+    latest = runHistoryRepo.findFirstByProjectIdOrderByStartedAtDesc(p.getId());
+}
+```
+
+- If a baseline snapshot exists, return the latest run **started with that
+  snapshot id** (any status — running, success, failed, aborted, timed_out).
+- Otherwise fall back to the project's latest run across all snapshots.
+- `RunHistoryRepository.findFirstByProjectIdAndSnapshotIdOrderByStartedAtDesc`
+  is a derived Spring Data query (no @Query needed).
+
+Time travel: when the user moves the pin to an older snapshot, BE automatically
+returns that snapshot's latest run, so the Overview row switches accordingly.
+No FE branching needed.
+
+### Frontend implementation
+
+`ExecutionOverviewPage.metrics` is a one-liner:
+
+```typescript
+const metrics = apiMetrics;
+```
+
+The previous logic, which overlaid `apiMetrics` with values computed from
+`pinnedSnapshot.executionContext.stages`, is gone. Reasons:
+
+1. Redundant — BE now returns the pin's latest run directly.
+2. Frozen `executionContext` is stale by one update step after Stop. Letting it
+   overwrite the live `apiMetrics` made the screen flicker on reload
+   (correct-then-wrong: the apiMetrics fetch finished first → correct render →
+   the snapshots fetch finished second → frozen overwrite → one gauge fewer).
+
+### Stop semantics interaction
+
+`LocalWorkerExecutor` only checks `runControlRegistry.isCancelled(runId)` at
+**stage boundaries** (`:73`), not inside the per-table loop of individual
+`StageRunner`s. So:
+
+1. Stage N is running, user presses Stop.
+2. Stage N runs to completion — `stage_instances.N.status` becomes `success`.
+3. Executor enters the loop header for stage N+1, sees `isCancelled() = true`,
+   breaks. Stages N+1..8 stay `pending`.
+4. `RunService.abortRun → finishRun → recordExecutionContext` runs immediately,
+   but at this point stage N may still be `running` in the DB (the runner has
+   not yet written its terminal status). So the frozen
+   `executionContext.stages[N]` is `running` even though by the next polling
+   tick `stage_instances.N` will be `success`.
+
+That one-tick drift is harmless under the new model — the Overview reads the
+live `stage_instances` (which converge to the correct final state), not the
+frozen payload. The frozen payload remains stale; Versions / Artifacts screens
+that read it accept that limitation.
+
+Decision: do **not** add an in-loop cancel check inside StageRunners. The
+trade-off (immediate termination vs. partial-commit safety + simplicity) is
+left as-is for now. If immediate termination becomes needed, the minimum
+change is to add `if (runControlRegistry.isCancelled(runId)) break;` inside
+the per-table loops of the heavy stages (Load most importantly).
+
+### Related files
+
+- `coordinator/run/ExecutionOverviewService.java`
+- `coordinator/run/RunHistoryRepository.java`
+- `frontend/src/pages/ExecutionOverviewPage.tsx`
+- `frontend/src/pages/ExecutionPage.tsx` (pin-switch effect & activeRunId rules)
+- `coordinator/worker/LocalWorkerExecutor.java` (stage-boundary cancel check)
+
+### What we did NOT do
+
+- Backfill frozen `executionContext` for legacy snapshots (re-running once
+  refreshes them; cost outweighs benefit).
+- Per-table cancel check in StageRunners.
+- Move the time-travel use case to a separate URL/screen.
+- Quarantine warning count automatic generation (enum / schema / UI all
+  ready, but no rule yet decides which event becomes a `warning`).
+
+---
+
+## 23. Further Reading
 
 - `CLAUDE.md` — stack, conventions, domain glossary, local run.
 - `docs/handoff/` — time-stamped handoff notes (read the most recent first).

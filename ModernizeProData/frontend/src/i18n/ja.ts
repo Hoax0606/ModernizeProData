@@ -520,8 +520,8 @@ export const ja: Record<TranslationKey, string> = {
   /* Run header */
   'execution.run.noActive':           'No active run',
   'execution.run.active':             'Active run',
+  'execution.run.lastLabel':          'Last run',
   'execution.run.noHistory':          '実行履歴がありません — まだマッピング段階です。',
-  'execution.run.lastRun':            'last run: {id} · {when} · {result}',
   'execution.run.startBtn':           'Start run',
   'execution.run.retryHint':          '最後に成功した段階以降から再開 (既存データ再利用)',
   'execution.run.discard':            'Discard',

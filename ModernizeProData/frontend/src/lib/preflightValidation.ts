@@ -482,6 +482,14 @@ function checkAsisUnmapped(ctx: Context): PreflightCheckResult {
     usedAsisCols.add(qualifyAsisCol(skip.asisTable, skip.asisColumn));
   }
 
+  /* 명시적 skip 표시된 AS-IS 컬럼 집합 (snapshot frozen). 이 컬럼들은 unmapped 검사에서 제외 ─
+     사용자가 「의도적으로 매핑하지 않는다」고 선언한 컬럼이므로 unmapped 라고 fail 시키면 안 됨
+     (2026-05-31 fix). */
+  const skippedAsisCols = new Set<string>();
+  for (const skip of ctx.snapshotData.asisSkips ?? []) {
+    skippedAsisCols.add(qualifyAsisCol(skip.asisTable, skip.asisColumn));
+  }
+
   /* 2026-05-30: scope を 'selectedTables の bindings 経由 AS-IS' から
      'AS-IS DDL に登録された全テーブル' へ変更.  unused AS-IS カラム検出は
      project 全体で行うべき(=selection に依存させない)という方針合わせ. */
@@ -494,6 +502,7 @@ function checkAsisUnmapped(ctx: Context): PreflightCheckResult {
     const unusedCols: string[] = [];
     for (const col of def.columns) {
       const key = qualifyAsisCol(asis, col.physicalName);
+      if (skippedAsisCols.has(key)) continue; // 명시적 skip 컬럼 제외.
       if (!usedAsisCols.has(key)) unusedCols.push(col.physicalName);
     }
     return unusedCols.length === 0
