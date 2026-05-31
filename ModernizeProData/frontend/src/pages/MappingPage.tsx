@@ -34,6 +34,8 @@ type AsisTable = {
   columnCount: number;
   rows: number;
   unrouted?: boolean;
+  /** unrouted 면서 모든 컬럼이 explicit skip 처리됨 → badge 를 'skipped' (회색) 로 표시. */
+  allColsSkipped?: boolean;
   /** Whether extracted data (CSV) has been imported into the AS-IS workspace. */
   imported?: boolean;
   /** TO-BE internalNames this AS-IS feeds (mock). */
@@ -571,6 +573,24 @@ export function MappingPage() {
     try { setProjMapStatus(await mappingImportApi.status(activeProjectId)); } catch { /* ignore */ }
   }, [activeProjectId]);
   useEffect(() => { void refreshProjMapStatus(); }, [refreshProjMapStatus, hydrationTick]);
+
+  // backend 의 mapping_asis_skip → store. 화면 진입 시 + hydrationTick 변경 시.
+  useEffect(() => {
+    if (!activeProjectId) return;
+    mappingImportApi.listAsisSkips(activeProjectId)
+      .then((list) => {
+        const byTable: Record<string, Record<string, boolean>> = {};
+        for (const s of list) {
+          const qualified = (s.asisSchema ? s.asisSchema + '.' : '') + s.asisTable;
+          const byCol = byTable[qualified] || {};
+          byCol[s.asisColumn] = true;
+          byTable[qualified] = byCol;
+        }
+        useMappingEditsStore.getState().replaceAsisSkips(activeProjectId, byTable);
+      })
+      .catch((e) => console.warn('[mapping] listAsisSkips failed', e));
+  }, [activeProjectId, hydrationTick]);
+
   const projMappingImported = projMapStatus.columnFilename !== null || projMapStatus.codeFilename !== null;
 
   const tableBindingEdits = useMappingEditsStore(
@@ -626,7 +646,18 @@ export function MappingPage() {
   const handleToggleAsisSkip = useCallback((tableName: string, colName: string, nextSkip: boolean) => {
     if (!activeProjectId || readOnly) return;
     useMappingEditsStore.getState().setAsisSkip(activeProjectId, tableName, colName, nextSkip);
+    // backend persist — has-changes diff + snapshot freeze 에 포함되려면 DB 에 들어가야.
+    const i = tableName.indexOf('.');
+    const asisSchema = i > 0 ? tableName.slice(0, i) : '';
+    const asisTable  = i > 0 ? tableName.slice(i + 1) : tableName;
+    mappingImportApi.upsertAsisSkip(activeProjectId, {
+      asisSchema: asisSchema || null,
+      asisTable,
+      asisColumn: colName,
+      skipped: nextSkip,
+    }).catch((e) => console.warn('[mapping] upsertAsisSkip failed', e));
     demoteToAnalysisOnEdit(activeProjectId);
+    unpinBaselineOnEdit(activeProjectId);
   }, [activeProjectId, readOnly]);
 
   const effectiveTobe = useMemo(() =>
@@ -663,9 +694,17 @@ export function MappingPage() {
     }
     return ASIS_TABLES.map((at) => {
       const r = routedByAsis[at.name] || [];
-      return { ...at, routing: r, unrouted: r.length === 0 };
+      const isUnrouted = r.length === 0;
+      // unrouted 인데 모든 컬럼이 explicit skip 이면 'skipped' (회색) 표시.
+      // asisSkippedCols[table][col] === true 인 컬럼만 skip 으로 카운트.
+      const skipMap = asisSkippedCols[at.name] || {};
+      const cols = ASIS_COLUMNS[at.name] || [];
+      const allColsSkipped = isUnrouted
+        && cols.length > 0
+        && cols.every((c) => skipMap[c.name] === true);
+      return { ...at, routing: r, unrouted: isUnrouted, allColsSkipped };
     });
-  }, [effectiveTobe]);
+  }, [effectiveTobe, asisSkippedCols, hydrationTick]);
 
   if (!activeProjectId) {
     return (
@@ -929,7 +968,7 @@ function InventoryItem({
 
   let badgeText = '';
   let badgeIcon: string | null = null;
-  let badgeTone: 'ok' | 'warn' | 'info' | null = null;
+  let badgeTone: 'ok' | 'warn' | 'info' | 'muted' | null = null;
   let showParentIcon = false;  // 부모 테이블 — chip 밖 왼쪽에 별도 표시
   if (side === 'tobe') {
     const tt = table as TobeTable;
@@ -941,11 +980,20 @@ function InventoryItem({
     if (tt.isParent && !tt.linkedFromProjectId) showParentIcon = true;
   } else {
     const at = table as AsisTable;
-    if (unrouted) { badgeText = 'unrouted'; badgeTone = 'warn'; }
+    if (at.allColsSkipped) { badgeText = 'skipped'; badgeTone = 'muted'; }
+    else if (unrouted) { badgeText = 'unrouted'; badgeTone = 'warn'; }
     else          { badgeText = `→ ${at.routing.length}`; badgeTone = 'ok'; }
   }
-  const toneColor = badgeTone === 'warn' ? 'var(--amber)' : badgeTone === 'info' ? 'var(--navy)' : 'var(--green)';
-  const toneBg    = badgeTone === 'warn' ? 'var(--amber-50)' : badgeTone === 'info' ? 'var(--navy-50)' : 'var(--green-50)';
+  const toneColor =
+    badgeTone === 'warn'  ? 'var(--amber)'
+    : badgeTone === 'info'  ? 'var(--navy)'
+    : badgeTone === 'muted' ? 'var(--text-3)'
+    : 'var(--green)';
+  const toneBg =
+    badgeTone === 'warn'  ? 'var(--amber-50)'
+    : badgeTone === 'info'  ? 'var(--navy-50)'
+    : badgeTone === 'muted' ? 'var(--panel-2)'
+    : 'var(--green-50)';
 
   return (
     <div
@@ -1247,6 +1295,22 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
   /**
    * Hydrate bindings from DB into zustand. (검증은 별도 — findUncoveredDdlColumns)
    */
+  const hydrateAsisSkipsFromDb = useCallback(async (projectId: string): Promise<void> => {
+    try {
+      const list = await mappingImportApi.listAsisSkips(projectId);
+      const byTable: Record<string, Record<string, boolean>> = {};
+      for (const s of list) {
+        const qualified = (s.asisSchema ? s.asisSchema + '.' : '') + s.asisTable;
+        const byCol = byTable[qualified] || {};
+        byCol[s.asisColumn] = true;
+        byTable[qualified] = byCol;
+      }
+      useMappingEditsStore.getState().replaceAsisSkips(projectId, byTable);
+    } catch (e) {
+      console.warn('[mapping] failed to hydrate asis-skips', e);
+    }
+  }, []);
+
   const hydrateBindingsFromDb = useCallback(async (projectId: string): Promise<void> => {
     if (TOBE_TABLES.length === 0) return;
     try {
@@ -1385,9 +1449,10 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     // baselineSnapshot 변경 (set/clear) → main effect 가 fresh fetch.
     hydrateBindingsFromDb(activeProjectIdForRow);
     hydrateRowEditsFromDb(activeProjectIdForRow);
+    hydrateAsisSkipsFromDb(activeProjectIdForRow);
     return () => { cancelled = true; };
     // hydrationTick: 전체(프로젝트) import 후 status/룰/바인딩을 다시 읽어 toolbar·그리드 갱신.
-  }, [activeProjectIdForRow, baselineSnapshot?.id, hydrateBindingsFromDb, hydrateRowEditsFromDb, hydrationTick]);
+  }, [activeProjectIdForRow, baselineSnapshot?.id, hydrateBindingsFromDb, hydrateRowEditsFromDb, hydrateAsisSkipsFromDb, hydrationTick]);
   const rowEdits = useMappingEditsStore(
     (s) => (activeProjectIdForRow ? s.rowEdits[activeProjectIdForRow]?.[table.internalName] : undefined) || EMPTY_ROW_EDITS,
   );
@@ -4652,8 +4717,16 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
   const routedTobe = effectiveTobe.filter((t) => t.sources.some((s) => s.table === table.name));
 
   const activeProjectIdForAsis = useWorkspaceStore((s) => s.activeProjectId);
+  const navigate = useNavigate();
   const rowEditsByTobe = useMappingEditsStore(
     (s) => (activeProjectIdForAsis ? s.rowEdits[activeProjectIdForAsis] : undefined) || EMPTY_ROW_EDITS_BY_TOBE,
+  );
+  // baseline snapshot pin chip (TobeMappingDetail 과 동일 패턴) — AS-IS 화면도 표시.
+  const snapshots = useSnapshotsStore((s) => s.snapshots);
+  const pinnedIds = usePinnedSnapshotsStore((s) => s.pinnedIds);
+  const baselineSnapshot = useMemo(
+    () => snapshots.find((s) => s.projectId === activeProjectIdForAsis && pinnedIds.includes(s.id)),
+    [snapshots, activeProjectIdForAsis, pinnedIds],
   );
 
   const mappings = useMemo(
@@ -4691,6 +4764,17 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
       <div style={styles.contextBar}>
         <span style={{ ...styles.sidePill, color: 'var(--amber)', background: 'var(--amber-50)', borderColor: 'var(--amber)' }}>AS-IS</span>
         <div style={styles.tableChip}>{table.short}</div>
+        {baselineSnapshot && (
+          <button
+            type="button"
+            onClick={() => navigate('/versions', { state: { selectSnapshotId: baselineSnapshot.id } })}
+            style={styles.baselinePinChip}
+            title={`Pinned baseline: ${baselineSnapshot.name}  (click → Versions)`}
+          >
+            <PinIconSvg size={11} />
+            {baselineSnapshot.version}
+          </button>
+        )}
         <div style={{ flex: 1 }} />
       </div>
 

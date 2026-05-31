@@ -1,5 +1,6 @@
 package com.ksinfo.modernize_pro_data.coordinator.site;
 
+import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenAsisSkip;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenBinding;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenBindingSource;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenCodeMap;
@@ -54,6 +55,8 @@ public class SnapshotDiffService {
                 current == null ? List.of() : current.bindings(), items);
         diffCodeMaps(previous == null ? List.of() : previous.codeMaps(),
                 current == null ? List.of() : current.codeMaps(), items);
+        diffAsisSkips(previous == null ? List.of() : previous.asisSkips(),
+                current == null ? List.of() : current.asisSkips(), items);
 
         int added = 0, modified = 0, removed = 0;
         for (var it : items) {
@@ -290,6 +293,37 @@ public class SnapshotDiffService {
         List<SnapshotChanges.FieldChange> out = new ArrayList<>();
         cmpStr(out, "targetValue", a.targetValue(), b.targetValue());
         return out;
+    }
+
+    /* ── asisSkips ──────────────────────────────── */
+
+    /**
+     * AS-IS 컬럼 단위 skip 마킹 diff. key = (asisSchema, asisTable, asisColumn).
+     * skip 추가 → "added", 해제 → "removed". row 내용 비교는 없음 (마킹 자체가 본질).
+     */
+    private void diffAsisSkips(List<FrozenAsisSkip> prev, List<FrozenAsisSkip> curr,
+                               List<SnapshotChanges.ChangeItem> out) {
+        Map<String, FrozenAsisSkip> prevMap = indexBy(prev, this::asisSkipKey);
+        Map<String, FrozenAsisSkip> currMap = indexBy(curr, this::asisSkipKey);
+
+        for (var e : currMap.entrySet()) {
+            if (!prevMap.containsKey(e.getKey())) {
+                out.add(new SnapshotChanges.ChangeItem("added", "asisSkip",
+                        e.getKey(), "AS-IS column skip added",
+                        List.of(new SnapshotChanges.FieldChange("asisSkip", UNASSIGNED, "skipped"))));
+            }
+        }
+        for (var e : prevMap.entrySet()) {
+            if (!currMap.containsKey(e.getKey())) {
+                out.add(new SnapshotChanges.ChangeItem("removed", "asisSkip",
+                        e.getKey(), "AS-IS column skip removed",
+                        List.of(new SnapshotChanges.FieldChange("asisSkip", "skipped", UNASSIGNED))));
+            }
+        }
+    }
+
+    private String asisSkipKey(FrozenAsisSkip s) {
+        return nz(s.asisSchema()) + "." + nz(s.asisTable()) + "." + nz(s.asisColumn());
     }
 
     /* ── field comparators ─────────────────────── */

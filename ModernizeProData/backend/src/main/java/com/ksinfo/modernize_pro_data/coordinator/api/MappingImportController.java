@@ -2,6 +2,8 @@ package com.ksinfo.modernize_pro_data.coordinator.api;
 
 import com.ksinfo.modernize_pro_data.common.dto.ApiResponse;
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingAsisSkip;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingAsisSkipRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingCodeMap;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingCodeMapRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingImport;
@@ -12,6 +14,9 @@ import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRule;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRuleRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingRepository;
+
+import java.time.OffsetDateTime;
+import java.util.UUID;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -46,6 +51,7 @@ public class MappingImportController {
     private final MappingRuleRepository ruleRepo;
     private final MappingCodeMapRepository codeRepo;
     private final MappingTableBindingRepository bindingRepo;
+    private final MappingAsisSkipRepository asisSkipRepo;
 
     @PostMapping(path = "/{id}/mapping/import", consumes = "multipart/form-data")
     @PreAuthorize("hasAnyRole('MASTER','ADMIN')")
@@ -193,6 +199,61 @@ public class MappingImportController {
     @Transactional
     public ApiResponse<Void> deleteBindings(@PathVariable String id) {
         bindingRepo.deleteAllByProjectId(id);
+        return ApiResponse.ok(null);
+    }
+
+    /* ── AS-IS column skip 마킹 ───────────────── */
+
+    public record AsisSkipDto(String asisSchema, String asisTable, String asisColumn) {}
+
+    public record UpsertAsisSkipRequest(
+            String asisSchema,
+            String asisTable,
+            String asisColumn,
+            boolean skipped
+    ) {}
+
+    @GetMapping("/{id}/mapping/asis-skips")
+    public ApiResponse<List<AsisSkipDto>> listAsisSkips(@PathVariable String id) {
+        List<AsisSkipDto> out = asisSkipRepo.findByProjectId(id).stream()
+                .map(s -> new AsisSkipDto(
+                        s.getAsisSchema() == null ? "" : s.getAsisSchema(),
+                        s.getAsisTable(),
+                        s.getAsisColumn()))
+                .toList();
+        return ApiResponse.ok(out);
+    }
+
+    @PostMapping("/{id}/mapping/asis-skips")
+    @PreAuthorize("hasAnyRole('MASTER','ADMIN')")
+    @Transactional
+    public ApiResponse<Void> upsertAsisSkip(
+            @PathVariable String id,
+            @RequestBody UpsertAsisSkipRequest req,
+            Authentication auth
+    ) {
+        String schema = req.asisSchema() == null ? "" : req.asisSchema();
+        if (req.asisTable() == null || req.asisTable().isBlank()
+                || req.asisColumn() == null || req.asisColumn().isBlank()) {
+            throw new ApiException("BAD_REQUEST", "asisTable / asisColumn 필수", HttpStatus.BAD_REQUEST);
+        }
+        if (req.skipped()) {
+            var existing = asisSkipRepo.findByProjectIdAndAsisSchemaAndAsisTableAndAsisColumn(
+                    id, schema, req.asisTable(), req.asisColumn());
+            if (existing.isEmpty()) {
+                MappingAsisSkip e = new MappingAsisSkip();
+                e.setId("ms-" + UUID.randomUUID().toString().substring(0, 8));
+                e.setProjectId(id);
+                e.setAsisSchema(schema);
+                e.setAsisTable(req.asisTable());
+                e.setAsisColumn(req.asisColumn());
+                e.setCreatedBy(auth.getName());
+                e.setCreatedAt(OffsetDateTime.now());
+                asisSkipRepo.save(e);
+            }
+        } else {
+            asisSkipRepo.deleteOne(id, schema, req.asisTable(), req.asisColumn());
+        }
         return ApiResponse.ok(null);
     }
 
