@@ -31,6 +31,7 @@ export interface ValidationSumReconRow {
   /** "0" / "0.123" / null. 0 division 인 경우 null. */
   deltaPercent: string | number | null;
   verdict: ValidationVerdict;
+  note?: string | null;
 }
 
 /** NULL parity 1 row — nullable 컬럼별 NULL 개수 비교. */
@@ -41,6 +42,7 @@ export interface ValidationNullParityRow {
   tobeNulls: number;
   delta: number;
   verdict: ValidationVerdict;
+  note?: string | null;
 }
 
 /** Min/Max 1 row — numeric / date 컬럼별 MIN·MAX 비교. */
@@ -52,9 +54,12 @@ export interface ValidationMinMaxRow {
   tobeMin: string | number | null;
   tobeMax: string | number | null;
   verdict: ValidationVerdict;
+  /** WARN/FAIL 시 BE 가 적은 사유 — 예: "values match in canonical form — display format differs"
+   *  또는 "TZ canonical compare unavailable (ICU extension may be missing)" 등. null = 정상. */
+  note?: string | null;
 }
 
-/** Type validation 1 row — overflow / type mismatch 등 (PoC1 에선 비어있음). */
+/** Type validation 1 row — AuditStage 의 row-level validate.range/type/length 격리 결과. */
 export interface ValidationTypeValidRow {
   column: string;
   type: string;
@@ -62,13 +67,26 @@ export interface ValidationTypeValidRow {
   observedMax: string | number | null;
   overflowRows: number;
   verdict: ValidationVerdict;
+  note?: string | null;
 }
 
-/** Row count 요약 (Overview 안에도 들어가지만 시트 헤더 표시용 별도 키). */
+/** Row count 요약. 2026-05-31: quarantined 필드 추가 — AuditStage 가 위반 row 를 tobe_ 에서
+ *  DELETE 한 후 Load 가 PG 적재하므로 expected PG row = ASIS row - quarantined.
+ *  verdict 는 보정된 비교 (ASIS - quarantined == TOBE) 기준. */
 export interface ValidationRowCount {
   asis: number;
+  quarantined: number;
   tobe: number;
   verdict: ValidationVerdict;
+}
+
+/** quarantineStats 시트 1 row — stageLabel × (entries count, rows quarantined). */
+export interface ValidationQuarantineStatsRow {
+  stageLabel: string;
+  entries: number;
+  rowsQuarantined: number;
+  /** 'error' / 'warning' / '' — 같은 stageLabel 안에 둘 다 있으면 'error' 우선. */
+  severity?: string;
 }
 
 /** Checksum SHA-256 요약. PK 없는 binding 은 asis/tobe 빈 문자열 + verdict='WARN'. */
@@ -94,8 +112,34 @@ export interface ValidationReportDto {
   nullParity: ValidationNullParityRow[];
   minMax: ValidationMinMaxRow[];
   typeValid: ValidationTypeValidRow[];
+  /** 2026-05-31 추가 — binding 의 quarantine 통계 (stageLabel × entries / rows). */
+  quarantineStats: ValidationQuarantineStatsRow[];
   rowCount: ValidationRowCount;
   checksum: ValidationChecksum;
+}
+
+/** Drill-down — Data Integrity Check FAIL 시 어느 row 가 다른지 row-by-row 비교 결과. */
+export interface ValidationDiffSampleDto {
+  runId: string;
+  bindingId: string;
+  pkColumns: string[];
+  limit: number;
+  totalDiff: number;
+  /** 운영 메시지 — "no PK" / "TO-BE DB config not set" / "scanned first N rows only" 등. null = 정상. */
+  note: string | null;
+  rows: ValidationDiffRow[];
+}
+
+export interface ValidationDiffRow {
+  pk: unknown[];
+  status: 'asis-only' | 'tobe-only' | 'value-diff';
+  diffs: ValidationColumnDiff[];
+}
+
+export interface ValidationColumnDiff {
+  column: string;
+  asisValue: unknown;
+  tobeValue: unknown;
 }
 
 export const validationApi = {
@@ -113,5 +157,11 @@ export const validationApi = {
   getByTable: (runId: string, tobeTable: string) =>
     unwrap(api.get<ApiResponse<ValidationReportDto>>(
       `/api/v1/runs/${runId}/validation/by-table?tobeTable=${encodeURIComponent(tobeTable)}`,
+    )),
+
+  /** Drill-down: Data Integrity Check FAIL 시 row-by-row diff 조회. limit 기본 50, 최대 200. */
+  getDiffSample: (runId: string, bindingId: string, limit = 50) =>
+    unwrap(api.get<ApiResponse<ValidationDiffSampleDto>>(
+      `/api/v1/runs/${runId}/validation/${bindingId}/diff-sample?limit=${limit}`,
     )),
 };

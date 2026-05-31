@@ -39,7 +39,7 @@ export const BASE_STAGES: Array<Omit<Stage, 'pct' | 'tone'>> = [
   { id: 'audit',      name: 'Audit',      sub: 'CP1 ↔ CP2 parity',               shortName: 'audit',      rate: '—', eta: '—' },
   { id: 'load',       name: 'Load',       sub: 'apply to TO-BE',                 shortName: 'load',       rate: '—', eta: '—' },
   { id: 'verify',     name: 'Verify',     sub: 'CP2 ↔ TO-BE parity',             shortName: 'verify',     rate: '—', eta: '—' },
-  { id: 'validation', name: 'Validation', sub: 'SUM / NULL / SHA-256 audit report', shortName: 'validation', rate: '—', eta: '—' },
+  { id: 'validation', name: 'Validation', sub: 'SUM / NULL / Data integrity audit report', shortName: 'validation', rate: '—', eta: '—' },
 ];
 
 /** activeRun 이 없을 때의 fallback. hypercare/done 은 완료, 그 외는 모두 idle. */

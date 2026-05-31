@@ -7,6 +7,8 @@ import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTable;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository;
 import com.ksinfo.modernize_pro_data.coordinator.load.PgCopyManager;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntry;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntryRepository;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
@@ -67,6 +69,7 @@ public class ValidationReportService implements StageRunner {
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
     private final QuarantineService quarantineService;
+    private final QuarantineEntryRepository quarantineEntryRepo;
 
     @Override
     public String stageKey() {
@@ -150,7 +153,8 @@ public class ValidationReportService implements StageRunner {
                 empty.put("nullParity", List.of());
                 empty.put("minMax",     List.of());
                 empty.put("typeValid",  List.of());
-                empty.put("rowCount", Map.of("asis", 0, "tobe", 0, "verdict", "FAIL"));
+                empty.put("quarantineStats", List.of());
+                empty.put("rowCount", Map.of("asis", 0, "quarantined", 0, "tobe", 0, "verdict", "FAIL"));
                 empty.put("checksum", Map.of("asis", "", "tobe", "", "verdict", "FAIL"));
                 empty.put("totalChecks", 1);
                 empty.put("passedChecks", 0);
@@ -182,13 +186,63 @@ public class ValidationReportService implements StageRunner {
         /* 2026-05-30 합병 정책: validation 도 다른 stage 와 동일 — failedCount>0 면 run 도 failed.
            각 FAIL 항목별 quarantine entry 도 발생 (computeOne 안에서 record). */
         stage.setStatus(failedCount == 0 ? StageStatus.success : StageStatus.failed);
+
+        /* 2026-05-31 추가: stage 의 quarantine_entries 를 stageLabel × severity 별로 집계 →
+           운영자가 LogViewer / errorSummary 만 봐도 어느 check 가 fail/warn 인지 즉시 파악. */
+        Map<String, List<String>> failBreakdown = new java.util.TreeMap<>();   // label → [reason, ...]
+        Map<String, List<String>> warnBreakdown = new java.util.TreeMap<>();
+        for (QuarantineEntry q : quarantineEntryRepo
+                .findByRunIdOrderByCreatedAtAsc(ctx.getRunHistory().getId())) {
+            if (!stage.getId().equals(q.getStageInstanceId())) continue;
+            Map<String, Object> sample = q.getSampleData();
+            if (sample == null) continue;
+            String label = String.valueOf(sample.getOrDefault("stageLabel", ""));
+            String reason = String.valueOf(sample.getOrDefault("reason", ""));
+            Map<String, List<String>> target = q.getSeverity() == QuarantineSeverity.warning
+                    ? warnBreakdown : failBreakdown;
+            target.computeIfAbsent(label, k -> new ArrayList<>()).add(reason);
+        }
+
+        StringBuilder summary = new StringBuilder();
+        summary.append(successCount).append(" success, ").append(failedCount).append(" failed");
+        if (!failBreakdown.isEmpty() || !warnBreakdown.isEmpty()) {
+            for (var e : failBreakdown.entrySet()) {
+                summary.append("\n  · ").append(friendlyStageLabel(e.getKey()))
+                       .append(" FAIL (").append(e.getValue().size()).append("): ")
+                       .append(String.join("; ", e.getValue()));
+            }
+            for (var e : warnBreakdown.entrySet()) {
+                summary.append("\n  · ").append(friendlyStageLabel(e.getKey()))
+                       .append(" WARN (").append(e.getValue().size()).append("): ")
+                       .append(String.join("; ", e.getValue()));
+            }
+        }
+
         if (failedCount > 0) {
-            stage.setErrorSummary(failedCount + " table(s) with validation FAIL — see quarantine entries (stageLabel='validate.*')");
+            stage.setErrorSummary(summary.toString());
         }
         stageInstanceRepo.save(stage);
 
-        ingest(ctx, "Stage validation completed — " + successCount + " success, " + failedCount + " failed", true);
+        ingest(ctx, "Stage validation completed — " + summary, true);
         log.info("ValidationStage success={} failed={}", successCount, failedCount);
+    }
+
+    /** BE 의 stageLabel (validate.range 등) → 운영자 친숙 라벨. FE friendlyStageLabel 과 같은 매핑. */
+    private static String friendlyStageLabel(String label) {
+        return switch (label) {
+            case "validate.range"       -> "Numeric Range Overflow";
+            case "validate.type"        -> "Type Cast Failure";
+            case "validate.length"      -> "String Length Overflow";
+            case "validate.notnull"     -> "NOT NULL Violation";
+            case "validate.pk_unique"   -> "Primary Key Duplicate";
+            case "validate.fk"          -> "Foreign Key Violation";
+            case "validate.sum_recon"   -> "Total Reconciliation Mismatch";
+            case "validate.min_max"     -> "Min/Max Mismatch";
+            case "validate.null_parity" -> "NULL Count Mismatch";
+            case "validate.row_count"   -> "Record Count Mismatch";
+            case "validate.checksum"    -> "Data Integrity Mismatch";
+            default -> label == null || label.isEmpty() ? "(unknown)" : label;
+        };
     }
 
     private void failStage(StageInstance stage, OffsetDateTime startedAt,
@@ -260,6 +314,8 @@ public class ValidationReportService implements StageRunner {
                 sr.put("tobeSum", numOrNull(pgTriple[0]));
                 sr.put("deltaPercent", deltaPercent(duckTriple[0], pgTriple[0]));
                 sr.put("verdict", sumPass ? "PASS" : "FAIL");
+                if (!sumPass) sr.put("note", "SUM differs — ASIS=" + nullSafe(duckTriple[0])
+                        + " TOBE=" + nullSafe(pgTriple[0]));
                 sumRecon.add(sr);
                 if (!sumPass) {
                     recordQuarantine(ctx, stage, binding, tableLabel,
@@ -270,7 +326,7 @@ public class ValidationReportService implements StageRunner {
                                     duckTriple[0] == null ? "" : duckTriple[0],
                                     pgTriple[0] == null ? "" : pgTriple[0],
                                     String.valueOf(deltaPercent(duckTriple[0], pgTriple[0])))),
-                            1);
+                            1, QuarantineSeverity.error);
                 }
 
                 boolean minMaxPass = numericEq(duckTriple[1], pgTriple[1])
@@ -283,6 +339,7 @@ public class ValidationReportService implements StageRunner {
                 mm.put("tobeMin", numOrNull(pgTriple[1]));
                 mm.put("tobeMax", numOrNull(pgTriple[2]));
                 mm.put("verdict", minMaxPass ? "PASS" : "FAIL");
+                if (!minMaxPass) mm.put("note", "MIN/MAX differs");
                 minMax.add(mm);
                 if (!minMaxPass) {
                     recordQuarantine(ctx, stage, binding, tableLabel,
@@ -294,7 +351,7 @@ public class ValidationReportService implements StageRunner {
                                             + (duckTriple[2] == null ? "" : duckTriple[2]),
                                     (pgTriple[1] == null ? "" : pgTriple[1]) + " / "
                                             + (pgTriple[2] == null ? "" : pgTriple[2]))),
-                            1);
+                            1, QuarantineSeverity.error);
                 }
             }
 
@@ -360,7 +417,8 @@ public class ValidationReportService implements StageRunner {
                 mm.put("verdict", verdict);
                 if (note != null) mm.put("note", note);
                 minMax.add(mm);
-                /* WARN 은 format diff only — quarantine 발생 X. FAIL 만 record. */
+                /* FAIL = severity=error, WARN = severity=warning (2026-05-31).
+                   WARN 도 KPI/Quarantine 통일성을 위해 적재. 단 reason 은 "format differs (canonical match)" 로 명시. */
                 if ("FAIL".equals(verdict)) {
                     recordQuarantine(ctx, stage, binding, tableLabel,
                             "validate.min_max", "Validation date MIN/MAX mismatch — " + c.getPhysicalName(),
@@ -369,7 +427,17 @@ public class ValidationReportService implements StageRunner {
                             List.of(List.of(c.getPhysicalName(),
                                     nullSafe(duckQuad[0]) + " / " + nullSafe(duckQuad[1]),
                                     nullSafe(pgQuad[0])   + " / " + nullSafe(pgQuad[1]))),
-                            1);
+                            1, QuarantineSeverity.error);
+                } else if ("WARN".equals(verdict)) {
+                    recordQuarantine(ctx, stage, binding, tableLabel,
+                            "validate.min_max", "Validation date MIN/MAX format differs (values match) — "
+                                    + c.getPhysicalName(),
+                            List.of("column", "ASIS min/max", "TOBE min/max"),
+                            List.of("metric", "asis_value", "tobe_value"),
+                            List.of(List.of(c.getPhysicalName(),
+                                    nullSafe(duckQuad[0]) + " / " + nullSafe(duckQuad[1]),
+                                    nullSafe(pgQuad[0])   + " / " + nullSafe(pgQuad[1]))),
+                            1, QuarantineSeverity.warning);
                 }
             }
 
@@ -385,6 +453,7 @@ public class ValidationReportService implements StageRunner {
                 np.put("tobeNulls", pgNulls);
                 np.put("delta", duckNulls - pgNulls);
                 np.put("verdict", nullPass ? "PASS" : "FAIL");
+                if (!nullPass) np.put("note", "NULL count differs (delta=" + (duckNulls - pgNulls) + ")");
                 nullParity.add(np);
                 if (!nullPass) {
                     recordQuarantine(ctx, stage, binding, tableLabel,
@@ -393,7 +462,7 @@ public class ValidationReportService implements StageRunner {
                             List.of("metric", "asis_value", "tobe_value"),
                             List.of(List.of(c.getPhysicalName(),
                                     String.valueOf(duckNulls), String.valueOf(pgNulls))),
-                            Math.abs(duckNulls - pgNulls));
+                            Math.abs(duckNulls - pgNulls), QuarantineSeverity.error);
                 }
             }
 
@@ -440,17 +509,104 @@ public class ValidationReportService implements StageRunner {
             }
         }
 
+        /* Binding 의 모든 quarantine_entries fetch — typeValid 시트 + quarantineStats 시트 +
+           row_count 보정 셋 다에서 사용. (2026-05-31 통합) */
+        Map<String, DdlColumn> colByName = new HashMap<>();
+        for (DdlColumn c : cols) colByName.put(c.getPhysicalName(), c);
+        List<QuarantineEntry> bindingQuarantine = quarantineEntryRepo
+                .findByRunIdOrderByCreatedAtAsc(ctx.getRunHistory().getId())
+                .stream()
+                .filter(q -> binding.getId().equals(q.getBindingId()))
+                .toList();
+
+        /* typeValid 시트 — AuditStage 의 row-level type/length/range 위반. */
+        for (QuarantineEntry qe : bindingQuarantine) {
+            Map<String, Object> sample = qe.getSampleData();
+            if (sample == null) continue;
+            String label = String.valueOf(sample.getOrDefault("stageLabel", ""));
+            if (!label.startsWith("validate.range")
+             && !label.startsWith("validate.type")
+             && !label.startsWith("validate.length")) continue;
+            List<?> qColumns = sample.get("columns") instanceof List<?> l ? l : List.of();
+            String violatedCol = qColumns.size() >= 2 ? String.valueOf(qColumns.get(1))
+                               : qColumns.size() >= 1 ? String.valueOf(qColumns.get(0)) : "";
+            String reason = String.valueOf(sample.getOrDefault("reason", ""));
+            DdlColumn dc = colByName.get(violatedCol);
+            String typeLabel = dc == null ? "" : displayType(dc);
+            String bound = reason;
+            int idxDec = reason.indexOf("DECIMAL");
+            if (idxDec >= 0) bound = reason.substring(idxDec);
+            else if (label.startsWith("validate.length") && dc != null && dc.getLength() != null) {
+                bound = "len ≤ " + dc.getLength();
+            } else if (label.startsWith("validate.type")) {
+                bound = "type cast: " + typeLabel;
+            }
+            Map<String, Object> tv = new LinkedHashMap<>();
+            tv.put("column", violatedCol);
+            tv.put("type", typeLabel);
+            tv.put("bound", bound);
+            tv.put("observedMax", null);
+            tv.put("overflowRows", qe.getRowCount());
+            tv.put("verdict", "FAIL");
+            tv.put("note", reason);
+            typeValid.add(tv);
+        }
+
+        /* quarantineStats 시트 — stageLabel × (entries, rows). 격리 row 적재 정확도 가시화. */
+        java.util.TreeMap<String, Long> rowsByLabel = new java.util.TreeMap<>();
+        java.util.TreeMap<String, Integer> entriesByLabel = new java.util.TreeMap<>();
+        long quarantinedRows = 0;
+        for (QuarantineEntry qe : bindingQuarantine) {
+            Map<String, Object> sample = qe.getSampleData();
+            String label = sample == null ? "" : String.valueOf(sample.getOrDefault("stageLabel", ""));
+            String key = label.isEmpty() ? "(none)" : label;
+            long rc = qe.getRowCount() == null ? 0L : qe.getRowCount();
+            rowsByLabel.merge(key, rc, Long::sum);
+            entriesByLabel.merge(key, 1, Integer::sum);
+            /* row count 보정용 합계 — audit/validate.* 의 위반 row 만 (audit 가 tobe_ 에서 DELETE). */
+            if (label.startsWith("validate.")) quarantinedRows += rc;
+        }
+        /* severityByLabel — stageLabel 별 첫 severity (적재 통일성). 같은 stageLabel 안에서 error/warning 섞이면
+           "error" 우선으로 표시 (운영자 우선순위). */
+        Map<String, String> severityByLabel = new HashMap<>();
+        for (QuarantineEntry qe : bindingQuarantine) {
+            Map<String, Object> sample = qe.getSampleData();
+            String label = sample == null ? "" : String.valueOf(sample.getOrDefault("stageLabel", ""));
+            String key = label.isEmpty() ? "(none)" : label;
+            String sev = qe.getSeverity() == null ? "" : qe.getSeverity().name();
+            severityByLabel.merge(key, sev, (a, b) -> "error".equals(a) ? a : b);
+        }
+        List<Map<String, Object>> quarantineStats = new ArrayList<>();
+        for (var e : rowsByLabel.entrySet()) {
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("stageLabel", e.getKey());
+            row.put("entries", entriesByLabel.getOrDefault(e.getKey(), 0));
+            row.put("rowsQuarantined", e.getValue());
+            row.put("severity", severityByLabel.getOrDefault(e.getKey(), ""));
+            quarantineStats.add(row);
+        }
+
+        /* row_count 검증 — ASIS == TOBE 직접 비교 (사용자 결정 2026-05-31).
+           격리 = 데이터 손실. 의도된 격리든 아니든 PASS 로 표시하면 운영자 silent failure
+           위험. 격리 있으면 무조건 FAIL — Quarantine 시트가 "어디서 얼마나" 정보 제공.
+           quarantined 필드는 정보용으로 row_count map 에 포함. */
         boolean rowCountPass = duckRows == pgRows;
         Map<String, Object> rowCount = orderedMap(
-                "asis", duckRows, "tobe", pgRows,
+                "asis", duckRows,
+                "quarantined", quarantinedRows,
+                "tobe", pgRows,
                 "verdict", rowCountPass ? "PASS" : "FAIL");
         if (!rowCountPass) {
             recordQuarantine(ctx, stage, binding, tableLabel,
-                    "validate.row_count", "Validation row count mismatch — " + tableLabel,
-                    List.of("table", "ASIS rows", "TOBE rows"),
-                    List.of("metric", "asis_value", "tobe_value"),
-                    List.of(List.of(tableLabel, String.valueOf(duckRows), String.valueOf(pgRows))),
-                    Math.abs(duckRows - pgRows));
+                    "validate.row_count", "Validation row count mismatch — " + tableLabel
+                            + " (ASIS " + duckRows + " ≠ TOBE " + pgRows
+                            + (quarantinedRows > 0 ? "; " + quarantinedRows + " row(s) quarantined" : "")
+                            + ")",
+                    List.of("table", "ASIS rows", "Quarantined", "TOBE rows"),
+                    List.of("metric", "asis_value", "quarantined", "tobe_value"),
+                    List.of(List.of(tableLabel, String.valueOf(duckRows),
+                            String.valueOf(quarantinedRows), String.valueOf(pgRows))),
+                    Math.abs(duckRows - pgRows), QuarantineSeverity.error);
         }
 
         /* Checksum verdict — 3-level (PASS/WARN/FAIL):
@@ -483,7 +639,18 @@ public class ValidationReportService implements StageRunner {
                     List.of(List.of(tableLabel,
                             duckChecksumRaw == null ? "" : duckChecksumRaw,
                             pgChecksumRaw   == null ? "" : pgChecksumRaw)),
-                    1);
+                    1, QuarantineSeverity.error);
+        } else if ("WARN".equals(checksumVerdict) && duckChecksumRaw != null) {
+            /* WARN — raw 표현 다르나 canonical 일치 (timestamp format diff 등). KPI/Quarantine
+               통일성을 위해 severity=warning 으로 적재. (2026-05-31 옵션 (b) 채택) */
+            recordQuarantine(ctx, stage, binding, tableLabel,
+                    "validate.checksum",
+                    "Data integrity format differs (values match canonical) — " + tableLabel,
+                    List.of("table", "ASIS hash", "TOBE hash"),
+                    List.of("metric", "asis_value", "tobe_value"),
+                    List.of(List.of(tableLabel,
+                            duckChecksumRaw, pgChecksumRaw == null ? "" : pgChecksumRaw)),
+                    1, QuarantineSeverity.warning);
         }
 
         List<Map<String, Object>> overview = new ArrayList<>();
@@ -503,6 +670,14 @@ public class ValidationReportService implements StageRunner {
                 "asis", (numericCols.size() + dateCols.size()) + " cols",
                 "tobe", (numericCols.size() + dateCols.size()) + " cols",
                 "verdict", rollupVerdict(minMax)));
+        /* Type Validation roll-up — typeValid 시트의 모든 entry 가 FAIL (quarantine 발생 의미).
+           entry 0 = PASS (모든 row 타입/길이/범위 통과), entry > 0 = FAIL.
+           (2026-05-31 추가) */
+        overview.add(orderedMap("item", "Type Validation (" + typeValid.size() + " issue"
+                        + (typeValid.size() == 1 ? "" : "s") + ")",
+                "asis", typeValid.isEmpty() ? "OK" : typeValid.size() + " issues",
+                "tobe", typeValid.isEmpty() ? "OK" : typeValid.size() + " issues",
+                "verdict", typeValid.isEmpty() ? "PASS" : "FAIL"));
         overview.add(orderedMap("item", "PK uniqueness", "asis", "OK", "tobe", "OK", "verdict", "PASS"));
 
         int totalChecks = overview.size();
@@ -520,6 +695,7 @@ public class ValidationReportService implements StageRunner {
         data.put("nullParity", nullParity);
         data.put("minMax", minMax);
         data.put("typeValid", typeValid);
+        data.put("quarantineStats", quarantineStats);
         data.put("rowCount", rowCount);
         data.put("checksum", checksum);
         data.put("totalChecks", totalChecks);
@@ -529,17 +705,20 @@ public class ValidationReportService implements StageRunner {
 
     /* ---------- Quarantine record helper (2026-05-30 합병 정책) ---------- */
 
-    /** FAIL 인 validation 체크별로 quarantine_entries 1 row 발생. AuditStage 의 record 패턴.
-     *  WARN 은 호출하지 않음 (format diff only — audit 무관). */
+    /** Validation 체크의 verdict 별로 quarantine_entries 1 row 발생.
+     *  FAIL → severity=error / WARN → severity=warning (2026-05-31).
+     *  + run_log 에도 같은 level (WARN/ERROR) 로 ingest — LogViewer stream 카운트와 통일.
+     *  WARN 도 발생시켜서 ExecutionPage KPI 의 warn 카운트 + Quarantine 페이지에 통일 표시. */
     private void recordQuarantine(StageContext ctx, StageInstance stage,
                                   MappingTableBinding binding, String tableLabel,
                                   String stageLabel, String reason,
                                   List<String> columns, List<String> columnRoles,
-                                  List<List<Object>> sampleRows, long rowCount) {
+                                  List<List<Object>> sampleRows, long rowCount,
+                                  QuarantineSeverity severity) {
         Map<String, Object> data = new HashMap<>();
         data.put("reason", reason);
         data.put("detail", tableLabel + " — " + stageLabel);
-        data.put("severity", "error");
+        data.put("severity", severity.name());
         data.put("stageLabel", stageLabel);
         data.put("table", tableLabel);
         data.put("columns", columns);
@@ -551,10 +730,18 @@ public class ValidationReportService implements StageRunner {
                 binding.getId(),
                 null,
                 reason,
-                QuarantineSeverity.error,
+                severity,
                 data,
                 rowCount,
                 ctx.getLogLineSeqCursor());
+
+        /* run_log 에도 같은 severity 로 1 라인 추가 — LogViewer stream 의 WARN/ERROR 카운트와 일치.
+           기존 ingest(info/error) 분기 외 WARN level 명시 호출. */
+        long seq = ctx.nextLogSeq();
+        var logLine = severity == QuarantineSeverity.warning
+                ? StageHelpers.warn(seq, ctx.getRunHistory().getId(), STAGE_KEY, reason)
+                : StageHelpers.error(seq, ctx.getRunHistory().getId(), STAGE_KEY, reason);
+        runLogIngest.ingest(ctx.getRunHistory().getId(), ctx.getProject().getId(), List.of(logLine));
     }
 
     /** null 안전 toString — sampleRows 안의 String 변환용. */

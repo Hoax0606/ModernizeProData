@@ -2,6 +2,8 @@ package com.ksinfo.modernize_pro_data.coordinator.api;
 
 import com.ksinfo.modernize_pro_data.common.dto.ApiResponse;
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.coordinator.run.validation.ValidationDiffSampleDto;
+import com.ksinfo.modernize_pro_data.coordinator.run.validation.ValidationDiffService;
 import com.ksinfo.modernize_pro_data.coordinator.run.validation.ValidationReport;
 import com.ksinfo.modernize_pro_data.coordinator.run.validation.ValidationReportDto;
 import com.ksinfo.modernize_pro_data.coordinator.run.validation.ValidationReportRepository;
@@ -33,6 +35,7 @@ import java.util.List;
 public class ValidationReportController {
 
     private final ValidationReportRepository reportRepo;
+    private final ValidationDiffService diffService;
 
     @GetMapping("/api/v1/runs/{runId}/validation")
     @PreAuthorize("isAuthenticated()")
@@ -58,6 +61,18 @@ public class ValidationReportController {
      * TO-BE 物理 테이블명으로 조회. FE 가 binding ID 추적을 안 해도 selectedTable 만으로
      * 접근 가능 — binding 1:1 mapping 가정. shared mapping 등으로 모호하면 첫 매칭 반환.
      */
+    /**
+     * Drill-down — Data Integrity Check (SHA-256) FAIL 시 어느 row 가 다른지 row-by-row 비교.
+     * PK 기반 매칭 + 컬럼 비교. 한 요청당 최대 200 row (BE 부담 제한).
+     */
+    @GetMapping("/api/v1/runs/{runId}/validation/{bindingId}/diff-sample")
+    @PreAuthorize("isAuthenticated()")
+    public ApiResponse<ValidationDiffSampleDto> getDiffSample(@PathVariable String runId,
+                                                              @PathVariable String bindingId,
+                                                              @RequestParam(defaultValue = "50") int limit) {
+        return ApiResponse.ok(diffService.fetchDiff(runId, bindingId, limit));
+    }
+
     @GetMapping("/api/v1/runs/{runId}/validation/by-table")
     @PreAuthorize("isAuthenticated()")
     public ApiResponse<ValidationReportDto> getByTable(@PathVariable String runId,
