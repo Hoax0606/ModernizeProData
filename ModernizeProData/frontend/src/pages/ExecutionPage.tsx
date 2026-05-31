@@ -536,6 +536,7 @@ export function ExecutionPage() {
     /* Retry = 실패한 run 의 **마지막 success stage 이후부터** 재개. BE 가 정합성 검증
        (snapshot / selectedTables 동일 + 옛 parquet 존재) → 자동 fallback 처음부터 if 부적합.
        opts.resumeFromRunId 로 옛 run id 전달. handleStartRun 의 guard 우회 위해 직접 호출. */
+    if (!canRetry) return;
     if (!runMode || selectedTables.size === 0) return;
     const oldRunId = activeRunId;   // null 가능 — 그 경우 처음부터.
     setActiveRunId(null);
@@ -545,9 +546,10 @@ export function ExecutionPage() {
   };
 
   const handleDiscard = () => {
+    if (!canDiscard) return;
     /* halted run の表示をヘッダーから片付ける + pin 박제 fallback も殺す.
-       BE の run 자체は history に残るので影響なし. discardedSnapshotId で pin 切替 effect の
-       再注入を防ぎ, pin を別 snapshot に動かしたら自動 reset. */
+       BE の run 자체는 history 에 남으므로 영향 없음. discardedSnapshotId 로 pin 切替 effect 의
+       재 注入을 막고, pin 을 別 snapshot 으로 옮기면 자동 reset. */
     setActiveRunId(null);
     if (pinnedSnapshot) setDiscardedSnapshotId(pinnedSnapshot.id);
   };
@@ -558,6 +560,10 @@ export function ExecutionPage() {
   const isMyProject = !!user?.username && project?.executionAssignee === user.username;
   const runIsBulk = run?.metadata != null && (run.metadata as Record<string, unknown>).bulk === true;
   const canStop = isMaster || (isMyProject && !runIsBulk);
+  /* Retry / Discard も Stop と同じ権限 — bystander が他人の run を rewind / abort できないように.
+     (origin/dev 2026-05-31 取り込み) */
+  const canRetry = canStop;
+  const canDiscard = canStop;
 
   const handleStopRun = async () => {
     if (!canStop) return;
@@ -587,6 +593,8 @@ export function ExecutionPage() {
         onStart={handleStartRun}
         onStop={handleStopRun}
         canStop={canStop}
+        canRetry={canRetry}
+        canDiscard={canDiscard}
         onRetry={handleRetry}
         onDiscard={handleDiscard}
       />
@@ -628,7 +636,7 @@ function DisabledOverlay({ disabled, children }: { disabled: boolean; children: 
 
 function RunHeader({
   t, project, site, runMode, activeRun, runs, pinLastRunId, preflightPassed, hasPinnedSnapshot,
-  selectedTablesCount, onStart, onStop, canStop, onRetry, onDiscard,
+  selectedTablesCount, onStart, onStop, canStop, canRetry, canDiscard, onRetry, onDiscard,
 }: {
   t: T;
   project: Project;
@@ -645,6 +653,9 @@ function RunHeader({
   onStop: () => void;
   /** Stop 권한 — assignee 본인은 자기 run stop 가능, 단 bulk run (master 가 일괄 시작) 은 master 만. */
   canStop: boolean;
+  /** Retry / Discard 도 Stop 과 동일 권한 (master 또는 assignee 본인 + non-bulk). */
+  canRetry: boolean;
+  canDiscard: boolean;
   onRetry: () => void;
   onDiscard: () => void;
 }) {
@@ -782,8 +793,9 @@ function RunHeader({
           </div>
         </div>
         {/* halted 時のボタン: failed/aborted = Discard + Retry / completed = Discard のみ.
-            新規 Start run は Discard 後の no-active ブランチで出る. */}
-        {isHalted && (
+            新規 Start run は Discard 後の no-active ブランチで出る.
+            canDiscard / canRetry 권한 가드 — bystander 가 他人の run 을 rewind / abort 못 하도록. */}
+        {isHalted && canDiscard && (
           <button
             type="button"
             onClick={onDiscard}
@@ -793,7 +805,7 @@ function RunHeader({
             {t('execution.run.discard')}
           </button>
         )}
-        {(isFailed || isAborted) && (
+        {(isFailed || isAborted) && canRetry && (
           <button
             type="button"
             onClick={onRetry}

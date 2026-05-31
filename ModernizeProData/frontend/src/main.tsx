@@ -27,6 +27,27 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
 
+// beforeunload 의 best-effort logout 제거 (2026-05-31). 옛 정책 (confirm-to-evict)
+// 에서는 옛 session 강제 clear 위해 필요했지만 AuthService 가 last-write-wins 로
+// 전환 후 = 다음 login 시 자동 evict. beforeunload logout 은 F5 시도 fire 되어
+// reload 후 옛 token 이 sid mismatch (server 가 session clear 함) → 401 → logout
+// cycle 의 진짜 원인이었음.
+
+// F5 / Ctrl+R 자체 disable — Edge --app mode 의 chromeless 상태에서 사용자가
+// 실수로 누르거나 의도적 reload 가 의미 없는 시나리오 (zustand 가 state 보유 +
+// STOMP / polling 이 자동 재연결). 의도된 reload 가 진짜 필요한 dev 상황은
+// Ctrl+F5 (cache bypass) 로 우회 가능 — 그것은 막지 않음.
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'F5' && !e.ctrlKey && !e.shiftKey) {
+    e.preventDefault();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'r' || e.key === 'R') && !e.shiftKey) {
+    e.preventDefault();
+    return;
+  }
+});
+
 try {
   createRoot(document.getElementById('root')!).render(
     <StrictMode>

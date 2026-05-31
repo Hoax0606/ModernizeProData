@@ -84,7 +84,7 @@ public class RunLogRepository {
      * 호출자가 매 ingest 마다 부담 없이 호출할 수 있도록, 이미 있으면 IF NOT EXISTS 가
      * 즉시 끝난다. partition table 이름은 run_id 를 안전 표기로 변환.
      */
-    @Transactional
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.REQUIRES_NEW)
     public void ensurePartition(String runId) {
         if (!SAFE_RUN_ID.matcher(runId).matches()) {
             throw new IllegalArgumentException("Invalid runId for partition: " + runId);

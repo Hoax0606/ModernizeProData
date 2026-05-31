@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -130,38 +131,57 @@ public class DuckDbService {
     }
 
     /**
+     * 폐쇄망용 — 인스톨러 staging 의 duckdb-extensions/ 디렉토리 경로 resolve.
+     * jpackage 의 $APPDIR/app/duckdb-extensions/{name}.duckdb_extension. 없으면 (dev mode)
+     * null 반환 → INSTALL 의 인터넷 다운로드 fallback.
+     */
+    private static File resolveBundledExtension(String name) {
+        String javaHome = System.getProperty("java.home");
+        if (javaHome == null) return null;
+        File runtime = new File(javaHome);
+        File appDir = runtime.getParentFile();
+        if (appDir == null) return null;
+        File ext = new File(appDir, "app/duckdb-extensions/" + name + ".duckdb_extension");
+        return ext.isFile() ? ext : null;
+    }
+
+    /**
      * DuckDB encodings 확장 로드 — read_csv 의 encoding='shift_jis' 등을 가능하게 함.
      * UTF-8/UTF-16/Latin-1 은 native 라 확장 없이도 동작하므로, 로드 실패해도 DuckDB 자체는 막지 않는다.
-     * 폐쇄망(air-gapped)에서는 INSTALL 이 인터넷 다운로드를 못 하므로, 인스톨러에 확장 바이너리를
-     * 동봉하고 로컬 경로 INSTALL 로 교체해야 한다 (패키징 후속 작업).
+     * 폐쇄망에서는 install 단계 의 인터넷 다운로드 불가 → 인스톨러 동봉 binary 의 LOAD '<full-path>'.
      */
     private void loadEncodingsExtension(Connection conn) {
-        try (Statement st = conn.createStatement()) {
-            st.execute("INSTALL encodings");
-            st.execute("LOAD encodings");
-            log.info("DuckDB encodings extension loaded");
-        } catch (SQLException e) {
-            log.warn("DuckDB encodings extension 로드 실패 — 비 UTF-8 CSV 적재 불가 "
-                    + "(폐쇄망이면 확장 바이너리 동봉 필요): {}", e.getMessage());
-        }
+        loadBundledOrRemote(conn, "encodings", "비 UTF-8 CSV 적재 불가");
     }
 
     /**
      * DuckDB icu 확장 로드 — timezone offset 인식. {@code TIMESTAMP WITH TIME ZONE} CAST 또는
      * '+09:00' 같은 offset 포함 timestamp 문자열 파싱에 필요. 없으면
      * "Conversion Error: Unknown TimeZone '+09:00'!" 로 reject 됨.
-     *
-     * 폐쇄망(air-gapped) 노트: encodings 와 동일하게 INSTALL 이 인터넷 다운로드. 본운영 현장은
-     * 인스톨러에 바이너리 동봉 + 로컬 경로 INSTALL 로 교체 필요 (encoding 확장과 같은 후속).
      */
     private void loadIcuExtension(Connection conn) {
+        loadBundledOrRemote(conn, "icu", "timezone 포함 timestamp 파싱 불가");
+    }
+
+    /**
+     * 단일 extension load 의 공통 path. 1) 인스톨러 동봉 binary 가 있으면 그것 LOAD '<path>'
+     * 직접 (폐쇄망), 2) 없으면 INSTALL + LOAD 의 인터넷 다운로드 (dev mode).
+     */
+    private void loadBundledOrRemote(Connection conn, String name, String impactHint) {
+        File bundled = resolveBundledExtension(name);
         try (Statement st = conn.createStatement()) {
-            st.execute("INSTALL icu");
-            st.execute("LOAD icu");
-            log.info("DuckDB icu extension loaded");
+            if (bundled != null) {
+                String escaped = bundled.getAbsolutePath().replace("\\", "/").replace("'", "''");
+                st.execute("LOAD '" + escaped + "'");
+                log.info("DuckDB {} extension loaded from bundled binary ({})", name, escaped);
+                return;
+            }
+            st.execute("INSTALL " + name);
+            st.execute("LOAD " + name);
+            log.info("DuckDB {} extension loaded (remote install)", name);
         } catch (SQLException e) {
-            log.warn("DuckDB icu extension 로드 실패 — timezone 포함 timestamp 파싱 불가 "
-                    + "(폐쇄망이면 확장 바이너리 동봉 필요): {}", e.getMessage());
+            log.warn("DuckDB {} extension 로드 실패 — {} (폐쇄망이면 확장 바이너리 동봉 필요): {}",
+                    name, impactHint, e.getMessage());
         }
     }
 

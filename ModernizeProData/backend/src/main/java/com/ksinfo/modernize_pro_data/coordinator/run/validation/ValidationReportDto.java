@@ -29,6 +29,8 @@ public record ValidationReportDto(
         List<Map<String, Object>> nullParity,
         List<Map<String, Object>> minMax,
         List<Map<String, Object>> typeValid,
+        /** stageLabel × (entries count, rows quarantined) — 적재 정확도 가시화 (2026-05-31 추가). */
+        List<Map<String, Object>> quarantineStats,
         Map<String, Object> rowCount,
         Map<String, Object> checksum
 ) {
@@ -50,6 +52,7 @@ public record ValidationReportDto(
                 (List<Map<String, Object>>) d.getOrDefault("nullParity", List.of()),
                 (List<Map<String, Object>>) d.getOrDefault("minMax", List.of()),
                 (List<Map<String, Object>>) d.getOrDefault("typeValid", List.of()),
+                (List<Map<String, Object>>) d.getOrDefault("quarantineStats", List.of()),
                 (Map<String, Object>) d.getOrDefault("rowCount", Map.of()),
                 (Map<String, Object>) d.getOrDefault("checksum", Map.of())
         );

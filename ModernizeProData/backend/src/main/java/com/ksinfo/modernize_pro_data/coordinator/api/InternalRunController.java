@@ -114,6 +114,18 @@ public class InternalRunController {
         return ApiResponse.ok(null);
     }
 
+    /**
+     * Stage 단위 진행 알림 — Worker 의 LocalWorkerExecutor.broadcastStage 가 호출.
+     * body 는 generic Map (type/stageKey/status/success/failed). FE 는 invalidate
+     * 트리거로만 사용해 polling cache 를 refresh.
+     */
+    @PostMapping("/api/v1/internal/runs/{runId}/stage")
+    public ApiResponse<Void> stageProgress(@PathVariable String runId,
+                                           @RequestBody Map<String, Object> payload) {
+        messagingTemplate.convertAndSend("/topic/run/" + runId + "/progress", payload);
+        return ApiResponse.ok(null);
+    }
+
     /** 성공 완료. run_history.status='success' + projects.run_status='idle'. */
     @PostMapping("/api/v1/internal/runs/{runId}/complete")
     public ApiResponse<RunHistory> complete(@PathVariable String runId,

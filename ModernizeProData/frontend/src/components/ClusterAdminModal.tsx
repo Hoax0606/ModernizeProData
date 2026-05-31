@@ -174,7 +174,7 @@ function UsersTab() {
         username: name,
         password: newPw,
         role: newRole,
-        siteId: newRole === 'admin' ? (newSiteId || null) : null,
+        siteId: null,
       });
       resetAddForm();
       setAddOpen(false);
@@ -245,21 +245,8 @@ function UsersTab() {
                 ))}
               </select>
             </div>
-            {newRole === 'admin' && (
-              <div style={styles.formRow}>
-                <label style={styles.formRowLabel}>{t('userMgmt.add.site')}</label>
-                <select
-                  value={newSiteId}
-                  onChange={(e) => setNewSiteId(e.target.value)}
-                  style={styles.input}
-                >
-                  <option value="">{t('userMgmt.add.site.none')}</option>
-                  {sites.map((s) => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
-                  ))}
-                </select>
-              </div>
-            )}
+            {/* site 지정 입력 제거 (2026-05-31) — admin user 의 site 할당은 추후
+                Site Settings 등 별도 UI 에서 처리. 생성 시 항상 siteId=null. */}
             <div style={styles.formRow}>
               <label style={styles.formRowLabel}>{t('userMgmt.add.password')}</label>
               <div style={styles.formRowControl}>

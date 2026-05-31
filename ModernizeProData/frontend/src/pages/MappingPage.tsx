@@ -1803,7 +1803,9 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                 {masterProject?.name ?? bindingEdit?.sharedFromProjectId}
               </button>
               <div style={{ flex: 1 }} />
-              <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>{t('mapping.link.button.changeUnlink')}</button>
+              {!readOnly && (
+                <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>{t('mapping.link.button.changeUnlink')}</button>
+              )}
             </>
           ) : isParentTable && parentInfo ? (
             <>
@@ -1836,7 +1838,9 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
               <i className="fa-solid fa-unlink" style={{ fontSize: 11, color: 'var(--text-3)' }} />
               <span style={{ fontSize: 11, color: 'var(--text-3)' }}>{t('mapping.link.standalone')}</span>
               <div style={{ flex: 1 }} />
-              <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>{t('mapping.link.button.link')}</button>
+              {!readOnly && (
+                <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>{t('mapping.link.button.link')}</button>
+              )}
             </>
           )}
         </div>
@@ -1866,23 +1870,27 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by field name…" style={styles.searchInput} />
         </div>
         <div style={{ flex: 1 }} />
-        <button
-          style={yamlImported
-            ? { ...styles.btnSecondary, color: 'var(--text-3)' }
-            : styles.btnSecondary}
-          onClick={() => setImportYamlOpen(true)}
-        >{yamlImported
-            ? <><Ic.check /> YAML Imported</>
-            : <><i className="fa-solid fa-download" style={{ fontSize: 11 }} /> Import YAML</>}</button>
-        <button
-          style={mappingImported
-            ? { ...styles.btnSecondary, color: 'var(--text-3)' }
-            : styles.btnSecondary}
-          onClick={() => setImportMappingOpen(true)}
-          title="이 TO-BE 테이블만 매핑 정의서로 재매칭"
-        >{mappingImported
-            ? <><Ic.check /> Table mapped</>
-            : <><i className="fa-solid fa-table" style={{ fontSize: 11 }} /> Re-map table</>}</button>
+        {!readOnly && (
+          <>
+            <button
+              style={yamlImported
+                ? { ...styles.btnSecondary, color: 'var(--text-3)' }
+                : styles.btnSecondary}
+              onClick={() => setImportYamlOpen(true)}
+            >{yamlImported
+                ? <><Ic.check /> YAML Imported</>
+                : <><i className="fa-solid fa-download" style={{ fontSize: 11 }} /> Import YAML</>}</button>
+            <button
+              style={mappingImported
+                ? { ...styles.btnSecondary, color: 'var(--text-3)' }
+                : styles.btnSecondary}
+              onClick={() => setImportMappingOpen(true)}
+              title="이 TO-BE 테이블만 매핑 정의서로 재매칭"
+            >{mappingImported
+                ? <><Ic.check /> Table mapped</>
+                : <><i className="fa-solid fa-table" style={{ fontSize: 11 }} /> Re-map table</>}</button>
+          </>
+        )}
       </div>
       {importMappingOpen && (
         <MappingDefinitionImportModal

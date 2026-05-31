@@ -7,6 +7,7 @@ import { asisDdlApi, type DdlSchema, type DdlColumn } from '../api/asisDdl';
 import { tobeDdlApi } from '../api/tobeDdl';
 import { mappingImportApi } from '../api/mappingImport';
 import { validationApi, type ValidationReportDto } from '../api/validation';
+import { ValidationDiffModal } from '../components/ValidationDiffModal';
 import { useT, type TranslationKey } from '../i18n';
 
 /**
@@ -141,6 +142,7 @@ export const SHEETS: Record<CategoryKey, SheetSchema[]> = {
       { name: 'SUM(TOBE)', type: 'NUMBER' },
       { name: 'Δ %',       type: 'TEXT' },
       { name: 'Verdict',   type: 'TEXT' },
+      { name: 'Note',      type: 'TEXT' },
     ]},
     { name: 'NULL parity', columns: [
       { name: 'Column',     type: 'VARCHAR' },
@@ -149,6 +151,7 @@ export const SHEETS: Record<CategoryKey, SheetSchema[]> = {
       { name: 'NULLS TOBE', type: 'BIGINT' },
       { name: 'Δ',          type: 'BIGINT' },
       { name: 'Verdict',    type: 'TEXT' },
+      { name: 'Note',       type: 'TEXT' },
     ]},
     { name: 'Min Max', columns: [
       { name: 'Column',   type: 'VARCHAR' },
@@ -158,6 +161,7 @@ export const SHEETS: Record<CategoryKey, SheetSchema[]> = {
       { name: 'MIN TOBE', type: 'TEXT' },
       { name: 'MAX TOBE', type: 'TEXT' },
       { name: 'Verdict',  type: 'TEXT' },
+      { name: 'Note',     type: 'TEXT' },
     ]},
     { name: 'Range', columns: [
       { name: 'Column',        type: 'VARCHAR' },
@@ -166,6 +170,14 @@ export const SHEETS: Record<CategoryKey, SheetSchema[]> = {
       { name: 'Observed max',  type: 'NUMBER' },
       { name: 'Overflow rows', type: 'INT' },
       { name: 'Verdict',       type: 'TEXT' },
+      { name: 'Note',          type: 'TEXT' },
+    ]},
+    /* Quarantine 통계 시트 — binding 의 stageLabel × (entries, rows) 집계 (2026-05-31). */
+    { name: 'Quarantine', columns: [
+      { name: 'Check',             type: 'VARCHAR' },
+      { name: 'Entries',           type: 'INT' },
+      { name: 'Rows Quarantined',  type: 'BIGINT' },
+      { name: 'Severity',          type: 'TEXT' },
     ]},
   ],
 };
@@ -936,6 +948,14 @@ function verdictText(v: 'PASS' | 'FAIL' | 'WARN' | string): string {
   return String(v ?? '');
 }
 
+/** BE 의 overview item 라벨 → 화면 표시. SHA-256 만 친숙화하고 나머지는 BE 원본 그대로.
+ *  (2026-05-31 사용자 결정: SHA-256 hex 용어가 고객사 친숙도 낮아 'Data Integrity Check' 로
+ *  변경하되, 다른 항목은 운영팀에 익숙한 기존 어휘 유지). */
+function friendlyOverviewItem(item: string): string {
+  if (item === 'Checksum SHA-256') return 'Data Integrity Check';
+  return item;
+}
+
 function fmtCell(v: unknown): Cell {
   if (v == null) return null;
   if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'string') return v;
@@ -949,9 +969,28 @@ function validationOverviewRows(dto: ValidationReportDto): Cell[][] {
     ['Generated', dto.generatedAt ?? '', null, null],
     ['Check', 'ASIS', 'TOBE', 'Verdict'],
   ];
-  const items: Cell[][] = (dto.overview ?? []).map((r) => [
-    fmtCell(r.item), fmtCell(r.asis), fmtCell(r.tobe), verdictText(r.verdict),
-  ]);
+  const items: Cell[][] = (dto.overview ?? []).map((r) => {
+    const itemRaw = String(r.item ?? '');
+    /* SHA-256 checksum row 의 ASIS/TOBE 는 BE 가 hash prefix (8자+…) 전송. 고객사 입장에서
+       hex string 은 의미 전달 X — verdict 기반으로 'Match' / 'Mismatch' 로 변환해 가독성 ↑.
+       단 '(no PK)' 같은 sentinel 값은 보존. (2026-05-31 친숙화) */
+    if (itemRaw === 'Checksum SHA-256') {
+      const asisRaw = String(r.asis ?? '');
+      const tobeRaw = String(r.tobe ?? '');
+      const isSentinel = asisRaw.startsWith('(') || tobeRaw.startsWith('(');
+      const matchLabel = isSentinel
+        ? fmtCell(r.asis)
+        : (r.verdict === 'PASS' ? '✓ Match'
+         : r.verdict === 'WARN' ? '⚠ Match (display differs)'
+         : '✗ Mismatch');
+      const matchLabel2 = isSentinel ? fmtCell(r.tobe) : matchLabel;
+      return [friendlyOverviewItem(itemRaw), matchLabel, matchLabel2, verdictText(r.verdict)];
+    }
+    return [
+      friendlyOverviewItem(itemRaw),
+      fmtCell(r.asis), fmtCell(r.tobe), verdictText(r.verdict),
+    ];
+  });
   const total: Cell[][] = [
     ['Total', String(dto.totalChecks),
      `${dto.passedChecks} pass`,
@@ -966,6 +1005,7 @@ function validationSumReconRows(dto: ValidationReportDto): Cell[][] {
     fmtCell(r.asisSum), fmtCell(r.tobeSum),
     r.deltaPercent == null ? '' : `${fmtCell(r.deltaPercent)}%`,
     verdictText(r.verdict),
+    fmtCell(r.note ?? ''),
   ]);
 }
 
@@ -974,6 +1014,7 @@ function validationNullParityRows(dto: ValidationReportDto): Cell[][] {
     fmtCell(r.column), fmtCell(r.type),
     r.asisNulls, r.tobeNulls, r.delta,
     verdictText(r.verdict),
+    fmtCell(r.note ?? ''),
   ]);
 }
 
@@ -983,6 +1024,7 @@ function validationMinMaxRows(dto: ValidationReportDto): Cell[][] {
     fmtCell(r.asisMin), fmtCell(r.asisMax),
     fmtCell(r.tobeMin), fmtCell(r.tobeMax),
     verdictText(r.verdict),
+    fmtCell(r.note ?? ''),
   ]);
 }
 
@@ -992,7 +1034,43 @@ function validationRangeRows(dto: ValidationReportDto): Cell[][] {
     fmtCell(r.bound), fmtCell(r.observedMax),
     r.overflowRows ?? 0,
     verdictText(r.verdict),
+    fmtCell(r.note ?? ''),
   ]);
+}
+
+/** Quarantine 통계 시트 — stageLabel × (entries, rows, severity). 친숙화 라벨 적용. */
+function validationQuarantineRows(dto: ValidationReportDto): Cell[][] {
+  return (dto.quarantineStats ?? []).map((r) => [
+    friendlyStageLabel(r.stageLabel),
+    r.entries ?? 0,
+    r.rowsQuarantined ?? 0,
+    friendlySeverity(r.severity ?? ''),
+  ]);
+}
+
+/** quarantine severity → 화면 표시. error → "✗ Error", warning → "⚠ Warning", '' → ''. */
+function friendlySeverity(sev: string): string {
+  if (sev === 'error') return '✗ Error';
+  if (sev === 'warning') return '⚠ Warning';
+  return '';
+}
+
+/** BE 의 stageLabel (예: 'validate.range') → 고객사 친숙 라벨. */
+function friendlyStageLabel(label: string): string {
+  switch (label) {
+    case 'validate.range':       return 'Numeric Range Overflow';
+    case 'validate.type':        return 'Type Cast Failure';
+    case 'validate.length':      return 'String Length Overflow';
+    case 'validate.notnull':     return 'NOT NULL Violation';
+    case 'validate.pk_unique':   return 'Primary Key Duplicate';
+    case 'validate.fk':          return 'Foreign Key Violation';
+    case 'validate.sum_recon':   return 'Total Reconciliation Mismatch';
+    case 'validate.min_max':     return 'Min/Max Mismatch';
+    case 'validate.null_parity': return 'NULL Count Mismatch';
+    case 'validate.row_count':   return 'Record Count Mismatch';
+    case 'validate.checksum':    return 'Data Integrity Mismatch';
+    default: return label || '(unknown)';
+  }
 }
 
 /** Sheet 이름 → 해당 시트의 Cell[][] 행. dto null 또는 sheet 매칭 없으면 빈 배열. */
@@ -1004,6 +1082,7 @@ export function validationRowsFor(dto: ValidationReportDto | null | undefined, s
     case 'NULL parity': return validationNullParityRows(dto);
     case 'Min Max':     return validationMinMaxRows(dto);
     case 'Range':       return validationRangeRows(dto);
+    case 'Quarantine':  return validationQuarantineRows(dto);
     default: return [];
   }
 }
@@ -1037,17 +1116,30 @@ const ARGB_BY_STATUS: Record<string, { bg: string; fg: string }> = {
   unmapped: { bg: 'FFFFD9D9', fg: 'FFA00000' },
 };
 const ARGB_BY_VERDICT: Record<string, { bg: string; fg: string }> = {
+  /* 2026-05-31 친숙화 — 화면 표시 = 'Pass'/'Fail'/'Warning' (BE 의 'PASS'/'FAIL'/'WARN' 은
+     verdictText 에서 변환). 양쪽 키 모두 등록해 in-app preview / ExcelJS 둘 다 색칠. */
+  '✓ Pass': { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
   '✓ PASS': { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
   '✓':      { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
+  Pass:     { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
   PASS:     { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
+  '✗ Fail': { bg: 'FFF3D3D3', fg: 'FFA00000' },
   '✗ FAIL': { bg: 'FFF3D3D3', fg: 'FFA00000' },
   '✗':      { bg: 'FFF3D3D3', fg: 'FFA00000' },
+  Fail:     { bg: 'FFF3D3D3', fg: 'FFA00000' },
   FAIL:     { bg: 'FFF3D3D3', fg: 'FFA00000' },
   /* WARN (Talend Data Stewardship 패턴) — 표현 차이로 인한 false-positive 또는 canonical
-     비교 일치인 row. 노란 amber tint. ExcelJS 다운로드와 in-app preview 모두 사용. */
-  '⚠ WARN': { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
-  '⚠':      { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
-  WARN:     { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+     비교 일치인 row. 노란 amber tint. */
+  '⚠ Warning': { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  '⚠ WARN':    { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  '⚠':         { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  Warning:     { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  WARN:        { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  /* Checksum SHA-256 친숙화 — '✓ Match' / '⚠ Match (display differs)' / '✗ Mismatch'
+     (2026-05-31). hex string 노출 대신 사용자 친화 표현. */
+  '✓ Match':                     { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
+  '⚠ Match (display differs)':   { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  '✗ Mismatch':                  { bg: 'FFF3D3D3', fg: 'FFA00000' },
 };
 
 /* ExcelJS 셀에 fill + font color 한번에 적용하는 헬퍼. */
@@ -1748,6 +1840,9 @@ function ExcelWorkbook({
   /* Copy 버튼 직후 짧은 "Copied" 토스트를 띄우기 위한 상태.
      true 로 세팅 후 ~1.6 초 뒤 자동으로 false. */
   const [copied, setCopied] = useState(false);
+  /* Validation drill-down 모달 — Data Integrity Check (SHA-256) FAIL 시 row-by-row 비교.
+     Validation 카테고리 + validationDto.checksum.verdict 가 'FAIL' 일 때만 트리거 버튼 표시. */
+  const [diffOpen, setDiffOpen] = useState(false);
   /* 트리에서 선택한 자식(예: dashboard-snapshot, m_user) 이 있으면 그 이름으로,
      없으면 placeholder 로 fallback. */
   const baseName = selectedTable ?? t('artifacts.workbook.placeholderName');
@@ -1948,6 +2043,17 @@ function ExcelWorkbook({
           {filename} ({t('artifacts.workbook.readOnly')}) - Report
         </div>
         <div style={styles.titleBarRight}>
+          {category.key === 'validation'
+            && validationDto
+            && String(validationDto.checksum?.verdict ?? '') === 'FAIL' && (
+            <button
+              onClick={() => setDiffOpen(true)}
+              style={styles.titleBarActionBtn}
+              title="Open row-by-row Data Integrity diff"
+            >
+              View Row Diff
+            </button>
+          )}
           {category.downloadType === 'xlsx' ? (
             <button onClick={handleDownloadXlsx} style={styles.titleBarActionBtn}>
               Download .xlsx
@@ -1961,6 +2067,14 @@ function ExcelWorkbook({
           )}
         </div>
       </div>
+
+      <ValidationDiffModal
+        open={diffOpen}
+        runId={validationDto?.runId ?? null}
+        bindingId={validationDto?.bindingId ?? null}
+        tobeTable={validationDto?.tobeTable ?? selectedTable ?? ''}
+        onClose={() => setDiffOpen(false)}
+      />
 
       {/* 2) Ribbon — File 짙은 녹색, Home 활성 (밝은 회색) */}
       <div style={styles.ribbon}>

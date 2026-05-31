@@ -2,6 +2,7 @@ package com.ksinfo.modernize_pro_data.coordinator.runlog;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataAccessException;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -34,7 +35,7 @@ public class RunLogIngestService {
     @Transactional
     public void openRun(String runId, String projectId) {
         repo.upsertMeta(runId, projectId, null);
-        repo.ensurePartition(runId);
+        ensurePartitionBestEffort(runId);
     }
 
     @Transactional
@@ -45,7 +46,7 @@ public class RunLogIngestService {
 
         // 첫 호출일 수도 있으니 멱등하게.
         repo.upsertMeta(runId, projectId, null);
-        repo.ensurePartition(runId);
+        ensurePartitionBestEffort(runId);
 
         long total = 0, err = 0, warn = 0, info = 0;
         List<RunLogLine> toPersist = new ArrayList<>(chunk.size());
@@ -85,4 +86,20 @@ public class RunLogIngestService {
 
     /** STOMP 페이로드 — chunk 단위 묶음. */
     public record ChunkMessage(String runId, String projectId, List<RunLogLine> lines) { }
+
+    /**
+     * Partition 생성은 Coordinator (run_log table 의 owner) 만 가능. Worker mode 의
+     * delegate 된 user 는 public schema 의 CREATE 권한이 없어 permission denied — 그
+     * 경우 silent ignore. partition 자체는 Coordinator side 의 RunService.startRun 이
+     * 미리 만들어 두는 게 정공이지만 (멱등), 누락 시 Coordinator 의 첫 ingest 호출이
+     * 만들어 주므로 safe.
+     */
+    private void ensurePartitionBestEffort(String runId) {
+        try {
+            repo.ensurePartition(runId);
+        } catch (DataAccessException e) {
+            log.debug("ensurePartition skipped (likely Worker user without CREATE on public): {}",
+                    e.getMessage());
+        }
+    }
 }

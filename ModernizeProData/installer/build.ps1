@@ -31,11 +31,29 @@ param(
     # coordinator | worker | all (둘 다). 같은 jar 를 두 가지 모드로 굽는다 — Coordinator 는
     # 사용자님 PC(메타 DB 소유), Worker 는 팀원 PC 에 설치.
     [ValidateSet('coordinator','worker','all')]
-    [string]$Role = 'coordinator'
+    [string]$Role = 'coordinator',
+    # specific (role:lang) combo list — Role/Language 의 nested loop 우회. 예:
+    #   -Combo "coordinator:ko,worker:ja,worker:ko"
+    # 지정 시 Role/Language param 무시.
+    [string]$Combo = ''
 )
 
-$BuildRoles = if ($Role -eq 'all') { @('coordinator','worker') } else { @($Role) }
-Write-Host "Target role(s): $($BuildRoles -join ', ')" -ForegroundColor Magenta
+if ($Combo) {
+    $Pairs = $Combo -split ',' | ForEach-Object {
+        $r, $l = ($_.Trim() -split ':')
+        if (-not ($r -in 'coordinator','worker') -or -not ($l -in 'en','ko','ja')) {
+            throw "Invalid combo entry: '$_' (expected '<role>:<lang>')"
+        }
+        [PSCustomObject]@{ Role = $r; Lang = $l }
+    }
+    $BuildRoles = $Pairs.Role | Select-Object -Unique
+    $BuildLangs = $Pairs.Lang | Select-Object -Unique
+    Write-Host "Target combos: $($Combo)" -ForegroundColor Magenta
+} else {
+    $BuildRoles = if ($Role -eq 'all') { @('coordinator','worker') } else { @($Role) }
+    Write-Host "Target role(s): $($BuildRoles -join ', ')" -ForegroundColor Magenta
+    $Pairs = $null
+}
 
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
@@ -64,7 +82,9 @@ $IcoPath      = 'assets\mpd.ico'
 $LangCodes = @{ 'en' = 1033; 'ko' = 1042; 'ja' = 1041 }
 $LangCultures = @{ 'en' = 'en-us'; 'ko' = 'ko-kr'; 'ja' = 'ja-jp' }
 
-$BuildLangs = if ($Language -eq 'all') { @('en','ko','ja') } else { @($Language) }
+if (-not $Combo) {
+    $BuildLangs = if ($Language -eq 'all') { @('en','ko','ja') } else { @($Language) }
+}
 Write-Host "Target installer language(s): $($BuildLangs -join ', ')" -ForegroundColor Magenta
 
 # JavaFX SDK
@@ -194,6 +214,37 @@ $pgDst = Join-Path $StagingApp 'postgresql-portable.zip'
 Copy-Item -Force $pgZip $pgDst
 $pgSizeMB = [math]::Round((Get-Item $pgDst).Length / 1MB, 1)
 Write-Host "  Bundled PostgreSQL 18.4 zip ($pgSizeMB MB) into staging" -ForegroundColor Green
+
+# DuckDB extensions — 폐쇄망 운영에서 INSTALL 의 인터넷 다운로드 불가. 빌드 머신에서
+# pre-download → staging 동봉. 런타임은 LOAD '<full-path>' 직접.
+# 우리 duckdb-jdbc 1.5.3.0 = native DuckDB v1.5.3.
+$DuckDbVer = 'v1.5.3'
+$DuckDbPlatform = 'windows_amd64'
+$duckExtCache = Join-Path $PSScriptRoot "cache\duckdb-extensions\$DuckDbVer"
+$duckExtStaging = Join-Path $StagingApp 'duckdb-extensions'
+New-Item -ItemType Directory -Path $duckExtCache -Force | Out-Null
+New-Item -ItemType Directory -Path $duckExtStaging -Force | Out-Null
+$duckExtNames = @('encodings', 'icu')
+foreach ($name in $duckExtNames) {
+    $extFile = Join-Path $duckExtCache "$name.duckdb_extension"
+    if (-not (Test-Path $extFile)) {
+        $gzFile = Join-Path $duckExtCache "$name.duckdb_extension.gz"
+        $url = "http://extensions.duckdb.org/$DuckDbVer/$DuckDbPlatform/$name.duckdb_extension.gz"
+        Write-Host "  Downloading DuckDB extension $name ($url)..." -ForegroundColor Cyan
+        Invoke-WebRequest -Uri $url -OutFile $gzFile -UseBasicParsing
+        # gunzip via .NET GZipStream.
+        $inFs = [System.IO.File]::OpenRead($gzFile)
+        try {
+            $gz = New-Object System.IO.Compression.GZipStream($inFs, [System.IO.Compression.CompressionMode]::Decompress)
+            $outFs = [System.IO.File]::Create($extFile)
+            try { $gz.CopyTo($outFs) } finally { $outFs.Close(); $gz.Close() }
+        } finally { $inFs.Close() }
+        Remove-Item -Force $gzFile
+    }
+    Copy-Item -Force $extFile (Join-Path $duckExtStaging "$name.duckdb_extension")
+    $extKB = [math]::Round((Get-Item $extFile).Length / 1KB, 1)
+    Write-Host "  Bundled DuckDB extension $name ($extKB KB) into staging" -ForegroundColor Green
+}
 
 # dist/ 안의 옛 MSI 가 install 중이거나 file watcher (VSCode chokidar /
 # Windows SearchIndexer) 가 폴더 handle 점유 가능. 1) 안의 file 먼저 비움
@@ -356,6 +407,7 @@ function Invoke-JpackageForLang {
     $appName   = if ($isWorker) { 'ModernizeProData-Worker' } else { 'ModernizeProData' }
     $appDesc   = if ($isWorker) { 'Modernize Pro Data - Worker' } else { 'Modernize Pro Data - Coordinator' }
     $profiles  = if ($isWorker) { 'prod,worker' } else { 'prod' }
+    $mpdMode   = if ($isWorker) { 'worker' } else { 'coordinator' }
 
     $jpackageArgs = @(
         '--type',         'msi'
@@ -372,6 +424,7 @@ function Invoke-JpackageForLang {
         '--java-options', '-Dfile.encoding=UTF-8'
         '--java-options', "-Dspring.profiles.active=$profiles"
         '--java-options', '-Dmpd.gui.enabled=true'
+        '--java-options', "-DMPD_MODE=$mpdMode"
         '--java-options', "-Dmpd.default-lang=$Lang"
         # 부팅 시간 단축 — JIT 를 C1 (tier 1) 까지만 컴파일. 부팅 -1~2s. desktop 단일
         # 사용자 환경에서 runtime perf 영향 미미.
@@ -413,9 +466,15 @@ function Invoke-JpackageForLang {
     }
 }
 
-foreach ($role in $BuildRoles) {
-    foreach ($lang in $BuildLangs) {
-        Invoke-JpackageForLang -Lang $lang -RoleForBuild $role
+if ($Pairs) {
+    foreach ($p in $Pairs) {
+        Invoke-JpackageForLang -Lang $p.Lang -RoleForBuild $p.Role
+    }
+} else {
+    foreach ($role in $BuildRoles) {
+        foreach ($lang in $BuildLangs) {
+            Invoke-JpackageForLang -Lang $lang -RoleForBuild $role
+        }
     }
 }
 

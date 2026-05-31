@@ -7,6 +7,8 @@ import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationContext;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
@@ -42,6 +44,13 @@ public class LocalWorkerExecutor implements WorkerExecutor {
     private final List<StageRunner> stageRunners;
     private final RunControlRegistry runControlRegistry;
     private final SimpMessagingTemplate stomp;
+    /* Worker mode 에선 자체 STOMP broker (8081) 로 보내봤자 FE 가 안 봄 — Coordinator 의
+       InternalRunController 로 forward 해야 한다. WorkerBootstrap 의 HTTP client + JWT
+       를 재사용. ApplicationContext 로 lazy lookup — circular dep 회피. */
+    private final ApplicationContext appContext;
+
+    @Value("${modernize.mode:coordinator}")
+    private String mode;
 
     private Map<String, StageRunner> registry;
 
@@ -117,20 +126,31 @@ public class LocalWorkerExecutor implements WorkerExecutor {
         }
     }
 
-    /** Stage 완료(or throw) 후 한 줄 알림. payload 는 FE 가 invalidate 트리거로만 사용 가능. */
+    /** Stage 완료(or throw) 후 한 줄 알림. payload 는 FE 가 invalidate 트리거로만 사용 가능.
+     *  Coordinator self mode = local STOMP broker 직접. Worker mode = Coordinator 의
+     *  internal REST 로 POST (Coordinator 가 받아서 자체 broker 로 re-broadcast). */
     private void broadcastStage(String runId, StageInstance stage, boolean threw) {
-        try {
-            Map<String, Object> payload = new HashMap<>();
-            payload.put("type", "stage");
-            payload.put("stageKey", stage.getStageKey());
-            payload.put("status", threw ? "failed"
-                    : stage.getStatus() == null ? "unknown" : stage.getStatus().name());
-            payload.put("success", stage.getTablesSuccess() == null ? 0 : stage.getTablesSuccess());
-            payload.put("failed", stage.getTablesFailed() == null ? 0 : stage.getTablesFailed());
-            stomp.convertAndSend("/topic/run/" + runId + "/progress", payload);
-        } catch (Exception e) {
-            log.debug("Stage broadcast failed runId={} stage={}: {}",
-                    runId, stage.getStageKey(), e.getMessage());
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("type", "stage");
+        payload.put("stageKey", stage.getStageKey());
+        payload.put("status", threw ? "failed"
+                : stage.getStatus() == null ? "unknown" : stage.getStatus().name());
+        payload.put("success", stage.getTablesSuccess() == null ? 0 : stage.getTablesSuccess());
+        payload.put("failed", stage.getTablesFailed() == null ? 0 : stage.getTablesFailed());
+        if ("worker".equals(mode)) {
+            try {
+                appContext.getBean(WorkerBootstrap.class).postStageProgress(runId, payload);
+            } catch (Exception e) {
+                log.debug("Stage broadcast (worker→coord) failed runId={} stage={}: {}",
+                        runId, stage.getStageKey(), e.getMessage());
+            }
+        } else {
+            try {
+                stomp.convertAndSend("/topic/run/" + runId + "/progress", payload);
+            } catch (Exception e) {
+                log.debug("Stage broadcast (local STOMP) failed runId={} stage={}: {}",
+                        runId, stage.getStageKey(), e.getMessage());
+            }
         }
     }
 }

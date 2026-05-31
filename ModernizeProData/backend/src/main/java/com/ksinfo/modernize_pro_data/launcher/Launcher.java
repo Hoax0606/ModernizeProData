@@ -674,12 +674,15 @@ public class Launcher {
             System.setProperty("WORKER_USERNAME",     username);
             System.setProperty("WORKER_PASSWORD",     password);
             System.setProperty("WORKER_HOSTNAME",     hostname);
+            // wizard 가 이미 발급받은 JWT 를 WorkerBootstrap 가 재사용 — backend 자체
+            // login 시 새 sid 가 발급돼 UI 의 wizard session 을 evict 하는 cycle 회피.
+            if (jwt != null) System.setProperty("WORKER_BOOTSTRAP_JWT", jwt);
             // Coordinator app 과 메타 PG 가 같은 host 라는 가정 — 다른 host 면 운영자가
             // 환경 변수 COORDINATOR_DB_URL 으로 override (Launcher 가 set 한 뒤라도
             // Spring 의 -D > 환경 변수 우선순위 따라 envvar 가 이김).
-            // port 5433 = installer 동봉 PG (application-prod.yml 과 일치).
+            // port 5432 = installer 동봉 PG (application-prod.yml 과 일치).
             System.setProperty("COORDINATOR_DB_URL",
-                    "jdbc:postgresql://" + host + ":5433/mpd_meta");
+                    "jdbc:postgresql://" + host + ":5432/mpd_meta");
             // spring.profiles.active 는 jpackage args 의 --java-options 에서 prod,worker 로
             // 이미 박혔다. 추가 설정 불요.
 
@@ -704,8 +707,9 @@ public class Launcher {
             String bootstrap = buildBootstrapQuery();
             String fullUrl = coordUrl + sep + "_=" + System.currentTimeMillis() + bootstrap;
 
-            // wizard Stage 는 숨김 (Edge 가 main UI). Edge 종료 시 backend 도 stop.
-            Platform.runLater(() -> stage.setIconified(true));
+            // wizard Stage 숨김 — Edge 가 main UI. taskbar 에 wizard window 도 남지
+            // 않도록 hide. Edge 종료 시 backend 도 stop (edge-watcher).
+            Platform.runLater(() -> stage.hide());
             Process edgeProc = EdgeAppLauncher.launch(fullUrl, "edge-app-worker");
             if (edgeProc != null) {
                 new Thread(() -> {
@@ -723,7 +727,7 @@ public class Launcher {
                 }, "worker-edge-watcher").start();
             } else {
                 // Edge/Chrome 미발견 + default browser fallback. Stage 유지 (Stop 용).
-                Platform.runLater(() -> stage.setIconified(false));
+                Platform.runLater(() -> stage.show());
             }
 
             // selfRegister / heartbeat 은 Spring WorkerBootstrap 이 담당 (분산 실행 모드).
