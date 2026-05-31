@@ -218,6 +218,18 @@ export function ExecutionOverviewPage() {
         // Quarantine warningCount 는 별도 fetch 필요 — 일단 apiMetrics 의 값 유지.
         warningCount: apiMetrics[p.id]?.warningCount ?? 0,
         progressPct,
+        // ctx.stages を渡して buildStagesFromStageViews 経路に乗せる。これが無いと
+        // buildStagesFromMetric の fallback (progressPct 近似) に落ち、failed 段が常に
+        // pct=100 で赤 full bar として描画され Execution 画面と幅が合わなくなる。
+        stages: ctx.stages.map((s) => ({
+          stageKey: s.stageKey,
+          seq: s.seq ?? 0,
+          status: s.status ?? 'pending',
+          pct: s.pct,
+          tablesTotal: s.tablesTotal ?? 0,
+          tablesSuccess: s.tablesSuccess ?? 0,
+          tablesFailed: s.tablesFailed ?? 0,
+        })),
       };
     }
     return merged;
@@ -375,7 +387,7 @@ export function ExecutionOverviewPage() {
       {/* KPI row — Phase Mix 없음 */}
       <div style={styles.kpiRow}>
         <Kpi label={t('executionOverview.kpi.projects')} value={`${status.done} / ${siteProjects.length}`} tone="info" />
-        <Kpi label={t('executionOverview.kpi.running')}  value={status.running} tone={status.running > 0 ? 'warn' : undefined} />
+        <Kpi label={t('executionOverview.kpi.running')}  value={runningRuns} tone={runningRuns > 0 ? 'warn' : undefined} />
         <Kpi label={t('executionOverview.kpi.tables')}   value={`${totalTablesDone} / ${totalTables}`} />
         <Kpi label={t('executionOverview.kpi.rows')}     value={totalRows.toLocaleString()} />
         <Kpi label={t('executionOverview.kpi.errors')}   value={totalErrors}   tone="err" />
@@ -492,7 +504,7 @@ export function ExecutionOverviewPage() {
               <Th width={150}>{t('executionOverview.col.pinned')}</Th>
               <Th align="center">{t('executionOverview.col.username')}</Th>
               <Th align="center" width={70}>{t('executionOverview.col.tables')}</Th>
-              <Th align="right"  width={80}>{t('executionOverview.col.rows')}</Th>
+              <Th align="center" width={80}>{t('executionOverview.col.rows')}</Th>
               <Th align="center" width={260}>{t('executionOverview.col.progress')}</Th>
               <Th align="center" width={64}>{t('executionOverview.col.errors')}</Th>
               <Th align="center" width={76}>{t('executionOverview.col.warnings')}</Th>
@@ -523,7 +535,7 @@ export function ExecutionOverviewPage() {
                     <td style={styles.td}>
                       <span style={{ ...styles.projName, ...(dimColor ? { color: dimColor } : {}) }}>{p.name}</span>
                     </td>
-                    <td style={styles.td}>
+                    <td style={{ ...styles.td, textAlign: 'center' }}>
                       <span style={{ ...styles.phaseChip, ...phaseChipColor(p.phase, metrics[p.id]?.runStatus ?? p.runStatus) }}>{p.phase}</span>
                     </td>
                     <td style={styles.td}>
@@ -540,7 +552,7 @@ export function ExecutionOverviewPage() {
                         );
                       })()}
                     </td>
-                    <td style={styles.td}>
+                    <td style={{ ...styles.td, textAlign: 'center' }}>
                       {(() => {
                         // dropdown 또는 text 옆에 worker online 상태 dot 한 개 — assignee
                         // 가 잡혀있고 그 사람의 Worker daemon 이 heartbeat 살아있으면 green,
@@ -594,7 +606,7 @@ export function ExecutionOverviewPage() {
                       })()}
                     </td>
                     <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)' }}>{p.tableCount}</td>
-                    <td style={{ ...styles.td, textAlign: 'right',  fontFamily: 'var(--mono)', color: (metrics[p.id]?.rows ?? 0) > 0 ? 'var(--text-2)' : 'var(--text-4)' }}>{(metrics[p.id]?.rows ?? 0).toLocaleString()}</td>
+                    <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)', color: (metrics[p.id]?.rows ?? 0) > 0 ? 'var(--text-2)' : 'var(--text-4)' }}>{(metrics[p.id]?.rows ?? 0).toLocaleString()}</td>
                     <td style={{ ...styles.td, textAlign: 'center' }}>
                       <div style={styles.pipelineSlots}>
                         {pipelineStages.map((st) => (
