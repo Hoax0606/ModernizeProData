@@ -12,6 +12,7 @@ import {
 } from '../lib/pipelineStages';
 import { useT } from '../i18n';
 import { overviewApi, type ProjectExecMetrics } from '../api/executionOverview';
+import { useExecutionPreflightStore } from '../store/executionPreflight';
 import { runsApi } from '../api/runs';
 import { workerApi, type WorkerSummaryDto } from '../api/worker';
 
@@ -296,12 +297,16 @@ export function ExecutionOverviewPage() {
     // backend 가 worker offline / 미할당 인 경우 RunResultDto.status='REJECTED' 로 반환.
     // 성공 응답인데 REJECTED 인 경우 + Promise reject (네트워크 / 권한) 둘 다 모아 안내.
     const rejected: string[] = [];
+    const setActive = useExecutionPreflightStore.getState().setActiveRunId;
     results.forEach((r, idx) => {
       const projectName = siteProjects.find((p) => p.id === ids[idx])?.name ?? ids[idx];
       if (r.status === 'fulfilled' && r.value.status === 'REJECTED') {
         rejected.push(`${projectName}: ${r.value.reason ?? 'rejected'}`);
       } else if (r.status === 'rejected') {
         rejected.push(`${projectName}: ${(r.reason as Error)?.message ?? 'request failed'}`);
+      } else if (r.status === 'fulfilled' && r.value.status === 'STARTED' && r.value.runId) {
+        // 같은 site 안 ExecutionPage 들어가면 즉시 progress polling/STOMP 시작.
+        setActive(ids[idx], r.value.runId);
       }
     });
     if (rejected.length > 0) {

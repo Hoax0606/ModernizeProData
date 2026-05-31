@@ -462,7 +462,8 @@ function checkAsisUnmapped(ctx: Context): PreflightCheckResult {
     };
   }
   /* AS-IS columns referenced by any rule.  Cross-tobe lookup is fine here —
-     a column counts as "used" globally. 자식 link 의 master rules 도 합산. */
+     a column counts as "used" globally. 자식 link 의 master rules 도 합산.
+     명시적 skip 마킹 (FrozenAsisSkip) 도 "사용된 것으로 취급" — 의식적 제외 의도. */
   const usedAsisCols = new Set<string>();
   const allRules: FrozenRule[] = [...(ctx.snapshotData.rules ?? [])];
   for (const masterRules of Object.values(ctx.masterRulesByKey ?? {})) {
@@ -475,6 +476,10 @@ function checkAsisUnmapped(ctx: Context): PreflightCheckResult {
       if (!col) continue;
       usedAsisCols.add(qualifyAsisCol(r.asisTable, col));
     }
+  }
+  for (const skip of ctx.snapshotData.asisSkips ?? []) {
+    if (!skip.asisTable || !skip.asisColumn) continue;
+    usedAsisCols.add(qualifyAsisCol(skip.asisTable, skip.asisColumn));
   }
 
   /* 2026-05-30: scope を 'selectedTables の bindings 経由 AS-IS' から

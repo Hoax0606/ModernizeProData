@@ -73,10 +73,12 @@ public class PgRoleService {
         String quotedLit   = quoteLiteral(plainPassword);
 
         // 존재 여부 검사 후 분기 — PG 가 CREATE ROLE IF NOT EXISTS 를 지원 안 해서 두 단계.
+        // COUNT(*) = 항상 1 row 반환 (0 또는 1). SELECT 1 + queryForObject 면 0 row 시
+        // EmptyResultDataAccessException throw → user create transaction 통째 롤백.
         Integer exists = jdbc.queryForObject(
-                "SELECT 1 FROM pg_roles WHERE rolname = ?",
+                "SELECT COUNT(*) FROM pg_roles WHERE rolname = ?",
                 Integer.class, username);
-        if (exists != null && exists == 1) {
+        if (exists != null && exists > 0) {
             jdbc.execute("ALTER ROLE " + quotedIdent + " WITH LOGIN PASSWORD " + quotedLit);
             log.info("PG role updated (existing): {}", username);
         } else {
@@ -94,9 +96,9 @@ public class PgRoleService {
         String quotedLit   = quoteLiteral(newPlainPassword);
 
         Integer exists = jdbc.queryForObject(
-                "SELECT 1 FROM pg_roles WHERE rolname = ?",
+                "SELECT COUNT(*) FROM pg_roles WHERE rolname = ?",
                 Integer.class, username);
-        if (exists == null || exists != 1) {
+        if (exists == null || exists == 0) {
             log.warn("PG role missing for admin user {} — re-creating", username);
             createWorkerRole(username, newPlainPassword);
             return;
@@ -115,9 +117,9 @@ public class PgRoleService {
         validateUsername(username);
         String quotedIdent = quoteIdentifier(username);
         Integer exists = jdbc.queryForObject(
-                "SELECT 1 FROM pg_roles WHERE rolname = ?",
+                "SELECT COUNT(*) FROM pg_roles WHERE rolname = ?",
                 Integer.class, username);
-        if (exists == null || exists != 1) {
+        if (exists == null || exists == 0) {
             log.info("PG role dropWorkerRole: {} does not exist — skipping", username);
             return;
         }

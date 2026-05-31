@@ -487,7 +487,17 @@ export function ExecutionPage() {
 
   // handlePauseToggle 제거 (2026-05-29) — Pause 영구 제거. Stop + Retry 가 기능 동치.
 
+  // Stop / Retry / Discard 권한 (공통): 자기 project 인 assignee 본인은 자기 run 을
+  // 제어 가능. 단 그 run 이 master 가 /runs/all 로 일괄 시작한 bulk run
+  // (metadata.bulk === true) 이면 master 만. master 는 모든 경우 가능.
+  const isMyProject = !!user?.username && project?.executionAssignee === user.username;
+  const runIsBulk = run?.metadata != null && (run.metadata as Record<string, unknown>).bulk === true;
+  const canStop = isMaster || (isMyProject && !runIsBulk);
+  const canRetry = canStop;
+  const canDiscard = canStop;
+
   const handleRetry = async () => {
+    if (!canRetry) return;
     /* Retry = 실패한 run 의 **마지막 success stage 이후부터** 재개. BE 가 정합성 검증
        (snapshot / selectedTables 동일 + 옛 parquet 존재) → 자동 fallback 처음부터 if 부적합.
        opts.resumeFromRunId 로 옛 run id 전달. handleStartRun 의 guard 우회 위해 직접 호출. */
@@ -499,19 +509,13 @@ export function ExecutionPage() {
   };
 
   const handleDiscard = () => {
+    if (!canDiscard) return;
     /* polling 停止 + UI 의 「현재 run」 제거. BE 의 run 자체는 history 에 남음.
        추가로 fallback snapshot 의 executionContext 도 화면에서 끄기 — 안 그러면 activeRunId
        가 null 되자마자 fallback 으로 다시 그려진다 (Discard 가 무효화돼 보임). */
     setActiveRunId(null);
     if (fallbackSnapshot) setDiscardedSnapshotId(fallbackSnapshot.id);
   };
-
-  // Stop 권한: 자기 project 인 assignee 본인은 자기 run 을 stop 가능. 단 그 run 이
-  // master 가 /runs/all 로 일괄 시작한 bulk run (metadata.bulk === true) 이면 master 만.
-  // master 는 모든 경우 stop 가능.
-  const isMyProject = !!user?.username && project?.executionAssignee === user.username;
-  const runIsBulk = run?.metadata != null && (run.metadata as Record<string, unknown>).bulk === true;
-  const canStop = isMaster || (isMyProject && !runIsBulk);
 
   const handleStopRun = async () => {
     if (!canStop) return;
@@ -540,6 +544,8 @@ export function ExecutionPage() {
         onStart={handleStartRun}
         onStop={handleStopRun}
         canStop={canStop}
+        canRetry={canRetry}
+        canDiscard={canDiscard}
         onRetry={handleRetry}
         onDiscard={handleDiscard}
       />
@@ -581,7 +587,7 @@ function DisabledOverlay({ disabled, children }: { disabled: boolean; children: 
 
 function RunHeader({
   t, project, site, runMode, activeRun, runs, preflightPassed, hasPinnedSnapshot,
-  selectedTablesCount, onStart, onStop, canStop, onRetry, onDiscard,
+  selectedTablesCount, onStart, onStop, canStop, canRetry, canDiscard, onRetry, onDiscard,
 }: {
   t: T;
   project: Project;
@@ -596,6 +602,9 @@ function RunHeader({
   onStop: () => void;
   /** Stop 권한 — assignee 본인은 자기 run stop 가능, 단 bulk run (master 가 일괄 시작) 은 master 만. */
   canStop: boolean;
+  /** Retry/Discard 권한 — Stop 과 동일 (master 또는 assignee 본인 + non-bulk). */
+  canRetry: boolean;
+  canDiscard: boolean;
   onRetry: () => void;
   onDiscard: () => void;
 }) {
@@ -691,7 +700,7 @@ function RunHeader({
             <span> · {t('execution.run.tablesSummary', { n: selectedTablesCount })}</span>
           </div>
         </div>
-        {isHalted && (
+        {isHalted && canDiscard && (
           <button
             type="button"
             onClick={onDiscard}
@@ -701,7 +710,7 @@ function RunHeader({
             {t('execution.run.discard')}
           </button>
         )}
-        {(isFailed || isAborted) && (
+        {(isFailed || isAborted) && canRetry && (
           <button
             type="button"
             onClick={onRetry}

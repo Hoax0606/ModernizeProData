@@ -18,9 +18,9 @@ spring:
   # Worker 가 Coordinator 의 메타 PG 에 분리 계정으로 connect.
   # URL 은 Coordinator host 를 가리킴 (사내 LAN IP 또는 hostname). installer 입력으로 채움.
   # username/password 는 admin user 와 동일 (PG role 도 같은 이름으로 발급됨).
-  # port 5433 = installer 동봉 PG (application-prod.yml 과 일치). 기존 PG 5432 와 충돌 회피.
+  # port 5432 = installer 동봉 PG (application-prod.yml 과 일치).
   datasource:
-    url:      ${COORDINATOR_DB_URL:jdbc:postgresql://coordinator-host:5433/mpd_meta}
+    url:      ${COORDINATOR_DB_URL:jdbc:postgresql://coordinator-host:5432/mpd_meta}
     username: ${WORKER_USERNAME:}
     password: ${WORKER_PASSWORD:}
     driver-class-name: org.postgresql.Driver

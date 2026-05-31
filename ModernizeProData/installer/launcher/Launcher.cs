@@ -40,7 +40,10 @@ internal static class Launcher
             string mode = dialog.SelectedMode;
 
             string exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? ".";
-            string msi = Path.Combine(exeDir, "ModernizeProData-" + lang + "-1.0.0.msi");
+            // role 별 msi prefix. worker 만 별 jpackage build (build.ps1 -Role worker).
+            // standalone = coordinator 와 동일 jar / 동일 msi — 첫 boot 시 APP_MODE 로 분기.
+            string msiPrefix = mode == "worker" ? "ModernizeProData-Worker-" : "ModernizeProData-";
+            string msi = Path.Combine(exeDir, msiPrefix + lang + "-1.0.0.msi");
             if (!File.Exists(msi))
             {
                 MessageBox.Show(

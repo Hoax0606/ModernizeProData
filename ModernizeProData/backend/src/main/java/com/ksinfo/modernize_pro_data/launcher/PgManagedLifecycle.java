@@ -5,7 +5,6 @@ import java.io.IOException;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
 
@@ -42,14 +41,8 @@ public final class PgManagedLifecycle {
 
     private PgManagedLifecycle() {}
 
-    /** main 진입 시 한 번 호출. PG 가 이미 5432 listen 중이면 skip. 아니면 우리 PG start. */
+    /** main 진입 시 한 번 호출. PG init / start / config rewrite 처리. */
     public static void ensureRunning() {
-        if (isPortListening(DB_PORT)) {
-            System.out.println("PgManagedLifecycle: port " + DB_PORT + " already listening — use existing PG");
-            managed = false;
-            return;
-        }
-
         pgRoot = resolvePgRoot();
         if (pgRoot == null) {
             System.err.println("PgManagedLifecycle: bundled PG not found at $APPDIR/postgresql/ — skip");
@@ -66,14 +59,33 @@ public final class PgManagedLifecycle {
         dataDir = new File(baseDir, DATA_DIR_NAME);
         logFile = new File(baseDir, "pg.log");
 
+        boolean ourPg = isInitialized(dataDir);
+        boolean listening = isPortListening(DB_PORT);
+
+        // 외부 PG 가 5432 점유 + 우리 dataDir 없음 = 외부 PG 사용. listen / hba 우리 통제 안 됨.
+        if (listening && !ourPg) {
+            System.out.println("PgManagedLifecycle: port " + DB_PORT
+                    + " listening but our dataDir not initialized — using external PG");
+            managed = false;
+            return;
+        }
+
         try {
-            if (!isInitialized(dataDir)) {
+            if (!ourPg) {
                 System.out.println("PgManagedLifecycle: initdb to " + dataDir);
                 initdb();
             }
-            System.out.println("PgManagedLifecycle: starting PG");
-            pgCtl("start");
-            // ready 까지 wait — pg_isready loop.
+            // conf 항상 idempotent rewrite — 사내 LAN host 허용 + listen_addresses '*'.
+            writePgConf(dataDir);
+
+            if (listening) {
+                // 우리 PG 이미 떠 있음 — conf reload.
+                System.out.println("PgManagedLifecycle: reloading PG config");
+                pgCtl("reload");
+            } else {
+                System.out.println("PgManagedLifecycle: starting PG");
+                pgCtl("start");
+            }
             if (!waitForReady(30_000)) {
                 System.err.println("PgManagedLifecycle: PG did not become ready within 30s");
                 return;
@@ -84,6 +96,46 @@ public final class PgManagedLifecycle {
         } catch (Exception e) {
             System.err.println("PgManagedLifecycle.ensureRunning failed: " + e.getMessage());
             e.printStackTrace();
+        }
+    }
+
+    /**
+     * pg_hba.conf + postgresql.conf 를 우리 정책 으로 덮어쓰기. idempotent.
+     * - local + 127.0.0.1 / ::1 = trust (single-user desktop owner)
+     * - 사내 LAN range (10/8, 172.16/12, 192.168/16) = scram-sha-256 (Worker PC)
+     * - listen_addresses = '*' (Worker 가 사내 LAN 으로 connect)
+     * - port = {@link #DB_PORT}
+     */
+    private static void writePgConf(File dataDir) throws IOException {
+        File hba = new File(dataDir, "pg_hba.conf");
+        String hbaContent = """
+                # Managed by ModernizeProData PgManagedLifecycle — do not edit by hand.
+                local   all             all                                     trust
+                host    all             all             127.0.0.1/32            trust
+                host    all             all             ::1/128                 trust
+                host    all             all             10.0.0.0/8              scram-sha-256
+                host    all             all             172.16.0.0/12           scram-sha-256
+                host    all             all             192.168.0.0/16          scram-sha-256
+                """;
+        Files.writeString(hba.toPath(), hbaContent, StandardCharsets.UTF_8);
+
+        // postgresql.conf — 우리 directive 만 들어간 별 file 만들고 include. base conf 손
+        // 안 댐 (사용자 수동 tuning 보존). 단, 최초 initdb 직후엔 base 끝에 append 한 옛
+        // build 의 잔존 line 가능 — idempotent rewrite 의 single source of truth 로
+        // include_if_exists 사용.
+        File mpdConf = new File(dataDir, "mpd-managed.conf");
+        String mpdContent = "# Managed by ModernizeProData. Auto-overwritten on each launch.\n"
+                + "port = " + DB_PORT + "\n"
+                + "listen_addresses = '*'\n";
+        Files.writeString(mpdConf.toPath(), mpdContent, StandardCharsets.UTF_8);
+
+        File baseConf = new File(dataDir, "postgresql.conf");
+        String baseText = Files.readString(baseConf.toPath(), StandardCharsets.UTF_8);
+        String includeLine = "include_if_exists = 'mpd-managed.conf'";
+        if (!baseText.contains(includeLine)) {
+            Files.writeString(baseConf.toPath(),
+                    baseText + "\n" + includeLine + "\n",
+                    StandardCharsets.UTF_8);
         }
     }
 
@@ -199,19 +251,7 @@ public final class PgManagedLifecycle {
                     "--locale=C");
             if (code != 0) throw new IOException("initdb exit=" + code);
 
-            // pg_hba.conf — localhost trust (single-user desktop).
-            File hba = new File(dataDir, "pg_hba.conf");
-            String hbaContent = """
-                    local   all             all                                     trust
-                    host    all             all             127.0.0.1/32            trust
-                    host    all             all             ::1/128                 trust
-                    """;
-            Files.writeString(hba.toPath(), hbaContent, StandardCharsets.UTF_8);
-
-            // postgresql.conf — port + listen_addresses.
-            File conf = new File(dataDir, "postgresql.conf");
-            String extra = "\nport = " + DB_PORT + "\nlisten_addresses = 'localhost'\n";
-            Files.writeString(conf.toPath(), extra, StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+            writePgConf(dataDir);
         } finally {
             try { Files.deleteIfExists(pwFile.toPath()); } catch (Exception ignored) {}
         }

@@ -13,6 +13,14 @@ export interface SnapshotData {
   rules: FrozenRule[];
   codeMaps: FrozenCodeMap[];
   bindings: FrozenBinding[];
+  /** AS-IS column-level explicit skip markers. 옛 snapshot 은 누락 가능 → undefined/empty 허용. */
+  asisSkips?: FrozenAsisSkip[];
+}
+
+export interface FrozenAsisSkip {
+  asisSchema: string;
+  asisTable: string;
+  asisColumn: string;
 }
 
 export interface FrozenRule {
@@ -285,6 +293,7 @@ export const useSnapshotsStore = create<SnapshotsState>()(
         rules: data.rules ?? [],
         bindings: data.bindings ?? [],
         codeMaps: data.codeMaps ?? [],
+        asisSkips: data.asisSkips ?? [],
       };
       set((st) => ({
         snapshots: st.snapshots.map((s) => s.id === id ? { ...s, snapshotData: normalized } : s),

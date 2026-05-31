@@ -79,6 +79,7 @@ public class RunService {
     private final RunControlRegistry runControlRegistry;
     private final SimpMessagingTemplate stomp;
     private final com.ksinfo.modernize_pro_data.coordinator.site.SnapshotExecutionContextService snapshotExecutionContextService;
+    private final com.ksinfo.modernize_pro_data.coordinator.runlog.RunLogRepository runLogRepository;
 
     /**
      * Run を起動する. 3 系統 (Nightly Quartz / CLI / REST) のすべてがこの入口を通る.
@@ -226,6 +227,15 @@ public class RunService {
         if (!meta.isEmpty()) rh.setMetadata(meta);
         rh.setWorkerId(resolvedWorker);
         runHistoryRepo.save(rh);
+
+        // run_log partition 을 Coordinator (run_log 의 owner) 가 미리 생성.
+        // Worker 가 delegate run 실행 시 partition 생성 권한이 없어 (public schema CREATE
+        // 권한 부재) executeRun 의 첫 openRun 호출이 fail 한다. 여기서 미리 만들어 둠.
+        try {
+            runLogRepository.ensurePartition(rh.getId());
+        } catch (Exception e) {
+            log.warn("run_log partition pre-create failed runId={} : {}", rh.getId(), e.getMessage());
+        }
 
         project.setRunStatus(STATUS_RUNNING);
         maybeAdvancePhase(project, runType);

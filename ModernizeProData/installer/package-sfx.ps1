@@ -19,10 +19,14 @@ foreach ($p in @($sevenZip, $sfxModule)) {
 
 $dist = (Resolve-Path 'dist').Path
 $launcher = Join-Path $dist 'Launcher.exe'
-$en = Join-Path $dist 'ModernizeProData-en-1.0.0.msi'
-$ko = Join-Path $dist 'ModernizeProData-ko-1.0.0.msi'
-$ja = Join-Path $dist 'ModernizeProData-ja-1.0.0.msi'
-foreach ($f in @($launcher, $en, $ko, $ja)) {
+$en  = Join-Path $dist 'ModernizeProData-en-1.0.0.msi'
+$ko  = Join-Path $dist 'ModernizeProData-ko-1.0.0.msi'
+$ja  = Join-Path $dist 'ModernizeProData-ja-1.0.0.msi'
+$wen = Join-Path $dist 'ModernizeProData-Worker-en-1.0.0.msi'
+$wko = Join-Path $dist 'ModernizeProData-Worker-ko-1.0.0.msi'
+$wja = Join-Path $dist 'ModernizeProData-Worker-ja-1.0.0.msi'
+$payload = @($launcher, $en, $ko, $ja, $wen, $wko, $wja)
+foreach ($f in $payload) {
     if (-not (Test-Path $f)) { throw "Missing: $f. Build first." }
 }
 
@@ -35,7 +39,7 @@ Write-Host "Compressing payload (this is the longest step)..." -ForegroundColor 
 $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
 # -mx1 = fastest (the .msi cabs inside are already compressed so we don't
 # gain anything from -mx9; -mx1 finishes in seconds instead of minutes).
-& $sevenZip a -t7z -mx1 $archive $launcher $en $ko $ja | Out-Null
+& $sevenZip a -t7z -mx1 $archive $payload | Out-Null
 $ec = $LASTEXITCODE
 $ErrorActionPreference = $prev
 if ($ec -ne 0) { throw "7z archive build failed (exit $ec)" }
@@ -58,11 +62,16 @@ if (Test-Path $out) { Remove-Item -Force $out }
 
 Write-Host "Concatenating SFX module + config + archive..." -ForegroundColor Cyan
 # Binary concat: SFX header || config (UTF-8 BOM, terminated by InstallEnd) || 7z archive.
+# ReadAllBytes 는 2GB 한계 — 6 MSI bundle 의 archive 가 그 이상 가능하므로 stream copy.
 $outStream = [System.IO.File]::Create($out)
 try {
     foreach ($part in @($sfxModule, $config, $archive)) {
-        $bytes = [System.IO.File]::ReadAllBytes($part)
-        $outStream.Write($bytes, 0, $bytes.Length)
+        $inStream = [System.IO.File]::OpenRead($part)
+        try {
+            $inStream.CopyTo($outStream)
+        } finally {
+            $inStream.Close()
+        }
     }
 } finally {
     $outStream.Close()

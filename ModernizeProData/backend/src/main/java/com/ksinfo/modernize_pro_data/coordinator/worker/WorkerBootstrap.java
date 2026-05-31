@@ -146,6 +146,16 @@ public class WorkerBootstrap {
 
     private boolean ensureLoggedIn() {
         if (jwt.get() != null) return true;
+        // wizard 가 이미 발급받은 token 재사용 — backend 의 자체 login 이 UI 의 wizard
+        // session 을 evict 해 Edge UI 가 401 → reload → process exit cycle 회피.
+        // expire / invalidate 시 fallback 으로 user/pass 자체 login.
+        String bootstrapJwt = System.getProperty("WORKER_BOOTSTRAP_JWT");
+        if (bootstrapJwt != null && !bootstrapJwt.isBlank()) {
+            jwt.set(bootstrapJwt);
+            System.clearProperty("WORKER_BOOTSTRAP_JWT");
+            log.info("Reusing wizard JWT — sharing session with Worker UI.");
+            return true;
+        }
         try {
             String body = "{\"username\":\"" + escape(workerUsername) + "\","
                         + "\"password\":\"" + escape(workerPassword) + "\"}";
@@ -203,6 +213,20 @@ public class WorkerBootstrap {
 
     private JsonNode postJson(String path, String jsonBody) throws Exception {
         return postJson(path, jsonBody, true);
+    }
+
+    /**
+     * Stage progress broadcast — Worker mode 에서 LocalWorkerExecutor 가 호출.
+     * Coordinator 의 /api/v1/internal/runs/{runId}/stage 가 받아 FE 의
+     * /topic/run/{runId}/progress 로 re-broadcast 한다. fail = silent (FE polling fallback).
+     */
+    public void postStageProgress(String runId, java.util.Map<String, Object> payload) {
+        try {
+            String body = mapper.writeValueAsString(payload);
+            postJson("/api/v1/internal/runs/" + runId + "/stage", body, true);
+        } catch (Exception e) {
+            log.debug("postStageProgress failed runId={}: {}", runId, e.getMessage());
+        }
     }
 
     private JsonNode postJson(String path, String jsonBody, boolean authed) throws Exception {

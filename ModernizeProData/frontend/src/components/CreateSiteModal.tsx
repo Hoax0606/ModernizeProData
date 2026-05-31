@@ -69,8 +69,13 @@ export function CreateSiteModal({ open, onClose }: Props) {
   const [tobeDbScope, setTobeDbScope] = useState<'site' | 'project'>('site');
   const [tobeDbByEnv, setTobeDbByEnv] = useState<TobeDbByEnv>({});
   const [error, setError] = useState<string | null>(null);
-  const [testStatus, setTestStatus] = useState<TestStatus>('idle');
-  const [testMessage, setTestMessage] = useState<string | null>(null);
+  // stage 별 test 결과 (각 단계 의 DB 가 통과했는지 별도 추적). handleSubmit 시
+  // status === 'ok' 인 stage 만 final 저장 — test 미실시/실패 한 stage 의 DB 정보
+  // 는 폐기, site 자체는 생성 (사용자 요청: 통과 안 됐으면 DB 입력 안 된 상태).
+  const [testStatusByEnv, setTestStatusByEnv] = useState<Partial<Record<ProjectEnvironment, TestStatus>>>({});
+  const [testMessageByEnv, setTestMessageByEnv] = useState<Partial<Record<ProjectEnvironment, string>>>({});
+  const testStatus: TestStatus = testStatusByEnv[stage] ?? 'idle';
+  const testMessage: string | null = testMessageByEnv[stage] ?? null;
   // 현재 단계의 DB 폼 — tobeDbByEnv 에서 가져오거나 빈 connection (database 필드 누락 보호).
   const tobeDb: SiteDbConnection = { ...emptyDbConnection(), ...(tobeDbByEnv[stage] ?? {}) };
   const patchTobeDb = (patch: Partial<SiteDbConnection>) => {
@@ -78,14 +83,15 @@ export function CreateSiteModal({ open, onClose }: Props) {
       ...cur,
       [stage]: { ...emptyDbConnection(), ...(cur[stage] ?? {}), ...patch },
     }));
-    setTestStatus('idle');
-    setTestMessage(null);
+    setTestStatusByEnv((cur) => ({ ...cur, [stage]: 'idle' }));
+    setTestMessageByEnv((cur) => ({ ...cur, [stage]: undefined }));
   };
 
   const handleTest = async () => {
     if (testStatus === 'testing') return;
-    setTestStatus('testing');
-    setTestMessage(null);
+    const curStage = stage;
+    setTestStatusByEnv((cur) => ({ ...cur, [curStage]: 'testing' }));
+    setTestMessageByEnv((cur) => ({ ...cur, [curStage]: undefined }));
     try {
       const result = await tobeDbApi.testConnectionStandalone({
         dbType:   tobeDb.type,
@@ -95,11 +101,11 @@ export function CreateSiteModal({ open, onClose }: Props) {
         username: tobeDb.username.trim(),
         password: tobeDb.password,
       });
-      setTestStatus(result.success ? 'ok' : 'failed');
-      setTestMessage(result.message);
+      setTestStatusByEnv((cur) => ({ ...cur, [curStage]: result.success ? 'ok' : 'failed' }));
+      setTestMessageByEnv((cur) => ({ ...cur, [curStage]: result.message }));
     } catch (e) {
-      setTestStatus('failed');
-      setTestMessage((e as Error)?.message ?? 'Network error');
+      setTestStatusByEnv((cur) => ({ ...cur, [curStage]: 'failed' }));
+      setTestMessageByEnv((cur) => ({ ...cur, [curStage]: (e as Error)?.message ?? 'Network error' }));
     }
   };
 
@@ -116,8 +122,8 @@ export function CreateSiteModal({ open, onClose }: Props) {
     setTobeDbScope('site');
     setTobeDbByEnv({});
     setError(null);
-    setTestStatus('idle');
-    setTestMessage(null);
+    setTestStatusByEnv({});
+    setTestMessageByEnv({});
   };
 
   // 모달을 열 때마다 폼을 초기화한다 (닫았다 다시 열어도 이전 입력값이 남지 않게).
@@ -131,11 +137,13 @@ export function CreateSiteModal({ open, onClose }: Props) {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || blockedByProd) return;
-    // type 이 비어있는 단계는 저장하지 않음 — DB 미선택 상태로 둠.
+    // type 이 비어있거나 connection test 통과 안 된 단계는 저장하지 않음 —
+    // 사용자 요청: test 통과한 stage 의 DB 만 저장, 미통과 stage 는 DB 미입력
+    // 상태로 site 생성. master 가 추후 Site Settings 에서 채울 수 있음.
     const finalByEnv: TobeDbByEnv = {};
     for (const env of PROJECT_ENVIRONMENTS) {
       const c = tobeDbByEnv[env];
-      if (c && c.type.trim()) finalByEnv[env] = c;
+      if (c && c.type.trim() && testStatusByEnv[env] === 'ok') finalByEnv[env] = c;
     }
     // 생성 시 데이터가 채워진 모든 단계는 자동 lock.
     const finalLocks: TobeDbLocks = {};
