@@ -514,8 +514,8 @@ export const en: Record<TranslationKey, string> = {
   /* Run header */
   'execution.run.noActive':           'No active run',
   'execution.run.active':             'Active run',
+  'execution.run.lastLabel':          'Last run',
   'execution.run.noHistory':          'No run history yet — still in mapping phase.',
-  'execution.run.lastRun':            'last run: {id} · {when} · {result}',
   'execution.run.startBtn':           'Start run',
   'execution.run.retryHint':          'Resume from the last successful stage (reuse previous data)',
   'execution.run.discard':            'Discard',

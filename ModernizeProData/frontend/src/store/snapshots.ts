@@ -13,6 +13,15 @@ export interface SnapshotData {
   rules: FrozenRule[];
   codeMaps: FrozenCodeMap[];
   bindings: FrozenBinding[];
+  /** AS-IS 컬럼 단위 명시적 skip 마킹 (snapshot 동결). preflight の unmapped 검사 등에서 제외 대상.
+   *  legacy snapshot 은 null/missing → 호출 측에서 빈 list 로 normalize. */
+  asisSkips?: FrozenAsisSkip[];
+}
+
+export interface FrozenAsisSkip {
+  asisSchema: string;
+  asisTable: string;
+  asisColumn: string;
 }
 
 export interface FrozenRule {
@@ -289,6 +298,7 @@ export const useSnapshotsStore = create<SnapshotsState>()(
         rules: data.rules ?? [],
         bindings: data.bindings ?? [],
         codeMaps: data.codeMaps ?? [],
+        asisSkips: data.asisSkips ?? [],
       };
       set((st) => ({
         snapshots: st.snapshots.map((s) => s.id === id ? { ...s, snapshotData: normalized } : s),
