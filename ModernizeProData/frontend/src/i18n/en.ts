@@ -1313,6 +1313,7 @@ export const en: Record<TranslationKey, string> = {
   'logs.quarantine.filter.errors': 'Errors',
   'logs.quarantine.filter.warnings': 'Warnings',
   'logs.quarantine.pick.all':      'Pick a group…',
+  'logs.quarantine.pickTable.all': 'All tables',
   'logs.quarantine.rowsBadge':     '{n} ROWS',
   'logs.quarantine.colProject':    'PROJECT_NAME',
   'logs.quarantine.colTable':      'ROW',

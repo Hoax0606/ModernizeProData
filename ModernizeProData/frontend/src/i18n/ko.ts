@@ -1317,6 +1317,7 @@ export const ko = {
   'logs.quarantine.filter.errors': 'Errors',
   'logs.quarantine.filter.warnings': 'Warnings',
   'logs.quarantine.pick.all':      '항목 선택…',
+  'logs.quarantine.pickTable.all': '모든 테이블',
   'logs.quarantine.rowsBadge':     '{n} ROWS',
   'logs.quarantine.colProject':    'PROJECT_NAME',
   'logs.quarantine.colTable':      'ROW',
