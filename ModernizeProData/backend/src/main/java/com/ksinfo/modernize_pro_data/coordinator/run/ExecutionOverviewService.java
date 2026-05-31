@@ -131,21 +131,22 @@ public class ExecutionOverviewService {
                 rows, tablesTotal, tablesDone, errorCount, warningCount, progressPct, stageSummaries);
     }
 
-    /** StageInstance → StageSummary. pct は tablesSuccess/tablesTotal 比. */
+    /**
+     * StageInstance → StageSummary. pct は {@code StageController.derivePct} と同一式 —
+     * Execution 画面 (/api/v1/runs/{id}/stages) と Overview 画面で同じ run / 同じ stage を
+     * 見たときバーの幅が一致するように合わせる. 旧式は running 時に ok+failed を分子に
+     * 含めていたが、success が分子の derivePct と桁が合わなかった (例: 5 中 3 success +
+     * 1 failed → Execution 60% / Overview 80%).
+     */
     private static StageSummary toSummary(StageInstance s) {
         int total = s.getTablesTotal() == null ? 0 : s.getTablesTotal();
         int ok = s.getTablesSuccess() == null ? 0 : s.getTablesSuccess();
         int failed = s.getTablesFailed() == null ? 0 : s.getTablesFailed();
-        int pct;
-        if (s.getStatus() == StageStatus.success) {
-            pct = 100;
-        } else if (s.getStatus() == StageStatus.failed) {
-            pct = total > 0 ? (int) Math.round(100.0 * ok / total) : 0;
-        } else if (s.getStatus() == StageStatus.running) {
-            pct = total > 0 ? (int) Math.round(100.0 * (ok + failed) / total) : 0;
-        } else {
-            pct = 0;
-        }
+        int pct = switch (s.getStatus()) {
+            case pending -> 0;
+            case success -> 100;
+            case running, failed -> total == 0 ? 0 : (int) Math.floor(100.0 * ok / total);
+        };
         return new StageSummary(s.getStageKey(), s.getSeq(), s.getStatus().name(),
                 Math.max(0, Math.min(100, pct)), total, ok, failed);
     }
