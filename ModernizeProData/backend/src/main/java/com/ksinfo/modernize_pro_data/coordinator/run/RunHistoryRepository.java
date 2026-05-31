@@ -20,6 +20,11 @@ public interface RunHistoryRepository extends JpaRepository<RunHistory, String> 
     /** Coordinator 起動時 Misfire 判定用 — project の最後の run. */
     RunHistory findFirstByProjectIdOrderByStartedAtDesc(String projectId);
 
+    /** Execution Overview 用 — pin (baseline snapshot) で起動された最新 run.
+     *  pin.executionContext は finishRun 時にしか박제されないため running 중の run を取れない.
+     *  この query は status 問わず最新 (running 含む) を取って Overview の bar が live で動くようにする. */
+    RunHistory findFirstByProjectIdAndSnapshotIdOrderByStartedAtDesc(String projectId, String snapshotId);
+
     /** 同じ status の run を新しい順で取得 (sweep job 等で使う). */
     List<RunHistory> findByStatusOrderByStartedAtDesc(RunStatus status);
 

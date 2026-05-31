@@ -518,8 +518,8 @@ export const ko = {
   /* Run header */
   'execution.run.noActive':           'No active run',
   'execution.run.active':             'Active run',
+  'execution.run.lastLabel':          'Last run',
   'execution.run.noHistory':          '실행 이력이 없습니다 — 아직 매핑 단계입니다.',
-  'execution.run.lastRun':            'last run: {id} · {when} · {result}',
   'execution.run.startBtn':           'Start run',
   'execution.run.retryHint':          '마지막 성공 단계 이후부터 재개 (옛 데이터 재사용)',
   'execution.run.discard':            'Discard',

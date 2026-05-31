@@ -10,10 +10,13 @@ import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableResultRepos
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableStatus;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
+import com.ksinfo.modernize_pro_data.coordinator.site.Snapshot;
+import com.ksinfo.modernize_pro_data.coordinator.site.SnapshotRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Execution overview (All projects 화면, /site/execution) 의 per-project 실행 지표 집계.
@@ -28,6 +31,7 @@ public class ExecutionOverviewService {
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
     private final QuarantineEntryRepository quarantineRepo;
+    private final SnapshotRepository snapshotRepo;
 
     /**
      * Per-row pipeline 7-bar 描画用の stage 集約.
@@ -72,7 +76,18 @@ public class ExecutionOverviewService {
     }
 
     private ProjectExecMetrics metricsFor(Project p) {
-        RunHistory latest = runHistoryRepo.findFirstByProjectIdOrderByStartedAtDesc(p.getId());
+        /* Pin 中心: baseline (pinned) snapshot で起動された最新 run を優先 — running 含む.
+         * pin がない or pin の snapshot で 1 度も run していない場合は project 全体の最新 run fallback.
+         * これで Execution 画面 (activeRunId = pin.executionContext.runId 初期値) と
+         * Overview の data 源が同じ run を見るようになり, 両画面の bar 表示が一致する.
+         * (2026-05-31) */
+        Optional<Snapshot> baseline = snapshotRepo.findByProjectIdAndBaselineTrue(p.getId());
+        RunHistory latest = baseline
+                .map(b -> runHistoryRepo.findFirstByProjectIdAndSnapshotIdOrderByStartedAtDesc(p.getId(), b.getId()))
+                .orElse(null);
+        if (latest == null) {
+            latest = runHistoryRepo.findFirstByProjectIdOrderByStartedAtDesc(p.getId());
+        }
         if (latest == null) {
             return new ProjectExecMetrics(p.getId(), p.getName(), null, null,
                     0, p.getTobeTableCount(), 0, 0, 0, 0, List.of());

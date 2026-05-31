@@ -13,7 +13,8 @@ export interface SnapshotData {
   rules: FrozenRule[];
   codeMaps: FrozenCodeMap[];
   bindings: FrozenBinding[];
-  /** AS-IS column-level explicit skip markers. 옛 snapshot 은 누락 가능 → undefined/empty 허용. */
+  /** AS-IS 컬럼 단위 명시적 skip 마킹 (snapshot 동결). preflight 의 unmapped 검사 등에서 제외 대상.
+   *  옛 snapshot 은 누락 가능 → undefined/empty 허용 (호출 측에서 빈 list 로 normalize). */
   asisSkips?: FrozenAsisSkip[];
 }
 
