@@ -132,6 +132,10 @@ export interface SnapshotExecutionContext {
   finishedAt: string | null;
   durationMs: number | null;
   stages: StageSnapshot[];
+  /** 박제 시점의 quarantine entry count (severity=error). 박제 전 row 는 null. Overview KPI 의 pinned 경로용. */
+  errorCount?: number | null;
+  /** 박제 시점의 quarantine entry count (severity=warning). 박제 전 row 는 null. */
+  warningCount?: number | null;
 }
 
 export interface StageSnapshot {

@@ -166,6 +166,26 @@ function qualifiedName(t: DdlTableWithColumns): string {
   return t.table.schemaName ? `${t.table.schemaName}.${t.table.physicalName}` : t.table.physicalName;
 }
 
+/** quarantine focusRule.tobeTable (= 'schema.physical' 또는 'physical') 을 TO-BE 테이블에 매칭.
+   DDL 의 schemaName 과 mapping binding 의 tobeSchema 가 다르거나(대소문자/유무) 한쪽만 스키마를
+   가질 수 있어, 정규화 이름뿐 아니라 physical(마지막 '.' 뒷부분) 이름끼리도 비교한다.
+   못 맞추면 첫 테이블로 잘못 이동 + 강조 누락 → 반드시 physical fallback 필요. */
+function tablePhysical(label: string): string {
+  const i = label.lastIndexOf('.');
+  return (i >= 0 ? label.slice(i + 1) : label).toLowerCase();
+}
+function findTobeByLabel(tables: TobeTable[], label: string): TobeTable | undefined {
+  const want = label.toLowerCase();
+  const wantPhysical = tablePhysical(label);
+  return tables.find((tt) =>
+    tt.internalName.toLowerCase() === want
+    || tt.name.toLowerCase() === want
+    || tt.short.toLowerCase() === want
+    || tt.short.toLowerCase() === wantPhysical
+    || tablePhysical(tt.name) === wantPhysical,
+  );
+}
+
 /** Site 의 raw DB type 문자열을 dialect 코드로 정규화. 빈 값/모름 → 'oracle' 폴백. */
 function normalizeDialect(raw: string | null | undefined): string {
   if (!raw) return 'oracle';
@@ -357,6 +377,12 @@ export function MappingPage() {
   // Dashboard 행 클릭 → state.focusTable.internalName 로 해당 TO-BE 테이블을 active 화.
   const location = useLocation();
   const routerNavigate = useNavigate();
+  /** 사용자가 "skip" 으로 끈 navigation 의 location.state 객체 참조. 그 참조와 같은 동안만 강조 숨김.
+     navigate 마다 state 는 항상 새 객체 참조라, 새 "매핑 열기" 는 절대 dismiss 와 같지 않아 항상 다시 강조.
+     (location.key 는 환경에 따라 안정적이지 않을 수 있어 객체 참조로 식별 — 이게 재진입 보장의 핵심.) */
+  const [dismissedState, setDismissedState] = useState<unknown>(null);
+  /** focusRule navigation 을 1회만 테이블 점프하도록 식별 — location.state 객체 참조 기준. */
+  const jumpedStateRef = useRef<unknown>(null);
   // 同じ focusTable を hydrationTick の度に再適用しないためのガード.
   // window.history.replaceState だけだと React Router の location.state は更新されず, 結果として
   // schema 再 fetch (= hydrationTick++) のたびに同じテーブルへ強制リセットされていた.
@@ -371,68 +397,9 @@ export function MappingPage() {
       focusRule?: { tobeTable: string; tobeColumns: string[] };
     } | null;
 
-    // LogViewer Quarantine → "매핑 열기" → 위반 컬럼의 매핑 row 로 점프 + 빨간 펄스 (무한).
-    // fixTarget 분기와 동일한 단순 패턴 — 매 effect 호출에 setTimeout 새로 등록, cleanup 에서
-    // clear. hydrationTick 안정화 후 마지막 effect 의 setTimeout 만 발화 → highlight 적용.
-    // 색상/시간만 다름: mpd-quarantine-highlight (빨강, infinite). 사용자가 row 클릭 또는
-    // 다른 페이지로 navigation 할 때 자동 종료.
-    if (state?.focusRule?.tobeTable) {
-      const fr = state.focusRule;
-      const safeCols = fr.tobeColumns ?? [];
-
-      // case-insensitive table 매칭 + 선택. effectiveTobe 비어있으면 이번 effect 에선 skip,
-      // hydrationTick 변동 후 재진입 때 잡힘.
-      if (effectiveTobe.length > 0) {
-        const tobeKey = fr.tobeTable.toLowerCase();
-        const target = effectiveTobe.find((tt) =>
-          tt.name.toLowerCase() === tobeKey
-          || tt.internalName.toLowerCase() === tobeKey
-          || tt.short.toLowerCase() === tobeKey,
-        );
-        if (target) {
-          setSelected({ side: 'tobe', name: target.name, internalName: target.internalName });
-          didInitialSelectRef.current = true;
-        }
-      }
-
-      const targetCols = new Set(safeCols.map((c) => c.toLowerCase()));
-      const id = window.setTimeout(() => {
-        const allRows = document.querySelectorAll<HTMLElement>('tr[data-mpd-tobe-column]');
-        let els: HTMLElement[] = [];
-
-        // 1차 — TOBE 컬럼명 매치.
-        allRows.forEach((row) => {
-          const col = row.getAttribute('data-mpd-tobe-column');
-          if (col && targetCols.has(col.toLowerCase())) els.push(row);
-        });
-        // 2차 — ASIS 컬럼명 매치 (TOBE 실패 시). BE 가 보내는 위반 컬럼은 ASIS 측인 경우가 많음.
-        // src 가 'alias.column' 또는 'column' 형태 → 마지막 . 뒷부분만 비교.
-        if (els.length === 0) {
-          allRows.forEach((row) => {
-            const src = row.getAttribute('data-mpd-asis-column');
-            if (!src) return;
-            const colPart = src.split('.').pop()?.toLowerCase() ?? '';
-            if (colPart && targetCols.has(colPart)) els.push(row);
-          });
-        }
-        // 3차 — 매칭 0 (BE placeholder 등). 첫 row 라도 깜빡 → "도착했다" 시각 신호.
-        if (els.length === 0 && allRows.length > 0) els = [allRows[0]];
-        if (els.length === 0) return;
-
-        els[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
-        els.forEach((el) => el.classList.add('mpd-quarantine-highlight'));
-        // 사용자가 강조된 row 를 클릭하면 깜빡 종료 — row 가 active 화되는 인터랙션과 일체화.
-        const onceClickToStop = () => {
-          els.forEach((el) => {
-            el.classList.remove('mpd-quarantine-highlight');
-            el.removeEventListener('click', onceClickToStop);
-          });
-        };
-        els.forEach((el) => el.addEventListener('click', onceClickToStop));
-      }, 200);
-      window.history.replaceState({}, '');
-      return () => window.clearTimeout(id);
-    }
+    // (LogViewer Quarantine "매핑 열기" → focusRule 점프는 effectiveTobe 가 deps 인 별도 effect 에서
+    //  처리 — 아래 quarantineHl 근처. 여기 big effect 는 effectiveTobe 가 deps 가 아니라, 테이블이
+    //  늦게 로드되면 점프를 놓치기 때문. quarantineHl(useMemo)과 동일 타이밍으로 맞춘다.)
 
     // Dashboard row → focus a specific TO-BE table.
     if (state?.focusTable) {
@@ -531,6 +498,7 @@ export function MappingPage() {
   }, [hydrationTick]);
 
   const [selected, setSelected] = useState<Selection>(null);
+
   // 매핑 메뉴 초기 화면은 무조건 TO-BE 첫 테이블. 프로젝트가 바뀌면 다시 reset.
   const didInitialSelectRef = useRef(false);
   // 프로젝트 변경 시 selection lock 해제.
@@ -543,11 +511,14 @@ export function MappingPage() {
   useEffect(() => {
     if (didInitialSelectRef.current) return;
     if (TOBE_TABLES.length === 0) return;  // TO-BE 아직 안 옴 — 다음 tick 대기
+    // Quarantine "매핑 열기"(focusRule) 진입이면 첫 테이블을 자동선택하지 않는다 — 아래 focusRule
+    // effect 가 대상 테이블을 고르기 때문. (안 막으면 첫 테이블=customers 가 끼어들어 항상 거기로 이동.)
+    if ((location.state as { focusRule?: { tobeTable?: string } } | null)?.focusRule?.tobeTable) return;
     const first = TOBE_TABLES[0];
     setSelected({ side: 'tobe', name: first.name, internalName: first.internalName });
     didInitialSelectRef.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrationTick]);
+  }, [hydrationTick, location.state]);
   // hydrate 된 데이터에 selected 가 존재하지 않으면 자동으로 첫 TOBE 로 reset.
   useEffect(() => {
     if (!initialSelection) return;
@@ -706,6 +677,66 @@ export function MappingPage() {
     });
   }, [effectiveTobe, asisSkippedCols, hydrationTick]);
 
+  /** Quarantine "매핑 열기" 강조 대상 — location.state.focusRule 에서 매 렌더 파생.
+     dismiss 는 "그 navigation 의 state 객체" 한정 (location.state === dismissedState). 새 "매핑 열기"
+     는 새 state 객체라 절대 dismiss 와 같지 않으므로, 몇 번을 다시 들어와도 항상 강조된다.
+     hydrationTick 재렌더는 같은 state 객체 → dismiss 유지 (재발화 없음). */
+  const quarantineHl = useMemo<{ internalName: string; cols: string[] } | null>(() => {
+    const st = location.state as { focusRule?: { tobeTable: string; tobeColumns: string[] } } | null;
+    const fr = st?.focusRule;
+    if (!fr?.tobeTable) return null;
+    if (st === dismissedState) return null;  // 이 navigation 을 사용자가 skip 함
+    if (effectiveTobe.length === 0) return null;
+    const target = findTobeByLabel(effectiveTobe, fr.tobeTable);
+    return target ? { internalName: target.internalName, cols: fr.tobeColumns ?? [] } : null;
+  }, [location.state, dismissedState, effectiveTobe]);
+  /** 사용자가 이 navigation 에서 수동으로 테이블을 골랐는지 (= override 해제) 표시하는 location.state 참조. */
+  const userNavRef = useRef<unknown>(null);
+  /** "skip" — 강조만 끄고 그 테이블 목록은 그대로 둔다. dismiss 하면 quarantineHl 이 null 이 되어
+     화면 테이블이 selected 로 돌아가므로, 먼저 현재 강조 테이블을 selected 로 고정한 뒤 dismiss
+     (안 그러면 selected 가 비어 GuidePanel "좌측에서 테이블을 선택하세요" 로 빠진다). */
+  const clearQuarantineHl = useCallback(() => {
+    if (quarantineHl) {
+      const tt = effectiveTobe.find((t) => t.internalName === quarantineHl.internalName);
+      setSelected({ side: 'tobe', name: tt?.name ?? '', internalName: quarantineHl.internalName });
+      userNavRef.current = location.state;  // 이 navigation 에서 사용자 선택으로 간주 → override 해제
+    }
+    setDismissedState(location.state);
+  }, [location.state, quarantineHl, effectiveTobe]);
+
+  /* Quarantine "매핑 열기" → 대상 TO-BE 테이블로 1회 자동 점프.
+     deps 에 effectiveTobe 포함 — 테이블 목록이 늦게 로드돼도(quarantineHl useMemo 와 동일 타이밍)
+     반드시 그 시점에 다시 실행되어 점프한다. (big effect 는 effectiveTobe 가 deps 가 아니라
+     "강조는 맞는 테이블인데 이동만 첫 테이블" 증상이 났음.) jumpedStateRef 로 navigation 당 1회 제한. */
+  useEffect(() => {
+    const fr = (location.state as { focusRule?: { tobeTable: string; tobeColumns: string[] } } | null)?.focusRule;
+    if (!fr?.tobeTable) return;
+    if (jumpedStateRef.current === location.state) return;  // 이 navigation 은 이미 점프함
+    if (effectiveTobe.length === 0) return;                 // 테이블 로드 대기 — 다음 effectiveTobe 변경 때 재시도
+    const target = findTobeByLabel(effectiveTobe, fr.tobeTable);
+    if (target) {
+      setSelected({ side: 'tobe', name: target.name, internalName: target.internalName });
+      didInitialSelectRef.current = true;
+    }
+    jumpedStateRef.current = location.state;
+  }, [location.state, effectiveTobe]);
+
+  /* 화면에 열 테이블 = 파생값. quarantine "매핑 열기" 로 들어왔고 (quarantineHl 존재) 사용자가 이
+     navigation 에서 수동으로 다른 테이블을 고르지 않았으면, 강조 대상 테이블을 그대로 연다.
+     effect/자동선택 타이밍과 무관하게 quarantineHl(이미 정확히 해석됨)에서 직접 파생하므로
+     "항상 customers 로만 열림" 문제가 구조적으로 사라진다. */
+  const handleSelect = useCallback((s: Selection) => {
+    userNavRef.current = location.state;  // 사용자가 수동 선택 → 이 navigation 동안 override 해제
+    setSelected(s);
+  }, [location.state]);
+  const effectiveSelected = useMemo<Selection>(() => {
+    if (quarantineHl && userNavRef.current !== location.state) {
+      const tt = effectiveTobe.find((t) => t.internalName === quarantineHl.internalName);
+      return { side: 'tobe', name: tt?.name ?? '', internalName: quarantineHl.internalName };
+    }
+    return selected;
+  }, [quarantineHl, selected, location.state, effectiveTobe]);
+
   if (!activeProjectId) {
     return (
       <div style={styles.fullBleed}>
@@ -737,8 +768,8 @@ export function MappingPage() {
       <DualInventory
         asis={effectiveAsis}
         tobe={effectiveTobe}
-        selected={selected}
-        onSelect={setSelected}
+        selected={effectiveSelected}
+        onSelect={handleSelect}
         search={search}
         setSearch={setSearch}
         showUnrouted={showUnrouted}
@@ -747,14 +778,16 @@ export function MappingPage() {
         onOpenFullImport={readOnly ? undefined : () => setFullImportOpen(true)}
       />
       <Workspace
-        selected={selected}
-        onSelect={setSelected}
+        selected={effectiveSelected}
+        onSelect={handleSelect}
         tableBindingEdits={tableBindingEdits}
         onBindingChange={handleBindingChange}
         effectiveTobe={effectiveTobe}
         asisSkippedCols={asisSkippedCols}
         onToggleAsisSkip={handleToggleAsisSkip}
         hydrationTick={hydrationTick}
+        quarantineHl={quarantineHl}
+        onClearQuarantineHl={clearQuarantineHl}
       />
       {fullImportOpen && (
         <MappingDefinitionImportModal
@@ -1027,7 +1060,11 @@ function InventoryItem({
 
 // ── Right: workspace ─────────────────────────────────────────
 
-function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, effectiveTobe, asisSkippedCols, onToggleAsisSkip, hydrationTick }: {
+/** 강조 대상이 아닐 때 TobeMappingDetail 에 넘기는 고정 빈 배열 — 매 렌더 새 [] 생성으로 인한
+   useMemo 무효화/scroll effect 재발화 방지. */
+const EMPTY_HL_COLS: string[] = [];
+
+function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, effectiveTobe, asisSkippedCols, onToggleAsisSkip, hydrationTick, quarantineHl, onClearQuarantineHl }: {
   selected: Selection;
   onSelect: (s: Selection) => void;
   tableBindingEdits: Record<string, TableBindingEdit>;
@@ -1036,6 +1073,8 @@ function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, eff
   asisSkippedCols: Record<string, Record<string, boolean>>;
   onToggleAsisSkip: (tableName: string, colName: string, nextSkip: boolean) => void;
   hydrationTick: number;
+  quarantineHl: { internalName: string; cols: string[] } | null;
+  onClearQuarantineHl: () => void;
 }) {
   if (!selected) return <GuidePanel />;
   if (selected.side === 'tobe') {
@@ -1043,6 +1082,10 @@ function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, eff
     if (!table) return <GuidePanel />;
     const bindingEdit = tableBindingEdits[table.internalName];
     const rows = MAPPING_BY_TOBE[table.internalName] || [];
+    // quarantine 강조가 현재 보고 있는 테이블 대상인지 + 그 위반 컬럼들. active 면 cols 가 비어도
+    // 첫 row 라도 강조한다 (아래 TobeMappingDetail). 아니면 빈 배열(고정 ref).
+    const highlightActive = !!quarantineHl && quarantineHl.internalName === table.internalName;
+    const highlightCols = highlightActive ? quarantineHl!.cols : EMPTY_HL_COLS;
     return (
       <TobeMappingDetail
         key={table.internalName}
@@ -1051,6 +1094,9 @@ function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, eff
         bindingEdit={bindingEdit}
         onBindingChange={(edit) => onBindingChange(table.internalName, edit)}
         hydrationTick={hydrationTick}
+        highlightActive={highlightActive}
+        highlightCols={highlightCols}
+        onSkipHighlight={onClearQuarantineHl}
       />
     );
   }
@@ -1117,15 +1163,33 @@ async function findUncoveredDdlColumns(projectId: string, tableFilter: string | 
 
 // ── TO-BE mapping detail ─────────────────────────────────────
 
-function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydrationTick }: {
+function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydrationTick, highlightActive = false, highlightCols = EMPTY_HL_COLS, onSkipHighlight }: {
   table: TobeTable;
   rows: MappingRow[];
   bindingEdit?: TableBindingEdit;
   onBindingChange: (edit: TableBindingEdit) => void;
   hydrationTick: number;
+  /** Quarantine "매핑 열기" 강조가 이 테이블 대상인지. true 면 cols 가 비어도 첫 row 라도 강조. */
+  highlightActive?: boolean;
+  /** 강조 위반 컬럼명들 (있으면 매칭 row 강조, 없으면 첫 row fallback). */
+  highlightCols?: string[];
+  /** 강조 종료 콜백 — 에러 row 의 "skip" 버튼 / 강조 row 클릭 시 호출. */
+  onSkipHighlight?: () => void;
 }) {
   const navigate = useNavigate();
   const t = useT();
+  /** 강조 대상 컬럼 set (lowercase). tgt(=TO-BE) 또는 src(=AS-IS) 컬럼명이 여기 들면 그 row 가 강조. */
+  const hlSet = useMemo(
+    () => new Set(highlightCols.map((c) => c.toLowerCase())),
+    [highlightCols],
+  );
+  /** 강조 첫 row 로 스크롤 — 강조가 켜질 때 한 번. */
+  const firstHlRowRef = useRef<HTMLTableRowElement | null>(null);
+  useEffect(() => {
+    if (highlightActive) {
+      firstHlRowRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [highlightActive, hlSet]);
   // Banner 의 프로젝트명을 클릭 가능한 텍스트 버튼으로 — 다른 project 의 같은 테이블 매핑 화면으로 이동.
   const projectLinkStyle: React.CSSProperties = {
     background: 'transparent',
@@ -1596,6 +1660,17 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     (!q || (r.src + ' ' + r.tgt).toLowerCase().includes(q.toLowerCase())) &&
     (coverageFilter === 'all' || r.rule === coverageFilter),
   );
+  // 컬럼명 매치 — tgt(TO-BE) 또는 src(AS-IS, 마지막 '.' 뒷부분) 가 hlSet 에 들면 매치.
+  const rowColMatch = (r: MappingRow): boolean =>
+    (!!r.tgt && hlSet.has(r.tgt.toLowerCase()))
+    || (!!r.src && hlSet.has((r.src.split('.').pop() ?? '').toLowerCase()));
+  // 강조가 켜져 있으면 (= quarantine "매핑 열기" 로 진입) 컬럼 매치 row 를 강조.
+  // 매치가 하나도 없으면 (컬럼명 추출 실패 / 빈 cols / 표현식 source 등) 첫 row 라도 강조 →
+  // "이 테이블로 왔다" 시각 신호 (기존 imperative fallback 동작 유지).
+  const anyHlMatch = highlightActive && filtered.some(rowColMatch);
+  const rowIsHl = (r: MappingRow, i: number): boolean =>
+    highlightActive && (anyHlMatch ? rowColMatch(r) : i === 0);
+  const firstHlIdx = !highlightActive ? -1 : (anyHlMatch ? filtered.findIndex(rowColMatch) : 0);
 
   const counts = {
     all:      visibleRows.length,
@@ -1901,13 +1976,18 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
               {filtered.map((r, i) => {
                 const realIdx = visibleRows.indexOf(r);
                 const isActive = realIdx === activeIdx;
+                const isHl = rowIsHl(r, i);
                 return (
                   <tr
                     key={`${r.src}>${r.tgt}-${i}`}
+                    ref={i === firstHlIdx ? firstHlRowRef : undefined}
+                    className={isHl ? 'mpd-quarantine-highlight' : undefined}
                     data-fix-row={r.rule === 'unmapped' ? 'tobe-unmapped' : undefined}
                     data-mpd-tobe-column={r.tgt || undefined}
                     data-mpd-asis-column={r.src || undefined}
                     onClick={() => {
+                      // 강조된 row 를 클릭하면 강조 종료 (행 인터랙션과 일체화).
+                      if (isHl) onSkipHighlight?.();
                       // 자식 link 테이블은 master 에서만 수정 가능 — Inspector 안 열림.
                       if (isLinkedChild) return;
                       // 같은 행을 다시 누르면 inspector 를 닫는다 (토글). 다른 행이면 그 행으로 열기.
@@ -1977,7 +2057,23 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                     <td style={styles.gridTd}>
                       {r.tgtType === '—' ? <span style={{ color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>—</span> : <TypeBadge>{r.tgtType}</TypeBadge>}
                     </td>
-                    <td style={{ ...styles.gridTd, textAlign: 'center' }}><RuleTag rule={r.rule} status={r.status} /></td>
+                    <td style={{ ...styles.gridTd, textAlign: 'center' }}>
+                      {isHl ? (
+                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                          <RuleTag rule={r.rule} status={r.status} />
+                          {/* 강조 종료 버튼 — row onClick(=강조 끄기 + inspector) 로 전파 안 되게 stopPropagation. */}
+                          <button
+                            type="button"
+                            style={styles.rowSkipBtn}
+                            onClick={(e) => { e.stopPropagation(); onSkipHighlight?.(); }}
+                          >
+                            skip
+                          </button>
+                        </div>
+                      ) : (
+                        <RuleTag rule={r.rule} status={r.status} />
+                      )}
+                    </td>
                   </tr>
                 );
               })}
@@ -5238,6 +5334,13 @@ const styles: Record<string, React.CSSProperties> = {
 
   // Workspace
   workspace: { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 },
+
+  /* Quarantine 강조 row 의 종료(skip) 버튼 — State 칼럼, 빨강 톤. */
+  rowSkipBtn: {
+    padding: '2px 9px', border: '1px solid #e85d75', borderRadius: 999,
+    background: 'var(--panel)', color: '#c92a3f',
+    fontSize: 10.5, fontWeight: 700, cursor: 'pointer', lineHeight: 1.4,
+  },
 
   contextBar: {
     display: 'flex', alignItems: 'center', gap: 10,
