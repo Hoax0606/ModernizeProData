@@ -1,5 +1,7 @@
 package com.ksinfo.modernize_pro_data.coordinator.site;
 
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntryRepository;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunHistory;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
@@ -9,6 +11,7 @@ import com.ksinfo.modernize_pro_data.coordinator.site.frozen.SnapshotExecutionCo
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -37,7 +40,9 @@ public class SnapshotExecutionContextService {
     private final SnapshotRepository snapshotRepository;
     private final StageInstanceRepository stageInstanceRepository;
     private final StageTableResultRepository stageTableResultRepository;
+    private final QuarantineEntryRepository quarantineEntryRepository;
 
+    @Transactional
     public void recordExecutionContext(RunHistory rh) {
         if (rh == null || rh.getSnapshotId() == null) return;
         try {
@@ -87,6 +92,12 @@ public class SnapshotExecutionContextService {
             if (durationMs == null && rh.getStartedAt() != null && rh.getFinishedAt() != null) {
                 durationMs = Duration.between(rh.getStartedAt(), rh.getFinishedAt()).toMillis();
             }
+            // Overview KPI (Errors/Warnings) 의 pinned 경로용 박제. live run 경로
+            // (ExecutionOverviewService.metricsFor) 와 동일한 quarantineRepo.countByRunIdAndSeverity 를
+            // 그 시점에 query 해 ctx 에 같이 freeze — pinned/non-pinned 사이의 KPI 정의 일관성.
+            long errorCount = quarantineEntryRepository.countByRunIdAndSeverity(rh.getId(), QuarantineSeverity.error);
+            long warningCount = quarantineEntryRepository.countByRunIdAndSeverity(rh.getId(), QuarantineSeverity.warning);
+
             SnapshotExecutionContext ctx = new SnapshotExecutionContext(
                     rh.getId(),
                     rh.getRunType() == null ? null : rh.getRunType().name(),
@@ -94,7 +105,9 @@ public class SnapshotExecutionContextService {
                     rh.getStartedAt(),
                     rh.getFinishedAt(),
                     durationMs,
-                    stageSnapshots
+                    stageSnapshots,
+                    errorCount,
+                    warningCount
             );
             snapshot.setExecutionContext(ctx);
             snapshotRepository.save(snapshot);

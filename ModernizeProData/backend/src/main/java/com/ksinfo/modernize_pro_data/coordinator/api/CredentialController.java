@@ -26,6 +26,10 @@ import java.time.OffsetDateTime;
  *   POST   /api/v1/credentials/{id}/revoke ── 明示的 revoke
  *
  * 認証は user session, role check は master のみ register / revoke 可.
+ *
+ * <p>⚠ Security note (PoC): tokenPlain を HTTP response に返し frontend が
+ * localStorage に保管. air-gap 現場のみ運用前提で受容. 本番投入前に
+ * HttpOnly cookie へ移行すること.
  */
 @Slf4j
 @RestController

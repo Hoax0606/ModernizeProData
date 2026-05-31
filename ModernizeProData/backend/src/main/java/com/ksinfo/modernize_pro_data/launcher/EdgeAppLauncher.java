@@ -77,7 +77,14 @@ public final class EdgeAppLauncher {
                         "--user-data-dir=" + userDataDir.getAbsolutePath(),
                         "--window-size=1280,800",
                         "--no-first-run",
-                        "--no-default-browser-check"
+                        "--no-default-browser-check",
+                        // password save / autofill prompt 비활성 — 우리 도구의 login
+                        // form 이 web service 가 아니므로 browser 의 credential
+                        // manager 가 끼어들 필요 없음.
+                        "--disable-features=PasswordManagerOnboarding,"
+                                + "AutofillEnableAccountWalletStorage,"
+                                + "AutofillServerCommunication",
+                        "--password-store=basic"
                 ).redirectErrorStream(true).start();
             }
         }

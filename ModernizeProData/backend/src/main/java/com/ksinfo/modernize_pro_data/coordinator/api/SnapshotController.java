@@ -2,6 +2,8 @@ package com.ksinfo.modernize_pro_data.coordinator.api;
 
 import com.ksinfo.modernize_pro_data.common.dto.ApiResponse;
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingAsisSkip;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingAsisSkipRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingCodeMap;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingCodeMapRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRule;
@@ -9,6 +11,7 @@ import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRuleRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingSource;
+import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenAsisSkip;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.FrozenBindingSource;
 import com.ksinfo.modernize_pro_data.coordinator.site.AuditLogService;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
@@ -62,6 +65,7 @@ public class SnapshotController {
     private final MappingRuleRepository mappingRuleRepository;
     private final MappingCodeMapRepository mappingCodeMapRepository;
     private final MappingTableBindingRepository mappingTableBindingRepository;
+    private final MappingAsisSkipRepository mappingAsisSkipRepository;
     private final SnapshotDiffService snapshotDiffService;
     private final RunHistoryRepository runHistoryRepository;
 
@@ -113,7 +117,10 @@ public class SnapshotController {
         List<FrozenRule> rules = ownRules.stream()
                 .map(FrozenRule::fromEntity)
                 .toList();
-        return new SnapshotData(rules, codeMaps, bindings);
+        List<FrozenAsisSkip> asisSkips = mappingAsisSkipRepository.findByProjectId(projectId).stream()
+                .map(FrozenAsisSkip::fromEntity)
+                .toList();
+        return new SnapshotData(rules, codeMaps, bindings, asisSkips);
     }
 
     /** + New snapshot / + Cutover snapshot 버튼 활성화 판단용.
@@ -352,8 +359,13 @@ public class SnapshotController {
                 mappingTableBindingRepository.findByProjectIdWithSources(projectId));
         mappingRuleRepository.deleteAllByProjectId(projectId);
         mappingCodeMapRepository.deleteAllByProjectId(projectId);
+        mappingAsisSkipRepository.deleteAllByProjectId(projectId);
         // 2) DELETE 반영 — 같은 트랜잭션 안 새 insert 가 1차 캐시 충돌하지 않도록.
-        snapshotRepository.flush();
+        //    삭제한 repo 들 (binding/rule/codeMap) 의 entity manager 가 flush 대상.
+        //    여기서는 EntityManager 차원 flush (모든 dirty entity).
+        mappingTableBindingRepository.flush();
+        mappingRuleRepository.flush();
+        mappingCodeMapRepository.flush();
 
         // 3) rules
         if (data.rules() != null) {
@@ -438,6 +450,21 @@ public class SnapshotController {
                     }
                 }
                 mappingTableBindingRepository.save(e);
+            }
+        }
+
+        // asis skips
+        if (data.asisSkips() != null) {
+            for (FrozenAsisSkip s : data.asisSkips()) {
+                MappingAsisSkip e = new MappingAsisSkip();
+                e.setId(UUID.randomUUID().toString());
+                e.setProjectId(projectId);
+                e.setAsisSchema(s.asisSchema() == null ? "" : s.asisSchema());
+                e.setAsisTable(s.asisTable());
+                e.setAsisColumn(s.asisColumn());
+                e.setCreatedBy(userId);
+                e.setCreatedAt(now);
+                mappingAsisSkipRepository.save(e);
             }
         }
     }

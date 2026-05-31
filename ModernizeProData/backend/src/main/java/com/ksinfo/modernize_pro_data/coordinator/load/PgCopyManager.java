@@ -29,7 +29,7 @@ public class PgCopyManager {
 
     /**
      * site.tobeDbByEnv[env] map 으로부터 JDBC Connection 오픈.
-     * caller 가 close() 책임.
+     * caller 는 반드시 try-with-resources 로 wrap (leak 방지).
      */
     public Connection openConnection(Map<String, Object> dbConfig) throws Exception {
         String host = (String) dbConfig.get("host");

@@ -3,24 +3,34 @@ package com.ksinfo.modernize_pro_data.launcher;
 import com.ksinfo.modernize_pro_data.ModernizeProDataApplication;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.context.event.ApplicationEnvironmentPreparedEvent;
+import org.springframework.boot.context.event.ApplicationPreparedEvent;
 import org.springframework.boot.web.context.WebServerInitializedEvent;
 import org.springframework.context.ConfigurableApplicationContext;
 
+import javax.swing.BorderFactory;
+import javax.swing.BoxLayout;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
+import javax.swing.JComponent;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JWindow;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 import javax.swing.WindowConstants;
 import javax.swing.border.LineBorder;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
+import java.awt.Dimension;
 import java.awt.Font;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
 import java.awt.Image;
+import java.awt.RenderingHints;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.InputStream;
@@ -28,36 +38,31 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Coordinator / Standalone main GUI — JavaFX WebView (옛 WebKit) 와 JCEF (jpackage 환경
- * 통합 fail) 모두 폐기 후 **OS Edge `--app` chrome-less window** 사용 (2026-05-30).
+ * Coordinator / Standalone main GUI — JavaFX WebView / JCEF 모두 폐기 후 OS Edge `--app`
+ * chrome-less window 사용 (2026-05-30).
  *
- * <p>흐름:
- * <ol>
- *   <li>작은 control JFrame 띄움 — 상태 라벨 + Stop 버튼.</li>
- *   <li>Spring Boot background 시작.</li>
- *   <li>Spring ready → Edge / Chrome / fallback browser `--app=http://localhost:8080` launch.</li>
- *   <li>Edge process 별 thread 에서 waitFor — 사용자가 Edge 창 닫으면 backend 도 shutdown.</li>
- *   <li>Control JFrame X 또는 Stop 클릭 → Edge kill + Spring shutdown + exit.</li>
- * </ol>
+ * <p>Splash: 흰 배경 + logo + brand + custom navy progress bar + status text.
+ * Spring boot stage 별 listener + 150ms timer 로 0~100% 부드럽게 진행. Modern
+ * installer 패턴 (Slack / Notion / VSCode).
  *
- * <p>왜 OS Edge?
- * <ul>
- *   <li>Modern Chromium engine — font / icon / WebSocket / polling 안정.</li>
- *   <li>JCEF / JxBrowser native bundle 없음 → MSI 가벼움.</li>
- *   <li>Windows 11 = Edge 자동 설치 (현장 가정).</li>
- *   <li>`--app` chrome-less window → 사용자 시각 native desktop app (VS Code / Notion / Slack 동일 기술).</li>
- * </ul>
+ * <p>Edge launch 성공 → splash dispose → Edge `--app` 단일 window.
+ * Edge X 닫음 → backend shutdown (edge-watcher).
  */
 public class SwingGuiApp {
 
-    private static final String START_URL = "http://localhost:8080";
+    /** {@code ?app=mpd} = ad-hoc cache-bust. 사용자 PC 에 stale force-installed PWA
+     *  (옛 build 의 잔존) 가 살아 있어도 start_url 과 다르므로 Edge 가 PWA scope
+     *  match 안 함 → forward / self-exit 회피. */
+    private static final String START_URL = "http://localhost:8080/?app=mpd";
 
-    /** Excel-style splash — undecorated JWindow. title bar / 버튼 없음. Edge 떠면 dispose. */
     private JWindow splash;
-    /** Fallback control frame — Edge/Chrome 미발견 시만 표시. Stop 버튼. */
-    private JFrame fallbackFrame;
     private JLabel statusLabel;
-    private JButton stopBtn;
+    private BrandProgressBar progressBar;
+    private Timer progressTimer;
+
+    private JFrame fallbackFrame;
+    private JLabel fallbackStatus;
+    private JButton fallbackStopBtn;
 
     private final AtomicReference<ConfigurableApplicationContext> springCtxRef = new AtomicReference<>();
     private final AtomicReference<Process> edgeProcRef = new AtomicReference<>();
@@ -65,27 +70,43 @@ public class SwingGuiApp {
     private final AtomicBoolean uiLaunched = new AtomicBoolean(false);
 
     public void start(String[] startArgs) {
+        cleanupStaleEdgePolicy();
         SwingUtilities.invokeLater(this::createSplash);
         new Thread(this::bootSpring, "spring-boot-launcher").start();
     }
 
-    /* ── Excel-style splash (undecorated JWindow) ─────────────────────── */
+    /**
+     * 옛 build 가 사용자 PC HKCU 에 남긴 WCO force-install policy 의 best-effort
+     * 제거. 정책 없으면 reg 가 exit≠0 — 무시. 정책 살아있으면 Edge 다음 launch 시
+     * 우리 PWA force install / forward race 재발 가능.
+     */
+    private static void cleanupStaleEdgePolicy() {
+        try {
+            new ProcessBuilder("reg", "delete",
+                    "HKCU\\Software\\Policies\\Microsoft\\Edge",
+                    "/v", "WebAppInstallForceList", "/f")
+                    .redirectErrorStream(true).start().waitFor();
+        } catch (Exception ignored) {}
+    }
+
+    /* ── Splash ──────────────────────────────────────────────────────── */
 
     private void createSplash() {
         splash = new JWindow();
-        splash.setSize(420, 260);
+        splash.setSize(460, 280);
         splash.setLocationRelativeTo(null);
         splash.setBackground(Color.WHITE);
 
         JPanel panel = new JPanel(new BorderLayout());
         panel.setBackground(Color.WHITE);
-        panel.setBorder(new LineBorder(new Color(0xd0, 0xd5, 0xd9), 1));
+        panel.setBorder(new LineBorder(new Color(0xda, 0xe3, 0xe0), 1));
 
-        JPanel center = new JPanel();
-        center.setLayout(new javax.swing.BoxLayout(center, javax.swing.BoxLayout.Y_AXIS));
-        center.setOpaque(false);
+        // upper = logo + brand (vertical center, top half)
+        JPanel upper = new JPanel();
+        upper.setLayout(new BoxLayout(upper, BoxLayout.Y_AXIS));
+        upper.setOpaque(false);
+        upper.setBorder(BorderFactory.createEmptyBorder(72, 0, 0, 0));
 
-        // logo
         JLabel logoLabel = new JLabel("", SwingConstants.CENTER);
         logoLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
         try (InputStream is = SwingGuiApp.class.getResourceAsStream("/icons/mpd.png")) {
@@ -96,46 +117,142 @@ public class SwingGuiApp {
             }
         } catch (Exception ignored) {}
 
-        // brand name
         JLabel brand = new JLabel("ModernizeProData", SwingConstants.CENTER);
         brand.setAlignmentX(Component.CENTER_ALIGNMENT);
         brand.setFont(brand.getFont().deriveFont(Font.BOLD, 22f));
         brand.setForeground(new Color(0x0e, 0x72, 0x68));
-        brand.setBorder(javax.swing.BorderFactory.createEmptyBorder(16, 0, 0, 0));
+        brand.setBorder(BorderFactory.createEmptyBorder(14, 0, 0, 0));
 
-        center.add(logoLabel);
-        center.add(brand);
+        upper.add(logoLabel);
+        upper.add(brand);
+        panel.add(upper, BorderLayout.CENTER);
 
-        JPanel wrap = new JPanel(new java.awt.GridBagLayout());
-        wrap.setOpaque(false);
-        wrap.add(center);
-        panel.add(wrap, BorderLayout.CENTER);
+        // lower = progress bar + status text (south, with padding)
+        JPanel lower = new JPanel();
+        lower.setLayout(new BoxLayout(lower, BoxLayout.Y_AXIS));
+        lower.setOpaque(false);
+        lower.setBorder(BorderFactory.createEmptyBorder(0, 40, 24, 40));
+
+        progressBar = new BrandProgressBar();
+        progressBar.setAlignmentX(Component.CENTER_ALIGNMENT);
+        progressBar.setMaximumSize(new Dimension(Integer.MAX_VALUE, 6));
+
+        statusLabel = new JLabel("Starting…");
+        statusLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        statusLabel.setFont(statusLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        statusLabel.setForeground(new Color(0x67, 0x8b, 0x86));
+        statusLabel.setBorder(BorderFactory.createEmptyBorder(10, 0, 0, 0));
+
+        lower.add(progressBar);
+        lower.add(statusLabel);
+        panel.add(lower, BorderLayout.SOUTH);
 
         splash.setContentPane(panel);
         splash.setVisible(true);
+
+        // 150ms timer — progress < 90 이면 +1 자동 증가 (Spring listener 가 jump-up).
+        progressTimer = new Timer(150, e -> {
+            if (progressBar != null && progressBar.getValue() < 90) {
+                progressBar.setValue(progressBar.getValue() + 1);
+            }
+        });
+        progressTimer.start();
+    }
+
+    private void setProgress(int v) {
+        SwingUtilities.invokeLater(() -> {
+            if (progressBar != null) progressBar.setValue(v);
+        });
     }
 
     private void setStatus(String msg) {
-        // Excel-style splash 에는 status label 없음. fallback frame 에 statusLabel 있으면 갱신.
         SwingUtilities.invokeLater(() -> {
             if (statusLabel != null) statusLabel.setText(msg);
+            if (fallbackStatus != null) fallbackStatus.setText(msg);
         });
+    }
+
+    private void disposeSplash() {
+        if (progressTimer != null) {
+            progressTimer.stop();
+            progressTimer = null;
+        }
+        if (splash != null) {
+            splash.setVisible(false);
+            splash.dispose();
+            splash = null;
+            statusLabel = null;
+            progressBar = null;
+        }
+    }
+
+    /* ── Custom progress bar (brand-colored, rounded, thin) ──────────── */
+
+    static class BrandProgressBar extends JComponent {
+        private static final Color TRACK = new Color(0xe6, 0xec, 0xea);
+        private static final Color FOREGROUND = new Color(0x0e, 0x72, 0x68);
+        private int value = 0;
+
+        BrandProgressBar() {
+            setPreferredSize(new Dimension(0, 6));
+            setOpaque(false);
+        }
+
+        int getValue() { return value; }
+
+        void setValue(int v) {
+            int nv = Math.max(0, Math.min(100, v));
+            if (nv == value) return;
+            value = nv;
+            repaint();
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            Graphics2D g2 = (Graphics2D) g.create();
+            try {
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                int w = getWidth();
+                int h = getHeight();
+                g2.setColor(TRACK);
+                g2.fillRoundRect(0, 0, w, h, h, h);
+                int fw = (int) ((long) w * value / 100);
+                if (fw > 0) {
+                    g2.setColor(FOREGROUND);
+                    g2.fillRoundRect(0, 0, fw, h, h, h);
+                }
+            } finally {
+                g2.dispose();
+            }
+        }
     }
 
     /* ── Spring Boot ──────────────────────────────────────────────────── */
 
     private void bootSpring() {
         try {
-            setStatus("Starting backend (this may take ~10 sec)…");
-            // WebServerInitializedEvent = HTTP port 열린 시점 = ApplicationReady 보다 1~2s
-            // 빠름. lazy-init=true 라 dispatcherServlet / controllers 는 첫 request 에 init.
-            // 그 사이 Edge / Chromium 가 spawn + paint 라 backend init 과 병렬 진행.
+            // bundled PG 시작 (5432 이미 listen 중이면 skip).
+            setStatus("Starting database…");
+            setProgress(Math.max(8, progressBar == null ? 0 : progressBar.getValue()));
+            PgManagedLifecycle.ensureRunning();
+
             ConfigurableApplicationContext ctx = new SpringApplicationBuilder(ModernizeProDataApplication.class)
                     .headless(false)
-                    .listeners((WebServerInitializedEvent ev) -> {
-                        setStatus("Launching UI…");
-                        launchEdgeOnce();
-                    })
+                    .listeners(
+                            (ApplicationEnvironmentPreparedEvent ev) -> {
+                                setStatus("Loading config…");
+                                setProgress(Math.max(25, progressBar == null ? 0 : progressBar.getValue()));
+                            },
+                            (ApplicationPreparedEvent ev) -> {
+                                setStatus("Connecting database…");
+                                setProgress(Math.max(60, progressBar == null ? 0 : progressBar.getValue()));
+                            },
+                            (WebServerInitializedEvent ev) -> {
+                                setStatus("Opening UI…");
+                                setProgress(Math.max(90, progressBar == null ? 0 : progressBar.getValue()));
+                                launchEdgeOnce();
+                            }
+                    )
                     .run();
             springCtxRef.set(ctx);
             // safety net.
@@ -153,9 +270,9 @@ public class SwingGuiApp {
         if (!uiLaunched.compareAndSet(false, true)) return;
         Process p = EdgeAppLauncher.launch(START_URL, "edge-app-coordinator");
         if (p == null) {
-            // Edge/Chrome 미발견 → default browser fallback. splash dispose + fallback frame
-            // (Stop 버튼 only) 표시. 사용자가 default browser 닫아도 backend 살아있으니 Stop 필요.
+            // Edge/Chrome 미발견 → default browser fallback. splash dispose + fallback frame.
             SwingUtilities.invokeLater(() -> {
+                setProgress(100);
                 disposeSplash();
                 showFallbackControlFrame();
             });
@@ -163,8 +280,17 @@ public class SwingGuiApp {
         }
         edgeProcRef.set(p);
 
-        // Edge launch 성공 → splash dispose. VSCode / Notion 패턴 = main window 1개 only.
-        SwingUtilities.invokeLater(this::disposeSplash);
+        // Edge process spawn → 잠시 (200ms) 후 progress 100% → 200ms 후 splash dispose.
+        // Chromium 가 paint 할 시간 줘 splash → Edge 매끄러운 전환.
+        Timer finish = new Timer(200, e -> {
+            setProgress(100);
+            setStatus("Ready");
+            Timer hide = new Timer(200, e2 -> disposeSplash());
+            hide.setRepeats(false);
+            hide.start();
+        });
+        finish.setRepeats(false);
+        finish.start();
 
         // Edge process 종료 감시 — Edge X 닫으면 backend 도 stop.
         new Thread(() -> {
@@ -178,14 +304,6 @@ public class SwingGuiApp {
         }, "edge-watcher").start();
     }
 
-    private void disposeSplash() {
-        if (splash != null) {
-            splash.setVisible(false);
-            splash.dispose();
-            splash = null;
-        }
-    }
-
     private void showFallbackControlFrame() {
         fallbackFrame = new JFrame("ModernizeProData");
         fallbackFrame.setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
@@ -197,7 +315,7 @@ public class SwingGuiApp {
         panel.setBackground(Color.WHITE);
 
         JPanel center = new JPanel();
-        center.setLayout(new javax.swing.BoxLayout(center, javax.swing.BoxLayout.Y_AXIS));
+        center.setLayout(new BoxLayout(center, BoxLayout.Y_AXIS));
         center.setOpaque(false);
 
         JLabel brand = new JLabel("ModernizeProData", SwingConstants.CENTER);
@@ -205,19 +323,19 @@ public class SwingGuiApp {
         brand.setFont(brand.getFont().deriveFont(Font.BOLD, 18f));
         brand.setForeground(new Color(0x0e, 0x72, 0x68));
 
-        statusLabel = new JLabel("Running in default browser", SwingConstants.CENTER);
-        statusLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-        statusLabel.setFont(statusLabel.getFont().deriveFont(Font.PLAIN, 12f));
-        statusLabel.setForeground(new Color(0x67, 0x8b, 0x86));
-        statusLabel.setBorder(javax.swing.BorderFactory.createEmptyBorder(12, 0, 12, 0));
+        fallbackStatus = new JLabel("Running in default browser", SwingConstants.CENTER);
+        fallbackStatus.setAlignmentX(Component.CENTER_ALIGNMENT);
+        fallbackStatus.setFont(fallbackStatus.getFont().deriveFont(Font.PLAIN, 12f));
+        fallbackStatus.setForeground(new Color(0x67, 0x8b, 0x86));
+        fallbackStatus.setBorder(BorderFactory.createEmptyBorder(12, 0, 12, 0));
 
-        stopBtn = new JButton("Stop");
-        stopBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
-        stopBtn.addActionListener(e -> shutdown());
+        fallbackStopBtn = new JButton("Stop");
+        fallbackStopBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
+        fallbackStopBtn.addActionListener(e -> shutdown());
 
         center.add(brand);
-        center.add(statusLabel);
-        center.add(stopBtn);
+        center.add(fallbackStatus);
+        center.add(fallbackStopBtn);
 
         JPanel wrap = new JPanel(new java.awt.GridBagLayout());
         wrap.setOpaque(false);
@@ -246,6 +364,11 @@ public class SwingGuiApp {
             ConfigurableApplicationContext ctx = springCtxRef.get();
             if (ctx != null) SpringApplication.exit(ctx, () -> 0);
         } catch (Exception ignored) {}
+        // PG stop 의도적 안 함 — launcher 동시 실행 / 빠른 재시작 시 race condition
+        // (이전 instance shutdown 의 PG stop ↔ 새 instance startup detect 가
+        // 겹치면 새 instance 의 connect 가 refused). PG 그대로 두면 다음 launcher
+        // launch 가 reuse, Windows 종료 시 자연 die. ~200MB RAM trade.
+        if (progressTimer != null) progressTimer.stop();
         if (splash != null) splash.dispose();
         if (fallbackFrame != null) fallbackFrame.dispose();
         System.exit(0);
