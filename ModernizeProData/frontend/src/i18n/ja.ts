@@ -1319,6 +1319,7 @@ export const ja: Record<TranslationKey, string> = {
   'logs.quarantine.filter.errors': 'Errors',
   'logs.quarantine.filter.warnings': 'Warnings',
   'logs.quarantine.pick.all':      '項目を選択…',
+  'logs.quarantine.pickTable.all': '全テーブル',
   'logs.quarantine.rowsBadge':     '{n} ROWS',
   'logs.quarantine.colProject':    'PROJECT_NAME',
   'logs.quarantine.colTable':      'ROW',

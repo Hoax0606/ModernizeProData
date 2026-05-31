@@ -106,6 +106,8 @@ export function LogViewerPage() {
   const [openGroupId, setOpenGroupId] = useState<string | null>(null);
   /** 우상단 group dropdown 선택 — null 이면 severity 결과 다 표시, id 면 그 group 만 표시 + 자동 펼침. */
   const [pickedGroupId, setPickedGroupId] = useState<string | null>(null);
+  /** 테이블 dropdown 선택 — null 이면 전체 테이블, 문자열이면 그 테이블의 group 만. severity 와 AND 결합. */
+  const [tableFilter, setTableFilter] = useState<string | null>(null);
 
   useEffect(() => {
     const id = window.setTimeout(() => setDebouncedSearch(search), 200);
@@ -161,24 +163,44 @@ export function LogViewerPage() {
       totalRows: errRows + warnRows,
     };
   }, [allGroups]);
-  /* All 이 기본이므로 dropdown 미선택 시 severity 필터 결과를 그대로 표시.
-     dropdown 으로 group 하나 고르면 그 카드만 보이고 나머지는 hide. */
-  const filteredGroups = useMemo(() => {
-    const bySev = severityFilter === 'all'
-      ? allGroups
-      : allGroups.filter((g) => g.severity === severityFilter);
-    if (!pickedGroupId) return bySev;
-    return bySev.filter((g) => g.id === pickedGroupId);
-  }, [allGroups, severityFilter, pickedGroupId]);
-
-  /** dropdown 옵션 — 현재 severity 안에서 고를 수 있는 group 목록. */
-  const pickableGroups = useMemo(() => (
+  /* 필터는 severity → table → group(개별) 순으로 AND 결합한다.
+     - bySeverity : severity 탭 결과 (table dropdown 옵션의 모집단)
+     - byTable    : 거기서 테이블 dropdown 적용 (group dropdown 옵션의 모집단)
+     - filtered   : 거기서 개별 group dropdown 적용 → 최종 표시 카드 */
+  const bySeverity = useMemo(() => (
     severityFilter === 'all'
       ? allGroups
       : allGroups.filter((g) => g.severity === severityFilter)
   ), [allGroups, severityFilter]);
+  const byTable = useMemo(() => (
+    tableFilter ? bySeverity.filter((g) => g.table === tableFilter) : bySeverity
+  ), [bySeverity, tableFilter]);
+  const filteredGroups = useMemo(() => (
+    pickedGroupId ? byTable.filter((g) => g.id === pickedGroupId) : byTable
+  ), [byTable, pickedGroupId]);
 
-  /* severity 가 바뀌면 그 안에 picked 가 더 이상 없으니 picked 초기화. */
+  /** 테이블 dropdown 옵션 — 현재 severity 안에 등장하는 unique 테이블 + group 수, 알파벳순.
+     빈 table('') 인 entry 는 제외 (선택 의미 없음). */
+  const tableOptions = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const g of bySeverity) {
+      if (!g.table) continue;
+      m.set(g.table, (m.get(g.table) ?? 0) + 1);
+    }
+    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [bySeverity]);
+
+  /** group dropdown 옵션 — severity + table 필터까지 반영한 group 목록. */
+  const pickableGroups = byTable;
+
+  /* severity 가 바뀌어 그 안에 선택 테이블이 더는 없으면 table 필터 초기화. */
+  useEffect(() => {
+    if (tableFilter && !tableOptions.some(([v]) => v === tableFilter)) {
+      setTableFilter(null);
+    }
+  }, [tableOptions, tableFilter]);
+
+  /* severity/table 가 바뀌면 그 안에 picked 가 더 이상 없으니 picked 초기화. */
   useEffect(() => {
     if (pickedGroupId && !pickableGroups.some((g) => g.id === pickedGroupId)) {
       setPickedGroupId(null);
@@ -602,6 +624,18 @@ export function LogViewerPage() {
                   <SevTab label={t('logs.quarantine.filter.warnings')} count={groupStats.warnGroups}
                     active={severityFilter === 'warning'} onClick={() => setSeverityFilter('warning')} tone="warning" />
                 </div>
+                {/* 테이블 dropdown — severity 탭 바로 옆. 한 테이블의 위반만 모아 보기. */}
+                <select
+                  style={styles.tablePickSelect}
+                  value={tableFilter ?? ''}
+                  onChange={(e) => setTableFilter(e.target.value || null)}
+                  disabled={tableOptions.length === 0}
+                >
+                  <option value="">{t('logs.quarantine.pickTable.all')}</option>
+                  {tableOptions.map(([tbl, n]) => (
+                    <option key={tbl} value={tbl}>{tbl} ({n})</option>
+                  ))}
+                </select>
                 <select
                   style={styles.groupPickSelect}
                   value={pickedGroupId ?? ''}
@@ -610,7 +644,11 @@ export function LogViewerPage() {
                 >
                   <option value="">{t('logs.quarantine.pick.all')}</option>
                   {pickableGroups.map((g) => (
-                    <option key={g.id} value={g.id}>{g.reason} ({g.rowCount})</option>
+                    /* 같은 reason 이 여러 테이블에서 나면 라벨이 동일해 구분 불가 →
+                       테이블명을 앞에 붙여 식별. table 비면 reason 만. */
+                    <option key={g.id} value={g.id}>
+                      {g.table ? `${g.table} — ${g.reason}` : g.reason} ({g.rowCount})
+                    </option>
                   ))}
                 </select>
                 <div style={{ flex: 1 }} />
@@ -879,7 +917,11 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, 
             {open ? '▾' : '▸'}
           </button>
           <div style={styles.cardTitles}>
-            <div style={{ ...styles.cardReason, color: sevColor }}>{g.reason}</div>
+            <div style={styles.cardReasonRow}>
+              <span style={{ ...styles.cardReason, color: sevColor }}>{g.reason}</span>
+              {/* 테이블명 — 같은 reason 이 여러 테이블에서 나도 카드별로 식별되도록 항상 노출. */}
+              {g.table && <span style={styles.cardTableChip}>{g.table}</span>}
+            </div>
             {human && <div style={styles.cardHumanDetail}>{human}</div>}
           </div>
           <div style={styles.cardMetaRight}>
@@ -1470,6 +1512,13 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'inherit',
   },
 
+  /* 테이블 dropdown — severity 탭 바로 옆. group dropdown 보다 좁게 (테이블명 위주). */
+  tablePickSelect: {
+    padding: '5px 10px', border: '1px solid var(--border-strong)', borderRadius: 4,
+    background: 'var(--panel)', color: 'var(--text)',
+    fontSize: 11.5, cursor: 'pointer',
+    width: 180, flexShrink: 0,
+  },
   groupPickSelect: {
     padding: '5px 10px', border: '1px solid var(--border-strong)', borderRadius: 4,
     background: 'var(--panel)', color: 'var(--text)',
@@ -1517,7 +1566,16 @@ const styles: Record<string, React.CSSProperties> = {
   },
   cardExpand: { marginTop: 12 },
   cardTitles: { display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 },
+  cardReasonRow: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' },
   cardReason: { fontSize: 14, fontWeight: 700, lineHeight: 1.3 },
+  /* reason 옆 테이블명 chip — 사이트/프로젝트 chip 과 같은 톤, mono. */
+  cardTableChip: {
+    display: 'inline-flex', alignItems: 'center',
+    padding: '1px 8px', borderRadius: 999,
+    background: 'var(--panel-2)', border: '1px solid var(--border)',
+    color: 'var(--text-2)', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600,
+    maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  },
   cardDetail: {
     fontSize: 11.5, color: 'var(--text-4)', fontFamily: 'var(--mono)',
     wordBreak: 'break-word',
