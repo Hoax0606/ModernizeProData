@@ -1221,7 +1221,7 @@ export const ja: Record<TranslationKey, string> = {
   'siteOverview.kpi.errors':        'Errors',
   'siteOverview.kpi.warnings':      'Warnings',
   'siteOverview.kpi.overall':       'Overall mapping',
-  'siteOverview.col.rows':          'Columns (done / total)',
+  'siteOverview.col.rows':          'Rows (done / total)',
   'siteOverview.noRunYet':          'run データなし',
 
   'executionOverview.title':        'Execution overview',
@@ -1242,7 +1242,7 @@ export const ja: Record<TranslationKey, string> = {
   'executionOverview.col.pinned':   'Version',
   'executionOverview.col.username': 'Username',
   'executionOverview.col.tables':   'Tables',
-  'executionOverview.col.rows':     'Columns',
+  'executionOverview.col.rows':     'Rows',
   'executionOverview.col.progress': 'Progress',
   'executionOverview.col.errors':   'Errors',
   'executionOverview.col.warnings': 'Warnings',

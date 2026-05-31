@@ -1215,7 +1215,7 @@ export const en: Record<TranslationKey, string> = {
   'siteOverview.kpi.errors':        'Errors',
   'siteOverview.kpi.warnings':      'Warnings',
   'siteOverview.kpi.overall':       'Overall mapping',
-  'siteOverview.col.rows':          'Columns (done / total)',
+  'siteOverview.col.rows':          'Rows (done / total)',
   'siteOverview.noRunYet':          'no run data yet',
 
   'executionOverview.title':        'Execution overview',
@@ -1236,7 +1236,7 @@ export const en: Record<TranslationKey, string> = {
   'executionOverview.col.pinned':   'Version',
   'executionOverview.col.username': 'Username',
   'executionOverview.col.tables':   'Tables',
-  'executionOverview.col.rows':     'Columns',
+  'executionOverview.col.rows':     'Rows',
   'executionOverview.col.progress': 'Progress',
   'executionOverview.col.errors':   'Errors',
   'executionOverview.col.warnings': 'Warnings',
