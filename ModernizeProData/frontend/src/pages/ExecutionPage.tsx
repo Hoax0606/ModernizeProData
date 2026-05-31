@@ -446,7 +446,7 @@ export function ExecutionPage() {
 
   const runs = (runHistoryData ?? []).map(beRunToRunCard);
 
-  const controlsLocked = displayedActiveRun !== null || !hasPinnedSnapshot;
+  const controlsLocked = displayedActiveRun !== null || !hasPinnedSnapshot || !canControl;
 
   /* Real モードの run 起動本体 — start API 呼び出し + runId 保存.
      handleStartRun(二重起動 guard 経由) と handleRetry(guard なしで再起動 + resumeFromRunId) が共有.
@@ -495,6 +495,10 @@ export function ExecutionPage() {
   const canStop = isMaster || (isMyProject && !runIsBulk);
   const canRetry = canStop;
   const canDiscard = canStop;
+  /* Execution 페이지 전체 컨트롤 (table 선택 / preflight / Start) 권한.
+     master 또는 project executionAssignee 본인만. 비권한자는 DisabledOverlay
+     로 UI 잠그고 RunHeader 의 canStart 도 false 로. */
+  const canControl = isMaster || isMyProject;
 
   const handleRetry = async () => {
     if (!canRetry) return;
@@ -546,6 +550,7 @@ export function ExecutionPage() {
         canStop={canStop}
         canRetry={canRetry}
         canDiscard={canDiscard}
+        canControl={canControl}
         onRetry={handleRetry}
         onDiscard={handleDiscard}
       />
@@ -587,7 +592,7 @@ function DisabledOverlay({ disabled, children }: { disabled: boolean; children: 
 
 function RunHeader({
   t, project, site, runMode, activeRun, runs, preflightPassed, hasPinnedSnapshot,
-  selectedTablesCount, onStart, onStop, canStop, canRetry, canDiscard, onRetry, onDiscard,
+  selectedTablesCount, onStart, onStop, canStop, canRetry, canDiscard, canControl, onRetry, onDiscard,
 }: {
   t: T;
   project: Project;
@@ -605,19 +610,23 @@ function RunHeader({
   /** Retry/Discard 권한 — Stop 과 동일 (master 또는 assignee 본인 + non-bulk). */
   canRetry: boolean;
   canDiscard: boolean;
+  /** Start 권한 — master 또는 executionAssignee 본인만. */
+  canControl: boolean;
   onRetry: () => void;
   onDiscard: () => void;
 }) {
-  const canStart = preflightPassed && selectedTablesCount > 0 && hasPinnedSnapshot && runMode !== null;
+  const canStart = canControl && preflightPassed && selectedTablesCount > 0 && hasPinnedSnapshot && runMode !== null;
   const isDone = project.phase === 'done';
 
-  const startTooltip = !hasPinnedSnapshot
-    ? t('execution.run.startBlocked.noPin')
-    : !runMode
-      ? t('execution.run.startBlocked.phaseEnv', { phase: project.phase, env: site.environment })
-      : !preflightPassed
-        ? t('execution.run.startBlockedHint')
-        : t('execution.run.startReadyHint');
+  const startTooltip = !canControl
+    ? 'Only the assignee or master can start a run'
+    : !hasPinnedSnapshot
+      ? t('execution.run.startBlocked.noPin')
+      : !runMode
+        ? t('execution.run.startBlocked.phaseEnv', { phase: project.phase, env: site.environment })
+        : !preflightPassed
+          ? t('execution.run.startBlockedHint')
+          : t('execution.run.startReadyHint');
 
   if (!activeRun) {
     const lastRun = runs[0] ?? null;
