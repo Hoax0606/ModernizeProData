@@ -142,7 +142,6 @@ export const SHEETS: Record<CategoryKey, SheetSchema[]> = {
       { name: 'SUM(TOBE)', type: 'NUMBER' },
       { name: 'Δ %',       type: 'TEXT' },
       { name: 'Verdict',   type: 'TEXT' },
-      { name: 'Note',      type: 'TEXT' },
     ]},
     { name: 'NULL parity', columns: [
       { name: 'Column',     type: 'VARCHAR' },
@@ -151,7 +150,6 @@ export const SHEETS: Record<CategoryKey, SheetSchema[]> = {
       { name: 'NULLS TOBE', type: 'BIGINT' },
       { name: 'Δ',          type: 'BIGINT' },
       { name: 'Verdict',    type: 'TEXT' },
-      { name: 'Note',       type: 'TEXT' },
     ]},
     { name: 'Min Max', columns: [
       { name: 'Column',   type: 'VARCHAR' },
@@ -161,7 +159,6 @@ export const SHEETS: Record<CategoryKey, SheetSchema[]> = {
       { name: 'MIN TOBE', type: 'TEXT' },
       { name: 'MAX TOBE', type: 'TEXT' },
       { name: 'Verdict',  type: 'TEXT' },
-      { name: 'Note',     type: 'TEXT' },
     ]},
     { name: 'Range', columns: [
       { name: 'Column',        type: 'VARCHAR' },
@@ -170,7 +167,6 @@ export const SHEETS: Record<CategoryKey, SheetSchema[]> = {
       { name: 'Observed max',  type: 'NUMBER' },
       { name: 'Overflow rows', type: 'INT' },
       { name: 'Verdict',       type: 'TEXT' },
-      { name: 'Note',          type: 'TEXT' },
     ]},
     /* Quarantine 통계 시트 — binding 의 stageLabel × (entries, rows) 집계 (2026-05-31). */
     { name: 'Quarantine', columns: [
@@ -1005,7 +1001,6 @@ function validationSumReconRows(dto: ValidationReportDto): Cell[][] {
     fmtCell(r.asisSum), fmtCell(r.tobeSum),
     r.deltaPercent == null ? '' : `${fmtCell(r.deltaPercent)}%`,
     verdictText(r.verdict),
-    fmtCell(r.note ?? ''),
   ]);
 }
 
@@ -1014,7 +1009,6 @@ function validationNullParityRows(dto: ValidationReportDto): Cell[][] {
     fmtCell(r.column), fmtCell(r.type),
     r.asisNulls, r.tobeNulls, r.delta,
     verdictText(r.verdict),
-    fmtCell(r.note ?? ''),
   ]);
 }
 
@@ -1024,7 +1018,6 @@ function validationMinMaxRows(dto: ValidationReportDto): Cell[][] {
     fmtCell(r.asisMin), fmtCell(r.asisMax),
     fmtCell(r.tobeMin), fmtCell(r.tobeMax),
     verdictText(r.verdict),
-    fmtCell(r.note ?? ''),
   ]);
 }
 
@@ -1034,7 +1027,6 @@ function validationRangeRows(dto: ValidationReportDto): Cell[][] {
     fmtCell(r.bound), fmtCell(r.observedMax),
     r.overflowRows ?? 0,
     verdictText(r.verdict),
-    fmtCell(r.note ?? ''),
   ]);
 }
 
