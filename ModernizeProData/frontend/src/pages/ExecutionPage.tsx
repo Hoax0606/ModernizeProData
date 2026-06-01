@@ -17,6 +17,7 @@ import { tobeDbApi } from '../api/tobeDb';
 import { csvPreviewApi } from '../api/csvPreview';
 import { mappingImportApi } from '../api/mappingImport';
 import { runsApi, type RunHistoryDto, type StageView } from '../api/runs';
+import { quarantineAckApi } from '../api/quarantineAck';
 import { usePipelineProgress, isTerminal } from '../hooks/usePipelineProgress';
 import { PreflightResultPanel } from '../components/PreflightResultPanel';
 import {
@@ -672,6 +673,17 @@ function RunHeader({
   const canStart = canControl && preflightPassed && selectedTablesCount > 0 && hasPinnedSnapshot && runMode !== null;
   const isDone = project.phase === 'done';
 
+  /* run 에 미승인 WARN group 이 있으면 상태를 completed 대신 warning 으로 표시.
+     Log Viewer 에서 Acknowledge 하면 ack=non-null → warningPending=false → completed 로 자동 전환. */
+  const { data: ackGroups } = useQuery({
+    queryKey: ['exec-ack-groups', activeRun?.runId],
+    enabled: !!activeRun?.runId && activeRun.runStatus === 'completed',
+    queryFn: () => quarantineAckApi.listGroups(activeRun!.runId),
+    refetchInterval: 5_000,
+    staleTime: 2_000,
+  });
+  const warningPending = (ackGroups ?? []).some((g) => g.severity === 'warning' && !g.ack);
+
   const startTooltip = !canControl
     ? 'Only the assignee or master can start a run'
     : !hasPinnedSnapshot
@@ -762,13 +774,16 @@ function RunHeader({
     elapsed: formatDuration(elapsedMs),
   });
 
+  const isWarning = isCompleted && warningPending;
   const statusChipTone: BadgeTone =
     isFailed ? 'err'
+    : isWarning ? 'warn'
     : isAborted ? 'warn'
     : isCompleted ? 'queued'
     : 'ok';
   const statusChipText =
     isFailed ? t('execution.run.status.failed')
+    : isWarning ? t('execution.run.status.warning')
     : isAborted ? t('execution.run.status.aborted')
     : isCompleted ? t('execution.run.status.completed')
     : t('execution.run.status.running');

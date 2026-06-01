@@ -11,6 +11,8 @@ import lombok.Setter;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Run 1회분의 stage 실행 동안 공유되는 컨텍스트.
@@ -45,6 +47,26 @@ public class StageContext {
 
     /** RunLog ingest 의 line seq cursor. stage runner 가 ingest 후 update. */
     private long logLineSeqCursor;
+
+    /**
+     * ExtractStage 가 채우는 binding 별 AS-IS CSV 메타데이터(mtime+size). key = binding.getId().
+     * Validation 의 WARN ack carry-over fingerprint 매칭(정책 3·6)에 사용 — 같은 CSV 일 때만
+     * 이전 ack 가 carry-over 되도록.
+     */
+    @Builder.Default
+    private final Map<String, CsvFingerprint> csvFingerprintByBinding = new ConcurrentHashMap<>();
+
+    /** AS-IS CSV fingerprint — 한 binding 의 모든 source CSV 를 합산(size 합 / mtime 최댓값). */
+    public record CsvFingerprint(long mtimeMs, long size) {}
+
+    public void putCsvFingerprint(String bindingId, long mtimeMs, long size) {
+        csvFingerprintByBinding.put(bindingId, new CsvFingerprint(mtimeMs, size));
+    }
+
+    /** binding 의 CSV fingerprint. ExtractStage 미실행/미저장 시 null (= carry-over 비활성). */
+    public CsvFingerprint getCsvFingerprint(String bindingId) {
+        return csvFingerprintByBinding.get(bindingId);
+    }
 
     public Path parquet1Dir()  { return outputDir.resolve("parquet1"); }
     public Path parquet2Dir()  { return outputDir.resolve("parquet2"); }

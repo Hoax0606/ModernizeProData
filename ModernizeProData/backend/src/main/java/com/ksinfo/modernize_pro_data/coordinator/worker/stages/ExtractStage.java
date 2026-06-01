@@ -140,6 +140,7 @@ public class ExtractStage implements StageRunner {
                 String sampleSizeClause = isUtf8 ? ", sample_size=10000" : ", sample_size=-1";
 
                 long totalRows = 0;
+                long fpMtime = 0L; long fpSize = 0L;   // AS-IS CSV fingerprint (WARN ack carry-over, 정책 3·6)
                 for (Map.Entry<String, String> entry : asisTableToSchema.entrySet()) {
                     String asisTable = entry.getKey();
                     Path csv = StageHelpers.resolveCsvFile(baseDir, entry.getValue(), asisTable);
@@ -147,6 +148,12 @@ public class ExtractStage implements StageRunner {
                         String qualified = (entry.getValue() != null && !entry.getValue().isBlank())
                                 ? entry.getValue() + "." + asisTable : asisTable;
                         throw new IllegalStateException("CSV not found: " + qualified + ".csv");
+                    }
+                    try {
+                        fpMtime = Math.max(fpMtime, java.nio.file.Files.getLastModifiedTime(csv).toMillis());
+                        fpSize += java.nio.file.Files.size(csv);
+                    } catch (java.io.IOException ignore) {
+                        /* fingerprint 수집 실패 — 추출은 그대로 진행, carry-over 만 비활성(안전). */
                     }
                     String escapedPath = csv.toString().replace("'", "''");
                     String fqTable = quoteIdent(schema) + "." + quoteIdent("asis_" + asisTable);
@@ -173,6 +180,11 @@ public class ExtractStage implements StageRunner {
                         scanForReplacementChars(ctx, stage, childBindingId, tableLabel, schema, asisTable);
                     }
                     ingest(ctx, "Extracted source " + asisTable + " (binding " + tobeTable + ")", true);
+                }
+
+                // CSV fingerprint 저장 — Validation 의 WARN ack carry-over 매칭용 (key = 검증이 쓰는 childBindingId).
+                if (fpSize > 0) {
+                    ctx.putCsvFingerprint(childBindingId, fpMtime, fpSize);
                 }
 
                 OffsetDateTime tableEnd = OffsetDateTime.now();

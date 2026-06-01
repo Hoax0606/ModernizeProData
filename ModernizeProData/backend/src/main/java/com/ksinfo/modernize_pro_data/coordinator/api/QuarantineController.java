@@ -144,6 +144,8 @@ public class QuarantineController {
     private QuarantineGroupView toGroupView(QuarantineEntry e, String stageKeyFallback) {
         Map<String, Object> s = e.getSampleData() == null ? Map.of() : e.getSampleData();
         String stageLabel = s.get("stageLabel") instanceof String sl ? sl : stageKeyFallback;
+        Long csvMtimeMs = s.get("csvMtimeMs") instanceof Number n  ? n.longValue()  : null;
+        Long csvSize    = s.get("csvSize")    instanceof Number n2 ? n2.longValue() : null;
         return new QuarantineGroupView(
                 e.getId(),
                 e.getBindingId(),
@@ -157,7 +159,8 @@ public class QuarantineController {
                 (List<String>) s.getOrDefault("columnRoles", List.of()),
                 (List<List<Object>>) s.getOrDefault("sampleRows", List.of()),
                 (List<Object>) s.get("toBeValues"),
-                e.getRowCount() == null ? 0L : e.getRowCount()
+                e.getRowCount() == null ? 0L : e.getRowCount(),
+                csvMtimeMs, csvSize
         );
     }
 
@@ -176,7 +179,9 @@ public class QuarantineController {
             List<String> columnRoles,
             List<List<Object>> sampleRows,
             List<Object> toBeValues,
-            long rowCount
+            long rowCount,
+            Long csvMtimeMs,                  // AS-IS CSV fingerprint — FE 가 ack 시 그대로 전송 (carry-over)
+            Long csvSize
     ) {}
 
     public record SiteQuarantineGroupView(

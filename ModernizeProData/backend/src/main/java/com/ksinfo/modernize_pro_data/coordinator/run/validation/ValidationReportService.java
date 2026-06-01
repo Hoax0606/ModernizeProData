@@ -162,11 +162,16 @@ public class ValidationReportService implements StageRunner {
                 } else {
                     failedCount++;
                 }
-                ingest(ctx, "Validation " + tableLabel + ": " + report.getPassedChecks()
+                String validationMsg = "Validation " + tableLabel + ": " + report.getPassedChecks()
                         + "/" + report.getTotalChecks() + " PASS"
                         + (resolvedStatus == StageTableStatus.failed_with_pending_warnings
-                                ? " (warnings pending review)" : ""),
-                        countAsSuccess);
+                                ? " (warnings pending review)" : "");
+                if (resolvedStatus == StageTableStatus.failed_with_pending_warnings) {
+                    // PASS + 경고 검토대기 = 실패(FAIL)가 아님 → ERROR 가 아니라 WARN 으로 로깅.
+                    ingestWarn(ctx, validationMsg);
+                } else {
+                    ingest(ctx, validationMsg, countAsSuccess);
+                }
                 stage.setTablesSuccess(successCount);
                 stage.setTablesFailed(failedCount);
                 stageInstanceRepo.save(stage);
@@ -353,13 +358,16 @@ public class ValidationReportService implements StageRunner {
 
         String projectId = ctx.getProject().getId();
         com.ksinfo.modernize_pro_data.coordinator.run.RunType phase = ctx.getRunHistory().getRunType();
-        // 첫 도입: csv fingerprint null → carry-over 비활성. 그룹마다 ack 미존재로 판정.
+        // CSV fingerprint (ExtractStage 가 적재). null 이면 carry-over 비활성(안전 — 정책 3·6).
+        var fp = ctx.getCsvFingerprint(binding.getId());
+        Long csvMtimeMs = fp == null ? null : fp.mtimeMs();
+        Long csvSize    = fp == null ? null : fp.size();
         for (String key : warnGroupKeys) {
             int sep = key.indexOf('|');
             String ruleName = key.substring(0, sep);
             String reason = key.substring(sep + 1);
             var found = ackService.findCarryOver(projectId, binding.getId(),
-                    ruleName, reason, /*csvMtimeMs*/ null, /*csvSize*/ null, phase);
+                    ruleName, reason, csvMtimeMs, csvSize, phase);
             if (found.isEmpty()) return StageTableStatus.failed_with_pending_warnings;
         }
         return StageTableStatus.success;
@@ -876,12 +884,18 @@ public class ValidationReportService implements StageRunner {
         data.put("columns", columns);
         data.put("columnRoles", columnRoles);
         data.put("sampleRows", sampleRows);
+        /* CSV fingerprint 동봉 — FE 가 ack 시 그대로 돌려보내 carry-over 매칭(정책 3·6)에 사용. */
+        var fp = ctx.getCsvFingerprint(binding.getId());
+        if (fp != null) {
+            data.put("csvMtimeMs", fp.mtimeMs());
+            data.put("csvSize", fp.size());
+        }
         quarantineService.record(
                 ctx.getRunHistory().getId(),
                 stage.getId(),
                 binding.getId(),
                 null,
-                reason,
+                stageLabel,   // rule_name = stageLabel (정책 2: rule_name·reason 분리). ack 매칭 키 — FE g.stage 와 동일.
                 severity,
                 data,
                 rowCount,
@@ -1113,6 +1127,13 @@ public class ValidationReportService implements StageRunner {
         var line = info
                 ? StageHelpers.info(seq, ctx.getRunHistory().getId(), STAGE_KEY, message)
                 : StageHelpers.error(seq, ctx.getRunHistory().getId(), STAGE_KEY, message);
+        runLogIngest.ingest(ctx.getRunHistory().getId(), ctx.getProject().getId(), List.of(line));
+    }
+
+    /** WARN 레벨 로그. PASS + 경고 검토대기(failed_with_pending_warnings)처럼 '실패는 아니나 주의' 상태용. */
+    private void ingestWarn(StageContext ctx, String message) {
+        long seq = ctx.nextLogSeq();
+        var line = StageHelpers.warn(seq, ctx.getRunHistory().getId(), STAGE_KEY, message);
         runLogIngest.ingest(ctx.getRunHistory().getId(), ctx.getProject().getId(), List.of(line));
     }
 }

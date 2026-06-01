@@ -110,12 +110,14 @@ public class QuarantineAckController {
             Map<String, Object> sample = e.getSampleData() == null ? Map.of() : e.getSampleData();
             String reason = String.valueOf(sample.getOrDefault("reason", ""));
             String key = e.getBindingId() + "|" + e.getRuleName() + "|" + reason;
+            Long cMtime = sample.get("csvMtimeMs") instanceof Number nm ? nm.longValue() : null;
+            Long cSize  = sample.get("csvSize")    instanceof Number ns ? ns.longValue() : null;
             GroupAggregator g = groups.computeIfAbsent(key, k -> new GroupAggregator(
                     e.getBindingId(), e.getRuleName(), reason,
                     String.valueOf(sample.getOrDefault("table", "")),
                     String.valueOf(sample.getOrDefault("stageLabel",
                             stageKeyById.getOrDefault(e.getStageInstanceId(), "unknown"))),
-                    e.getSeverity()));
+                    e.getSeverity(), cMtime, cSize));
             g.rowCount += (e.getRowCount() == null ? 0 : e.getRowCount());
             g.entryCount++;
         }
@@ -127,7 +129,7 @@ public class QuarantineAckController {
             // Carry-over 조회 — csv fingerprint null 일 수도 (첫 도입)
             Optional<QuarantineAcknowledgment> carryOver = ackRepo.findLatestCarryOver(
                     project.getId(), g.bindingId, g.ruleName, g.reason,
-                    /*csvMtimeMs*/ null, /*csvSize*/ null, allowedPhases);
+                    g.csvMtimeMs, g.csvSize, allowedPhases);
             AckInfo ackInfo = carryOver.map(a -> new AckInfo(
                     a.getId(), a.getAcknowledgedBy(), a.getAcknowledgedAt(),
                     a.getPhase(), true /*carryOver*/)).orElse(null);
@@ -251,17 +253,22 @@ public class QuarantineAckController {
         final String tableName;
         final String stageLabel;
         final QuarantineSeverity severity;
+        final Long csvMtimeMs;     // carry-over fingerprint (정책 3·6) — sample_data 에서 추출
+        final Long csvSize;
         long rowCount = 0;
         int entryCount = 0;
 
         GroupAggregator(String bindingId, String ruleName, String reason,
-                        String tableName, String stageLabel, QuarantineSeverity severity) {
+                        String tableName, String stageLabel, QuarantineSeverity severity,
+                        Long csvMtimeMs, Long csvSize) {
             this.bindingId = bindingId;
             this.ruleName = ruleName;
             this.reason = reason;
             this.tableName = tableName;
             this.stageLabel = stageLabel;
             this.severity = severity;
+            this.csvMtimeMs = csvMtimeMs;
+            this.csvSize = csvSize;
         }
     }
 }

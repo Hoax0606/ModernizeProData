@@ -12,7 +12,7 @@ import {
 } from '../api/runLogs';
 import { runsApi, type RunHistoryDto, type RunTableResult } from '../api/runs';
 import { quarantineApi } from '../api/quarantine';
-import { quarantineAckApi, type RunPhase } from '../api/quarantineAck';
+import { quarantineAckApi, type RunPhase, type QuarantineGroupAck } from '../api/quarantineAck';
 import { useSnapshotsStore, usePinnedSnapshotsStore } from '../store/snapshots';
 import { formatTimestamp, formatTimeMs, formatDuration } from '../lib/formatters';
 import { stageColor } from './logViewerMock';
@@ -150,6 +150,22 @@ export function LogViewerPage() {
     staleTime: 2_000,
   });
 
+  /* group 별 ack 상태 (carry-over 반영). ack 된 group 은 Quarantine 목록에서 숨김. */
+  const { data: ackGroupsData, refetch: refetchAckGroups } = useQuery<QuarantineGroupAck[]>({
+    queryKey: ['quarantine-ack', runId],
+    enabled: !!runId,
+    queryFn: () => quarantineAckApi.listGroups(runId),
+    refetchInterval: 5_000,
+    staleTime: 2_000,
+  });
+  const ackedKeys = useMemo(() => {
+    const s = new Set<string>();
+    for (const ag of ackGroupsData ?? []) {
+      if (ag.ack) s.add(`${ag.bindingId}|${ag.ruleName}|${ag.reason}`);
+    }
+    return s;
+  }, [ackGroupsData]);
+
   /* WARN ack 시스템 (2026-06-01).
      runHistory 의 latest run 의 runType 을 ack phase 로 사용.
      runHistory 데이터 미도착 시 ack 버튼 미노출. */
@@ -171,15 +187,22 @@ export function LogViewerPage() {
         ruleName: g.stage,
         reason: g.reason,
         phase: runPhase,
+        // CSV fingerprint 전송 — 같은 CSV 로 재실행 시 carry-over (정책 3·6).
+        csvMtimeMs: g.csvMtimeMs ?? null,
+        csvSize: g.csvSize ?? null,
         note: note || null,
       });
       await refetchQuarantine();
+      await refetchAckGroups();
     } catch (e: unknown) {
       console.error('quarantine acknowledge failed', e);
       alert('Acknowledge failed: ' + (e instanceof Error ? e.message : String(e)));
     }
-  }, [project, runPhase, refetchQuarantine]);
-  const allGroups: QuarantineGroup[] = allGroupsData ?? [];
+  }, [project, runPhase, refetchQuarantine, refetchAckGroups]);
+  /* ack 된 group(carry-over 매칭) 은 숨긴다 — key = bindingId|stageLabel|reason (BE rule_name=stageLabel 과 동일). */
+  const allGroups: QuarantineGroup[] = (allGroupsData ?? []).filter(
+    (g) => !ackedKeys.has(`${g.bindingId}|${g.stage}|${g.reason}`),
+  );
   const groupStats = useMemo(() => {
     let errRows = 0, warnRows = 0;
     for (const g of allGroups) {

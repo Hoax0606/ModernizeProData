@@ -28,7 +28,13 @@
  * 즉 UI 는 이 shape 만 받으면 동작이 동일하다. 룰 정의 → DB → 응답까지의
  * 결정 과정은 BE 책임.
  */
-export type QuarantineColumnRole = 'pk' | 'violated' | 'context';
+/* 'pk'/'violated'/'context' = row 단위 위반(error 류) 표시용.
+   'metric'/'asis_value'/'tobe_value' = 집계 비교 위반(validate.min_max / validate.checksum 등 warning)
+   에서 BE 가 보내는 롤 — metric=비교 대상(컬럼/테이블명), asis_value=AS-IS 측 값, tobe_value=TO-BE 측 값.
+   (이 롤들을 헬퍼가 인식해야 warning 카드도 error 처럼 무엇이 다른지 값으로 보여준다 — 2026-06-01 fix) */
+export type QuarantineColumnRole =
+  | 'pk' | 'violated' | 'context'
+  | 'metric' | 'asis_value' | 'tobe_value';
 
 export type QuarantineSeverity = 'error' | 'warning';
 
@@ -56,6 +62,9 @@ export interface QuarantineGroup {
    */
   toBeValues?: QuarantineCell[];
   rowCount: number;                              // 그룹의 총 violated row 수 (sampleRows.length 보다 클 수 있음)
+  /** AS-IS CSV fingerprint (BE 만 채움). WARN ack 시 그대로 전송 → 같은 CSV 재실행 시 carry-over (정책 3·6). */
+  csvMtimeMs?: number | null;
+  csvSize?: number | null;
 }
 
 /**
@@ -479,33 +488,39 @@ export function quarantineToBeConstraint(g: QuarantineGroup, t: HumanizeT): stri
   }
 }
 
-/** sample row 의 violated 컬럼 값 = AS-IS 표시값. violated 없으면 null. */
+/** sample row 의 AS-IS 표시값. row 위반은 'violated', 집계 비교(warning)는 'asis_value' 컬럼. 없으면 null. */
 export function quarantineRowAsIs(g: QuarantineGroup, rowIdx: number): QuarantineCell {
-  const violatedIdx = g.columnRoles.findIndex((r) => r === 'violated');
-  if (violatedIdx < 0) return null;
-  return g.sampleRows[rowIdx]?.[violatedIdx] ?? null;
+  let idx = g.columnRoles.findIndex((r) => r === 'violated');
+  if (idx < 0) idx = g.columnRoles.findIndex((r) => r === 'asis_value');
+  if (idx < 0) return null;
+  return g.sampleRows[rowIdx]?.[idx] ?? null;
 }
 
-/** sample row 의 PK 컬럼 값 = 어떤 row 인지 식별용. PK 없으면 null. */
+/** sample row 의 식별 컬럼 값. row 위반은 'pk', 집계 비교(warning)는 'metric'(비교 대상명). 없으면 null. */
 export function quarantineRowPk(g: QuarantineGroup, rowIdx: number): QuarantineCell {
-  const pkIdx = g.columnRoles.findIndex((r) => r === 'pk');
-  if (pkIdx < 0) return null;
-  return g.sampleRows[rowIdx]?.[pkIdx] ?? null;
+  let idx = g.columnRoles.findIndex((r) => r === 'pk');
+  if (idx < 0) idx = g.columnRoles.findIndex((r) => r === 'metric');
+  if (idx < 0) return null;
+  return g.sampleRows[rowIdx]?.[idx] ?? null;
 }
 
-/** PK 컬럼명 — 없으면 null (헤더 fallback 라벨용). */
+/** 식별 컬럼명 — 헤더 fallback 라벨용. 'pk' 없으면 'metric'. 없으면 null. */
 export function quarantinePkColumnName(g: QuarantineGroup): string | null {
-  const pkIdx = g.columnRoles.findIndex((r) => r === 'pk');
-  return pkIdx >= 0 ? g.columns[pkIdx] ?? null : null;
+  let idx = g.columnRoles.findIndex((r) => r === 'pk');
+  if (idx < 0) idx = g.columnRoles.findIndex((r) => r === 'metric');
+  return idx >= 0 ? g.columns[idx] ?? null : null;
 }
 
-/** violated 컬럼명 — 헤더 AS-IS 옆 표기용. 없으면 null. */
+/** violated 컬럼명 — 헤더 AS-IS 옆 표기용. row 위반에서만 의미 있음(집계 비교 warning 은 metric 열/reason 이 대상 표시). 없으면 null. */
 export function quarantineViolatedColumnName(g: QuarantineGroup): string | null {
   const idx = g.columnRoles.findIndex((r) => r === 'violated');
   return idx >= 0 ? g.columns[idx] ?? null : null;
 }
 
-/** 룰 엔진 transform 시도 결과 = TO-BE 표시값. toBeValues 미제공이면 null. */
+/** TO-BE 표시값. 룰 엔진 transform 결과(toBeValues) 우선, 없으면 집계 비교(warning)의 'tobe_value' 컬럼. */
 export function quarantineRowToBe(g: QuarantineGroup, rowIdx: number): QuarantineCell {
-  return g.toBeValues?.[rowIdx] ?? null;
+  if (Array.isArray(g.toBeValues)) return g.toBeValues[rowIdx] ?? null;
+  const idx = g.columnRoles.findIndex((r) => r === 'tobe_value');
+  if (idx >= 0) return g.sampleRows[rowIdx]?.[idx] ?? null;
+  return null;
 }

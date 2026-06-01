@@ -540,6 +540,7 @@ export const en: Record<TranslationKey, string> = {
   'execution.run.status.completed':   'completed',
   'execution.run.status.failed':      'failed',
   'execution.run.status.aborted':     'aborted',
+  'execution.run.status.warning':     'warning',
   'execution.run.retry':              'Resume from failure',
   'execution.run.stop':               'Stop',
   'execution.run.abortReason':        'Aborted by user',
