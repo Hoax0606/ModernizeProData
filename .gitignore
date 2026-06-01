@@ -122,6 +122,13 @@ ModernizeProData/installer/assets/mpd.ico
 # Vite prod build → backend resources/static/ 으로 stage 됨 (빌드 산출물).
 ModernizeProData/backend/src/main/resources/static/
 
+# ── .NET WebView2 host 빌드 산출물 ─────────────────────────────────
+# webview-host/dist/ 는 release artifact (build.ps1 가 staging 으로 복사),
+# bin/ + obj/ 는 매 빌드마다 새로 생성되는 중간 파일. 둘 다 ignore.
+ModernizeProData/installer/webview-host/bin/
+ModernizeProData/installer/webview-host/obj/
+ModernizeProData/installer/webview-host/dist/
+
 # ── Docker 로컬 override ────────────────────────────────────────────
 compose.override.yaml
 compose.override.yml
