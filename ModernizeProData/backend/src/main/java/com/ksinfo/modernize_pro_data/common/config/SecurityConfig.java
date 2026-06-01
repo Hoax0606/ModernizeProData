@@ -50,6 +50,9 @@ public class SecurityConfig {
                         // First-boot license import — anonymous, only succeeds
                         // while no license is yet loaded (controller-side guard).
                         .requestMatchers("/api/v1/license/initial-setup").permitAll()
+                        // Worker self-management — login 전에도 URL 끊기 가능해야 하므로 anonymous.
+                        // Controller 내부에서 mode=worker 가드.
+                        .requestMatchers("/api/v1/worker-self/**").permitAll()
                         .requestMatchers("/ws/**").permitAll()     // 브라우저 SockJS handshake
                         .requestMatchers("/ws-raw/**").permitAll() // Worker raw WebSocket handshake
                         // SPA shell — bundled Vite 산출물 (login 페이지 진입 전 anonymous 로딩).

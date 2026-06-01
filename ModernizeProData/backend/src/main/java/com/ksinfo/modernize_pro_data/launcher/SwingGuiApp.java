@@ -268,7 +268,12 @@ public class SwingGuiApp {
 
     private void launchEdgeOnce() {
         if (!uiLaunched.compareAndSet(false, true)) return;
-        Process p = EdgeAppLauncher.launch(START_URL, "edge-app-coordinator");
+        // WebView2 host (.NET 8) 가 우선. 미발견 시 Edge `--app` fallback.
+        Process p = WebViewHostLauncher.launch(
+                START_URL,
+                "edge-app-coordinator",
+                "ModernizeProData",
+                WebViewHostLauncher.COORDINATOR_APP_ID);
         if (p == null) {
             // Edge/Chrome 미발견 → default browser fallback. splash dispose + fallback frame.
             SwingUtilities.invokeLater(() -> {
