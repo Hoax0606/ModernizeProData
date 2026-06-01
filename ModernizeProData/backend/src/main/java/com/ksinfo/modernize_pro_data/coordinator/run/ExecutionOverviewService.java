@@ -160,7 +160,8 @@ public class ExecutionOverviewService {
         int pct = switch (s.getStatus()) {
             case pending -> 0;
             case success -> 100;
-            case running, failed -> total == 0 ? 0 : (int) Math.floor(100.0 * ok / total);
+            case running, failed, failed_with_pending_warnings ->
+                    total == 0 ? 0 : (int) Math.floor(100.0 * ok / total);
         };
         return new StageSummary(s.getStageKey(), s.getSeq(), s.getStatus().name(),
                 Math.max(0, Math.min(100, pct)), total, ok, failed);

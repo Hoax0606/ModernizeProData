@@ -129,7 +129,8 @@ public class StageController {
         return switch (si.getStatus()) {
             case pending -> 0;
             case success -> 100;
-            case running, failed -> total == 0 ? 0 : (int) Math.floor(100.0 * success / total);
+            case running, failed, failed_with_pending_warnings ->
+                    total == 0 ? 0 : (int) Math.floor(100.0 * success / total);
         };
     }
 }
