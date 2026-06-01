@@ -23,6 +23,8 @@ export function LoginPage() {
   // 때까지 LoginPage 폼을 *절대* 노출하지 않는다 → 어떤 race 가 있어도
   // license MISSING 상태에서 user 가 login 폼을 볼 가능성 차단.
   const [licenseChecked, setLicenseChecked] = useState(false);
+  const [isWorkerMode, setIsWorkerMode] = useState(false);
+  const [forgetting, setForgetting] = useState(false);
 
   useEffect(() => {
     fetch('/api/v1/health/info?_=' + Date.now(), { cache: 'no-store' })
@@ -32,10 +34,28 @@ export function LoginPage() {
           navigate('/license-setup', { replace: true });
           return;
         }
+        if (d?.data?.mode === 'worker') setIsWorkerMode(true);
         setLicenseChecked(true);
       })
       .catch(() => setLicenseChecked(true));
   }, [navigate]);
+
+  /** Worker 가 저장된 Coordinator URL 잊기 — backend 가 HKCU 삭제 후 process 종료.
+      사용자 다시 launch 시 wizard 의 URL 입력 step 부터 재시작. */
+  const handleForgetUrl = async () => {
+    if (!window.confirm(t('login.forgetUrl.confirm'))) return;
+    setForgetting(true);
+    try {
+      await fetch('/api/v1/worker-self/forget-url', { method: 'POST' });
+      // backend 가 곧 종료. 사용자에게 안내 후 reload (response 후 그래도 종료 발생).
+      alert(t('login.forgetUrl.done'));
+    } catch (e) {
+      console.error('[login] forget-url failed', e);
+      alert(`Forget URL failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+    } finally {
+      setForgetting(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -185,6 +205,29 @@ export function LoginPage() {
             {t('login.devHint.role')}: <code style={styles.code}>master</code> / <code style={styles.code}>admin</code> / <code style={styles.code}>viewer</code>
             &nbsp;·&nbsp; {t('login.devHint.password')} <code style={styles.code}>password</code>
           </div>
+
+          {/* mode 별 보조 액션:
+              - coordinator : License 재입력 → /license-setup 진입 (master 가 expired/invalid 교체).
+              - worker      : URL 끊기 → backend 가 HKCU CoordinatorUrl 삭제 + 종료, 재실행 시
+                              wizard 의 URL 입력 step 부터 재시작. */}
+          {isWorkerMode ? (
+            <button
+              type="button"
+              onClick={handleForgetUrl}
+              disabled={forgetting}
+              style={{ ...styles.linkBtn, ...(forgetting ? styles.buttonDisabled : {}) }}
+            >
+              {forgetting ? t('login.forgetUrl.busy') : t('login.forgetUrl')}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => navigate('/license-setup')}
+              style={styles.linkBtn}
+            >
+              {t('login.relicense')}
+            </button>
+          )}
         </form>
 
         {/* 푸터 */}
@@ -486,5 +529,17 @@ const styles: Record<string, React.CSSProperties> = {
   footerVersion: {
     fontSize: 11,
     color: 'var(--text-4)',
+  },
+  linkBtn: {
+    marginTop: 4,
+    padding: '8px 10px',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 4,
+    background: 'transparent',
+    color: 'var(--navy)',
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+    fontFamily: 'inherit',
   },
 };

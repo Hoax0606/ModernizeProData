@@ -199,21 +199,39 @@ if ($jfxDllCount -eq 0) {
 }
 Write-Host "  Bundled $jfxDllCount JavaFX native DLLs into staging" -ForegroundColor Green
 
-# PostgreSQL 18 portable binaries — 모든 MSI 에 bundle (staging 은 한 번). Worker MSI
-# 도 같은 staging 쓰니까 PG 포함. Worker 는 ensureRunning 호출 안 함 (LocalAppData
-# 의 instance start 안 함, Coordinator PG 에 connect). MSI 크기 +200MB 수용.
+# WebView2 host (.NET 8) — Edge app-mode 대체. dist/ModernizeProDataUI.exe 가 없으면
+# 빌드하고 staging 에 복사. taskbar 우클릭에서 "Microsoft Edge" 잔향 제거 목적.
+$hostExe = Join-Path $PSScriptRoot 'webview-host\dist\ModernizeProDataUI.exe'
+if (-not (Test-Path $hostExe)) {
+    Write-Host "  Building WebView2 host (ModernizeProDataUI.exe)..." -ForegroundColor Cyan
+    & (Join-Path $PSScriptRoot 'webview-host\build-host.ps1')
+    # build-host.ps1 가 Set-Location $PSScriptRoot (webview-host) 로 이동시키므로 원래 dir 복원.
+    Set-Location $PSScriptRoot
+}
+if (Test-Path $hostExe) {
+    # 절대 path 로 staging dir 지정 — 다른 step 이 cwd 를 옮겼을 가능성 대비.
+    $stagingAbs = Join-Path $PSScriptRoot $StagingApp
+    Copy-Item -Force $hostExe $stagingAbs
+    $uiMb = [math]::Round((Get-Item $hostExe).Length / 1MB, 1)
+    Write-Host "  Bundled ModernizeProDataUI.exe ($uiMb MB) into staging" -ForegroundColor Green
+} else {
+    Write-Host "  WARNING: ModernizeProDataUI.exe not built — Edge app-mode fallback will be used at runtime." -ForegroundColor Yellow
+}
+
+# PostgreSQL 18 portable binaries — Coordinator MSI 에만 bundle. Worker 는 자기 PG
+# 를 띄우지 않고 Coordinator 의 PG 에 LAN JDBC 로 connect (application-worker.yml).
+# 따라서 Worker MSI 에 PG portable 동봉 = -228MB 절감 (2026-06-01 결정).
 $pgZip = Join-Path $PSScriptRoot 'cache\postgresql-18.4-windows-x64-binaries.zip'
 if (-not (Test-Path $pgZip)) {
     Write-Host "  Downloading PostgreSQL 18.4 portable binaries..." -ForegroundColor Cyan
     $pgUrl = 'https://get.enterprisedb.com/postgresql/postgresql-18.4-1-windows-x64-binaries.zip'
     Invoke-WebRequest -Uri $pgUrl -OutFile $pgZip -UseBasicParsing
 }
-# zip 그대로 stage — Java 가 첫 launch 시 user dir 에 extract (WiX 의 file count
-# 한계 회피, 5000+ 파일 = light.exe exit 103).
-$pgDst = Join-Path $StagingApp 'postgresql-portable.zip'
-Copy-Item -Force $pgZip $pgDst
-$pgSizeMB = [math]::Round((Get-Item $pgDst).Length / 1MB, 1)
-Write-Host "  Bundled PostgreSQL 18.4 zip ($pgSizeMB MB) into staging" -ForegroundColor Green
+# 실제 staging copy 는 Invoke-JpackageForLang 안에서 role 별로 conditional.
+# 여기선 source path 만 보존.
+$script:PgZipSourcePath = $pgZip
+$pgSrcMB = [math]::Round((Get-Item $pgZip).Length / 1MB, 1)
+Write-Host "  PostgreSQL 18.4 zip source ready ($pgSrcMB MB, will be staged per-role at jpackage time)" -ForegroundColor Green
 
 # DuckDB extensions — 폐쇄망 운영에서 INSTALL 의 인터넷 다운로드 불가. 빌드 머신에서
 # pre-download → staging 동봉. 런타임은 LOAD '<full-path>' 직접.
@@ -344,7 +362,20 @@ function Invoke-JpackageForLang {
     Set-Location $PSScriptRoot
 
     $code = $LangCodes[$Lang]
-    Write-Host "[8/8] Running jpackage (--type msi, language=$Lang / LCID=$code)..." -ForegroundColor Cyan
+    Write-Host "[8/8] Running jpackage (--type msi, role=$RoleForBuild language=$Lang / LCID=$code)..." -ForegroundColor Cyan
+
+    # Role 별 PG portable zip 동봉 제어. Coordinator 만 자기 PG 시작 (PgManagedLifecycle.ensureRunning).
+    # Worker 는 Coordinator 의 PG 에 LAN connect (application-worker.yml) → portable 불필요.
+    $pgStaged = Join-Path $StagingApp 'postgresql-portable.zip'
+    if ($RoleForBuild -eq 'coordinator') {
+        if (-not $script:PgZipSourcePath) { throw "PgZipSourcePath not initialized — staging step skipped?" }
+        Copy-Item -Force $script:PgZipSourcePath $pgStaged
+        $pgMb = [math]::Round((Get-Item $pgStaged).Length / 1MB, 1)
+        Write-Host "  [PG] copied PostgreSQL 18.4 zip ($pgMb MB) into staging for Coordinator MSI" -ForegroundColor DarkGray
+    } else {
+        if (Test-Path $pgStaged) { Remove-Item -Force $pgStaged }
+        Write-Host "  [PG] omitted for Worker MSI (Worker connects to Coordinator PG over LAN)" -ForegroundColor DarkGray
+    }
 
     $resDir = Join-Path $PSScriptRoot "staging\res-$Lang"
     if (Test-Path $resDir) { Remove-Item -Recurse -Force $resDir }

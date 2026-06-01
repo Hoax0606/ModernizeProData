@@ -1,0 +1,127 @@
+using System;
+using System.Drawing;
+using System.IO;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.WinForms;
+
+namespace KsInfo.ModernizeProData.UI;
+
+/// <summary>
+/// WebView2 호스트 폼. Edge `--app=URL` 대체.
+///
+/// 비활성화 항목 (chromeless 일관성):
+///   - 기본 context menu (우클릭)
+///   - DevTools (필요 시 옵션화)
+///   - 다운로드 UI (브라우저 chrome 의 download bubble 자체가 없음 → 의미 X.
+///     다운로드 자체는 onDownloadStarting 에서 우리가 결정)
+///   - 새 창 / pop-up (router 안에서 처리, 외부 도메인은 OS 기본 브라우저로 분리)
+///
+/// taskbar 표시:
+///   - process 가 우리이므로 AUMID = HostOptions.AppId 가 그대로 적용됨 (Program.cs 에서 set).
+/// </summary>
+internal sealed class MainForm : Form
+{
+    private readonly HostOptions _opts;
+    private readonly WebView2 _web;
+
+    public MainForm(HostOptions opts)
+    {
+        _opts = opts;
+        Text = opts.Title;
+        // Edge `--app` 의 기본 size 와 동일 (1280x800).
+        ClientSize = new Size(1280, 800);
+        StartPosition = FormStartPosition.CenterScreen;
+        MinimumSize = new Size(900, 600);
+        // FormBorderStyle = Sizable 유지 (사용자가 resize / move 가능). 완전 borderless
+        // 는 운영 정책 정해진 후 옵션화.
+
+        // exe 의 embedded icon (csproj ApplicationIcon = ..\assets\mpd.ico) 을 Form 으로.
+        // staging 에 별도 .ico copy 없이도 title bar / taskbar 에 brand icon 표시.
+        try
+        {
+            string? exePath = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(exePath))
+            {
+                Icon? ico = Icon.ExtractAssociatedIcon(exePath);
+                if (ico != null) Icon = ico;
+            }
+        }
+        catch { /* icon 추출 실패 silent — 기본 OS icon 표시 */ }
+
+        _web = new WebView2 { Dock = DockStyle.Fill };
+        Controls.Add(_web);
+
+        HandleCreated += (_, _) => ApplyBrandTitleBar();
+        Shown += async (_, _) => await InitWebViewAsync();
+        FormClosing += (_, _) =>
+        {
+            // host 종료 시 backend Java 프로세스도 자연 stop — Java 의 SwingGuiApp 가
+            // host process exit 를 watch 한다.
+        };
+    }
+
+    /// <summary>
+    /// Brand title bar (Windows 11 22000+). 회색 default → navy + white text.
+    /// 이전 Windows / 실패 시 silent (Form 정상 작동).
+    /// </summary>
+    private void ApplyBrandTitleBar()
+    {
+        // Brand mint/teal #0e7268 (React 의 --navy 변수와 동일 brand). border 는
+        // 살짝 더 진한 톤 (--navy-700) 으로 윤곽 강조.
+        var caption = Color.FromArgb(0x0e, 0x72, 0x68);
+        var border  = Color.FromArgb(0x0a, 0x58, 0x50);
+        var text    = Color.White;
+        try
+        {
+            int captionCr = NativeMethods.ToColorRef(caption);
+            NativeMethods.DwmSetWindowAttribute(Handle, NativeMethods.DWMWA_CAPTION_COLOR, ref captionCr, sizeof(int));
+            int borderCr = NativeMethods.ToColorRef(border);
+            NativeMethods.DwmSetWindowAttribute(Handle, NativeMethods.DWMWA_BORDER_COLOR, ref borderCr, sizeof(int));
+            int textCr = NativeMethods.ToColorRef(text);
+            NativeMethods.DwmSetWindowAttribute(Handle, NativeMethods.DWMWA_TEXT_COLOR, ref textCr, sizeof(int));
+        }
+        catch { /* old Windows / DWM 부재 — silent */ }
+    }
+
+    private async Task InitWebViewAsync()
+    {
+        // user-data dir = LOCALAPPDATA\ModernizeProData\webview2\<profile> .
+        string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string userDataDir = Path.Combine(localAppData, "ModernizeProData", "webview2", _opts.Profile);
+        Directory.CreateDirectory(userDataDir);
+
+        var env = await CoreWebView2Environment.CreateAsync(null, userDataDir, null);
+        await _web.EnsureCoreWebView2Async(env);
+
+        var settings = _web.CoreWebView2.Settings;
+        settings.AreDefaultContextMenusEnabled = false;   // 우클릭 메뉴 X
+        settings.AreDevToolsEnabled = false;              // F12 X (운영 build)
+        settings.IsStatusBarEnabled = false;              // 하단 URL preview X
+        settings.IsZoomControlEnabled = true;
+        settings.AreBrowserAcceleratorKeysEnabled = false; // Ctrl+P / Ctrl+S / Ctrl+R etc.
+        settings.IsBuiltInErrorPageEnabled = true;
+
+        // 외부 domain link / target=_blank → OS 기본 브라우저로 분리. 도구 내부 navigation
+        // (localhost:8080) 만 host 안에서 처리.
+        _web.CoreWebView2.NewWindowRequested += (s, e) =>
+        {
+            e.Handled = true;
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = e.Uri,
+                    UseShellExecute = true
+                });
+            }
+            catch { /* shell open 실패 silent */ }
+        };
+
+        // 다운로드 = 도구 안에서 의도된 export 만 발생. browser 의 download bubble 자체가
+        // 없는 host 라 user-visible UI 영향 0. blob → <a download> 클릭 흐름은 그대로 작동.
+
+        _web.CoreWebView2.Navigate(_opts.Url);
+    }
+}
