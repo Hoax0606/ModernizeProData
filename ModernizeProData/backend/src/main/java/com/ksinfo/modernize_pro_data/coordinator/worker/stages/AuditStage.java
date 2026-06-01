@@ -58,16 +58,16 @@ public class AuditStage implements StageRunner {
     private static final String STAGE_KEY = "audit";
     /**
      * quarantine sample row 상한.
-     * 2026-05-29: 팀장 지시로 5 → 전수 표시. fetchSamples / checkPkUniqueness 의 LIMIT 절이
-     * Integer.MAX_VALUE 가 되어 사실상 cap 없이 모든 위반 row 가 DB JSONB 에 저장됨.
      *
-     * 위험 (PoC1 데모 환경엔 nominal, 본운영 진입 전 재검토 필수):
-     *   - 메타 DB JSONB 폭주 (1만 row × 20 col ≈ 10 MB / 그룹).
-     *   - HTTP 응답 / 브라우저 렌더링 폭주 (대량 환경).
-     * 자세한 결정 배경 + 본운영 대안 (Sample DB + parquet streaming UI 등):
-     *   docs/handoff/2026-05-29-quarantine-show-all-decision.md
+     * 2026-05-29: 팀장 지시로 5 → 전수 표시 (Integer.MAX_VALUE).
+     * 2026-06-01: 실 BANKSYS transaction_monthly run 에서 OOM (Java heap space) 발생 →
+     *             1000 으로 cap. 전수 보존은 {@link #exportViolationParquet} 의 parquet
+     *             (위반 row 전체) 에 의존, JSONB sample 은 1000 까지만.
+     *
+     * 결정 배경: docs/handoff/2026-05-29-quarantine-show-all-decision.md +
+     * AuditStage OOM 인시던트 노트 (2026-06-01).
      */
-    private static final int SAMPLE_LIMIT = Integer.MAX_VALUE;
+    private static final int SAMPLE_LIMIT = 1000;
 
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
