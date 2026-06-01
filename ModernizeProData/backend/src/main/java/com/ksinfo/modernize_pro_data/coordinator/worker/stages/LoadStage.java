@@ -212,7 +212,6 @@ public class LoadStage implements StageRunner {
                 .orElseGet(() -> StageTableResult.create(stage.getId(), binding.getId(), tobeSchema, tobeTable));
         result.setStartedAt(tableStart);
 
-        Path tempCsv = tempDir.resolve(tobeTable + ".csv");
         try {
             // 검증/이전 단계가 이 테이블을 실패로 표시했으면 적재 skip (bad data → Postgres 방지).
             if (upstreamFailed(ctx, stage, binding.getId())) {
@@ -226,27 +225,22 @@ public class LoadStage implements StageRunner {
                 return false;
             }
 
-            // 1. DuckDB → temp CSV (task 별 connection — 병렬 안전).
-            //    tobe_ 의 컬럼명을 순서대로 수집 → CSV 필드 순서와 동일 → PG COPY 명시 컬럼 리스트로 전달해
-            //    transform SELECT 순서(mapping_rules 순)와 PG DDL ordinal 의 어긋남으로 인한 silent 컬럼
-            //    misalignment 방지.
+            /* 1. DuckDB tobe_ 테이블의 컬럼 순서 (PG COPY 의 명시 컬럼 리스트 와 ResultSet
+                  순서가 1:1) — PG DDL ordinal 과 무관하게 정확히 들어가게 함. */
             String fqTobeDuck = quoteIdent(schema) + "." + quoteIdent("tobe_" + tobeTable);
-            String escapedCsv = tempCsv.toString().replace("\\", "/").replace("'", "''");
             List<String> tobeColumns = new ArrayList<>();
             try (Connection duck = duckDbService.duplicateConnection();
-                 Statement st = duck.createStatement()) {
-                try (ResultSet rs = st.executeQuery("SELECT * FROM " + fqTobeDuck + " LIMIT 0")) {
-                    ResultSetMetaData md = rs.getMetaData();
-                    for (int i = 1; i <= md.getColumnCount(); i++) {
-                        tobeColumns.add(md.getColumnLabel(i));
-                    }
+                 Statement metaSt = duck.createStatement();
+                 ResultSet rs = metaSt.executeQuery("SELECT * FROM " + fqTobeDuck + " LIMIT 0")) {
+                ResultSetMetaData md = rs.getMetaData();
+                for (int i = 1; i <= md.getColumnCount(); i++) {
+                    tobeColumns.add(md.getColumnLabel(i));
                 }
-                st.execute("COPY " + fqTobeDuck + " TO '" + escapedCsv + "' (FORMAT CSV, HEADER false)");
             }
 
             // Artifact 표시용 통합 SQL: Transform 의 SELECT 를 COPY 의 source 로 감싼 형태로
-            // stage_table_results.compiled_sql 에 박제. 실제 실행은 위 2-step (DuckDB COPY OUT
-            // + 아래 PG COPY IN). ArtifactsPage MIGRATION SQL 카테고리가 이 텍스트를 그대로 표시.
+            // stage_table_results.compiled_sql 에 박제. 실제 실행은 ResultSet stream → PG COPY.
+            // ArtifactsPage MIGRATION SQL 카테고리가 이 텍스트를 그대로 표시.
             String transformSql = ctx.getStages().stream()
                     .filter(s -> "transform".equals(s.getStageKey()))
                     .findFirst()
@@ -257,7 +251,9 @@ public class LoadStage implements StageRunner {
                 result.setCompiledSql(buildLoadArtifactSql(tobeSchema, tobeTable, tobeColumns, transformSql));
             }
 
-            // 2. PostgreSQL Connection + (PoC1 부트스트랩) + (FK off) + TRUNCATE + COPY + (FK 복귀)
+            /* 2. DuckDB SELECT * → PG COPY FROM STDIN streaming. 중간 CSV 파일 X.
+                  PG connection 과 DuckDB connection 을 동시 열고, ResultSet 을 한 row 씩
+                  CSV 직렬화 → PGCopyOutputStream. PgCopyManager.copyInFromResultSet 참고. */
             String pgQualified = pgTableName(tobeSchema, tobeTable);
             long rows;
             try (Connection conn = pgCopyManager.openConnection(dbConfig)) {
@@ -265,13 +261,19 @@ public class LoadStage implements StageRunner {
                 boolean fkDisabled = pgCopyManager.tryDisableConstraints(conn);
                 try {
                     pgCopyManager.truncate(conn, pgQualified);
-                    rows = pgCopyManager.copyInFromCsv(conn, pgQualified, tempCsv, tobeColumns);
+                    try (Connection duck = duckDbService.duplicateConnection();
+                         Statement duckSt = duck.createStatement();
+                         ResultSet rs = duckSt.executeQuery("SELECT * FROM " + fqTobeDuck)) {
+                        rows = pgCopyManager.copyInFromResultSet(conn, pgQualified, tobeColumns, rs);
+                    }
                 } finally {
                     if (fkDisabled) pgCopyManager.restoreConstraints(conn);
                 }
+                /* 적재 후 PK 인덱스 자동 생성 — Verify 의 ORDER BY PK 가 seq scan 가는 비용
+                   회피. IF NOT EXISTS 로 재실행 멱등. CONCURRENTLY 는 트랜잭션 안에서 못 쓰니
+                   AutoCommit 켠 상태에서만 시도. 실패해도 적재 자체는 성공 — log 만 남김. */
+                ensurePkIndex(ctx, conn, tobeSchema, tobeTable, columnsByTable);
             }
-
-            try { Files.deleteIfExists(tempCsv); } catch (Exception ignore) {}
 
             result.setStatus(StageTableStatus.success);
             result.setRowCount(rows);
@@ -337,6 +339,58 @@ public class LoadStage implements StageRunner {
             st.executeUpdate(PgDdlGenerator.createTableIfNotExists(tobeSchema, tobeTable, cols));
         }
         ingest(ctx, "Ensured PG table " + (tobeSchema == null || tobeSchema.isBlank() ? "" : tobeSchema + ".") + tobeTable, true);
+    }
+
+    /**
+     * 적재 후 PK 인덱스 자동 생성. Verify 의 PK ORDER BY 가 인덱스 scan 사용하게.
+     *
+     * <ul>
+     *   <li>PK 컬럼 = DdlColumn.pkOrder ASC. PK 가 없으면 skip.</li>
+     *   <li>{@code CREATE INDEX CONCURRENTLY IF NOT EXISTS} — 대용량 테이블의 잠금 회피 +
+     *       재실행 멱등. CONCURRENTLY 는 transaction 안에서 못 쓰므로 autoCommit 켠다.</li>
+     *   <li>인덱스 이름 = {@code idx_pk_<schema>_<table>} (충돌 회피).</li>
+     *   <li>실패는 적재 자체엔 영향 없음 — log 만 남기고 계속.</li>
+     * </ul>
+     */
+    private void ensurePkIndex(StageContext ctx, Connection conn, String tobeSchema, String tobeTable,
+                               Map<String, List<DdlColumn>> columnsByTable) {
+        List<DdlColumn> cols = columnsByTable.get(tobeTable);
+        if (cols == null || cols.isEmpty()) return;
+        List<String> pkCols = cols.stream()
+                .filter(c -> c.getPkOrder() != null)
+                .sorted(java.util.Comparator.comparing(DdlColumn::getPkOrder))
+                .map(DdlColumn::getPhysicalName)
+                .toList();
+        if (pkCols.isEmpty()) return;
+
+        String fqTobe = pgTableName(tobeSchema, tobeTable);
+        String idxName = "idx_pk_"
+                + ((tobeSchema == null || tobeSchema.isBlank()) ? "" : tobeSchema.toLowerCase() + "_")
+                + tobeTable.toLowerCase();
+        String quotedCols = pkCols.stream()
+                .map(c -> "\"" + c.replace("\"", "\"\"") + "\"")
+                .collect(Collectors.joining(", "));
+        String sql = "CREATE INDEX CONCURRENTLY IF NOT EXISTS \""
+                + idxName.replace("\"", "\"\"") + "\" ON " + fqTobe + " (" + quotedCols + ")";
+
+        boolean prevAutoCommit;
+        try {
+            prevAutoCommit = conn.getAutoCommit();
+        } catch (Exception e) {
+            log.warn("ensurePkIndex: getAutoCommit failed for {}: {}", tobeTable, e.getMessage());
+            return;
+        }
+        try {
+            if (!prevAutoCommit) conn.setAutoCommit(true);
+            try (Statement st = conn.createStatement()) {
+                st.execute(sql);
+            }
+            ingest(ctx, "Ensured PK index " + idxName + " on " + tobeTable + " (" + String.join(",", pkCols) + ")", true);
+        } catch (Exception e) {
+            log.warn("ensurePkIndex skip {} ({}): {}", tobeTable, idxName, e.getMessage());
+        } finally {
+            try { conn.setAutoCommit(prevAutoCommit); } catch (Exception ignored) {}
+        }
     }
 
     /** PostgreSQL 의 qualified table 명. schema 가 비면 unquoted (default search_path). */

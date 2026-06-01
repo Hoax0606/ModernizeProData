@@ -305,15 +305,26 @@ public class ValidationReportService implements StageRunner {
              Connection pgConn = pgCopyManager.openConnection(dbConfig);
              Statement pgSt = pgConn.createStatement()) {
 
-            duckRows = scalarLong(duckSt, "SELECT COUNT(*) FROM " + fqDuck);
-            pgRows   = scalarLong(pgSt,   "SELECT COUNT(*) FROM " + fqPg);
+            /* 2026-05-31 P1-4 — column 별 풀스캔을 1 query 로 통합.
+               이전: COUNT(*) 1 + numericCols 의 SUM/MIN/MAX N + nullableCols 의 NULL COUNT M
+                    = (1 + N + M) 풀스캔 × 양쪽 (DuckDB+PG) = (2 + 2N + 2M)
+               이후: 1 query 에 모두 묶음 = 2 풀스캔 (DuckDB + PG 각 1).
+               select index 매핑: [0]=COUNT, [1..3]=SUM/MIN/MAX col0, [4..6]=col1, ...
+                                  [1+3N + i] = nullableCols[i] 의 NULL COUNT. */
+            String duckAggQ = buildAggregateQuery(fqDuck, numericCols, nullableCols);
+            String pgAggQ   = buildAggregateQuery(fqPg,   numericCols, nullableCols);
+            int aggTotal = 1 + 3 * numericCols.size() + nullableCols.size();
+            String[] duckAgg = scalarN(duckSt, duckAggQ, aggTotal);
+            String[] pgAgg   = scalarN(pgSt,   pgAggQ,   aggTotal);
 
-            for (DdlColumn c : numericCols) {
-                String col = quote(c.getPhysicalName());
-                String duckQ = "SELECT SUM(" + col + "), MIN(" + col + "), MAX(" + col + ") FROM " + fqDuck;
-                String pgQ   = "SELECT SUM(" + col + "), MIN(" + col + "), MAX(" + col + ") FROM " + fqPg;
-                String[] duckTriple = scalarTriple(duckSt, duckQ);
-                String[] pgTriple   = scalarTriple(pgSt,   pgQ);
+            duckRows = parseLongOrZero(duckAgg[0]);
+            pgRows   = parseLongOrZero(pgAgg[0]);
+
+            for (int i = 0; i < numericCols.size(); i++) {
+                DdlColumn c = numericCols.get(i);
+                int base = 1 + 3 * i;
+                String[] duckTriple = { duckAgg[base], duckAgg[base + 1], duckAgg[base + 2] };
+                String[] pgTriple   = { pgAgg[base],   pgAgg[base + 1],   pgAgg[base + 2] };
 
                 String typeLabel = displayType(c);
                 boolean sumPass = numericEq(duckTriple[0], pgTriple[0]);
@@ -451,10 +462,13 @@ public class ValidationReportService implements StageRunner {
                 }
             }
 
-            for (DdlColumn c : nullableCols) {
-                String col = quote(c.getPhysicalName());
-                long duckNulls = scalarLong(duckSt, "SELECT COUNT(*) FROM " + fqDuck + " WHERE " + col + " IS NULL");
-                long pgNulls   = scalarLong(pgSt,   "SELECT COUNT(*) FROM " + fqPg   + " WHERE " + col + " IS NULL");
+            /* nullableCols 의 NULL COUNT 는 위 aggregate query 에 FILTER 절로 이미 통합됨.
+               별도 query 없이 duckAgg/pgAgg 의 nullBase 인덱스부터 추출. (2026-05-31 P1-4) */
+            int nullBase = 1 + 3 * numericCols.size();
+            for (int i = 0; i < nullableCols.size(); i++) {
+                DdlColumn c = nullableCols.get(i);
+                long duckNulls = parseLongOrZero(duckAgg[nullBase + i]);
+                long pgNulls   = parseLongOrZero(pgAgg[nullBase + i]);
                 boolean nullPass = duckNulls == pgNulls;
                 Map<String, Object> np = new LinkedHashMap<>();
                 np.put("column", c.getPhysicalName());
@@ -839,6 +853,41 @@ public class ValidationReportService implements StageRunner {
             return "STRFTIME(CAST(" + col + " AS TIMESTAMP WITH TIME ZONE) AT TIME ZONE 'UTC', '%Y-%m-%d %H:%M:%S.%f')";
         }
         return "STRFTIME(TRY_CAST(" + col + " AS TIMESTAMP), '%Y-%m-%d %H:%M:%S.%f')";
+    }
+
+    /** 2026-05-31 P1-4 — COUNT + numericCols 의 SUM/MIN/MAX + nullableCols 의 NULL COUNT FILTER
+     *  를 한 query 에 통합. column 별 풀스캔 N+M+1 회 → 1 회.
+     *  순서: [0] = COUNT(*), [1..1+3N] = numericCol i 의 SUM/MIN/MAX, [1+3N+i] = nullableCol i 의 NULL COUNT. */
+    private static String buildAggregateQuery(String fqTable,
+                                              List<DdlColumn> numericCols,
+                                              List<DdlColumn> nullableCols) {
+        StringBuilder sb = new StringBuilder("SELECT COUNT(*)");
+        for (DdlColumn c : numericCols) {
+            String col = quote(c.getPhysicalName());
+            sb.append(", SUM(").append(col).append(")")
+              .append(", MIN(").append(col).append(")")
+              .append(", MAX(").append(col).append(")");
+        }
+        for (DdlColumn c : nullableCols) {
+            String col = quote(c.getPhysicalName());
+            sb.append(", COUNT(*) FILTER (WHERE ").append(col).append(" IS NULL)");
+        }
+        sb.append(" FROM ").append(fqTable);
+        return sb.toString();
+    }
+
+    /** ResultSet 의 string value → long. null/blank/parse fail 시 0. */
+    private static long parseLongOrZero(String s) {
+        if (s == null || s.isBlank()) return 0L;
+        try {
+            return Long.parseLong(s.trim());
+        } catch (NumberFormatException e) {
+            try {
+                return new BigDecimal(s.trim()).longValueExact();
+            } catch (Exception ex) {
+                return 0L;
+            }
+        }
     }
 
     /** N 개 컬럼을 한 query 로 가져옴 — string 배열 반환. */

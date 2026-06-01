@@ -142,10 +142,27 @@ public class AuditStage implements StageRunner {
                 /* 위반 row 분리용 WHERE 조건 모음 — 모든 검사가 추가, 마지막에 UNION (OR) 으로 DELETE. */
                 List<String> rowFilters = new ArrayList<>();
                 int violations = 0;
+
+                /* 2026-05-31 P1-6 — column×4 check 풀스캔 통합.
+                   이전: col 마다 NOT NULL/length/type/range 별도 COUNT(*) — col 20 × 4 = 80+ 풀스캔.
+                   이후: 1 query 에 모든 check 의 위반 count 를 CASE WHEN SUM 으로 묶음 → 1 풀스캔.
+                   위반 발견된 check 만 sample fetch + quarantine. */
+                List<CheckSpec> allChecks = new ArrayList<>();
                 for (DdlColumn col : cols) {
-                    violations += auditColumn(ctx, stage, binding, fqTobe, tableLabel, pkCol, col, rowFilters);
+                    allChecks.addAll(buildColumnChecks(col));
                 }
-                // PK 중복(uniqueness) — 테이블 단위 검사
+                if (!allChecks.isEmpty()) {
+                    long[] counts = runAggregatedChecks(fqTobe, allChecks);
+                    for (int i = 0; i < allChecks.size(); i++) {
+                        if (counts[i] > 0) {
+                            CheckSpec spec = allChecks.get(i);
+                            violations += processViolation(ctx, stage, binding, fqTobe, tableLabel, pkCol,
+                                    spec.colName(), spec.whereCond(), spec.reason(), spec.stageLabel(),
+                                    counts[i], rowFilters);
+                        }
+                    }
+                }
+                // PK 중복(uniqueness) — 테이블 단위 검사 (GROUP BY 라 별도 유지)
                 violations += checkPkUniqueness(ctx, stage, binding, fqTobe, tableLabel, cols, rowFilters);
 
                 long separated = 0;
@@ -241,59 +258,72 @@ public class AuditStage implements StageRunner {
      * @param tableLabel 사용자 표시용 테이블 식별자 (schema 있으면 'schema.table', 없으면 'table').
      *                   SQL 식별자가 아님 — quarantine sampleData / 로그 메시지에서만 사용.
      */
-    private int auditColumn(StageContext ctx, StageInstance stage, MappingTableBinding binding,
-                            String fqTobe, String tableLabel, String pkCol, DdlColumn col,
-                            List<String> rowFilters) throws Exception {
-        int violations = 0;
+    /** column 별 4 check 의 spec (count 안 함, query 만들기용). 2026-05-31 P1-6. */
+    private record CheckSpec(String colName, String stageLabel, String reason, String whereCond) {}
+
+    /** col 의 4 종 check (NOT NULL / length / type / range) 의 spec 생성. 실제 count 는 통합 query. */
+    private static List<CheckSpec> buildColumnChecks(DdlColumn col) {
+        List<CheckSpec> checks = new ArrayList<>();
         String colName = col.getPhysicalName();
         String q = quoteIdent(colName);
 
-        // 1. NOT NULL
         if (!col.isNullable()) {
-            violations += runCheck(ctx, stage, binding, fqTobe, tableLabel, pkCol, colName,
-                    q + " IS NULL",
-                    "NOT NULL violation", "validate.notnull", rowFilters);
+            checks.add(new CheckSpec(colName, "validate.notnull",
+                    "NOT NULL violation",
+                    q + " IS NULL"));
         }
-        // 2. length — 문자수 기준 (PG VARCHAR(n) = n 문자).
-        // 단, 시간형(TIMESTAMP(6)) / 숫자형은 (6) 이 fractional-second precision 또는 자릿수라
-        // 문자 길이가 아니다 → length 체크 skip (그렇지 않으면 모든 timestamp 가 "Length > 6" 위반).
         Integer len = col.getLength();
         if (len != null && len > 0 && isStringType(col.getDataType())) {
-            violations += runCheck(ctx, stage, binding, fqTobe, tableLabel, pkCol, colName,
-                    "LENGTH(CAST(" + q + " AS VARCHAR)) > " + len + " AND " + q + " IS NOT NULL",
-                    "Length > " + len, "validate.length", rowFilters);
+            checks.add(new CheckSpec(colName, "validate.length",
+                    "Length > " + len,
+                    "LENGTH(CAST(" + q + " AS VARCHAR)) > " + len + " AND " + q + " IS NOT NULL"));
         }
-        // 3. type — 숫자/날짜/타임스탬프 컬럼인데 cast 실패 (빈 문자열 제외). char/varchar 는 skip.
         String castType = duckCastType(col);
         if (castType != null) {
-            violations += runCheck(ctx, stage, binding, fqTobe, tableLabel, pkCol, colName,
+            checks.add(new CheckSpec(colName, "validate.type",
+                    "Type cast failed (" + castType + ")",
                     "TRY_CAST(" + q + " AS " + castType + ") IS NULL AND " + q + " IS NOT NULL"
-                            + " AND TRIM(CAST(" + q + " AS VARCHAR)) <> ''",
-                    "Type cast failed (" + castType + ")", "validate.type", rowFilters);
+                            + " AND TRIM(CAST(" + q + " AS VARCHAR)) <> ''"));
         }
-        // 4. range — 숫자지만 DECIMAL(p,s) 자릿수 초과 (정수부 overflow).
         if (isNumeric(col) && col.getPrecision() != null) {
             int p = col.getPrecision();
             int s = col.getScale() == null ? 0 : col.getScale();
             if (p > 0 && p <= 38 && s >= 0 && s <= p) {
-                violations += runCheck(ctx, stage, binding, fqTobe, tableLabel, pkCol, colName,
+                checks.add(new CheckSpec(colName, "validate.range",
+                        "Numeric out of range DECIMAL(" + p + "," + s + ")",
                         "TRY_CAST(" + q + " AS DECIMAL(" + p + "," + s + ")) IS NULL"
-                                + " AND TRY_CAST(" + q + " AS DOUBLE) IS NOT NULL",
-                        "Numeric out of range DECIMAL(" + p + "," + s + ")", "validate.range", rowFilters);
+                                + " AND TRY_CAST(" + q + " AS DOUBLE) IS NOT NULL"));
             }
         }
-        return violations;
+        return checks;
     }
 
-    /** 단일 검사 수행 — count > 0 이면 sample 추출 + Quarantine 기록 + 로그, 위반 시 1 반환.
-     *  추가: rowFilters 에 위반 WHERE 조건 append (호출부가 unionWhere 만들어 DELETE 에 사용).
-     *  tableLabel 은 표시용 schema-qualified 라벨. */
-    private int runCheck(StageContext ctx, StageInstance stage, MappingTableBinding binding,
-                         String fqTobe, String tableLabel, String pkCol, String colName,
-                         String whereCond, String reason, String stageLabel,
-                         List<String> rowFilters) throws Exception {
-        long count = countWhere(fqTobe, whereCond);
-        if (count <= 0) return 0;
+    /** 모든 check 의 위반 count 를 1 query 로 통합. CASE WHEN SUM 패턴 — 1 풀스캔. */
+    private long[] runAggregatedChecks(String fqTobe, List<CheckSpec> checks) throws Exception {
+        StringBuilder sb = new StringBuilder("SELECT ");
+        for (int i = 0; i < checks.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append("SUM(CASE WHEN ").append(checks.get(i).whereCond())
+              .append(" THEN 1 ELSE 0 END)");
+        }
+        sb.append(" FROM ").append(fqTobe);
+        try (Statement st = duckDbService.statement();
+             ResultSet rs = st.executeQuery(sb.toString())) {
+            rs.next();
+            long[] counts = new long[checks.size()];
+            for (int i = 0; i < checks.size(); i++) {
+                String v = rs.getString(i + 1);
+                counts[i] = (v == null || v.isBlank()) ? 0L : Long.parseLong(v.trim());
+            }
+            return counts;
+        }
+    }
+
+    /** 위반 발견된 check 1 건 처리 — sample fetch + quarantine 기록 + rowFilters 누적. */
+    private int processViolation(StageContext ctx, StageInstance stage, MappingTableBinding binding,
+                                 String fqTobe, String tableLabel, String pkCol, String colName,
+                                 String whereCond, String reason, String stageLabel,
+                                 long count, List<String> rowFilters) throws Exception {
         List<List<Object>> samples = fetchSamples(fqTobe, pkCol, colName, whereCond);
         Map<String, Object> sampleData = buildSampleData(tableLabel, colName, pkCol, samples, reason, stageLabel);
         quarantineService.record(
@@ -309,14 +339,6 @@ public class AuditStage implements StageRunner {
         ingest(ctx, "Audit " + reason + " in " + tableLabel + "." + colName + " (" + count + " rows)", false);
         rowFilters.add(whereCond);
         return 1;
-    }
-
-    private long countWhere(String fqTable, String whereCond) throws Exception {
-        try (Statement st = duckDbService.statement();
-             ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + fqTable + " WHERE " + whereCond)) {
-            rs.next();
-            return rs.getLong(1);
-        }
     }
 
     private List<List<Object>> fetchSamples(String fqTable, String pkCol, String violatedCol,

@@ -41,6 +41,9 @@ modernize:
   # 현장 대용량 — 파일 모드로 테이블도 디스크 spill (RAM 초과 OOM 내성). dev/test 는 base 의 in-memory 유지.
   duckdb:
     memory-mode: false
+  # Coordinator 인스톨 환경 = HikariCP 10 default. 4 thread 안전.
+  run:
+    load-parallelism: ${LOAD_PARALLELISM:4}
 
 logging:
   level:

@@ -129,7 +129,15 @@ public class ExtractStage implements StageRunner {
                     }
                 }
 
-                String encodingClause = encodingClause(site.getAsisEncoding());
+                String asisEncoding = site.getAsisEncoding();
+                /* UTF-8 source (default) 는 character replacement / type inference 부담 X.
+                   sample_size 축소 + scanForReplacementChars skip → 대용량 환경 read 시간 ↓.
+                   (2026-05-31 perf 라운드 P0-2) */
+                boolean isUtf8 = asisEncoding == null || asisEncoding.isBlank()
+                        || "utf-8".equalsIgnoreCase(asisEncoding.trim())
+                        || "utf8".equalsIgnoreCase(asisEncoding.trim());
+                String encodingClause = encodingClause(asisEncoding);
+                String sampleSizeClause = isUtf8 ? ", sample_size=10000" : ", sample_size=-1";
 
                 long totalRows = 0;
                 for (Map.Entry<String, String> entry : asisTableToSchema.entrySet()) {
@@ -146,7 +154,7 @@ public class ExtractStage implements StageRunner {
                     try (Statement st = duckDbService.statement()) {
                         st.execute("CREATE OR REPLACE TABLE " + fqTable
                                 + " AS SELECT * FROM read_csv_auto('" + escapedPath
-                                + "', header=true, sample_size=-1, all_varchar=true" + encodingClause + ")");
+                                + "', header=true, all_varchar=true" + sampleSizeClause + encodingClause + ")");
 
                         try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + fqTable)) {
                             rs.next();
@@ -159,8 +167,11 @@ public class ExtractStage implements StageRunner {
                     }
                     /* Step 3 — DuckDB 가 invalid byte 만났을 때 throw 안 하고 U+FFFD (대체 문자) 로
                        silent 치환. 정상 read 통과한 것 같지만 데이터 일부 손상.
-                       각 asis 컬럼에 U+FFFD 있나 COUNT — 발견 시 quarantine 카드 (stageLabel='encode'). */
-                    scanForReplacementChars(ctx, stage, childBindingId, tableLabel, schema, asisTable);
+                       각 asis 컬럼에 U+FFFD 있나 COUNT — 발견 시 quarantine 카드 (stageLabel='encode').
+                       UTF-8 source 는 valid byte 시퀀스 보장 → skip (2026-05-31 perf P0-2). */
+                    if (!isUtf8) {
+                        scanForReplacementChars(ctx, stage, childBindingId, tableLabel, schema, asisTable);
+                    }
                     ingest(ctx, "Extracted source " + asisTable + " (binding " + tobeTable + ")", true);
                 }
 

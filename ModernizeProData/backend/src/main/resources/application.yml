@@ -19,8 +19,14 @@ spring:
     password: ${DB_PASSWORD:mpd}
     driver-class-name: org.postgresql.Driver
     hikari:
-      maximum-pool-size: 10
+      # Coord = LoadStage 병렬 4 thread + Quartz 5 thread + REST handler 여유.
+      # 9+ 동시 점유 시나리오 대비 15. HIKARI_POOL_MAX 로 site 별 override.
+      maximum-pool-size: ${HIKARI_POOL_MAX:15}
       connection-timeout: 5000
+      # 5분 idle 이후 회수. 작업 burst 후 connection slot 빠르게 반환.
+      idle-timeout: 300000
+      # 30분 max-lifetime — PG 의 server-side timeout 보다 짧게.
+      max-lifetime: 1800000
 
   jpa:
     # Flyway 가 스키마 단일 책임. Hibernate 는 검증만.
@@ -104,6 +110,13 @@ modernize:
   output:
     base-path: ${MPD_OUTPUT_BASE_PATH:C:/modernize/output}
 
+  # Run 실행 튜닝 — LoadStage 의 binding 단위 병렬도. 1 = 순차 (옛 default).
+  # HikariCP pool size 10 + Hikari connection-timeout 5s 라 worker 노드 안에서
+  # 4 thread 까지 안전. 대용량 BANKSYS 데모에선 thread overhead < I/O wait 이라
+  # 거의 항상 이득. LOAD_PARALLELISM 환경 변수로 site 별 override 가능.
+  run:
+    load-parallelism: ${LOAD_PARALLELISM:4}
+
 # ── 로깅 ────────────────────────────────────────────────────────────────
 logging:
   level:
@@ -111,5 +124,8 @@ logging:
     com.ksinfo.modernize_pro_data: DEBUG
     org.springframework.security: INFO
     org.springframework.web: INFO
+    # HikariCP pool stat — DEBUG 면 매 connection acquire / release 로깅 부담.
+    # INFO 면 startup banner + leak / failure 만. P3-7 검증 시 stress 환경에서만 DEBUG.
+    com.zaxxer.hikari: INFO
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"

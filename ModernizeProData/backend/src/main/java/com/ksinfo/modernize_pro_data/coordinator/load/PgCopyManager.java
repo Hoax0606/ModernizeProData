@@ -3,13 +3,17 @@ package com.ksinfo.modernize_pro_data.coordinator.load;
 import lombok.extern.slf4j.Slf4j;
 import org.postgresql.PGConnection;
 import org.postgresql.copy.CopyManager;
+import org.postgresql.copy.PGCopyOutputStream;
 import org.springframework.stereotype.Service;
 
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -99,15 +103,98 @@ public class PgCopyManager {
                               List<String> columns) throws Exception {
         PGConnection pg = conn.unwrap(PGConnection.class);
         CopyManager copyManager = pg.getCopyAPI();
-        String colList = (columns == null || columns.isEmpty()) ? ""
-                : " (" + columns.stream()
-                        .map(c -> "\"" + c.replace("\"", "\"\"") + "\"")
-                        .collect(Collectors.joining(", ")) + ")";
+        String colList = buildColumnList(columns);
         String sql = "COPY " + schemaQualifiedTable + colList + " FROM stdin (FORMAT csv, HEADER false)";
         try (InputStream in = Files.newInputStream(csvFile)) {
             long rows = copyManager.copyIn(sql, in);
             log.info("PG COPY {}{} ← {} : {} rows", schemaQualifiedTable, colList, csvFile, rows);
             return rows;
+        }
+    }
+
+    /**
+     * DuckDB ResultSet → PG COPY FROM STDIN 직접 streaming. 중간 CSV 파일 X.
+     *
+     * <p>흐름: caller 가 DuckDB SELECT 의 ResultSet 을 open 한 상태로 넘김. 이
+     * 메서드가 row 마다 CSV 직렬화 → {@link PGCopyOutputStream} 으로 write.
+     * 대용량 (수십 GB) 에서 디스크 IO 우회로 40~60% 단축 기대.
+     *
+     * <p>CSV format = PG default (RFC 4180-ish). NULL = unquoted empty field
+     * (CSV 모드 default). 빈 문자열은 quoted `""` 로 NULL 과 구분.
+     *
+     * <p>caller 책임:
+     * <ul>
+     *   <li>ResultSet 의 컬럼 순서와 {@code columns} 의 순서 일치.</li>
+     *   <li>ResultSet 의 fetch size 적절 (DuckDB JDBC 의 기본은 streaming).</li>
+     *   <li>ResultSet / Connection 의 lifecycle 관리 (이 메서드는 close 안 함).</li>
+     * </ul>
+     */
+    public long copyInFromResultSet(Connection conn, String schemaQualifiedTable,
+                                    List<String> columns, ResultSet rs) throws Exception {
+        PGConnection pg = conn.unwrap(PGConnection.class);
+        String colList = buildColumnList(columns);
+        String sql = "COPY " + schemaQualifiedTable + colList + " FROM stdin (FORMAT csv, HEADER false)";
+
+        ResultSetMetaData md = rs.getMetaData();
+        int colCount = md.getColumnCount();
+        long rows = 0;
+        // 8KB chunk — small enough to flush often, big enough to avoid syscall churn.
+        StringBuilder line = new StringBuilder(256);
+        try (PGCopyOutputStream out = new PGCopyOutputStream(pg, sql, 65536)) {
+            while (rs.next()) {
+                line.setLength(0);
+                for (int i = 1; i <= colCount; i++) {
+                    if (i > 1) line.append(',');
+                    appendCsvField(line, rs.getObject(i));
+                }
+                line.append('\n');
+                out.write(line.toString().getBytes(StandardCharsets.UTF_8));
+                rows++;
+            }
+            out.flush();
+        }
+        log.info("PG COPY {}{} ← <duckdb stream> : {} rows", schemaQualifiedTable, colList, rows);
+        return rows;
+    }
+
+    /** Build the quoted column list suffix, or empty string when no columns specified. */
+    private static String buildColumnList(List<String> columns) {
+        if (columns == null || columns.isEmpty()) return "";
+        return " (" + columns.stream()
+                .map(c -> "\"" + c.replace("\"", "\"\"") + "\"")
+                .collect(Collectors.joining(", ")) + ")";
+    }
+
+    /**
+     * Append one value to a CSV line.
+     * <ul>
+     *   <li>{@code null} → empty unquoted field. PG CSV default NULL representation.</li>
+     *   <li>empty String → {@code ""} (quoted empty). Distinguishes empty string from NULL.</li>
+     *   <li>otherwise → quote only when the value contains {@code , " \r \n}.
+     *       Inner {@code "} doubled per RFC 4180.</li>
+     * </ul>
+     */
+    private static void appendCsvField(StringBuilder sb, Object v) {
+        if (v == null) return;
+        String s = v.toString();
+        if (s.isEmpty()) {
+            sb.append("\"\"");
+            return;
+        }
+        boolean needQuote = false;
+        for (int i = 0, n = s.length(); i < n; i++) {
+            char c = s.charAt(i);
+            if (c == ',' || c == '"' || c == '\n' || c == '\r') {
+                needQuote = true;
+                break;
+            }
+        }
+        if (needQuote) {
+            sb.append('"');
+            sb.append(s.replace("\"", "\"\""));
+            sb.append('"');
+        } else {
+            sb.append(s);
         }
     }
 }
