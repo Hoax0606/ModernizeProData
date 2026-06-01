@@ -2649,23 +2649,43 @@ type RowEdit = { savedSrc?: string[]; savedRule?: string; savedDefault?: string;
  * row editor / 자동완성이 expand alias.column 도 source 후보로 보여줄 수 있게 한다.
  * type 정보는 expand_expr 에 없으므로 VARCHAR fallback.
  */
-/** Inspector 의 RULE 칸 aggregate template 종류 — Row N:1 집계 시점에 자주 쓰는 패턴들. */
-type AggregateTemplateKind = 'count_star' | 'sum' | 'avg' | 'min' | 'max' | 'cond_sum';
+/** Inspector 의 RULE 칸 template 종류 — SQL aggregate (Row N:1) + DuckDB UDF (scalar). */
+type AggregateTemplateKind =
+  | 'count_star' | 'sum' | 'avg' | 'min' | 'max' | 'cond_sum'
+  // UDF (scalar functions — backend UdfRegistry 의 12 UDFs)
+  | 'apply_scale' | 'unpack_zone_decimal' | 'unpack_comp' | 'unpack_comp_float'
+  | 'unpack_signed_separate' | 'unpack_overpunch'
+  | 'convert_era' | 'assign_seq' | 'validate_bizno'
+  | 'mask_phone' | 'hash_sha256' | 'normalize_corp';
 
 /**
- * Row N:1 집계용 aggregate SQL boilerplate 생성. alias / column 자동 인식 — 없으면 marker.
- * 사용자 수정 부분은 {...} 마커로 표시.
+ * RULE 칸 template SQL boilerplate 생성. alias / column 자동 인식 — 없으면 marker {col}.
+ * SQL aggregate (Row N:1) + UDF (scalar). 사용자 수정 부분은 {...} 마커.
  */
 function generateAggregateTemplate(kind: AggregateTemplateKind, sourceAlias: string, sourceCol?: string): string {
   const a = sourceAlias || 't';
   const col = sourceCol || '{col}';
+  const ref = `${a}.${col}`;
   switch (kind) {
     case 'count_star': return 'COUNT(*)';
-    case 'sum':        return `SUM(CAST(${a}.${col} AS DECIMAL(20,2)))`;
-    case 'avg':        return `AVG(CAST(${a}.${col} AS DECIMAL(20,2)))`;
-    case 'min':        return `MIN(${a}.${col})`;
-    case 'max':        return `MAX(${a}.${col})`;
-    case 'cond_sum':   return `SUM(CASE WHEN ${a}.{cond_col} = '{cond_val}' THEN CAST(${a}.${col} AS DECIMAL(20,2)) ELSE 0 END)`;
+    case 'sum':        return `SUM(CAST(${ref} AS DECIMAL(20,2)))`;
+    case 'avg':        return `AVG(CAST(${ref} AS DECIMAL(20,2)))`;
+    case 'min':        return `MIN(${ref})`;
+    case 'max':        return `MAX(${ref})`;
+    case 'cond_sum':   return `SUM(CASE WHEN ${a}.{cond_col} = '{cond_val}' THEN CAST(${ref} AS DECIMAL(20,2)) ELSE 0 END)`;
+    // UDF — backend UdfRegistry 시그니처 기반
+    case 'apply_scale':            return `apply_scale(${ref}, {scale})`;
+    case 'unpack_zone_decimal':    return `unpack_zone_decimal(${ref}, {scale})`;
+    case 'unpack_comp':            return `unpack_comp(${ref}, {scale})`;
+    case 'unpack_comp_float':      return `unpack_comp_float(${ref})`;
+    case 'unpack_signed_separate': return `unpack_signed_separate(${ref}, {scale})`;
+    case 'unpack_overpunch':       return `unpack_overpunch(${ref}, {scale})`;
+    case 'convert_era':            return `convert_era(${ref})`;
+    case 'assign_seq':             return `assign_seq()`;
+    case 'validate_bizno':         return `validate_bizno(${ref})`;
+    case 'mask_phone':             return `mask_phone(${ref})`;
+    case 'hash_sha256':            return `hash_sha256(${ref})`;
+    case 'normalize_corp':         return `normalize_corp(${ref})`;
   }
 }
 
@@ -2813,7 +2833,10 @@ function AggregateTemplateMenu({ onPick, disabled }: {
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState('');
+  const [category, setCategory] = useState<'all' | 'sql' | 'udf'>('all');
   const wrapRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (!open) return;
     const onDocClick = (e: MouseEvent) => {
@@ -2822,10 +2845,41 @@ function AggregateTemplateMenu({ onPick, disabled }: {
     window.addEventListener('mousedown', onDocClick);
     return () => window.removeEventListener('mousedown', onDocClick);
   }, [open]);
+  useEffect(() => {
+    if (open) { setFilter(''); setCategory('all'); setTimeout(() => searchRef.current?.focus(), 0); }
+  }, [open]);
   const pick = (kind: AggregateTemplateKind | null) => {
     onPick(kind);
     setOpen(false);
   };
+  // 항목 정의 (section + label). filter 와 매칭 시만 표시.
+  type Item = { kind: AggregateTemplateKind; label: string };
+  const aggregateItems: Item[] = [
+    { kind: 'count_star', label: t('mapping.inspector.aggregate.count') },
+    { kind: 'sum',        label: t('mapping.inspector.aggregate.sum') },
+    { kind: 'avg',        label: t('mapping.inspector.aggregate.avg') },
+    { kind: 'min',        label: t('mapping.inspector.aggregate.min') },
+    { kind: 'max',        label: t('mapping.inspector.aggregate.max') },
+    { kind: 'cond_sum',   label: t('mapping.inspector.aggregate.condSum') },
+  ];
+  const udfItems: Item[] = [
+    { kind: 'apply_scale',            label: t('mapping.inspector.aggregate.applyScale') },
+    { kind: 'unpack_zone_decimal',    label: t('mapping.inspector.aggregate.unpackZoneDecimal') },
+    { kind: 'unpack_comp',            label: t('mapping.inspector.aggregate.unpackComp') },
+    { kind: 'unpack_comp_float',      label: t('mapping.inspector.aggregate.unpackCompFloat') },
+    { kind: 'unpack_signed_separate', label: t('mapping.inspector.aggregate.unpackSignedSeparate') },
+    { kind: 'unpack_overpunch',       label: t('mapping.inspector.aggregate.unpackOverpunch') },
+    { kind: 'convert_era',            label: t('mapping.inspector.aggregate.convertEra') },
+    { kind: 'assign_seq',             label: t('mapping.inspector.aggregate.assignSeq') },
+    { kind: 'validate_bizno',         label: t('mapping.inspector.aggregate.validateBizno') },
+    { kind: 'mask_phone',             label: t('mapping.inspector.aggregate.maskPhone') },
+    { kind: 'hash_sha256',            label: t('mapping.inspector.aggregate.hashSha256') },
+    { kind: 'normalize_corp',         label: t('mapping.inspector.aggregate.normalizeCorp') },
+  ];
+  const lo = filter.toLowerCase().trim();
+  const matches = (item: Item) => !lo || item.label.toLowerCase().includes(lo) || item.kind.toLowerCase().includes(lo);
+  const aggFiltered = category === 'udf' ? [] : aggregateItems.filter(matches);
+  const udfFiltered = category === 'sql' ? [] : udfItems.filter(matches);
   return (
     <div ref={wrapRef} style={{ position: 'relative', display: 'inline-block' }}>
       <button
@@ -2858,30 +2912,86 @@ function AggregateTemplateMenu({ onPick, disabled }: {
             borderRadius: 2,
             boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
             zIndex: 100,
-            minWidth: 220,
-            padding: '4px 0',
+            minWidth: 260,
+            maxHeight: 360,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
           }}
         >
-          <button type="button" onClick={() => pick('count_star')} style={menuItemStyle}>
-            {t('mapping.inspector.aggregate.count')}
-          </button>
-          <button type="button" onClick={() => pick('sum')} style={menuItemStyle}>
-            {t('mapping.inspector.aggregate.sum')}
-          </button>
-          <button type="button" onClick={() => pick('avg')} style={menuItemStyle}>
-            {t('mapping.inspector.aggregate.avg')}
-          </button>
-          <button type="button" onClick={() => pick('min')} style={menuItemStyle}>
-            {t('mapping.inspector.aggregate.min')}
-          </button>
-          <button type="button" onClick={() => pick('max')} style={menuItemStyle}>
-            {t('mapping.inspector.aggregate.max')}
-          </button>
-          <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
-          <button type="button" onClick={() => pick('cond_sum')} style={menuItemStyle}>
-            {t('mapping.inspector.aggregate.condSum')}
-          </button>
-          <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+          {/* 검색 input + 카테고리 chip. esc 시 닫음. */}
+          <div style={{ padding: '6px 8px', borderBottom: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <input
+              ref={searchRef}
+              type="text"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false); }}
+              placeholder="Filter… (e.g. sum, unpack, mask)"
+              style={{
+                width: '100%',
+                fontSize: 11,
+                fontFamily: 'var(--mono)',
+                padding: '4px 6px',
+                border: '1px solid var(--border)',
+                borderRadius: 2,
+                background: 'var(--bg)',
+                color: 'var(--text)',
+                outline: 'none',
+              }}
+            />
+            <div style={{ display: 'flex', gap: 4 }}>
+              {(['all', 'sql', 'udf'] as const).map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => setCategory(c)}
+                  style={{
+                    flex: 1,
+                    fontSize: 10,
+                    padding: '3px 6px',
+                    border: `1px solid ${category === c ? 'var(--navy)' : 'var(--border)'}`,
+                    background: category === c ? 'var(--navy-50)' : 'transparent',
+                    color: category === c ? 'var(--navy)' : 'var(--text-2)',
+                    borderRadius: 10,
+                    cursor: 'pointer',
+                    fontWeight: category === c ? 600 : 400,
+                  }}
+                >
+                  {c === 'all' ? 'All' : c === 'sql' ? 'SQL' : 'UDF'}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div style={{ overflowY: 'auto', flex: 1, padding: '4px 0' }}>
+            {aggFiltered.length > 0 && (
+              <>
+                <div style={menuSectionHeader}>SQL Aggregate</div>
+                {aggFiltered.map((it) => (
+                  <button key={it.kind} type="button" onClick={() => pick(it.kind)} style={menuItemStyle}>
+                    {it.label}
+                  </button>
+                ))}
+              </>
+            )}
+            {udfFiltered.length > 0 && (
+              <>
+                {aggFiltered.length > 0 && <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />}
+                <div style={menuSectionHeader}>DuckDB UDF</div>
+                {udfFiltered.map((it) => (
+                  <button key={it.kind} type="button" onClick={() => pick(it.kind)} style={menuItemStyle}>
+                    {it.label}
+                  </button>
+                ))}
+              </>
+            )}
+            {aggFiltered.length === 0 && udfFiltered.length === 0 && (
+              <div style={{ padding: '8px 12px', fontSize: 11, color: 'var(--text-3)', textAlign: 'center' }}>
+                no match
+              </div>
+            )}
+          </div>
+          <div style={{ height: 1, background: 'var(--border)' }} />
           <button type="button" onClick={() => pick(null)} style={{ ...menuItemStyle, color: 'var(--text-3)' }}>
             {t('mapping.inspector.aggregate.clear')}
           </button>
@@ -2890,6 +3000,15 @@ function AggregateTemplateMenu({ onPick, disabled }: {
     </div>
   );
 }
+
+const menuSectionHeader: React.CSSProperties = {
+  padding: '4px 12px 2px',
+  fontSize: 9.5,
+  textTransform: 'uppercase',
+  letterSpacing: 0.6,
+  color: 'var(--text-3)',
+  fontWeight: 600,
+};
 
 function resolveSrcType(s: string, sources: TobeTable['sources'], expandExpr?: string): string {
   if (!s) return '—';
@@ -2965,6 +3084,8 @@ const _str  = (s: string) => `<span style="color:#9fd9b3">${_e(s)}</span>`;
 const _cmt  = (s: string) => `<span style="color:#7a8aa6">${_e(s)}</span>`;
 const _num  = (s: string) => `<span style="color:#79c0ff">${_e(s)}</span>`;
 const _def  = (s: string) => `<span style="color:#cad7e8">${_e(s)}</span>`;
+/** template placeholder {...} — 사용자가 채워야 할 marker. 노란 50% alpha 배경 + 흰 글자. */
+const _ph   = (s: string) => `<span style="background:rgba(250,204,21,0.5);color:#ffffff;padding:0 3px;border-radius:2px">${_e(s)}</span>`;
 
 // 예약어 / 절 / 타입 — 주황 (#e8b86f) 으로 강조.
 const SQL_KW = new Set(['SELECT','FROM','WHERE','AND','OR','NOT','IN','IS','NULL','AS','JOIN','LEFT','RIGHT','INNER','OUTER','FULL','ON','DROP','DEFAULT','UNION','ALL','DISTINCT','CASE','WHEN','THEN','ELSE','END','TRUE','FALSE','WITH','INSERT','UPDATE','DELETE','LIKE','BETWEEN','EXISTS','USING','INTO','RETURNS','ORDER','GROUP','BY','HAVING','LIMIT','OFFSET','NUMERIC','INTEGER','VARCHAR','CHAR','DATE','TIMESTAMP','BOOLEAN','UUID','TEXT','JSONB','INT','BIGINT','FLOAT','DOUBLE']);
@@ -3042,6 +3163,12 @@ function highlightSql(raw: string): string {
   const out: string[] = [];
   let i = 0;
   while (i < raw.length) {
+    if (raw[i] === '{') {
+      // {word} placeholder — template marker. {scale}, {cond_col} 등. 일반 코드 block `{` 와
+      // 구분 위해 [A-Za-z_]\w* 패턴만. 폐쇄 brace 까지.
+      const m = raw.slice(i).match(/^\{[A-Za-z_][\w]*\}/);
+      if (m) { out.push(_ph(m[0])); i += m[0].length; continue; }
+    }
     if (raw[i] === '-' && raw[i + 1] === '-') {
       const end = raw.indexOf('\n', i);
       const s = end < 0 ? raw.slice(i) : raw.slice(i, end + 1);
@@ -3077,6 +3204,10 @@ function highlightJava(raw: string): string {
   const out: string[] = [];
   let i = 0;
   while (i < raw.length) {
+    if (raw[i] === '{') {
+      const m = raw.slice(i).match(/^\{[A-Za-z_][\w]*\}/);
+      if (m) { out.push(_ph(m[0])); i += m[0].length; continue; }
+    }
     if (raw[i] === '/' && raw[i + 1] === '*') {
       const end = raw.indexOf('*/', i + 2);
       const s = end < 0 ? raw.slice(i) : raw.slice(i, end + 2);
