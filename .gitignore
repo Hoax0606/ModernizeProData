@@ -87,6 +87,8 @@ credentials/
 # license public key 는 빌드 시 jar 에 임베드되어야 하므로 예외로 track.
 # private.pem 은 그대로 ignore (이름이 다르므로 위 *.pem 규칙에 걸림).
 !ModernizeProData/backend/src/main/resources/license/public.pem
+# update public key 도 동일 패턴 — jar 에 임베드되어 도구가 서명 검증.
+!ModernizeProData/backend/src/main/resources/license/mpd-update-public.pem
 
 # ── 로그 ────────────────────────────────────────────────────────────
 *.log

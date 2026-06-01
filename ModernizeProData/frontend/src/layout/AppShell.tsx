@@ -15,6 +15,7 @@ import { SignOutModal } from '../components/SignOutModal';
 import { ClusterAdminModal } from '../components/ClusterAdminModal';
 import { LicenseBanner } from '../components/LicenseBanner';
 import { NotificationToast } from '../components/NotificationToast';
+import { UpdateModal } from '../components/UpdateModal';
 import { LockIcon } from '../components/LockIcon';
 import { HourglassHalfIcon } from '../components/HourglassHalfIcon';
 import { useLicenseStore } from '../store/license';
@@ -96,6 +97,7 @@ export function AppShell() {
   const [createSiteOpen, setCreateSiteOpen] = useState(false);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [clusterAdminOpen, setClusterAdminOpen] = useState(false);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
   const [siteSettingsOpen, setSiteSettingsOpen] = useState(false);
   const [siteSettingsFocus, setSiteSettingsFocus] = useState<import('../store/ui').SiteSettingsFocus>(undefined);
   const [siteMenuOpen, setSiteMenuOpen] = useState(false);
@@ -611,6 +613,13 @@ export function AppShell() {
                     onClick={() => { setUserOpen(false); setClusterAdminOpen(true); }}
                   />
                 )}
+                {user?.role === 'master' && (
+                  <MenuItem
+                    icon={<IconUpdate />}
+                    label={t('menu.checkForUpdates')}
+                    onClick={() => { setUserOpen(false); setUpdateModalOpen(true); }}
+                  />
+                )}
                 <div style={styles.userMenuDivider} />
                 <MenuItem
                   icon={<IconHelp />}
@@ -914,6 +923,7 @@ export function AppShell() {
         }
       />
       <ClusterAdminModal open={clusterAdminOpen} onClose={() => setClusterAdminOpen(false)} />
+      <UpdateModal open={updateModalOpen} onClose={() => setUpdateModalOpen(false)} />
       <CreateSiteModal open={createSiteOpen} onClose={() => setCreateSiteOpen(false)} />
       <CreateProjectModal open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} />
       <SignOutModal
@@ -1048,6 +1058,17 @@ function IconSignout() {
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="var(--red)" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
       <path d="M8.5 3V2a1 1 0 0 0-1-1H2.5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-1" />
       <path d="M6 7h6.5M10.5 4.5 13 7l-2.5 2.5" />
+    </svg>
+  );
+}
+
+function IconUpdate() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 7a5 5 0 0 1 9-3" />
+      <path d="M11 1.5V4h-2.5" />
+      <path d="M12 7a5 5 0 0 1-9 3" />
+      <path d="M3 12.5V10h2.5" />
     </svg>
   );
 }

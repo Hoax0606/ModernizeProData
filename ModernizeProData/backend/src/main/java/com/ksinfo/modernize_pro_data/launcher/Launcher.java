@@ -53,6 +53,9 @@ public class Launcher {
         redirectStdoutToFile();
         readInstallerChoicesFromRegistry();
 
+        // pending update 있으면 jar / host swap (Spring 부팅 전). 실패는 silent log.
+        UpdateApplier.applyPendingIfAny();
+
         if (Boolean.getBoolean("mpd.gui.enabled")) {
             String mode = System.getProperty("MPD_MODE", "coordinator");
             if ("worker".equalsIgnoreCase(mode)) {
