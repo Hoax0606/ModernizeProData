@@ -1,5 +1,6 @@
 package com.ksinfo.modernize_pro_data.coordinator.update;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -20,7 +21,9 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -38,7 +41,7 @@ import java.util.zip.ZipInputStream;
 public class UpdateService {
 
     /** GitHub release 의 latest redirect — 항상 가장 최근 release 의 manifest.json. */
-    @Value("${modernize.update.manifest-url:https://github.com/Hoax0606/ModernizeProData/releases/latest/download/manifest.json}")
+    @Value("${modernize.update.manifest-url:https://github.com/Hoax0606/Data-Migration_Tool/releases/latest/download/manifest.json}")
     private String manifestUrl;
 
     @Value("${modernize.update.enabled:true}")
@@ -76,6 +79,45 @@ public class UpdateService {
         mapper = JsonMapper.builder()
                 .addModule(new JavaTimeModule())
                 .build();
+        loadCacheFromDisk();
+    }
+
+    /** 마지막 manifest + meta 를 disk 에 persist. process restart 시 UI 가 옛 정보 유지. */
+    private void persistCacheToDisk() {
+        try {
+            Path file = cacheFile();
+            Files.createDirectories(file.getParent());
+            Map<String, Object> bag = new HashMap<>();
+            bag.put("manifest", lastManifest);
+            bag.put("lastCheckAt", lastCheckAt == null ? null : lastCheckAt.toString());
+            bag.put("lastCheckStatus", lastCheckStatus);
+            bag.put("lastCheckError", lastCheckError);
+            Files.writeString(file, mapper.writeValueAsString(bag));
+        } catch (Exception e) {
+            log.debug("Update cache persist failed: {}", e.getMessage());
+        }
+    }
+
+    private void loadCacheFromDisk() {
+        try {
+            Path file = cacheFile();
+            if (!Files.isRegularFile(file)) return;
+            JsonNode root = mapper.readTree(Files.readAllBytes(file));
+            JsonNode m = root.get("manifest");
+            if (m != null && !m.isNull()) lastManifest = mapper.treeToValue(m, UpdateManifest.class);
+            JsonNode at = root.get("lastCheckAt");
+            if (at != null && !at.isNull()) lastCheckAt = OffsetDateTime.parse(at.asText());
+            JsonNode st = root.get("lastCheckStatus");
+            if (st != null && !st.isNull()) lastCheckStatus = st.asText();
+            JsonNode er = root.get("lastCheckError");
+            if (er != null && !er.isNull()) lastCheckError = er.asText();
+        } catch (Exception e) {
+            log.debug("Update cache load failed: {}", e.getMessage());
+        }
+    }
+
+    private Path cacheFile() {
+        return Path.of(stagingDirBase, "ModernizeProData", "update-cache", "last-status.json");
     }
 
     /**
@@ -165,6 +207,7 @@ public class UpdateService {
             // 사이트 PC = outbound 차단 — DEBUG 만. WARN 으로 매번 알리면 noise.
             log.debug("Update check exception: {}", e.toString());
         }
+        persistCacheToDisk();
         return status();
     }
 

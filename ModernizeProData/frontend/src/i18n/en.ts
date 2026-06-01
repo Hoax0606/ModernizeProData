@@ -269,6 +269,7 @@ export const en: Record<TranslationKey, string> = {
   'update.applying': 'Applying…',
   'update.applyConfirm': 'Download and stage the update? The application will restart on next launch to finish applying.',
   'update.restartHint': 'Restart the application to finish applying.',
+  'update.applyInProgress': 'Downloading + verifying + staging the new binary. This may take up to a minute. Do not close the modal.',
   'update.upToDate': 'You are up to date.',
   'update.releaseNotes': 'Release notes',
   'menu.help': 'Help & shortcuts',

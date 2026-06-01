@@ -275,6 +275,7 @@ export const ja: Record<TranslationKey, string> = {
   'update.applying': '適用中…',
   'update.applyConfirm': '更新をダウンロードして準備します。次回起動時に適用が完了します。続行しますか?',
   'update.restartHint': 'アプリを再起動すると適用が完了します。',
+  'update.applyInProgress': '新しい binary をダウンロード + 検証 + 準備中です。最大 1 分ほどかかります。モーダルを閉じないでください。',
   'update.upToDate': '最新です。',
   'update.releaseNotes': 'リリースノート',
   'menu.help': 'Help & shortcuts',

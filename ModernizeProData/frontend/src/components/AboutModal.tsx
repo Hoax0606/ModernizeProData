@@ -15,7 +15,7 @@ export function AboutModal({ open, onClose }: Props) {
         <img src="/mpd.png" alt="" width={48} height={48} style={{ display: 'block' }} />
         <div>
           <div style={styles.brandText}><BrandName /></div>
-          <div style={styles.versionText}>v0.1.0-dev</div>
+          <div style={styles.versionText}>v1.0.0</div>
         </div>
       </div>
 

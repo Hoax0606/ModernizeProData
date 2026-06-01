@@ -97,6 +97,11 @@ export function UpdateModal({ open, onClose }: Props) {
           {error && <div style={styles.error}>{error}</div>}
         </div>
 
+        {applyState.kind === 'busy' && (
+          <div style={styles.applyBusy}>
+            <span style={styles.spinner} aria-hidden /> {t('update.applyInProgress')}
+          </div>
+        )}
         {applyState.kind === 'success' && (
           <div style={styles.applySuccess}>{applyState.message} · {t('update.restartHint')}</div>
         )}
@@ -233,6 +238,26 @@ const styles: Record<string, React.CSSProperties> = {
     border: '1px solid var(--navy)',
     borderRadius: 4,
     fontSize: 12,
+  },
+  applyBusy: {
+    margin: '8px 18px 0',
+    padding: '8px 10px',
+    background: 'var(--panel-2)',
+    color: 'var(--text-2)',
+    border: '1px solid var(--border)',
+    borderRadius: 4,
+    fontSize: 12,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+  },
+  spinner: {
+    width: 12, height: 12,
+    border: '2px solid var(--border-strong)',
+    borderTopColor: 'var(--navy)',
+    borderRadius: '50%',
+    display: 'inline-block',
+    animation: 'mpd-spin 0.8s linear infinite',
   },
   upToDate: {
     fontSize: 12, color: 'var(--text-3)',

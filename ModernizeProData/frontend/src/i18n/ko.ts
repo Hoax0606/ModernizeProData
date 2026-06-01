@@ -273,6 +273,7 @@ export const ko = {
   'update.applying': '적용 중…',
   'update.applyConfirm': '업데이트를 다운로드하고 준비합니다. 다음 실행 시 자동으로 마무리됩니다. 진행할까요?',
   'update.restartHint': '도구를 재실행하면 적용이 완료됩니다.',
+  'update.applyInProgress': '새 binary 를 다운로드 + 검증 + 준비 중입니다. 최대 1분 정도 걸릴 수 있어요. 창을 닫지 마세요.',
   'update.upToDate': '최신 상태입니다.',
   'update.releaseNotes': '릴리스 노트',
   'menu.help': 'Help & shortcuts',

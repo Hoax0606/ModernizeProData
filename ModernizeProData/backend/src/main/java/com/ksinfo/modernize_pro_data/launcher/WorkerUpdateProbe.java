@@ -21,7 +21,7 @@ public final class WorkerUpdateProbe {
     private WorkerUpdateProbe() {}
 
     public static final String DEFAULT_MANIFEST_URL =
-            "https://github.com/Hoax0606/ModernizeProData/releases/latest/download/manifest.json";
+            "https://github.com/Hoax0606/Data-Migration_Tool/releases/latest/download/manifest.json";
 
     /** check 결과. fail = available 정보 없음. */
     public static final class Result {

@@ -232,7 +232,7 @@ export function LoginPage() {
 
         {/* 푸터 */}
         <div style={styles.footer}>
-          © KS Info System Co., Ltd. <span style={styles.footerVersion}>v0.1.0-dev</span>
+          © KS Info System Co., Ltd. <span style={styles.footerVersion}>v1.0.0</span>
         </div>
       </div>
     </div>

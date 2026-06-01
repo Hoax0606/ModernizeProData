@@ -340,7 +340,7 @@ $jlinkModules = @(
     'jdk.naming.dns','jdk.naming.rmi'
 ) -join ','
 
-$jlinkArgs = @(
+$jlinkArgsBase = @(
     '--module-path',   "$jdkJmods;$JavafxSdkLib"
     '--add-modules',   $jlinkModules
     '--bind-services'
@@ -348,15 +348,23 @@ $jlinkArgs = @(
     '--no-header-files'
     '--no-man-pages'
     '--compress=2'
-    # AppCDS 1차 — JDK module 의 CDS archive (server/classes.jsa) 를 runtime
-    # image 에 굽는다. 사용자 PC 의 JVM 이 -Xshare:auto (default) 로 archive 가
-    # 존재하면 자동 사용 → 클래스 로딩 시간 ↓ (Spring Boot 부팅 -1~2s 기대).
-    # JDK 17+ 지원. Application 의 class archive 는 별 작업으로 추가 가능.
-    '--generate-cds-archive'
     '--output',        $RuntimeDir
 )
+# AppCDS 1차 — JDK module 의 CDS archive (server/classes.jsa) 를 runtime image 에 굽는다.
+# 사용자 PC 의 JVM 이 -Xshare:auto (default) 로 archive 가 존재하면 자동 사용 → 클래스
+# 로딩 시간 ↓ (Spring Boot 부팅 -1~2s 기대). JDK 17+ 지원. 단 일부 JDK distribution
+# (예: 옛 Temurin / 일부 OpenJDK) 에서 옵션 인식 못 할 가능성 → fail 시 재시도 (cds 없이).
+$jlinkArgs = @('--generate-cds-archive') + $jlinkArgsBase
 Invoke-Native { & jlink @jlinkArgs }
-if ($LASTEXITCODE -ne 0) { throw "jlink failed (exit $LASTEXITCODE)" }
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  jlink --generate-cds-archive failed (exit $LASTEXITCODE) — retrying without AppCDS..." -ForegroundColor Yellow
+    if (Test-Path $RuntimeDir) { Remove-Item -Recurse -Force $RuntimeDir }
+    Invoke-Native { & jlink @jlinkArgsBase }
+    if ($LASTEXITCODE -ne 0) { throw "jlink failed (exit $LASTEXITCODE)" }
+    Write-Host "  Runtime image built without AppCDS (startup will be slightly slower)." -ForegroundColor Yellow
+} else {
+    Write-Host "  Runtime image built with AppCDS." -ForegroundColor Green
+}
 
 # === [8] jpackage with per-language resource override ===
 function Invoke-JpackageForLang {
