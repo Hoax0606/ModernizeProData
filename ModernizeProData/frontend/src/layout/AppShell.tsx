@@ -185,7 +185,7 @@ export function AppShell() {
       await fetchProjects(siteId);
     };
     void lightSync();
-    const id = setInterval(() => void lightSync(), 2_000);
+    const id = setInterval(() => void lightSync(), 1_000);
     return () => clearInterval(id);
   }, [fetchProjects]);
 

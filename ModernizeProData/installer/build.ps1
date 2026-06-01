@@ -472,6 +472,10 @@ function Invoke-JpackageForLang {
         '--java-options', '-XX:TieredStopAtLevel=1'
         # JavaFX native DLLs live alongside the fat jar inside $APPDIR.
         '--java-options', '-Djava.library.path=$APPDIR'
+        # Heap = 4GB. AuditStage 의 SAMPLE_LIMIT 1000 cap 으로 OOM risk 자체는
+        # 줄였지만, 대용량 (transaction_monthly 등) 운영 시 안전 margin.
+        # JVM default = 256MB ~ system RAM 의 1/4. 명시로 일관성 확보.
+        '--java-options', '-Xmx4g'
         '--win-per-user-install'
         '--win-menu'
         '--win-menu-group', $appName

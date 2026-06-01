@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyDescriptionAttribute("ModernizeProData UI host (WebView2)")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+8fdbd076e4c74f2024f9ededc818357c3b3c791d")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f94d5dd734d04adb255fb73c70bf7274f310fadc")]
 [assembly: System.Reflection.AssemblyProductAttribute("ModernizeProData")]
 [assembly: System.Reflection.AssemblyTitleAttribute("ModernizeProDataUI")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
