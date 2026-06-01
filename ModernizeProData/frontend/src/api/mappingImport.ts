@@ -231,7 +231,9 @@ export const mappingImportApi = {
   ): Promise<MappingReportResult> =>
     unwrap(api.get<ApiResponse<MappingReportResult>>(
       `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/report`,
-      { params: { tobeSchema, tobeTable, limit } },
+      // Trial 의 read_csv + GROUP BY 가 1.4GB 같은 큰 file 에서 30s 넘을 수 있음.
+      // axios default (api client.ts) 의 30s timeout 으로는 부족 → 10분 으로 override.
+      { params: { tobeSchema, tobeTable, limit }, timeout: 600_000 },
     )),
 
   /** Upsert one TO-BE table's binding (manual edit from UI). */

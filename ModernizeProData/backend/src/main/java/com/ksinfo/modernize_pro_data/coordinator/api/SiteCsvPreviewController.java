@@ -112,6 +112,58 @@ public class SiteCsvPreviewController {
         return ApiResponse.ok(preview);
     }
 
+    /** AS-IS csv 의 data row 수 (header 제외) — Mapping page 좌측 tree 표시용. */
+    public record CsvRowCount(String table, long rowCount) {}
+
+    @GetMapping("/{siteId}/csv-row-count/{tableName}")
+    public ApiResponse<CsvRowCount> rowCount(
+            @PathVariable String siteId,
+            @PathVariable String tableName
+    ) {
+        Site site = siteRepository.findById(siteId)
+                .orElseThrow(() -> new ApiException(
+                        "SITE_NOT_FOUND", "사이트를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
+        String csvPath = site.getCsvPath();
+        if (csvPath == null || csvPath.isBlank()) {
+            throw new ApiException("CSV_PATH_NOT_SET", "사이트에 CSV 경로가 설정되지 않았습니다", HttpStatus.BAD_REQUEST);
+        }
+        if (!SAFE_TABLE_NAME.matcher(tableName).matches()) {
+            throw new ApiException("INVALID_TABLE_NAME", "허용되지 않은 테이블 이름: " + tableName, HttpStatus.BAD_REQUEST);
+        }
+        Path baseDir;
+        try {
+            baseDir = Paths.get(csvPath).toAbsolutePath().normalize();
+        } catch (Exception e) {
+            throw new ApiException("CSV_PATH_INVALID", "CSV 경로 형식이 잘못됨: " + csvPath, HttpStatus.BAD_REQUEST);
+        }
+        if (!Files.isDirectory(baseDir)) {
+            throw new ApiException("CSV_PATH_NOT_DIRECTORY", "CSV 경로가 디렉터리가 아님: " + baseDir, HttpStatus.BAD_REQUEST);
+        }
+        Path csvFile = resolveCsvFile(baseDir, tableName);
+        if (csvFile == null) {
+            throw new ApiException("CSV_FILE_NOT_FOUND", "CSV 파일을 찾을 수 없음: " + tableName + ".csv", HttpStatus.NOT_FOUND);
+        }
+        // raw line count (header 제외). 1.4GB 도 byte-stream 으로 ~10-15초.
+        long lines = 0;
+        try (Stream<String> stream = Files.lines(csvFile, java.nio.charset.StandardCharsets.UTF_8)) {
+            lines = stream.count();
+        } catch (IOException | java.io.UncheckedIOException e) {
+            // UTF-8 디코딩 실패 시 byte 단위 newline count fallback (인코딩 무관).
+            try (java.io.InputStream is = Files.newInputStream(csvFile);
+                 java.io.BufferedInputStream bis = new java.io.BufferedInputStream(is, 1 << 20)) {
+                byte[] buf = new byte[1 << 16];
+                int n;
+                while ((n = bis.read(buf)) > 0) {
+                    for (int i = 0; i < n; i++) if (buf[i] == '\n') lines++;
+                }
+            } catch (IOException ex) {
+                throw new ApiException("CSV_READ_FAILED", "CSV row count 실패: " + ex.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+            }
+        }
+        long rowCount = Math.max(0, lines - 1);  // header 제외
+        return ApiResponse.ok(new CsvRowCount(tableName, rowCount));
+    }
+
     /**
      * Resolve a CSV under {baseDir}. {tableName} 은 schema 한정(HR_PAYROLL.EMPLOYEES)
      * 또는 bare(employees) 둘 다 허용. 다음 순서로 시도 (둘 다 case-insensitive):
@@ -162,8 +214,11 @@ public class SiteCsvPreviewController {
         // csvFile is already validated to live under the site's csvPath; only the
         // single-quote needs escaping for the SQL string literal.
         String escapedPath = csvFile.toString().replace("'", "''");
+        // sample_size=1024 — schema detection 용. limit 가 작아 전체 scan 안 함.
+        // 옛 -1 은 1GB+ file 에서 schema detect 시간/메모리 폭주 (preflight csv-arrived 호출이
+        // 그것 못 견뎌 csv 미도착으로 잘못 판정). all_varchar=true 라 type 추론 무관 — 작은 sample 충분.
         String sql = "SELECT * FROM read_csv_auto('" + escapedPath
-                + "', header=true, sample_size=-1, all_varchar=true) LIMIT " + (limit + 1);
+                + "', header=true, sample_size=1024, all_varchar=true) LIMIT " + (limit + 1);
 
         List<String> headers = new ArrayList<>();
         List<List<String>> rows = new ArrayList<>();

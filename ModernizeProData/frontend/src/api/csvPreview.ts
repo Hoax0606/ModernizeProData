@@ -20,4 +20,11 @@ export const csvPreviewApi = {
       `/api/v1/sites/${encodeURIComponent(siteId)}/csv-preview/${encodeURIComponent(tableName)}`,
       { params: { limit } },
     )),
+
+  /** AS-IS csv 의 data row 수 (header 제외). Mapping page tree 표시용. 1.4GB 도 line count ~15초. */
+  rowCount: (siteId: string, tableName: string): Promise<{ table: string; rowCount: number }> =>
+    unwrap(api.get<ApiResponse<{ table: string; rowCount: number }>>(
+      `/api/v1/sites/${encodeURIComponent(siteId)}/csv-row-count/${encodeURIComponent(tableName)}`,
+      { timeout: 120_000 },
+    )),
 };
