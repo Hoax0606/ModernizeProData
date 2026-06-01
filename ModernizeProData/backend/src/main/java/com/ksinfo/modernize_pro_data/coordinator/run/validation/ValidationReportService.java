@@ -7,6 +7,7 @@ import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTable;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository;
 import com.ksinfo.modernize_pro_data.coordinator.load.PgCopyManager;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineAckService;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntry;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntryRepository;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
@@ -71,6 +72,7 @@ public class ValidationReportService implements StageRunner {
     private final StageTableResultRepository stageTableResultRepo;
     private final QuarantineService quarantineService;
     private final QuarantineEntryRepository quarantineEntryRepo;
+    private final QuarantineAckService ackService;
     private final StageProgressBroadcaster broadcaster;
 
     @Override
@@ -105,6 +107,7 @@ public class ValidationReportService implements StageRunner {
 
         int successCount = 0;
         int failedCount  = 0;
+        int pendingWarningsCount = 0;
 
         for (MappingTableBinding binding : ctx.getBindings()) {
             OffsetDateTime tableStart = OffsetDateTime.now();
@@ -130,11 +133,19 @@ public class ValidationReportService implements StageRunner {
                 report.setErrorSummary(null);
                 reportRepo.save(report);
 
-                /* StageTableResult — passedChecks == totalChecks 면 success, 아니면 failed.
-                   FE pipeline 에서 "{n}/{m} tables" 표기에 활용. */
+                /* StageTableResult — 2026-06-01 WARN ack 시스템 도입:
+                 *   - FAIL 있음 → failed (기존)
+                 *   - FAIL 0 + WARN 0 → success
+                 *   - FAIL 0 + WARN 있고 ack 미존재 → failed_with_pending_warnings
+                 *     (Request Review 차단, FE pipeline tile amber)
+                 *   - FAIL 0 + WARN 있고 ack 존재 (carry-over) → success
+                 * passedChecks 는 PASS+WARN 합산 (line 691) 이라 "no FAIL" 만 의미. */
                 boolean allPassed = report.getPassedChecks() == report.getTotalChecks();
+                StageTableStatus resolvedStatus = resolveTableStatus(
+                        ctx, stage, binding, allPassed);
                 OffsetDateTime tableEnd = OffsetDateTime.now();
-                tableResult.setStatus(allPassed ? StageTableStatus.success : StageTableStatus.failed);
+                tableResult.setStatus(resolvedStatus);
+                boolean countAsSuccess = resolvedStatus == StageTableStatus.success;
                 Map<String, Object> rd = new HashMap<>();
                 rd.put("passed", report.getPassedChecks());
                 rd.put("total",  report.getTotalChecks());
@@ -143,9 +154,19 @@ public class ValidationReportService implements StageRunner {
                 tableResult.setDurationMs(Duration.between(tableStart, tableEnd).toMillis());
                 stageTableResultRepo.save(tableResult);
 
-                if (allPassed) successCount++; else failedCount++;
+                if (countAsSuccess) {
+                    successCount++;
+                } else if (resolvedStatus == StageTableStatus.failed_with_pending_warnings) {
+                    pendingWarningsCount++;
+                    failedCount++;
+                } else {
+                    failedCount++;
+                }
                 ingest(ctx, "Validation " + tableLabel + ": " + report.getPassedChecks()
-                        + "/" + report.getTotalChecks() + " PASS", allPassed);
+                        + "/" + report.getTotalChecks() + " PASS"
+                        + (resolvedStatus == StageTableStatus.failed_with_pending_warnings
+                                ? " (warnings pending review)" : ""),
+                        countAsSuccess);
                 stage.setTablesSuccess(successCount);
                 stage.setTablesFailed(failedCount);
                 stageInstanceRepo.save(stage);
@@ -212,8 +233,21 @@ public class ValidationReportService implements StageRunner {
         stage.setTablesSuccess(successCount);
         stage.setTablesFailed(failedCount);
         /* 2026-05-30 합병 정책: validation 도 다른 stage 와 동일 — failedCount>0 면 run 도 failed.
-           각 FAIL 항목별 quarantine entry 도 발생 (computeOne 안에서 record). */
-        stage.setStatus(failedCount == 0 ? StageStatus.success : StageStatus.failed);
+           각 FAIL 항목별 quarantine entry 도 발생 (computeOne 안에서 record).
+           2026-06-01 WARN ack 시스템: failedCount 안에서 pendingWarningsCount 만 따로 분류.
+           - failedCount=0 → success
+           - failedCount>0 && pendingWarningsCount==failedCount → failed_with_pending_warnings
+             (WARN 만, 운영자 ack 후 통과 가능)
+           - failedCount > pendingWarningsCount → failed (FAIL 있음, 강한 상태) */
+        StageStatus newStageStatus;
+        if (failedCount == 0) {
+            newStageStatus = StageStatus.success;
+        } else if (pendingWarningsCount == failedCount) {
+            newStageStatus = StageStatus.failed_with_pending_warnings;
+        } else {
+            newStageStatus = StageStatus.failed;
+        }
+        stage.setStatus(newStageStatus);
 
         /* 2026-05-31 추가: stage 의 quarantine_entries 를 stageLabel × severity 별로 집계 →
            운영자가 LogViewer / errorSummary 만 봐도 어느 check 가 fail/warn 인지 즉시 파악. */
@@ -278,6 +312,57 @@ public class ValidationReportService implements StageRunner {
             case "validate.checksum"    -> "Data Integrity Mismatch";
             default -> label == null || label.isEmpty() ? "(unknown)" : label;
         };
+    }
+
+    /**
+     * Stage table status 3-way 분기 (2026-06-01 WARN ack 시스템).
+     *
+     * @param allPassed report.passedChecks == totalChecks (PASS + WARN 합산이라 "no FAIL" 의미)
+     * @return success / failed / failed_with_pending_warnings
+     *
+     * 로직:
+     *   - !allPassed → failed (FAIL 있음, 강한 상태)
+     *   - allPassed && quarantine entry 中 warning 0개 → success
+     *   - allPassed && warning entry 있고 모든 WARN 그룹에 ack 존재 (carry-over) → success
+     *   - allPassed && warning entry 있고 ack 미존재 → failed_with_pending_warnings
+     *
+     * Carry-over (옵션 C — 조건부): csv_mtime_ms + csv_size 일치 + phase 매칭 시 자동 ack.
+     * 첫 도입: csv fingerprint 미전달 = carry-over 없음. ExtractStage 가 CSV 메타데이터
+     * 저장 후 carry-over 활성 — Commit 3.
+     */
+    private StageTableStatus resolveTableStatus(StageContext ctx, StageInstance stage,
+                                                MappingTableBinding binding, boolean allPassed) {
+        if (!allPassed) return StageTableStatus.failed;
+
+        List<QuarantineEntry> bindingEntries = quarantineEntryRepo
+                .findByStageInstanceIdAndBindingIdOrderByCreatedAtAsc(stage.getId(), binding.getId());
+        long warnCount = bindingEntries.stream()
+                .filter(q -> q.getSeverity() == QuarantineSeverity.warning)
+                .count();
+        if (warnCount == 0) return StageTableStatus.success;
+
+        // WARN 그룹 별로 ack carry-over 조회. 모든 그룹에 ack 있어야 success.
+        // 그룹 키 = (rule_name + reason) — per-stageLabel scope (정책 2).
+        java.util.Set<String> warnGroupKeys = new java.util.LinkedHashSet<>();
+        for (QuarantineEntry q : bindingEntries) {
+            if (q.getSeverity() != QuarantineSeverity.warning) continue;
+            String reason = q.getSampleData() == null ? ""
+                    : String.valueOf(q.getSampleData().getOrDefault("reason", ""));
+            warnGroupKeys.add(q.getRuleName() + "|" + reason);
+        }
+
+        String projectId = ctx.getProject().getId();
+        com.ksinfo.modernize_pro_data.coordinator.run.RunType phase = ctx.getRunHistory().getRunType();
+        // 첫 도입: csv fingerprint null → carry-over 비활성. 그룹마다 ack 미존재로 판정.
+        for (String key : warnGroupKeys) {
+            int sep = key.indexOf('|');
+            String ruleName = key.substring(0, sep);
+            String reason = key.substring(sep + 1);
+            var found = ackService.findCarryOver(projectId, binding.getId(),
+                    ruleName, reason, /*csvMtimeMs*/ null, /*csvSize*/ null, phase);
+            if (found.isEmpty()) return StageTableStatus.failed_with_pending_warnings;
+        }
+        return StageTableStatus.success;
     }
 
     private void failStage(StageInstance stage, OffsetDateTime startedAt,

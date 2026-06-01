@@ -114,7 +114,11 @@ public class ProjectRunReadinessService {
                 if (latestPerTable.containsKey(tobeTable)) continue;  // newer run が既に決定済
 
                 List<StageTableResult> rs = e.getValue();
-                boolean anyFailed = rs.stream().anyMatch(r -> r.getStatus() == StageTableStatus.failed);
+                // 2026-06-01 WARN ack 시스템: failed_with_pending_warnings 도 차단.
+                // 운영자 ack 후 다음 run 에서 success → 그때 readiness 통과.
+                boolean anyFailed = rs.stream().anyMatch(r ->
+                        r.getStatus() == StageTableStatus.failed
+                        || r.getStatus() == StageTableStatus.failed_with_pending_warnings);
                 boolean allSuccess = rs.stream().allMatch(r -> r.getStatus() == StageTableStatus.success);
                 TableState state;
                 if (anyFailed)        state = TableState.FAILED;
