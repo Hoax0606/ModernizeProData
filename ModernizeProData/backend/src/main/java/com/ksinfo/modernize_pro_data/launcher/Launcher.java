@@ -710,7 +710,11 @@ public class Launcher {
             // wizard Stage 숨김 — Edge 가 main UI. taskbar 에 wizard window 도 남지
             // 않도록 hide. Edge 종료 시 backend 도 stop (edge-watcher).
             Platform.runLater(() -> stage.hide());
-            Process edgeProc = EdgeAppLauncher.launch(fullUrl, "edge-app-worker");
+            Process edgeProc = WebViewHostLauncher.launch(
+                    fullUrl,
+                    "edge-app-worker",
+                    "ModernizeProData - Worker",
+                    WebViewHostLauncher.WORKER_APP_ID);
             if (edgeProc != null) {
                 new Thread(() -> {
                     try {

@@ -22,6 +22,7 @@ export function LicenseSetupPage() {
   // controller guard is the authority; this just keeps the UI honest.
   const canApply = !user || user.role === 'master';
   const [content, setContent] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -37,6 +38,7 @@ export function LicenseSetupPage() {
     try {
       const text = await file.text();
       setContent(text);
+      setFileName(file.name);
       setError(null);
     } catch (err) {
       setError(t('licenseSetup.error.fileChooser', {
@@ -118,7 +120,7 @@ export function LicenseSetupPage() {
             <button type="button" onClick={onPick} style={styles.filePickerBtn}>
               <span style={loaded ? styles.fileNameSet : styles.fileNameEmpty}>
                 {loaded
-                  ? t('licenseSetup.fileLoaded', { bytes: content!.length })
+                  ? (fileName ?? t('licenseSetup.fileLoaded', { bytes: content!.length }))
                   : t('licenseSetup.pickFile')}
               </span>
               <span style={styles.fileBrowseTag}>{t('licenseSetup.browse')}</span>

@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>KsInfo.ModernizeProData.UI</RootNamespace>
+    <AssemblyName>ModernizeProDataUI</AssemblyName>
+    <ApplicationIcon>..\assets\mpd.ico</ApplicationIcon>
+    <!-- Edge app-mode 대체 host. taskbar / 우클릭 메뉴 / context menu 를 우리가 결정. -->
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <Product>ModernizeProData</Product>
+    <Company>KS Info System Co., Ltd.</Company>
+    <Description>ModernizeProData UI host (WebView2)</Description>
+    <!-- self-contained + single file 로 .NET runtime 동봉. 사용자 PC 의 .NET 의존 0. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- trimming = 작게. WinForms reflection 의존 코드 일부 깨질 수 있어 보수적으로 끔. -->
+    <PublishTrimmed>false</PublishTrimmed>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
+  </ItemGroup>
+
+</Project>
