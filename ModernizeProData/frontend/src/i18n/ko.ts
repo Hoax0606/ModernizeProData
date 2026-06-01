@@ -454,6 +454,14 @@ export const ko = {
   'versions.changes.status.deleted':  'DELETED',
   'versions.changes.field.asisColumn':'Asis Column',                      // field 라벨 — 영문 통일
   'versions.changes.field.rule':      'Rule',
+  'versions.changes.field.sources':             'Source Mapping',
+  'versions.changes.field.compositionKind':     'Composition',
+  'versions.changes.field.whereFilter':         'WHERE Filter',
+  'versions.changes.field.groupByExpr':         'GROUP BY',
+  'versions.changes.field.expandExpr':          'Expand',
+  'versions.changes.field.sharedFromProjectId': 'Shared From',
+  'versions.changes.field.targetValue':         'Target Value',
+  'versions.changes.field.asisSkip':            'AS-IS Skip',
   'versions.changes.compareLabel':    '{version} 과 비교',                 // desc — 번역
   'versions.changes.firstSnapshot':   '첫 스냅샷 — 모든 항목 추가됨',
   'versions.changes.noChanges':       '변경 사항이 기록되지 않았습니다.',

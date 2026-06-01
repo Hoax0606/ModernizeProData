@@ -59,7 +59,9 @@
   --phase-done:         #678b86; /* 회색 */
   --phase-done-50:      #f2f4f3;
 
-  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* 가독성 통일: 코드/식별자 표기도 본문(Pretendard)과 동일 글꼴로 — 작은 크기에서
+     모노(JetBrains Mono)가 얇고 아리아싱돼 보이는 문제 해소. (PROJECTS 사이드바와 동일) */
+  --mono: 'Pretendard Variable', 'Noto Sans JP', ui-monospace, SFMono-Regular, Menlo, monospace;
   /* 본문: Pretendard Variable 이 한·영을 깔끔하게 처리.
      일본어 글자는 Noto Sans JP 로 fallback (브라우저 자동 코드포인트 매칭). */
   --sans: 'Pretendard Variable', 'Noto Sans JP', -apple-system, system-ui, sans-serif;
@@ -123,7 +125,9 @@ html, body {
   font-size: 12px;
   line-height: 1.45;
   letter-spacing: -0.005em;
-  font-feature-settings: 'ss01', 'cv01', 'cv11', 'tnum';
+  /* 'zero' = 슬래시 제로 (숫자 0 ↔ 영문 O 구분). Pretendard 가 지원. */
+  font-feature-settings: 'ss01', 'cv01', 'cv11', 'tnum', 'zero';
+  font-variant-numeric: slashed-zero tabular-nums;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
@@ -132,7 +136,13 @@ html, body {
 #root { height: 100vh; }
 
 button { font-family: inherit; font-size: inherit; color: inherit; }
-input, select, textarea { font-family: inherit; }
+/* 폼 요소는 폰트 피처가 자동 상속되지 않으므로(브라우저 UA 리셋) 명시적으로 부여 —
+   검색창 등 input 안에서도 슬래시 제로(0̸)가 보이도록. */
+input, select, textarea {
+  font-family: inherit;
+  font-feature-settings: 'ss01', 'cv01', 'cv11', 'tnum', 'zero';
+  font-variant-numeric: slashed-zero tabular-nums;
+}
 
 /* Tightened scrollbars */
 *::-webkit-scrollbar { width: 10px; height: 10px; }

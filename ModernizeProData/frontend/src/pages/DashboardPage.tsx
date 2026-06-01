@@ -365,7 +365,7 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
                 <td style={{ ...styles.td, textAlign: 'center' }}><ReadinessDot kind={r.readiness} /></td>
                 <td style={{ ...styles.td, fontFamily: 'var(--mono)', fontWeight: 500 }}>
                   {r.schemaName && (
-                    <span style={{ color: 'var(--text-4)', fontWeight: 400 }}>{r.schemaName}.</span>
+                    <span style={{ color: 'var(--text)' }}>{r.schemaName}.</span>
                   )}
                   {r.physicalName}
                 </td>

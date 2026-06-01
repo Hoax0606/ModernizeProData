@@ -5494,7 +5494,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex', alignItems: 'center', gap: 6,
     fontFamily: 'var(--mono)', fontSize: 11.5,
   },
-  invItemName: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 },
+  invItemName: { fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 },
   invItemBadge: {
     fontSize: 9, fontFamily: 'var(--mono)', fontWeight: 600,
     padding: '0 4px', borderRadius: 2,
