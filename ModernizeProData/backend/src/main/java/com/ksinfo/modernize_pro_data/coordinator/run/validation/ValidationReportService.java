@@ -152,6 +152,24 @@ public class ValidationReportService implements StageRunner {
                 broadcaster.stageProgress(runId, stage);
             } catch (Exception e) {
                 log.warn("ValidationReport compute failed for {} ({}): {}", tableLabel, binding.getId(), e.getMessage());
+                /* 2026-06-01 Fix #1 — Validation 자체 fail (SQL exception 등) 도 quarantine 에 적재.
+                   이전엔 empty fallback + stage_table_results.errorDetail 만 — Quarantine 페이지에
+                   카드 없어 사용자 진단 어려움. 'validate.stage_failure' stageLabel 로 명시 적재. */
+                try {
+                    String errMsg = e.getMessage() == null ? "(no message)" : e.getMessage();
+                    recordQuarantine(ctx, stage, binding, tableLabel,
+                            "validate.stage_failure",
+                            "Validation stage failed — " + tableLabel + ": " + errMsg,
+                            List.of("table", "error"),
+                            List.of("table", "error"),
+                            List.of(List.of(tableLabel, errMsg)),
+                            1L, QuarantineSeverity.error);
+                } catch (Exception qe) {
+                    /* catastrophic 케이스 — quarantine 적재 자체 실패. 무시하고 진행 (stage_table_results
+                       에는 errorDetail 남음). OOM 등은 본질적으로 quarantine 적재 불가. */
+                    log.warn("Failed to record stage_failure quarantine for {}: {}",
+                            tableLabel, qe.getMessage());
+                }
                 Map<String, Object> empty = new LinkedHashMap<>();
                 empty.put("overview", List.of(Map.of(
                         "item", "Validation aggregate", "asis", "ERROR", "tobe", "ERROR", "verdict", "FAIL")));
@@ -213,8 +231,15 @@ public class ValidationReportService implements StageRunner {
             target.computeIfAbsent(label, k -> new ArrayList<>()).add(reason);
         }
 
+        /* 2026-06-01 A2 — warn 카운트도 명시 + failedCount=0 + warn>0 시 errorSummary 설정.
+           이전엔 warn 만 있어도 errorSummary null → 운영자가 warn 발생 인지 어려움. */
+        int warnTotal = warnBreakdown.values().stream().mapToInt(List::size).sum();
+
         StringBuilder summary = new StringBuilder();
         summary.append(successCount).append(" success, ").append(failedCount).append(" failed");
+        if (warnTotal > 0) {
+            summary.append(", ").append(warnTotal).append(" with warnings");
+        }
         if (!failBreakdown.isEmpty() || !warnBreakdown.isEmpty()) {
             for (var e : failBreakdown.entrySet()) {
                 summary.append("\n  · ").append(friendlyStageLabel(e.getKey()))
@@ -228,7 +253,7 @@ public class ValidationReportService implements StageRunner {
             }
         }
 
-        if (failedCount > 0) {
+        if (failedCount > 0 || warnTotal > 0) {
             stage.setErrorSummary(summary.toString());
         }
         stageInstanceRepo.save(stage);
@@ -623,8 +648,10 @@ public class ValidationReportService implements StageRunner {
         if (!rowCountPass) {
             recordQuarantine(ctx, stage, binding, tableLabel,
                     "validate.row_count", "Validation row count mismatch — " + tableLabel
-                            + " (ASIS " + duckRows + " ≠ TOBE " + pgRows
-                            + (quarantinedRows > 0 ? "; " + quarantinedRows + " row(s) quarantined" : "")
+                            + " (ASIS " + duckRows + " ≠ TOBE " + pgRows + " — data loss"
+                            + (quarantinedRows > 0
+                                ? "; " + quarantinedRows + " row(s) audit-quarantined"
+                                : "")
                             + ")",
                     List.of("table", "ASIS rows", "Quarantined", "TOBE rows"),
                     List.of("metric", "asis_value", "quarantined", "tobe_value"),
@@ -702,7 +729,23 @@ public class ValidationReportService implements StageRunner {
                 "asis", typeValid.isEmpty() ? "OK" : typeValid.size() + " issues",
                 "tobe", typeValid.isEmpty() ? "OK" : typeValid.size() + " issues",
                 "verdict", typeValid.isEmpty() ? "PASS" : "FAIL"));
-        overview.add(orderedMap("item", "PK uniqueness", "asis", "OK", "tobe", "OK", "verdict", "PASS"));
+        /* 2026-06-01 Fix #3 — PK uniqueness 를 동적 계산. AuditStage 의 validate.pk_unique
+           quarantine 개수 기반. 이전엔 항상 "OK / PASS" 하드코딩이라 Quarantine 페이지의 PK
+           duplicate entry 가 있어도 Validation Overview 가 PASS 표시 — UX 불일치 해소. */
+        long pkUniqueViolations = bindingQuarantine.stream()
+                .filter(q -> {
+                    Map<String, Object> s = q.getSampleData();
+                    return s != null && "validate.pk_unique".equals(s.get("stageLabel"));
+                })
+                .mapToLong(q -> q.getRowCount() == null ? 0L : q.getRowCount())
+                .sum();
+        if (pkUniqueViolations > 0) {
+            String dupLabel = pkUniqueViolations + " duplicate" + (pkUniqueViolations == 1 ? "" : "s");
+            overview.add(orderedMap("item", "PK uniqueness",
+                    "asis", dupLabel, "tobe", dupLabel, "verdict", "FAIL"));
+        } else {
+            overview.add(orderedMap("item", "PK uniqueness", "asis", "OK", "tobe", "OK", "verdict", "PASS"));
+        }
 
         int totalChecks = overview.size();
         /* WARN 은 passed 로 카운트 — 실 데이터 동일 (format diff only) 이므로 audit 통과.
