@@ -41,6 +41,9 @@ import java.util.stream.Stream;
 public class MappingReportService {
 
     private static final int MAX_LIMIT = 1000;
+    /** Trial preview 용 — 각 AS-IS source 의 read_csv 에서 sample row 수.
+     *  1GB+ csv 의 GROUP BY / JOIN 가 분 단위 걸리는 것 방지. Cutover 는 별도 path (ExtractStage 의 parquet). */
+    private static final int TRIAL_SOURCE_SAMPLE = 100;
 
     private final DuckDbService duckDbService;
     private final ProjectRepository projectRepository;
@@ -322,9 +325,13 @@ public class MappingReportService {
             // all_varchar=true — ExtractStage 의 parquet1 생성과 동일한 input 형태 (모든 컬럼 VARCHAR).
             // 이렇게 해야 Trial / Cutover 두 path 의 데이터 타입이 일관되어 룰이 양쪽에서 똑같이 동작.
             // 산술 / 비교가 필요한 transform_sql 은 명시적 CAST 가 필수 (사용자 컨벤션).
-            String readCsv = "read_csv('" + escPath
+            //
+            // Trial preview 라 각 source 를 sample (TRIAL_SOURCE_SAMPLE row) 로 제한 — 1GB+ csv 의
+            // GROUP BY / JOIN 이 분 단위 걸리는 것 방지. group / join 결과는 sample 기반이라
+            // 의미적 정확성보다 룰 동작 확인 용도. Cutover 는 ExtractStage 의 parquet 사용 (전체).
+            String readCsv = "(SELECT * FROM read_csv('" + escPath
                     + "', header=true, delim=',', null_padding=true, all_varchar=true"
-                    + ") " + aliasQ;
+                    + ") LIMIT " + TRIAL_SOURCE_SAMPLE + ") " + aliasQ;
             if (i == 0) {
                 from.append(readCsv);
             } else if ("union".equals(s.getRole())) {

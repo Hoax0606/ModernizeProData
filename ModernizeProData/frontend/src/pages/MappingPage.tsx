@@ -358,6 +358,15 @@ export function MappingPage() {
     // (실제 파일 존재 / 행 수 검증은 백엔드 CSV import API 가 생기면 그 응답으로 교체.)
     if (siteForDialect?.csvPath && siteForDialect.csvPath.trim() !== '') {
       ASIS_TABLES = ASIS_TABLES.map((t) => ({ ...t, imported: true }));
+      // 각 AS-IS table 의 csv data row 수 fetch (header 제외). 큰 file 도 line count
+      // 로 ~15초. 병렬. 결과 도착마다 ASIS_TABLES.rows 갱신 + hydrationTick bump.
+      const siteId = siteForDialect.id;
+      for (const at of ASIS_TABLES) {
+        csvPreviewApi.rowCount(siteId, at.name).then((r) => {
+          ASIS_TABLES = ASIS_TABLES.map((t) => t.name === at.name ? { ...t, rows: r.rowCount } : t);
+          setHydrationTick((v) => v + 1);
+        }).catch(() => { /* file 없으면 0 유지 */ });
+      }
     }
     TOBE_TABLES = ddlToTobeTables(tobeSchema);
     ASIS_COLUMNS = ddlToAsisColumns(asisSchema);
@@ -1052,10 +1061,19 @@ function InventoryItem({
         </span>
       </div>
       <div style={styles.invItemSub}>
-        {table.columnCount} cols · {table.rows >= 1e6 ? (table.rows / 1e6).toFixed(1) + 'M' : table.rows.toLocaleString()} rows
+        {side === 'tobe'
+          ? `${table.columnCount} cols`
+          : `${table.columnCount} cols · ${formatRowCount(table.rows)} rows`}
       </div>
     </div>
   );
+}
+
+/** 천 단위 K, 백만 단위 M 압축. Trial preview 의 row 수 표시용. */
+function formatRowCount(n: number): string {
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return n.toLocaleString();
 }
 
 // ── Right: workspace ─────────────────────────────────────────
@@ -2234,16 +2252,28 @@ function AutocompleteInput({
   }, [value]);
 
   useEffect(() => {
-    if (!focused || !completions.length || !inputRef.current) { setAcItems([]); return; }
+    if (!focused || !completions.length || !inputRef.current) {
+      setAcItems((prev) => { if (prev.length) { setAcIdx(0); return []; } return prev; });
+      return;
+    }
     const pos = inputRef.current.selectionStart ?? 0;
     let s = pos;
     while (s > 0 && /[\w.]/.test(value[s - 1])) s--;
     const word = value.slice(s, pos);
-    if (word.length < 1) { setAcItems([]); return; }
+    if (word.length < 1) {
+      setAcItems((prev) => { if (prev.length) { setAcIdx(0); return []; } return prev; });
+      return;
+    }
     const lo = word.toLowerCase();
     const hits = completions.filter((c) => c.toLowerCase().includes(lo) && c.toLowerCase() !== lo).slice(0, 10);
-    setAcItems(hits);
-    setAcIdx(0);
+    // hits 가 *실제로 변경됐을 때만* acIdx reset — 사용자 ArrowDown 선택이 effect 재실행으로
+    // 첫 항목으로 되돌아가는 것 방지.
+    setAcItems((prev) => {
+      const same = prev.length === hits.length && prev.every((p, i) => p === hits[i]);
+      if (same) return prev;
+      setAcIdx(0);
+      return hits;
+    });
   }, [value, focused, completions]);
 
   const applyAc = (item: string) => {
@@ -3100,18 +3130,31 @@ function HighlightEditor({
     }
   }, [value]);
 
-  // Refresh autocomplete after each value/focus change (runs after cursor is restored)
+  // Refresh autocomplete after each value/focus change (runs after cursor is restored).
+  // acIdx reset 은 hits 가 *실제로 변경됐을 때만* — 사용자가 ArrowDown 으로 선택한 후 같은
+  // word 의 effect 재실행 (caret 이동, focus 토글 등) 으로 인해 highlight 가 첫 항목으로
+  // 되돌아가지 않도록.
   useEffect(() => {
-    if (!isFocused || !completions?.length || !taRef.current) { setAcItems([]); return; }
+    if (!isFocused || !completions?.length || !taRef.current) {
+      setAcItems((prev) => { if (prev.length) { setAcIdx(0); return []; } return prev; });
+      return;
+    }
     const pos = taRef.current.selectionStart;
     let s = pos;
     while (s > 0 && /[\w.]/.test(value[s - 1])) s--;
     const word = value.slice(s, pos);
-    if (word.length < 1) { setAcItems([]); return; }
+    if (word.length < 1) {
+      setAcItems((prev) => { if (prev.length) { setAcIdx(0); return []; } return prev; });
+      return;
+    }
     const lo = word.toLowerCase();
     const hits = completions.filter((c) => c.toLowerCase().includes(lo) && c.toLowerCase() !== lo).slice(0, 10);
-    setAcItems(hits);
-    setAcIdx(0);
+    setAcItems((prev) => {
+      const same = prev.length === hits.length && prev.every((p, i) => p === hits[i]);
+      if (same) return prev;
+      setAcIdx(0);
+      return hits;
+    });
   }, [value, isFocused]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const applyAc = (item: string) => {
