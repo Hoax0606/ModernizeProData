@@ -10,7 +10,7 @@
 	</parent>
 	<groupId>com.ksinfo</groupId>
 	<artifactId>modernize-pro-data</artifactId>
-	<version>0.0.1-SNAPSHOT</version>
+	<version>1.0.0</version>
 	<name/>
 	<description/>
 	<url/>
@@ -187,6 +187,11 @@
 	</dependencies>
 
 	<build>
+		<!-- finalName 을 version 무관 고정 — 자동 업데이트 시 jar 파일명이 매 release
+		     마다 달라지면 jpackage 의 .cfg 의 app.classpath line 과 미스매치. 고정으로
+		     UpdateApplier 의 단순 swap 가능. version 정보는 manifest 의
+		     Implementation-Version 만 사용. -->
+		<finalName>modernize-pro-data</finalName>
 		<plugins>
 			<plugin>
 				<groupId>org.springframework.boot</groupId>

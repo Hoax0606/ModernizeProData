@@ -183,6 +183,11 @@ input, select, textarea {
   0%, 100% { background-color: transparent; }
   50%      { background-color: #FFD9D9; }
 }
+
+/* UpdateModal apply busy spinner — inline style 의 animation: mpd-spin ... 참조. */
+@keyframes mpd-spin {
+  to { transform: rotate(360deg); }
+}
 .mpd-quarantine-highlight {
   animation: mpd-quarantine-pulse 0.8s ease-in-out infinite;
   border-radius: 4px;

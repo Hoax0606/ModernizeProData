@@ -115,7 +115,7 @@ $sigBase64 = [Convert]::ToBase64String($sigBytes)
 # --- 5. manifest.json ---
 Write-Host "[5/6] Manifest..." -ForegroundColor Cyan
 $releaseNotes = if ($Notes -and (Test-Path $Notes)) { Get-Content -Raw $Notes } else { '' }
-$githubRepo = 'Hoax0606/ModernizeProData'  # GitHub Releases 의 repo. release.ps1 는 본사 master 만 사용 — repo 변경 시 여기 갱신.
+$githubRepo = 'Hoax0606/Data-Migration_Tool'  # GitHub Releases 의 repo. release.ps1 는 본사 master 만 사용 — repo 변경 시 여기 갱신.
 $assetUrl = "https://github.com/$githubRepo/releases/download/$Tag/$zipName"
 
 $manifest = [PSCustomObject]@{
