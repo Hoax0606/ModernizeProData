@@ -44,6 +44,13 @@ public class UpdateService {
     @Value("${modernize.update.enabled:true}")
     private boolean enabled;
 
+    /** Launch 시 자동 check 후 update 있으면 즉시 apply (next 부팅에 swap).
+     *  Worker = default ON (본사 외부망 launch 마다 자동 갱신).
+     *  Coord = default OFF (master 가 UI 에서 명시 click).
+     *  application-*.yml 에서 override. */
+    @Value("${modernize.update.auto-apply-on-start:false}")
+    private boolean autoApplyOnStart;
+
     /** Staging dir 의 base. apply 가 여기에 새 jar / host 풀어 둠. Launcher 가 다음
      *  부팅 시 detect → swap. */
     @Value("${modernize.update.staging-dir:#{systemEnvironment['LOCALAPPDATA'] ?: systemProperties['user.home']}}")
@@ -69,6 +76,37 @@ public class UpdateService {
         mapper = JsonMapper.builder()
                 .addModule(new JavaTimeModule())
                 .build();
+    }
+
+    /**
+     * Spring 의 ApplicationReadyEvent 이후 trigger — auto-apply 가 on 이면 background
+     * thread 가 check + applyLatest 시도. 모든 동작 silent fail. 외부망 환경 (본사 dev)
+     * 에선 자동 갱신, 사이트 폐쇄망에선 fail = no-op.
+     */
+    @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
+    void autoApplyOnStart() {
+        if (!autoApplyOnStart) return;
+        Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(2000); // Spring 의 다른 init 가 자리 잡을 시간.
+                UpdateStatus s = check();
+                if (!s.isUpdateAvailable()) {
+                    log.debug("Auto-update: nothing to apply (current={}, latest={})",
+                            s.getCurrentVersion(), s.getLatestVersion());
+                    return;
+                }
+                ApplyResult r = applyLatest();
+                if (r.isSuccess()) {
+                    log.info("Auto-update: staged {} — will swap on next launch", s.getLatestVersion());
+                } else {
+                    log.warn("Auto-update apply failed: {}", r.getMessage());
+                }
+            } catch (Throwable ex) {
+                log.debug("Auto-update background thread error: {}", ex.toString());
+            }
+        }, "update-auto-apply");
+        t.setDaemon(true);
+        t.start();
     }
 
     /** 현재 jar 의 Implementation-Version. dev 빌드면 null. */
