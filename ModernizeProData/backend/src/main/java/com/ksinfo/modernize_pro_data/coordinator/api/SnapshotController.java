@@ -68,6 +68,7 @@ public class SnapshotController {
     private final MappingAsisSkipRepository mappingAsisSkipRepository;
     private final SnapshotDiffService snapshotDiffService;
     private final RunHistoryRepository runHistoryRepository;
+    private final com.ksinfo.modernize_pro_data.coordinator.site.SnapshotMappingRestoreService snapshotMappingRestoreService;
 
     /* ── DTOs ──────────────────────────────────── */
 
@@ -336,14 +337,16 @@ public class SnapshotController {
     }
 
     /**
-     * snapshot.snapshotData 의 frozen rules / codeMaps / bindings 를
-     * 활성 mapping_rules / mapping_code_maps / mapping_table_bindings 로 복원한다.
+     * snapshot.snapshotData 의 frozen rules / codeMaps / bindings / asisSkips 를
+     * 활성 mapping_* 테이블로 복원한다.
      *
      * 절차:
-     *  1) 해당 project 의 기존 mapping_* row 전부 삭제 (bindings 는 sources cascade 위해 entity-level deleteAll).
-     *  2) flush 로 DB 반영 → 이후 insert 가 1차 캐시 충돌 없이 진행.
-     *  3) snapshotData 의 각 frozen 을 새 entity 로 변환해 insert. ID 는 새 UUID 발급
-     *     (snapshot 의 frozen id 를 그대로 쓰면 다음 snapshot 이 같은 id 를 동결하게 됨).
+     *  1) 해당 project 의 기존 mapping_* row 전부 삭제 (bindings 는 sources cascade
+     *     위해 entity-level deleteAll). flush 로 DB 반영.
+     *  2) {@link SnapshotMappingRestoreService} 가 PG-side {@code jsonb_to_recordset}
+     *     으로 snapshot_data JSONB → mapping_* INSERT 를 한 SQL 안에서 수행 (Java
+     *     unpack / JpaRepository.save loop 없음). 큰 mapping 에서 baseline pin
+     *     30s → 2~3s 단축이 핵심 이득.
      */
     private void restoreMappingFromSnapshot(Snapshot snapshot, String userId) {
         SnapshotData data = snapshot.getSnapshotData();
@@ -352,7 +355,6 @@ public class SnapshotController {
             return;
         }
         String projectId = snapshot.getProjectId();
-        OffsetDateTime now = OffsetDateTime.now();
 
         // 1) wipe — bindings 는 sources cascade 가 필요해 entity-level deleteAll.
         mappingTableBindingRepository.deleteAll(
@@ -360,12 +362,25 @@ public class SnapshotController {
         mappingRuleRepository.deleteAllByProjectId(projectId);
         mappingCodeMapRepository.deleteAllByProjectId(projectId);
         mappingAsisSkipRepository.deleteAllByProjectId(projectId);
-        // 2) DELETE 반영 — 같은 트랜잭션 안 새 insert 가 1차 캐시 충돌하지 않도록.
-        //    삭제한 repo 들 (binding/rule/codeMap) 의 entity manager 가 flush 대상.
-        //    여기서는 EntityManager 차원 flush (모든 dirty entity).
+        // DELETE 반영 — 같은 트랜잭션 안 새 insert 가 1차 캐시 충돌하지 않도록.
         mappingTableBindingRepository.flush();
         mappingRuleRepository.flush();
         mappingCodeMapRepository.flush();
+
+        // 2) PG-side INSERT (jsonb_to_recordset). entity loop 비교 round-trip 동치.
+        snapshotMappingRestoreService.restore(snapshot.getId(), projectId, userId);
+    }
+
+    // 옛 entity-loop 패턴 (rules/codeMaps/bindings+sources/asisSkips 각각 for loop)
+    // 은 SnapshotMappingRestoreService 가 단일 PG SQL 로 대체. 큰 dataset 의 30s+
+    // 비용 (Jackson deserialize + entity save loop) 제거.
+    /* 이전 코드 (참고용 주석, 동치성 검증 후 제거 예정 — 2026-06-01) */
+    @SuppressWarnings("unused")
+    private void restoreMappingFromSnapshotLegacy(Snapshot snapshot, String userId) {
+        SnapshotData data = snapshot.getSnapshotData();
+        if (data == null) return;
+        String projectId = snapshot.getProjectId();
+        OffsetDateTime now = OffsetDateTime.now();
 
         // 3) rules
         if (data.rules() != null) {
