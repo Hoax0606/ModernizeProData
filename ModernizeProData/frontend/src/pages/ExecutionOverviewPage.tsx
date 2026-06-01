@@ -597,6 +597,7 @@ export function ExecutionOverviewPage() {
                                   st.tone === 'ok'      ? 'var(--text-3)'
                                   : st.tone === 'running' ? 'var(--green)'
                                   : st.tone === 'err'   ? 'var(--red)'
+                                  : st.tone === 'warn'  ? 'var(--amber)'
                                   : 'var(--amber)',
                               }}
                             />
