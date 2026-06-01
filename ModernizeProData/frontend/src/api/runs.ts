@@ -57,7 +57,7 @@ export interface TableResultView {
 export interface StageView {
   stageKey: string;
   seq: number;
-  status: 'pending' | 'running' | 'success' | 'failed';
+  status: 'pending' | 'running' | 'success' | 'failed' | 'failed_with_pending_warnings';
   /** 0-100. BE が tables_success/tables_total から算出 (or 単純 100/0). */
   pct: number;
   tablesTotal: number;

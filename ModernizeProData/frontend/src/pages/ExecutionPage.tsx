@@ -1092,6 +1092,7 @@ function OverallProgress({ t, stages }: { t: T; stages: Stage[] }) {
                   st.tone === 'ok' ? 'var(--text-3)'
                   : st.tone === 'running' ? 'var(--green)'
                   : st.tone === 'err' ? 'var(--red)'
+                  : st.tone === 'warn' ? 'var(--amber)'
                   : 'var(--amber)',
                 // transition 제거 — JavaFX WebView (WebKit ~v608) 에서 빠른 polling +
 // width 변경이 compositing layer 재구성 폭주를 일으켜 native crash 유발.
@@ -1134,6 +1135,7 @@ function PipelineStages({ t, stages }: { t: T; stages: Stage[] }) {
                   st.tone === 'running' ? 'var(--green-50)'
                   : st.tone === 'idle' ? 'var(--amber-50)'
                   : st.tone === 'err' ? 'var(--red-50)'
+                  : st.tone === 'warn' ? 'var(--amber-50)'
                   : 'var(--panel)',
               }}
             >
@@ -1152,6 +1154,7 @@ function PipelineStages({ t, stages }: { t: T; stages: Stage[] }) {
                 {st.tone === 'ok' && <StatusBadge tone="queued">{t('execution.stages.status.done')}</StatusBadge>}
                 {st.tone === 'running' && <StatusBadge tone="ok">{t('execution.stages.status.live')}</StatusBadge>}
                 {st.tone === 'err' && <StatusBadge tone="err">{t('execution.stages.status.failed')}</StatusBadge>}
+                {st.tone === 'warn' && <StatusBadge tone="warn">Awaiting Review</StatusBadge>}
                 {st.tone === 'idle' && <StatusBadge tone="running">{t('execution.stages.status.queued')}</StatusBadge>}
               </div>
             </div>
@@ -1195,6 +1198,7 @@ function ProgressBar({ pct, tone }: { pct: number; tone: StageTone }) {
     tone === 'ok'       ? 'var(--text-3)'
     : tone === 'running'? 'var(--green)'
     : tone === 'err'    ? 'var(--red)'
+    : tone === 'warn'   ? 'var(--amber)'
     : 'var(--amber)';
   return (
     <div style={{ flex: 1, height: 6, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>

@@ -16,7 +16,15 @@ export type StageProgressInput = Pick<
   errorSummary?: string;
 };
 
-export type StageTone = 'idle' | 'running' | 'ok' | 'err';
+/**
+ * Pipeline stage tile 의 색상 결정용.
+ *  - idle    : 미실행 / pending — 회색
+ *  - running : 실행 중 — 파랑
+ *  - ok      : success — 초록
+ *  - warn    : failed_with_pending_warnings — amber (WARN 만, 운영자 ack 미존재)
+ *  - err     : failed — 빨강 (FAIL 있음)
+ */
+export type StageTone = 'idle' | 'running' | 'ok' | 'warn' | 'err';
 
 export interface Stage {
   id: string;
@@ -83,6 +91,7 @@ export function buildStagesFromStageViews(stageViews: StageProgressInput[]): Sta
     }
     const tone: StageTone =
       sv.status === 'success' ? 'ok'
+      : sv.status === 'failed_with_pending_warnings' ? 'warn'
       : sv.status === 'failed' ? 'err'
       : sv.status === 'running' ? 'running'
       : 'idle';
@@ -94,6 +103,7 @@ export function buildStagesFromStageViews(stageViews: StageProgressInput[]): Sta
     let eta = '—';
     if (sv.status === 'success') eta = 'done';
     else if (sv.status === 'failed') eta = 'failed';
+    else if (sv.status === 'failed_with_pending_warnings') eta = 'review';
     else if (sv.status === 'pending') eta = '—';
     else if (sv.status === 'running' && sv.startedAt && sv.tablesTotal > 0) {
       const elapsed = Date.now() - new Date(sv.startedAt).getTime();

@@ -12,6 +12,7 @@ import {
 } from '../api/runLogs';
 import { runsApi, type RunHistoryDto, type RunTableResult } from '../api/runs';
 import { quarantineApi } from '../api/quarantine';
+import { quarantineAckApi, type RunPhase } from '../api/quarantineAck';
 import { useSnapshotsStore, usePinnedSnapshotsStore } from '../store/snapshots';
 import { formatTimestamp, formatTimeMs, formatDuration } from '../lib/formatters';
 import { stageColor } from './logViewerMock';
@@ -141,13 +142,43 @@ export function LogViewerPage() {
   /** Quarantine groups — runId 의 위반 row 묶음. useQuery 로 캐시 + 자동 refetch.
      runId 변경 시 자동 refetch. usePipelineProgress 의 WS invalidate('run-history') 와는
      별개 queryKey 라 직접 invalidate 안 받지만, 5s 폴링이 곧 따라잡음. */
-  const { data: allGroupsData } = useQuery<QuarantineGroup[]>({
+  const { data: allGroupsData, refetch: refetchQuarantine } = useQuery<QuarantineGroup[]>({
     queryKey: ['quarantine', runId],
     enabled: !!runId,
     queryFn: () => quarantineApi.byRun(runId),
     refetchInterval: 5_000,
     staleTime: 2_000,
   });
+
+  /* WARN ack 시스템 (2026-06-01).
+     runHistory 의 latest run 의 runType 을 ack phase 로 사용.
+     runHistory 데이터 미도착 시 ack 버튼 미노출. */
+  const latestRun = (runHistory ?? [])[0];
+  const runPhase: RunPhase | null = latestRun
+    ? (latestRun.runType as RunPhase)
+    : null;
+
+  const handleAcknowledge = useCallback(async (g: QuarantineGroup) => {
+    if (!project || !runPhase || !g.bindingId) return;
+    const note = window.prompt(
+      `Acknowledge WARN group:\n${g.reason}\n\nOptional note (Cancel to abort):`,
+    );
+    if (note === null) return;
+    try {
+      await quarantineAckApi.acknowledge({
+        projectId: project.id,
+        bindingId: g.bindingId,
+        ruleName: g.stage,
+        reason: g.reason,
+        phase: runPhase,
+        note: note || null,
+      });
+      await refetchQuarantine();
+    } catch (e: unknown) {
+      console.error('quarantine acknowledge failed', e);
+      alert('Acknowledge failed: ' + (e instanceof Error ? e.message : String(e)));
+    }
+  }, [project, runPhase, refetchQuarantine]);
   const allGroups: QuarantineGroup[] = allGroupsData ?? [];
   const groupStats = useMemo(() => {
     let errRows = 0, warnRows = 0;
@@ -666,6 +697,9 @@ export function LogViewerPage() {
                     t={t}
                     open={openGroupId === g.id}
                     runId={runId}
+                    onAcknowledge={g.severity === 'warning' && g.bindingId && runPhase
+                      ? () => void handleAcknowledge(g)
+                      : null}
                     onToggle={() => setOpenGroupId((cur) => (cur === g.id ? null : g.id))}
                     onOpenMapping={() => {
                       // 매핑 row highlight 대상 컬럼명 추출 — 3 단계로 robust 하게 시도.
@@ -861,13 +895,15 @@ function SevTab({ label, count, active, onClick, tone }: {
 }
 
 /** Quarantine group card — 카드 클릭으로 열고 닫음. 열렸을 때만 액션바(이 테이블만 다시 이행/매핑/Requeue/...) 표시. */
-function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, runId }: {
+function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, onAcknowledge, runId }: {
   g: QuarantineGroup;
   t: (k: string, v?: Record<string, string>) => string;
   open: boolean;
   onToggle: () => void;
   onOpenMapping: () => void;
   onOpenInspector: () => void;
+  /** WARN 그룹 ack 핸들러. null 이면 버튼 미노출 (severity!=warning / bindingId 없음 / phase 미상). */
+  onAcknowledge: (() => void) | null;
   runId: string | null;
 }) {
   const isErr = g.severity === 'error';
@@ -1017,6 +1053,18 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, 
                 </button>
               )}
               <div style={{ flex: 1 }} />
+              {/* WARN 그룹 명시 ack — 2026-06-01. 운영자가 검토 후 OK 표시 → 다음 run 에서
+                  같은 fingerprint (project + binding + rule + reason + csv_mtime + csv_size) 의
+                  WARN 은 자동 carry-over. 정책 7 — Rehearsal ack → Cutover 도 자동 적용. */}
+              {onAcknowledge && (
+                <button
+                  type="button"
+                  style={styles.actPrimary}
+                  onClick={onAcknowledge}
+                >
+                  Acknowledge group
+                </button>
+              )}
               <button
                 type="button"
                 style={styles.actLink}
