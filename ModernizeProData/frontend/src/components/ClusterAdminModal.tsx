@@ -373,7 +373,7 @@ function UsersTab() {
                           }
                           style={{ ...styles.miniBtn, ...((isSelf || !u.hasActiveSession) ? styles.btnDisabled : {}) }}
                         >
-                          {forceLogoutId === u.id ? '…' : t('userMgmt.forceLogout')}
+                          {forceLogoutId === u.id ? '' : t('userMgmt.forceLogout')}
                         </button>
                         <button
                           onClick={() => setConfirmDeleteId(u.id)}

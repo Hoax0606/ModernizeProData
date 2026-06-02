@@ -128,11 +128,32 @@ export function LoginPage() {
 
         {/* 로그인 카드 */}
         <form style={styles.card} onSubmit={handleSubmit} autoComplete="off">
+          {/* 상단 보조 row — 언어 드랍다운 + mode 별 보조 액션 (Re-enter license / Disconnect URL).
+              버튼 클릭으로 인한 form submit 회피 위해 type="button" 명시. */}
+          <div style={styles.topRow}>
+            {isWorkerMode ? (
+              <button
+                type="button"
+                onClick={handleForgetUrl}
+                disabled={forgetting}
+                style={{ ...styles.miniLinkBtn, ...(forgetting ? styles.buttonDisabled : {}) }}
+              >
+                {forgetting ? t('login.forgetUrl.busy') : t('login.forgetUrl')}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => navigate('/license-setup')}
+                style={styles.miniLinkBtn}
+              >
+                {t('login.relicense')}
+              </button>
+            )}
+            <LanguageDropdown language={language} onChange={setLanguage} />
+          </div>
+
           <label style={styles.label}>
-            <div style={styles.labelRow}>
-              <span style={styles.labelText}>{t('login.username')}</span>
-              <LanguageDropdown language={language} onChange={setLanguage} />
-            </div>
+            <span style={styles.labelText}>{t('login.username')}</span>
             <input
               type="text"
               value={username}
@@ -201,33 +222,6 @@ export function LoginPage() {
             </button>
           )}
 
-          <div style={styles.hint}>
-            {t('login.devHint.role')}: <code style={styles.code}>master</code> / <code style={styles.code}>admin</code> / <code style={styles.code}>viewer</code>
-            &nbsp;·&nbsp; {t('login.devHint.password')} <code style={styles.code}>password</code>
-          </div>
-
-          {/* mode 별 보조 액션:
-              - coordinator : License 재입력 → /license-setup 진입 (master 가 expired/invalid 교체).
-              - worker      : URL 끊기 → backend 가 HKCU CoordinatorUrl 삭제 + 종료, 재실행 시
-                              wizard 의 URL 입력 step 부터 재시작. */}
-          {isWorkerMode ? (
-            <button
-              type="button"
-              onClick={handleForgetUrl}
-              disabled={forgetting}
-              style={{ ...styles.linkBtn, ...(forgetting ? styles.buttonDisabled : {}) }}
-            >
-              {forgetting ? t('login.forgetUrl.busy') : t('login.forgetUrl')}
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => navigate('/license-setup')}
-              style={styles.linkBtn}
-            >
-              {t('login.relicense')}
-            </button>
-          )}
         </form>
 
         {/* 푸터 */}
@@ -375,7 +369,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    gap: 22,
+    gap: 12,
   },
   brandBlock: {
     display: 'flex',
@@ -395,14 +389,14 @@ const styles: Record<string, React.CSSProperties> = {
   },
   card: {
     width: '100%',
-    padding: 24,
+    padding: '14px 24px 20px',
     background: 'var(--panel)',
     border: '1px solid var(--border)',
     borderRadius: 6,
     boxShadow: '0 1px 3px rgba(12,31,27,0.04)',
     display: 'flex',
     flexDirection: 'column',
-    gap: 14,
+    gap: 12,
   },
   label: {
     display: 'flex',
@@ -541,5 +535,24 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     cursor: 'pointer',
     fontFamily: 'inherit',
+  },
+  topRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 6,
+    marginBottom: -4,
+  },
+  miniLinkBtn: {
+    padding: '3px 8px',
+    border: '1px solid var(--border)',
+    borderRadius: 3,
+    background: 'var(--panel-2)',
+    color: 'var(--text-2)',
+    fontSize: 11,
+    fontWeight: 500,
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+    lineHeight: 1.3,
   },
 };

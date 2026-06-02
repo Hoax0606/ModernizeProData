@@ -114,9 +114,14 @@ public class LicenseController {
     public ApiResponse<LicenseDto> initialSetup(@RequestParam("file") MultipartFile file,
                                                  Authentication auth) {
         requireAnonymousOrMaster(auth);
-        if (licenseService.getActive() != null) {
+        // anonymous Re-enter 는 license 가 사실상 동작 못 하는 상태에서만 허용 —
+        // 정상 / 만료 임박 / grace 기간 (= 도구 사용 가능 상태) 일 땐 거부하고
+        // master 가 로그인 후 Settings 에서 정식 replace 하도록 유도.
+        // READ_ONLY / EXPIRED / INVALID / MISSING = 통과 (사용자가 새 file 적용 가능).
+        LicenseStatus cur = licenseService.currentStatus();
+        if (cur == LicenseStatus.ACTIVE || cur == LicenseStatus.EXPIRING || cur == LicenseStatus.IN_GRACE) {
             throw new ApiException("LICENSE_ALREADY_LOADED",
-                    "이미 라이선스가 등록되어 있습니다. master 로 로그인 후 변경하세요.",
+                    "현재 라이선스가 정상 동작 중입니다. 라이선스 교체는 master 로 로그인 후 Settings 에서 진행해 주세요.",
                     HttpStatus.CONFLICT);
         }
         if (file.isEmpty()) {
@@ -143,9 +148,14 @@ public class LicenseController {
     public ApiResponse<LicenseDto> initialSetupRaw(@RequestBody String body,
                                                     Authentication auth) {
         requireAnonymousOrMaster(auth);
-        if (licenseService.getActive() != null) {
+        // anonymous Re-enter 는 license 가 사실상 동작 못 하는 상태에서만 허용 —
+        // 정상 / 만료 임박 / grace 기간 (= 도구 사용 가능 상태) 일 땐 거부하고
+        // master 가 로그인 후 Settings 에서 정식 replace 하도록 유도.
+        // READ_ONLY / EXPIRED / INVALID / MISSING = 통과 (사용자가 새 file 적용 가능).
+        LicenseStatus cur = licenseService.currentStatus();
+        if (cur == LicenseStatus.ACTIVE || cur == LicenseStatus.EXPIRING || cur == LicenseStatus.IN_GRACE) {
             throw new ApiException("LICENSE_ALREADY_LOADED",
-                    "이미 라이선스가 등록되어 있습니다. master 로 로그인 후 변경하세요.",
+                    "현재 라이선스가 정상 동작 중입니다. 라이선스 교체는 master 로 로그인 후 Settings 에서 진행해 주세요.",
                     HttpStatus.CONFLICT);
         }
         if (body == null || body.isBlank()) {

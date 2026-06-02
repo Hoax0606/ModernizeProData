@@ -75,7 +75,7 @@ export function UpdateModal({ open, onClose }: Props) {
       <div style={styles.dialog} onClick={(e) => e.stopPropagation()}>
         <div style={styles.header}>
           <div style={styles.title}>{t('update.title')}</div>
-          <button onClick={onClose} style={styles.closeBtn} aria-label="Close">×</button>
+          <button type="button" onClick={onClose} style={styles.closeBtn} aria-label="Close">×</button>
         </div>
 
         <div style={styles.body}>

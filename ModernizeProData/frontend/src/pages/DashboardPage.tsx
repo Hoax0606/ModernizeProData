@@ -340,7 +340,7 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
             {tobeSchema === null ? (
               <tr>
                 <td colSpan={6} style={styles.emptyRow}>
-                  <div style={styles.emptyHint}>Loading…</div>
+                  <div style={styles.emptyHint}>Loading</div>
                 </td>
               </tr>
             ) : filtered.length === 0 ? (

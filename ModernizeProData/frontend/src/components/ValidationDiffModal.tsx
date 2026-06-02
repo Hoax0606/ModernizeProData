@@ -45,7 +45,7 @@ export function ValidationDiffModal({ open, runId, bindingId, tobeTable, onClose
             <div style={styles.title}>Row Diff — {tobeTable}</div>
             <div style={styles.subtitle}>
               {loading
-                ? 'Loading row diff…'
+                ? 'Loading row diff'
                 : data
                   ? `${data.totalDiff} diff row${data.totalDiff === 1 ? '' : 's'} found`
                     + (data.pkColumns.length > 0 ? ` · PK: ${data.pkColumns.join(', ')}` : '')
@@ -62,7 +62,7 @@ export function ValidationDiffModal({ open, runId, bindingId, tobeTable, onClose
         {error && <div style={styles.error}>{error}</div>}
 
         <div style={styles.body}>
-          {loading && <div style={styles.empty}>Loading…</div>}
+          {loading && <div style={styles.empty}>Loading</div>}
           {!loading && data && data.rows.length === 0 && !error && (
             <div style={styles.empty}>
               {data.note ? '—' : 'No diff rows found.'}

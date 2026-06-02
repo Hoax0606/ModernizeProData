@@ -466,7 +466,7 @@ function ManifestPreview({ manifest }: { manifest: ManifestEntry[] }) {
               {files.length > 200 && (
                 <tr>
                   <td colSpan={2} style={{ ...styles.manifestCell, fontStyle: 'italic', color: 'var(--text-3)' }}>
-                    …{files.length - 200} more files
+                    {files.length - 200} more files
                   </td>
                 </tr>
               )}
@@ -593,7 +593,7 @@ function MigrationFormatPreview({
   const xlsxFilename = previewProject ? `migration-${pathSafeName(previewProject.name)}.preview.xlsx` : 'migration.preview.xlsx';
   const formulaText = previewProject
     ? previewRunData
-      ? `Migration SQL · ${previewProject.name} · ${tables.length} table${tables.length === 1 ? '' : 's'} · run ${previewRunData.runId.slice(0, 12)}… · ${previewRunData.runStatus}`
+      ? `Migration SQL · ${previewProject.name} · ${tables.length} table${tables.length === 1 ? '' : 's'} · run ${previewRunData.runId.slice(0, 12)} · ${previewRunData.runStatus}`
       : `Migration SQL · ${previewProject.name} · no finished run yet`
     : 'Migration SQL · (no project)';
   const sheetList = ['Tables', 'Sample SQL'];

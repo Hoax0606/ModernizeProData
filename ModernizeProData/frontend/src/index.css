@@ -155,19 +155,32 @@ input, select, textarea {
 *::-webkit-scrollbar-thumb:hover { background: var(--text-4); }
 
 /* Pre-flight Fix 도착지 강조 — DdlSchemaPanel 의 정적 highlight 효과를 className 으로
-   재사용 가능하게. 부모가 className 을 1초간 토글 → 0.4s transition 으로 부드럽게 ON/OFF. */
+   재사용 가능하게. 부모가 className 을 1초간 토글 → 0.4s transition 으로 부드럽게 ON/OFF.
+   8번 (Mint Breath) — 정적 색은 거의 안 보이지만 호흡 펄스가 시선을 끈다.
+   1번~7번 후보 이력은 highlight-colors 메모리 참조. */
+@keyframes mpd-fix-breath {
+  0%, 100% {
+    background-color: #ECFDF5;
+    box-shadow: 0 0 0 1.5px rgba(16, 185, 129, 0.45),
+                0 0 0 0 rgba(16, 185, 129, 0);
+  }
+  50% {
+    background-color: #A7F3D0;
+    box-shadow: 0 0 0 1.5px rgba(16, 185, 129, 0.75),
+                0 0 18px 6px rgba(16, 185, 129, 0.32);
+  }
+}
+@keyframes mpd-fix-breath-td {
+  0%, 100% { background-color: #ECFDF5; }
+  50%      { background-color: #A7F3D0; }
+}
 .mpd-fix-highlight {
-  background-color: #D0EAEA !important;
-  /* 외곽 2px deep teal (DdlSchemaPanel border 와 동일, layout shift 없음)
-     + 그 바깥 4px glow (DdlSchemaPanel box-shadow 와 동일) → 총 spread 6px. */
-  box-shadow: 0 0 0 2px #0E7C7B, 0 0 0 6px rgba(14, 124, 123, 0.22) !important;
+  animation: mpd-fix-breath 1.6s ease-in-out infinite;
   border-radius: 4px;
-  transition: background-color 0.4s ease, box-shadow 0.4s ease;
 }
 /* table row 의 td inline background (zebra / isActive) 를 덮기 위한 자식 셀렉터. */
 .mpd-fix-highlight > td {
-  background-color: #D0EAEA !important;
-  transition: background-color 0.4s ease;
+  animation: mpd-fix-breath-td 1.6s ease-in-out infinite;
 }
 
 /* Quarantine 매핑 열기 도착지 강조 — 빨간 펄스 무한 반복. 사용자가 어떤 source field 가

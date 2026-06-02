@@ -193,6 +193,47 @@ export function AppShell() {
 
   const activeSite = useMemo(() => sites.find((s) => s.id === activeSiteId) ?? null, [sites, activeSiteId]);
   const activeProject = useMemo(() => allProjects.find((p) => p.id === activeProjectId) ?? null, [allProjects, activeProjectId]);
+
+  // ── Global keyboard shortcuts ──
+  // Ctrl+B = sidebar toggle, Ctrl+1~7 = project tab nav, Ctrl+, = Solution Settings.
+  // 한국어 IME 변환 중 (isComposing) 일 때는 무시 — 다른 단축키 conflict 방지.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod || e.altKey || e.shiftKey) return;
+      // Ctrl+B — sidebar toggle (input/textarea focus 여도 작동)
+      if (e.key === 'b' || e.key === 'B') {
+        e.preventDefault();
+        setSidebarOpen((o) => !o);
+        return;
+      }
+      // Ctrl+, — Solution Settings open
+      if (e.key === ',') {
+        e.preventDefault();
+        setSolutionOpen(true);
+        return;
+      }
+      // Ctrl+1~7 — page nav. activeProject 있으면 project tabs, 없고 activeSite 있으면 site tabs.
+      const idx = ['1', '2', '3', '4', '5', '6', '7'].indexOf(e.key);
+      if (idx >= 0) {
+        const projectPaths = ['/', '/mapping', '/versions', '/execution', '/artifacts', '/logs', '/settings'];
+        const sitePaths    = ['/', '/site/execution', '/site/quarantine', '/site/approvals', '/site/export', '/site/audit', '/site/scheduler'];
+        if (activeProject) {
+          e.preventDefault();
+          navigate(projectPaths[idx]);
+        } else if (activeSite) {
+          // Ctrl+7 = Scheduler 는 master 만 — 비-master 면 noop.
+          if (idx === 6 && user?.role !== 'master') return;
+          e.preventDefault();
+          navigate(sitePaths[idx]);
+        }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [navigate, activeProject, activeSite, user?.role]);
+
   const activeProjectReadOnly = isProjectReadOnly(activeProject, user);
 
   // scope='project' 인 site 의 active project 가 그 site 면 Project DB 로,
@@ -643,7 +684,13 @@ export function AppShell() {
               onClick={(e) => { e.stopPropagation(); setUserOpen((o) => !o); }}
               style={{ ...styles.userRow, ...(userOpen ? styles.userRowActive : {}) }}
             >
-              <div style={styles.avatar}>{user?.username?.[0]?.toUpperCase() ?? '?'}</div>
+              {(() => {
+                const src = user?.role === 'master' ? '/master.png'
+                          : user?.role === 'admin'  ? '/admin.jpg'
+                          : null;
+                if (src) return <img src={src} alt={user?.role} style={styles.avatarImg} />;
+                return <div style={styles.avatar}>{user?.username?.[0]?.toUpperCase() ?? '?'}</div>;
+              })()}
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div style={styles.userName}>{user?.username}</div>
                 <div style={styles.userSub}>KS Info System</div>
@@ -1595,6 +1642,14 @@ const styles: Record<string, React.CSSProperties> = {
     placeItems: 'center',
     fontSize: 12,
     fontWeight: 700,
+    flexShrink: 0,
+  },
+  avatarImg: {
+    width: 26,
+    height: 26,
+    borderRadius: '50%',
+    objectFit: 'contain',
+    background: 'var(--panel-2)',
     flexShrink: 0,
   },
   userName: { fontSize: 12, fontWeight: 600, color: 'var(--text)' },

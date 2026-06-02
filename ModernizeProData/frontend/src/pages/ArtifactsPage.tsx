@@ -1679,13 +1679,13 @@ export function ArtifactsPage() {
           <button
             onClick={() => void handleDownloadBundle()}
             disabled={bundleBusy}
-            title={bundleBusy ? '...' : t('siteExport.btn.download')}
+            title={bundleBusy ? '' : t('siteExport.btn.download')}
             style={bundleBusy
               ? { ...styles.btnPrimary, ...styles.btnPrimaryDisabled }
               : styles.btnPrimary}
           >
             <span style={styles.btnIcon}>↓</span>
-            {bundleBusy ? '...' : t('siteExport.btn.download')}
+            {bundleBusy ? '' : t('siteExport.btn.download')}
           </button>
         </div>
       </aside>

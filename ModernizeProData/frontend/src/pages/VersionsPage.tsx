@@ -806,8 +806,7 @@ function SnapshotDetailView({
       : notCompletedTables.length > 0
         ? t('versions.runReadiness.notCompleted', {
             count: String(notCompletedTables.length),
-            tables: notCompletedTables.slice(0, 3).join(', ')
-              + (notCompletedTables.length > 3 ? ' …' : ''),
+            tables: notCompletedTables.slice(0, 3).join(', '),
           })
         : '';
   const canRequest = !readOnly && runReadinessAllReady;

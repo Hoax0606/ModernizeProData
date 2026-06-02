@@ -334,7 +334,7 @@ function LicenseCard({ isMaster }: { isMaster: boolean }) {
     >
       {loading ? (
         <Row label={t('solution.license.licensedTo')}>
-          <span style={styles.licenseValue}>…</span>
+          <span style={styles.licenseValue}>—</span>
         </Row>
       ) : (
         <>
@@ -569,7 +569,7 @@ function WorkerCard() {
 
       {loading ? (
         <Row label={t('solution.workers.list')}>
-          <span style={styles.licenseValue}>…</span>
+          <span style={styles.licenseValue}>—</span>
         </Row>
       ) : workers.length === 0 ? (
         <Row label={t('solution.workers.list')}>
@@ -588,7 +588,7 @@ function WorkerCard() {
                 }}>
                   {t(`solution.workers.status.${w.status}` as const)}
                 </span>
-                <code style={styles.licenseMono}>{w.tokenPrefix}…</code>
+                <code style={styles.licenseMono}>{w.tokenPrefix}</code>
                 <span style={{ fontSize: 11, color: 'var(--text-3)' }}>{siteName}</span>
                 <span style={{ fontSize: 11, color: 'var(--text-3)' }}>
                   {w.lastSeenAt ? new Date(w.lastSeenAt).toLocaleString() : t('solution.workers.lastSeen.never')}

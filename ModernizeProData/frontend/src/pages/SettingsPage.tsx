@@ -487,7 +487,7 @@ function PSDanger({ project }: { project: Project }) {
       <div style={styles.dangerCard}>
         <div style={styles.dangerRow}>
           <div style={{ flex: 1 }}>
-            <div style={styles.dangerTitle}>{t('projectSettings.danger.duplicate.label')}</div>
+            <div style={{ ...styles.dangerTitle, color: 'var(--text)' }}>{t('projectSettings.danger.duplicate.label')}</div>
             <div style={styles.dangerDesc}>
               {t('projectSettings.danger.duplicate.desc')}
             </div>
@@ -505,7 +505,7 @@ function PSDanger({ project }: { project: Project }) {
           )}
         </div>
 
-        <div style={{ ...styles.dangerRow, borderTop: '1px solid var(--red)' }}>
+        <div style={{ ...styles.dangerRow, borderTop: '1px solid var(--border)' }}>
           <div style={{ flex: 1 }}>
             <div style={styles.dangerTitle}>Delete project</div>
             <div style={styles.dangerDesc}>
@@ -518,7 +518,7 @@ function PSDanger({ project }: { project: Project }) {
               disabled={readOnly}
               style={{ ...styles.btnDanger, ...(readOnly ? styles.btnDisabled : {}) }}
             >
-              Delete project…
+              Delete project
             </button>
           ) : (
             <span style={styles.coordOnlyTag} title="Coordinator only">Coordinator only</span>
@@ -1056,12 +1056,12 @@ const styles: Record<string, React.CSSProperties> = {
 
   /* danger zone */
   dangerCard: {
-    border: '1px solid var(--red)', borderRadius: 4,
+    border: '1px solid var(--border-strong)', borderRadius: 4,
     background: 'var(--panel)', marginBottom: 10,
     overflow: 'hidden',
   },
   dangerRow: {
-    padding: '10px 14px', background: 'var(--red-50)',
+    padding: '10px 14px', background: 'var(--panel)',
     display: 'flex', alignItems: 'center', gap: 12,
   },
   dangerTitle: { fontSize: 12, fontWeight: 600, color: 'var(--red)' },

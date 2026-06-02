@@ -44,6 +44,12 @@ public class UpdateService {
     @Value("${modernize.update.manifest-url:https://github.com/Hoax0606/Data-Migration_Tool/releases/latest/download/manifest.json}")
     private String manifestUrl;
 
+    /** Maven resource filtering 으로 pom.xml 의 version 이 박힘. jar manifest 의
+     *  Implementation-Version 가 null 인 dev 환경 (mvnw spring-boot:run) 에서도
+     *  정상 표시. */
+    @Value("${modernize.version:}")
+    private String configuredVersion;
+
     @Value("${modernize.update.enabled:true}")
     private boolean enabled;
 
@@ -151,11 +157,16 @@ public class UpdateService {
         t.start();
     }
 
-    /** 현재 jar 의 Implementation-Version. dev 빌드면 null. */
+    /** 현재 version. config (modernize.version, Maven 으로 치환됨) 우선, fallback =
+     *  jar manifest 의 Implementation-Version. dev 환경 (mvnw spring-boot:run) 에서도
+     *  config 가 정상 박혀 표시 가능. */
     public String currentVersion() {
+        if (configuredVersion != null && !configuredVersion.isBlank()
+                && !configuredVersion.equals("@project.version@")) {
+            return configuredVersion;
+        }
         Package pkg = UpdateService.class.getPackage();
-        String v = pkg == null ? null : pkg.getImplementationVersion();
-        return v;
+        return pkg == null ? null : pkg.getImplementationVersion();
     }
 
     /** 현재 상태 — 마지막 check 결과 기반. */
