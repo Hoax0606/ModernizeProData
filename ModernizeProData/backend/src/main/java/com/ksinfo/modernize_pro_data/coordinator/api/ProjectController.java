@@ -143,22 +143,31 @@ public class ProjectController {
         if (req.tobeDbByEnv() != null) p.setTobeDbByEnv(req.tobeDbByEnv());
         if (req.tobeDbLocks() != null) p.setTobeDbLocks(req.tobeDbLocks());
 
-        // audit log — 의미 있는 변경만 기록
+        // audit log — 의미 있는 변경만 기록. 3개 nested save 대신 batch saveAll
+        // (transaction time 단축 → PESSIMISTIC lock 잡고 있는 시간 짧음 → rename concurrent 개선).
         String actor = auth != null ? auth.getName() : "system";
+        java.util.List<com.ksinfo.modernize_pro_data.coordinator.site.AuditLog> pending = new java.util.ArrayList<>(3);
         if (req.phase() != null && !java.util.Objects.equals(prevPhase, p.getPhase())) {
-            auditLogService.record(p, actor, "phase changed")
-                    .details(prevPhase + " → " + p.getPhase()).save();
+            var a = com.ksinfo.modernize_pro_data.coordinator.site.AuditLog
+                    .create(p.getSiteId(), p.getId(), actor, "phase changed");
+            a.setDetails(prevPhase + " → " + p.getPhase());
+            pending.add(a);
         }
         if (req.assignee() != null && !java.util.Objects.equals(prevAssignee, p.getAssignee())) {
-            auditLogService.record(p, actor, "assignee changed")
-                    .details((prevAssignee == null ? "(none)" : prevAssignee) + " → "
-                           + (p.getAssignee() == null ? "(none)" : p.getAssignee())).save();
+            var a = com.ksinfo.modernize_pro_data.coordinator.site.AuditLog
+                    .create(p.getSiteId(), p.getId(), actor, "assignee changed");
+            a.setDetails((prevAssignee == null ? "(none)" : prevAssignee) + " → "
+                    + (p.getAssignee() == null ? "(none)" : p.getAssignee()));
+            pending.add(a);
         }
         if (req.executionAssignee() != null && !java.util.Objects.equals(prevExecutionAssignee, p.getExecutionAssignee())) {
-            auditLogService.record(p, actor, "execution assignee changed")
-                    .details((prevExecutionAssignee == null ? "(none)" : prevExecutionAssignee) + " → "
-                           + (p.getExecutionAssignee() == null ? "(none)" : p.getExecutionAssignee())).save();
+            var a = com.ksinfo.modernize_pro_data.coordinator.site.AuditLog
+                    .create(p.getSiteId(), p.getId(), actor, "execution assignee changed");
+            a.setDetails((prevExecutionAssignee == null ? "(none)" : prevExecutionAssignee) + " → "
+                    + (p.getExecutionAssignee() == null ? "(none)" : p.getExecutionAssignee()));
+            pending.add(a);
         }
+        if (!pending.isEmpty()) auditLogService.saveAll(pending);
 
         projectRepository.save(p);
         log.info("Project updated: {} ({}) — assignee={} executionAssignee={}",

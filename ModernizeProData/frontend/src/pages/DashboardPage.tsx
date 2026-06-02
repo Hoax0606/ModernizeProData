@@ -714,10 +714,14 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
     () => projects.slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
     [projects],
   );
+  // username 비교 정규화 — backend 가 null / empty string / 대소문자 다른 표기로 보낼 때
+  // dropdown 의 selection 과 매치 못 해 모든 row 가 Unassigned 로 떨어지는 회귀 방지.
+  const normAssignee = (s: string | null | undefined) => (s ?? '').trim().toLowerCase();
   const filteredProjects = sortedProjects.filter((p) => {
     if (phaseFilter && p.phase !== phaseFilter) return false;
-    if (userFilter === '__unassigned') return !p.assignee;
-    if (userFilter && p.assignee !== userFilter) return false;
+    const pa = normAssignee(p.assignee);
+    if (userFilter === '__unassigned') return pa === '';
+    if (userFilter && pa !== normAssignee(userFilter)) return false;
     return true;
   });
 

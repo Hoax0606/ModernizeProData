@@ -329,8 +329,12 @@ public class MappingReportService {
             // Trial preview 라 각 source 를 sample (TRIAL_SOURCE_SAMPLE row) 로 제한 — 1GB+ csv 의
             // GROUP BY / JOIN 이 분 단위 걸리는 것 방지. group / join 결과는 sample 기반이라
             // 의미적 정확성보다 룰 동작 확인 용도. Cutover 는 ExtractStage 의 parquet 사용 (전체).
+            //
+            // sample_size=100 — DuckDB 의 schema auto-detect 가 큰 file 의 일부만 sample 하도록 강제.
+            // all_varchar=true 와 결합 시 schema infer overhead 거의 사라지고 첫 LIMIT row 만 stream.
+            // (1000만 row CSV 의 schema 추론 default = 20480 row sample → 수십초 추가 비용 제거.)
             String readCsv = "(SELECT * FROM read_csv('" + escPath
-                    + "', header=true, delim=',', null_padding=true, all_varchar=true"
+                    + "', header=true, delim=',', null_padding=true, all_varchar=true, sample_size=100"
                     + ") LIMIT " + TRIAL_SOURCE_SAMPLE + ") " + aliasQ;
             if (i == 0) {
                 from.append(readCsv);

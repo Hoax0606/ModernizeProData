@@ -142,3 +142,6 @@ docker-compose.override.yml
 # Coordinator (docker tobe-stages 띄우는 사람) 만 local 에 보관.
 # 선행 슬래시 — repo 루트의 db/ 만. backend 의 db/migration 까지 무시되지 않게.
 /db/
+
+# installer 의 local build counter (매 빌드 ProductVersion bump)
+ModernizeProData/installer/.build-counter

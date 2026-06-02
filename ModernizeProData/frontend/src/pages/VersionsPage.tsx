@@ -331,19 +331,6 @@ export function VersionsPage() {
             >
               {t('versions.createCutover')}
             </button>
-            {snapshots.length > 0 && (
-              <button
-                onClick={async () => {
-                  if (!confirm('Delete all snapshots in this project?')) return;
-                  for (const s of snapshots) await deleteSnapshot(s.id);
-                  if (activeProjectId) clearAuditLogByProject(activeProjectId);
-                }}
-                style={{ ...styles.btnGhost, color: 'var(--red)', borderColor: 'var(--red)', ...(readOnly ? styles.btnDisabled : {}) }}
-                disabled={readOnly}
-              >
-                Delete all ({snapshots.length})
-              </button>
-            )}
           </>
         )}
       </div>

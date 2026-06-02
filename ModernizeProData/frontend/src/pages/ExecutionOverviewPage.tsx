@@ -204,11 +204,14 @@ export function ExecutionOverviewPage() {
   // redirect 는 sidebar 프로젝트 클릭 핸들러가 직접 처리 (race 회피).
   if (activeProjectId || !site) return null;
 
+  // username 비교 정규화 — null / empty string / 대소문자 다른 표기 대응 (DashboardPage 와 동일).
+  const normExec = (s: string | null | undefined) => (s ?? '').trim().toLowerCase();
   const filteredProjects = siteProjects.filter((p) => {
     if (phaseFilter && p.phase !== phaseFilter) return false;
+    const pe = normExec(p.executionAssignee);
     if (userFilter === '__unassigned') {
-      if (p.executionAssignee) return false;
-    } else if (userFilter && p.executionAssignee !== userFilter) return false;
+      if (pe !== '') return false;
+    } else if (userFilter && pe !== normExec(userFilter)) return false;
     const ec = errorCount(p);
     if (errorFilter === 'has'  && ec === 0) return false;
     if (errorFilter === 'none' && ec >  0) return false;

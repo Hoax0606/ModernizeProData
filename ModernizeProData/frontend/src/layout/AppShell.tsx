@@ -187,7 +187,9 @@ export function AppShell() {
       await fetchProjects(siteId);
     };
     void lightSync();
-    const id = setInterval(() => void lightSync(), 1_000);
+    // 5s 주기 — Coord 1 + Worker 다수 환경에서 projects fetch 가 매초 발사되면 PG lock
+    // 경쟁 + HikariCP saturation. 5s 면 phase/runStatus 라이브 표시도 충분.
+    const id = setInterval(() => void lightSync(), 5_000);
     return () => clearInterval(id);
   }, [fetchProjects]);
 

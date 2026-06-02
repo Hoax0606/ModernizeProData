@@ -20,8 +20,10 @@ spring:
     driver-class-name: org.postgresql.Driver
     hikari:
       # Coord = LoadStage 병렬 4 thread + Quartz 5 thread + REST handler 여유.
-      # 9+ 동시 점유 시나리오 대비 15. HIKARI_POOL_MAX 로 site 별 override.
-      maximum-pool-size: ${HIKARI_POOL_MAX:15}
+      # Coord 1 + Worker 3 동시 polling (lightSync 5s / heavySync 10s / 각 화면별
+      # 5s polling) + LoadStage / Quartz 까지 = 25+ slot 필요. HIKARI_POOL_MAX
+      # 로 site 별 override.
+      maximum-pool-size: ${HIKARI_POOL_MAX:30}
       connection-timeout: 5000
       # 5분 idle 이후 회수. 작업 burst 후 connection slot 빠르게 반환.
       idle-timeout: 300000
@@ -32,7 +34,9 @@ spring:
     # Flyway 가 스키마 단일 책임. Hibernate 는 검증만.
     hibernate:
       ddl-auto: validate
-    show-sql: false
+    # SQL log — bottleneck 진단 시 env var SPRING_JPA_SHOW_SQL=true 로 toggle.
+    # production default = false (overhead 큼).
+    show-sql: ${SPRING_JPA_SHOW_SQL:false}
     properties:
       hibernate:
         format_sql: true
@@ -133,5 +137,9 @@ logging:
     # HikariCP pool stat — DEBUG 면 매 connection acquire / release 로깅 부담.
     # INFO 면 startup banner + leak / failure 만. P3-7 검증 시 stress 환경에서만 DEBUG.
     com.zaxxer.hikari: INFO
+    # SQL trace — env var SPRING_JPA_SHOW_SQL=true 와 같이 toggle 해야 의미.
+    # bottleneck 진단 시 LOG_SQL_LEVEL=DEBUG 로 reproduce → query + binding 확인.
+    org.hibernate.SQL: ${LOG_SQL_LEVEL:WARN}
+    org.hibernate.orm.jdbc.bind: ${LOG_SQL_LEVEL:WARN}
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"

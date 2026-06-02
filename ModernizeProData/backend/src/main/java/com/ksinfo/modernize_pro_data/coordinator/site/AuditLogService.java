@@ -42,6 +42,20 @@ public class AuditLogService {
         }
     }
 
+    /** Multi-entry batch save — 1 transaction 안에서 동시에 INSERT 모아 commit.
+     *  ProjectController.update 처럼 같은 PATCH 안에서 phase/assignee/executionAssignee
+     *  3 change 가 동시에 발생할 때 nested save 3 번 대신 1 batch 로 transaction time 단축. */
+    @Transactional
+    public java.util.List<AuditLog> saveAll(java.util.List<AuditLog> entries) {
+        if (entries == null || entries.isEmpty()) return java.util.List.of();
+        try {
+            return repo.saveAll(entries);
+        } catch (Exception e) {
+            log.warn("Failed to save audit log batch ({}): {}", entries.size(), e.getMessage());
+            return entries;
+        }
+    }
+
     public class Builder {
         private final AuditLog a;
 

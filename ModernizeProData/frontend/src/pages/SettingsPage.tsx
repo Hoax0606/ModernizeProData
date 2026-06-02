@@ -214,27 +214,6 @@ function PSGeneral({ project, site }: { project: Project; site: Site | null }) {
         </PSRow>
       </PSCard>
 
-      <PSCard title={t('projectSettings.phase.title')} desc={t('projectSettings.phase.desc')}>
-        <PSRow label={t('projectSettings.phase.row')}>
-          <select
-            value={project.phase}
-            disabled={readOnly}
-            onChange={async (e) => {
-              const phase = e.target.value as ProjectPhase;
-              try {
-                await projectApi.update(project.id, { phase, runStatus: 'idle' });
-                const siteId = useWorkspaceStore.getState().activeSiteId;
-                if (siteId) await useWorkspaceStore.getState().fetchProjects(siteId);
-              } catch (err) {
-                console.error('[settings] phase change failed', err);
-              }
-            }}
-            style={{ ...styles.phaseSelect, ...(readOnly ? styles.btnDisabled : {}) }}
-          >
-            {ALL_PHASES.map((ph) => <option key={ph} value={ph}>{ph}</option>)}
-          </select>
-        </PSRow>
-      </PSCard>
     </>
   );
 }

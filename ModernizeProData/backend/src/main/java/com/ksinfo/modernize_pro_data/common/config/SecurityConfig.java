@@ -56,9 +56,12 @@ public class SecurityConfig {
                         .requestMatchers("/ws/**").permitAll()     // 브라우저 SockJS handshake
                         .requestMatchers("/ws-raw/**").permitAll() // Worker raw WebSocket handshake
                         // SPA shell — bundled Vite 산출물 (login 페이지 진입 전 anonymous 로딩).
+                        // 새 image 가 frontend/public 에 추가될 때 매번 SecurityConfig 만지지 않게
+                        // pattern (*.png / *.jpg / *.svg / *.ico) 로 whitelist. public asset 한정
+                        // (api / ws 경로 와 conflict 없음 — root 직속 file 만 매치).
                         .requestMatchers("/", "/index.html",
-                                         "/favicon.svg", "/favicon.ico",
-                                         "/mpd.png", "/mpd_lic.png",
+                                         "/*.png", "/*.jpg", "/*.jpeg",
+                                         "/*.svg", "/*.ico", "/*.webp",
                                          "/assets/**").permitAll()
                         .anyRequest().authenticated()
                 )

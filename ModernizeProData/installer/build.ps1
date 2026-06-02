@@ -68,7 +68,19 @@ function Invoke-Native {
     try { & $Block } finally { $ErrorActionPreference = $prev }
 }
 
-$Version      = '1.0.0'
+# 매 빌드마다 ProductVersion 자동 bump — Windows Installer 가 새 build 를 major
+# upgrade 로 인식 → 옛 install 자동 uninstall + 새 install. 사용자가 Add/Remove
+# Programs uninstall 클릭 안 해도 됨. dev cycle 의 sourcelist mismatch (1612)
+# 자연 회피.
+#
+# Windows Installer ProductVersion 형식 = MAJOR(0-255).MINOR(0-255).BUILD(0-65535).
+# 매 빌드 monotonic 증가 보장 = file-based counter. .gitignore 에 등록 — 사용자 PC
+# 의 local 빌드 카운터. 고객 출하 시 별 release script 로 '1.0.0' 등 visible
+# version 박는다.
+$counterFile = Join-Path $PSScriptRoot '.build-counter'
+$counter = if (Test-Path $counterFile) { [int](Get-Content $counterFile) + 1 } else { 1 }
+Set-Content -Path $counterFile -Value $counter -NoNewline
+$Version = "1.0.$counter"
 $Vendor       = 'KS Info System Co., Ltd.'
 $FrontendDir  = Resolve-Path '..\frontend'
 $BackendDir   = Resolve-Path '..\backend'
@@ -162,7 +174,10 @@ Copy-Item -Recurse -Force (Join-Path $frontDist '*') $StaticDir
 Write-Host "[4/8] Building backend fat jar..." -ForegroundColor Cyan
 Push-Location $BackendDir
 try {
-    Invoke-Native { & .\mvnw.cmd -q -DskipTests package }
+    # clean 필수 — frontend/dist → backend/static 가 새로 복사돼도 Maven 가 backend
+    # java source mtime 만 보고 fat jar repackage 를 skip 하면 옛 jar 안의 옛 static
+    # 이 그대로 msi 에 들어가 install 후 옛 frontend 가 표시된다.
+    Invoke-Native { & .\mvnw.cmd -q -DskipTests clean package }
     if ($LASTEXITCODE -ne 0) { throw "Maven package failed (exit $LASTEXITCODE)" }
 } finally {
     Pop-Location

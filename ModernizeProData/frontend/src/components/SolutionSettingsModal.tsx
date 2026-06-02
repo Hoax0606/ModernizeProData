@@ -298,28 +298,6 @@ function LicenseCard({ isMaster }: { isMaster: boolean }) {
             style={{ display: 'none' }}
             onChange={onFile}
           />
-          {lic?.status && lic.status !== 'MISSING' && (
-            <button
-              style={styles.licenseClearBtn}
-              onClick={async () => {
-                if (!confirm(t('solution.license.clearDev.confirm'))) return;
-                try {
-                  await licenseApi.clear();
-                  // SPA nav, not window.location — JavaFX WebView does not
-                  // actually reload the page on location.replace().
-                  useAuthStore.getState().logout();
-                  navigate('/license-setup', { replace: true });
-                } catch (err) {
-                  setUploadError(err instanceof ApiError
-                    ? err.message
-                    : t('solution.license.clearDev.failed'));
-                }
-              }}
-              title={t('solution.license.clearDev')}
-            >
-              {t('solution.license.clearDev')}
-            </button>
-          )}
           <button
             style={styles.licenseUpdateBtn}
             onClick={() => fileRef.current?.click()}

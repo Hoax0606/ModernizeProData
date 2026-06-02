@@ -146,7 +146,12 @@ export const mappingImportApi = {
     return unwrap(api.post<ApiResponse<MappingImport>>(
       `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/import`,
       fd,
-      { headers: { 'Content-Type': 'multipart/form-data' } },
+      {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        // 대형 매핑정의서 (수만 row, DuckDB read_csv + JDBC batch persist) 가 axios
+        // global 30s timeout 초과. 10 분 으로 늘림 — runReport 와 동일 정책.
+        timeout: 600_000,
+      },
     ));
   },
 
