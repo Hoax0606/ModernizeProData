@@ -11,15 +11,18 @@ import { api, unwrap, type ApiResponse } from './client';
  * - getByTable  : TO-BE 物理명 fallback (binding ID 추적이 어려운 경우)
  */
 
-/** Validation verdict — 시트 / Overview / 개별 row 의 PASS/FAIL/WARN. */
-export type ValidationVerdict = 'PASS' | 'FAIL' | 'WARN';
+/** Validation verdict — PASS/FAIL/WARN/SKIP.
+ *  SKIP = 운영자가 명시 ack 해서 다음 run 부터는 carry-over (정책 3·6). */
+export type ValidationVerdict = 'PASS' | 'FAIL' | 'WARN' | 'SKIP';
 
-/** Overview 시트 1 row — "Item / ASIS / TOBE / Verdict" 4 열. */
+/** Overview 시트 1 row — "Item / ASIS / TOBE / Verdict / Note" 5 열.
+ *  Note 는 SKIP 시 ack note (운영자 메모) 또는 WARN 시 canonical-match 안내 텍스트. */
 export interface ValidationOverviewRow {
   item: string;
   asis: string | number | null;
   tobe: string | number | null;
   verdict: ValidationVerdict;
+  note?: string | null;
 }
 
 /** Sum recon 1 row — numeric 컬럼별 SUM 비교. */

@@ -3,6 +3,10 @@ package com.ksinfo.modernize_pro_data.coordinator.run;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlImportService;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTable;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineAckService;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntry;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntryRepository;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableResult;
@@ -61,6 +65,8 @@ public class ProjectRunReadinessService {
     private final RunHistoryRepository runHistoryRepo;
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
+    private final QuarantineEntryRepository quarantineEntryRepo;
+    private final QuarantineAckService ackService;
 
     /**
      * Per-project の Request Review readiness.
@@ -114,8 +120,20 @@ public class ProjectRunReadinessService {
                 if (latestPerTable.containsKey(tobeTable)) continue;  // newer run が既に決定済
 
                 List<StageTableResult> rs = e.getValue();
-                boolean anyFailed = rs.stream().anyMatch(r -> r.getStatus() == StageTableStatus.failed);
-                boolean allSuccess = rs.stream().allMatch(r -> r.getStatus() == StageTableStatus.success);
+                // 2026-06-02 옵션 C: failed_with_pending_warnings 인 result 도 ack 까지
+                // 같이 확인. 모든 WARN group 이 ack 됐으면 그 result 는 success 로 간주
+                // (stage_table_results.status 자체는 audit 으로 보존, readiness gate 만 통과).
+                boolean anyFailed = rs.stream().anyMatch(r -> {
+                    if (r.getStatus() == StageTableStatus.failed) return true;
+                    if (r.getStatus() == StageTableStatus.failed_with_pending_warnings) {
+                        return hasPendingWarnings(r, projectId, run.getRunType());
+                    }
+                    return false;
+                });
+                boolean allSuccess = rs.stream().allMatch(r ->
+                        r.getStatus() == StageTableStatus.success
+                        || (r.getStatus() == StageTableStatus.failed_with_pending_warnings
+                            && !hasPendingWarnings(r, projectId, run.getRunType())));
                 TableState state;
                 if (anyFailed)        state = TableState.FAILED;
                 else if (allSuccess)  state = TableState.SUCCESS;
@@ -135,6 +153,41 @@ public class ProjectRunReadinessService {
         }
         boolean allReady = success == orderedNames.size();
         return new ProjectRunReadinessDto(allReady, orderedNames.size(), success, notRun, failed);
+    }
+
+    /**
+     * 옵션 C — failed_with_pending_warnings result 가 ack 되었는지 확인.
+     * 그 result 가 가진 WARN quarantine entries 의 unique (rule_name + reason) group 각각이
+     * 명시 ack (phase 정책 7 의 allowedPhases 내) 를 가지고 있으면 false (pending 없음).
+     * 1개라도 ack 없으면 true (pending 있음 → readiness 차단).
+     *
+     * stage_table_results.status 자체는 변경 X — audit log 로 보존. readiness gate 만 ack 까지 봄.
+     */
+    private boolean hasPendingWarnings(StageTableResult r, String projectId, RunType runPhase) {
+        List<QuarantineEntry> entries = quarantineEntryRepo
+                .findByStageInstanceIdAndBindingIdOrderByCreatedAtAsc(r.getStageInstanceId(), r.getBindingId());
+
+        Set<String> warnGroupKeys = new java.util.LinkedHashSet<>();
+        Map<String, String> reasonByKey = new java.util.HashMap<>();
+        Map<String, String> ruleByKey = new java.util.HashMap<>();
+        for (QuarantineEntry q : entries) {
+            if (q.getSeverity() != QuarantineSeverity.warning) continue;
+            String reason = q.getSampleData() == null ? ""
+                    : String.valueOf(q.getSampleData().getOrDefault("reason", ""));
+            String key = q.getRuleName() + "|" + reason;
+            if (warnGroupKeys.add(key)) {
+                reasonByKey.put(key, reason);
+                ruleByKey.put(key, q.getRuleName());
+            }
+        }
+        if (warnGroupKeys.isEmpty()) return false;   // WARN 자체가 없으면 pending 없음
+
+        for (String key : warnGroupKeys) {
+            var ack = ackService.findExplicitAck(projectId, r.getBindingId(),
+                    ruleByKey.get(key), reasonByKey.get(key), runPhase);
+            if (ack.isEmpty()) return true;          // 1개라도 ack 없으면 pending 있음
+        }
+        return false;
     }
 
     /** 最新 run での per-table 集約結果. */

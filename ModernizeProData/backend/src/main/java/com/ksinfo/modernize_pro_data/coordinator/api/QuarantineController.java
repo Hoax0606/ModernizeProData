@@ -2,10 +2,13 @@ package com.ksinfo.modernize_pro_data.coordinator.api;
 
 import com.ksinfo.modernize_pro_data.common.dto.ApiResponse;
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineAckService;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineAcknowledgment;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntry;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntryRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunHistory;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunHistoryRepository;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunType;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableResult;
@@ -27,8 +30,12 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -48,18 +55,74 @@ public class QuarantineController {
     private final StageTableResultRepository stageTableResultRepo;
     private final RunHistoryRepository runRepo;
     private final ProjectRepository projectRepo;
+    private final QuarantineAckService ackService;
 
-    /** Run 1 회분의 quarantine group. LogViewerPage 의 quarantine 탭. */
+    /**
+     * Run 1 회분의 quarantine group. LogViewerPage 의 quarantine 탭.
+     *
+     * 각 entry 에 명시 ack 정보 매핑 — 같은 (binding, rule_name, reason) 의 ack 가 있으면
+     * group 카드에 "이미 검토 완료" 표시 (FE LogViewerPage 의 Acknowledge 버튼 비활성).
+     */
     @GetMapping("/api/v1/runs/{runId}/quarantine")
     public ApiResponse<List<QuarantineGroupView>> listByRun(@PathVariable String runId) {
         List<QuarantineEntry> entries = quarantineRepo.findByRunIdOrderByCreatedAtAsc(runId);
         if (entries.isEmpty()) return ApiResponse.ok(List.of());
 
         Map<String, String> stageKeyById = loadStageKeys(entries);
+
+        // ack lookup — entry 별로 매번 호출하면 N+1. unique (binding, rule, reason) 만 lookup.
+        RunHistory run = runRepo.findById(runId).orElse(null);
+        Map<String, AckSummary> ackByKey = run == null
+                ? Map.of()
+                : loadAckSummaryByGroup(entries, run.getProjectId(), run.getRunType());
+
         return ApiResponse.ok(entries.stream()
-                .map(e -> toGroupView(e, stageKeyById.getOrDefault(e.getStageInstanceId(), "unknown")))
+                .map(e -> {
+                    Map<String, Object> s = e.getSampleData() == null ? Map.of() : e.getSampleData();
+                    String reason = (String) s.getOrDefault("reason", e.getRuleName());
+                    String ackKey = e.getBindingId() + "|" + e.getRuleName() + "|" + reason;
+                    AckSummary summary = ackByKey.get(ackKey);
+                    AckInfoView ack = summary == null ? null : summary.ack();
+                    int priorCount = summary == null ? 0 : summary.priorAckCount();
+                    return toGroupView(e, stageKeyById.getOrDefault(e.getStageInstanceId(), "unknown"), ack, priorCount);
+                })
                 .toList());
     }
+
+    /**
+     * Entries 의 unique (binding, rule, reason) set 을 만들고 각각 ack 상태 lookup.
+     * 두 정보 동시 채움:
+     *   - ack (carry-over): fingerprint+phase 일치 시. dim+meta 표시 트리거.
+     *   - priorAckCount: fingerprint 무관 같은 group key 의 explicit ack 총 개수.
+     *     ack==null + priorAckCount > 0 = "다른 CSV 의 ack 만 있음" → FE 가 hint 표시.
+     */
+    private Map<String, AckSummary> loadAckSummaryByGroup(List<QuarantineEntry> entries,
+                                                          String projectId, RunType phase) {
+        Set<String> seen = new LinkedHashSet<>();
+        Map<String, AckSummary> out = new HashMap<>();
+        for (QuarantineEntry e : entries) {
+            Map<String, Object> s = e.getSampleData() == null ? Map.of() : e.getSampleData();
+            String reason = (String) s.getOrDefault("reason", e.getRuleName());
+            String key = e.getBindingId() + "|" + e.getRuleName() + "|" + reason;
+            if (!seen.add(key)) continue;
+            // Carry-over (정책 3·6): fingerprint 일치 시에만.
+            Long mtime = s.get("csvMtimeMs") instanceof Number n  ? n.longValue()  : null;
+            Long size  = s.get("csvSize")    instanceof Number n2 ? n2.longValue() : null;
+            Optional<QuarantineAcknowledgment> carryAck = ackService.findCarryOver(
+                    projectId, e.getBindingId(), e.getRuleName(), reason, mtime, size, phase);
+            AckInfoView ackView = carryAck.map(a -> new AckInfoView(
+                    a.getId(), a.getAcknowledgedBy(), a.getAcknowledgedAt(), a.getPhase()))
+                    .orElse(null);
+            // Prior ack count (fingerprint 무관) — 같은 group 의 explicit ack 전체 이력 길이.
+            int priorCount = ackService.countExplicitAckByGroup(
+                    projectId, e.getBindingId(), e.getRuleName(), reason);
+            out.put(key, new AckSummary(ackView, priorCount));
+        }
+        return out;
+    }
+
+    /** group 별 ack 요약 — carry-over ack (있을 수 있음) + 같은 group 전체 ack count. */
+    private record AckSummary(AckInfoView ack, int priorAckCount) {}
 
     /**
      * Site 단위 — 모든 project 의 최근 run 의 quarantine.
@@ -81,7 +144,8 @@ public class QuarantineController {
             Map<String, String> stageKeyById = loadStageKeys(entries);
             for (QuarantineEntry e : entries) {
                 String stage = stageKeyById.getOrDefault(e.getStageInstanceId(), "unknown");
-                QuarantineGroupView g = toGroupView(e, stage);
+                // Site-wide 뷰는 ack 정보 미표시 (분류 작업 페이지 아님). null/0 전달.
+                QuarantineGroupView g = toGroupView(e, stage, null, 0);
                 result.add(new SiteQuarantineGroupView(
                         g.id(), g.bindingId(), g.reason(), g.detail(), g.severity(), g.stage(),
                         g.firstSeenAt(), g.table(),
@@ -141,9 +205,12 @@ public class QuarantineController {
     }
 
     @SuppressWarnings("unchecked")
-    private QuarantineGroupView toGroupView(QuarantineEntry e, String stageKeyFallback) {
+    private QuarantineGroupView toGroupView(QuarantineEntry e, String stageKeyFallback,
+                                             AckInfoView ack, int priorAckCount) {
         Map<String, Object> s = e.getSampleData() == null ? Map.of() : e.getSampleData();
         String stageLabel = s.get("stageLabel") instanceof String sl ? sl : stageKeyFallback;
+        Long csvMtimeMs = s.get("csvMtimeMs") instanceof Number n  ? n.longValue()  : null;
+        Long csvSize    = s.get("csvSize")    instanceof Number n2 ? n2.longValue() : null;
         return new QuarantineGroupView(
                 e.getId(),
                 e.getBindingId(),
@@ -157,7 +224,8 @@ public class QuarantineController {
                 (List<String>) s.getOrDefault("columnRoles", List.of()),
                 (List<List<Object>>) s.getOrDefault("sampleRows", List.of()),
                 (List<Object>) s.get("toBeValues"),
-                e.getRowCount() == null ? 0L : e.getRowCount()
+                e.getRowCount() == null ? 0L : e.getRowCount(),
+                csvMtimeMs, csvSize, ack, priorAckCount
         );
     }
 
@@ -176,7 +244,19 @@ public class QuarantineController {
             List<String> columnRoles,
             List<List<Object>> sampleRows,
             List<Object> toBeValues,
-            long rowCount
+            long rowCount,
+            Long csvMtimeMs,                  // AS-IS CSV fingerprint — FE 가 ack 시 그대로 전송 (carry-over)
+            Long csvSize,
+            AckInfoView ack,                  // null = ack 없음. 같은 (binding, rule, reason) 의 carry-over ack
+            int priorAckCount                 // fingerprint 무관 같은 group 의 explicit ack 총 개수. ack==null + priorAckCount>0 = 다른 CSV 의 ack 만 있음 → FE 가 hint 표시
+    ) {}
+
+    /** Group ack 메타 — entry 가 속한 group 의 명시 ack 정보. FE 가 표시 + 버튼 disable 용. */
+    public record AckInfoView(
+            Long acknowledgmentId,
+            String acknowledgedBy,
+            OffsetDateTime acknowledgedAt,
+            String phase                      // test / rehearsal / cutover
     ) {}
 
     public record SiteQuarantineGroupView(

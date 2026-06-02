@@ -12,6 +12,7 @@ import {
 } from '../api/runLogs';
 import { runsApi, type RunHistoryDto, type RunTableResult } from '../api/runs';
 import { quarantineApi } from '../api/quarantine';
+import { quarantineAckApi, type RunPhase, type QuarantineGroupAck, type AckHistoryEntry } from '../api/quarantineAck';
 import { useSnapshotsStore, usePinnedSnapshotsStore } from '../store/snapshots';
 import { formatTimestamp, formatTimeMs, formatDuration } from '../lib/formatters';
 import { stageColor } from './logViewerMock';
@@ -25,6 +26,7 @@ import {
   type QuarantineGroup,
   type QuarantineSeverity,
 } from './quarantineMock';
+import { Modal } from '../components/Modal';
 
 /**
  * Log viewer — 프로젝트 실행 로그 조회.
@@ -101,7 +103,8 @@ export function LogViewerPage() {
   /** 화면 모드. stream = 전체 로그 tail, quarantine = 규칙 위반 group 카드 뷰, history = run 履歴. */
   const [view, setView] = useState<'stream' | 'quarantine' | 'history'>('stream');
   /** Quarantine 화면의 severity 필터. */
-  const [severityFilter, setSeverityFilter] = useState<'all' | QuarantineSeverity>('all');
+  /* 'skip' = ack 된 WARN group. severity 와 별개 분류 — warning 카운트에서 제외. */
+  const [severityFilter, setSeverityFilter] = useState<'all' | QuarantineSeverity | 'skip'>('all');
   /** 펼쳐진 (= 액션바 표시) group 의 id. 한 번에 하나만. 같은 카드 다시 클릭 → 접힘. */
   const [openGroupId, setOpenGroupId] = useState<string | null>(null);
   /** 우상단 group dropdown 선택 — null 이면 severity 결과 다 표시, id 면 그 group 만 표시 + 자동 펼침. */
@@ -141,37 +144,179 @@ export function LogViewerPage() {
   /** Quarantine groups — runId 의 위반 row 묶음. useQuery 로 캐시 + 자동 refetch.
      runId 변경 시 자동 refetch. usePipelineProgress 의 WS invalidate('run-history') 와는
      별개 queryKey 라 직접 invalidate 안 받지만, 5s 폴링이 곧 따라잡음. */
-  const { data: allGroupsData } = useQuery<QuarantineGroup[]>({
+  const { data: allGroupsData, refetch: refetchQuarantine } = useQuery<QuarantineGroup[]>({
     queryKey: ['quarantine', runId],
     enabled: !!runId,
     queryFn: () => quarantineApi.byRun(runId),
     refetchInterval: 5_000,
     staleTime: 2_000,
   });
+
+  /* group 별 ack 상태 (carry-over 반영). ack 된 group 은 Quarantine 목록에서 숨김. */
+  const { data: ackGroupsData, refetch: refetchAckGroups } = useQuery<QuarantineGroupAck[]>({
+    queryKey: ['quarantine-ack', runId],
+    enabled: !!runId,
+    queryFn: () => quarantineAckApi.listGroups(runId),
+    refetchInterval: 5_000,
+    staleTime: 2_000,
+  });
+  /* ackGroupsData 는 carry-over visibility polling 용 — render 는 byRun 의 g.ack 직접 사용. */
+  void ackGroupsData;
+
+  /* WARN ack 시스템 (2026-06-01).
+     runHistory 의 latest run 의 runType 을 ack phase 로 사용.
+     runHistory 데이터 미도착 시 ack 버튼 미노출. */
+  const latestRun = (runHistory ?? [])[0];
+  const runPhase: RunPhase | null = latestRun
+    ? (latestRun.runType as RunPhase)
+    : null;
+
+  /** Ack Modal state — 운영자가 [그룹 검토 완료] 클릭 → 이 modal 에서 메모 입력 후 저장.
+      isRereview=true 면 carry-over 된 group 의 재검토 — 같은 modal 재사용, 제목/placeholder 만 동적. */
+  const [ackTarget, setAckTarget] = useState<QuarantineGroup | null>(null);
+  const [ackIsRereview, setAckIsRereview] = useState(false);
+  const [ackPreviousNote, setAckPreviousNote] = useState<string | null>(null);
+  const [ackNote, setAckNote] = useState('');
+  const [ackBusy, setAckBusy] = useState(false);
+  const [ackError, setAckError] = useState<string | null>(null);
+
+  /** Ack history popover state — dim 카드의 (↗ history) 클릭 시 group 의 전체 ack 이력 표시.
+      run history 의 historyRows 와 충돌 피하기 위해 ackHistory* prefix 사용. */
+  const [ackHistoryTarget, setAckHistoryTarget] = useState<QuarantineGroup | null>(null);
+  const [ackHistoryRows, setAckHistoryRows] = useState<AckHistoryEntry[]>([]);
+  const [ackHistoryBusy, setAckHistoryBusy] = useState(false);
+  const [ackHistoryError, setAckHistoryError] = useState<string | null>(null);
+  const openAckHistory = useCallback(async (g: QuarantineGroup) => {
+    if (!project || !g.bindingId) return;
+    setAckHistoryTarget(g);
+    setAckHistoryRows([]);
+    setAckHistoryError(null);
+    setAckHistoryBusy(true);
+    try {
+      const rows = await quarantineAckApi.history({
+        projectId: project.id,
+        bindingId: g.bindingId,
+        ruleName: g.stage,
+        reason: g.reason,
+      });
+      setAckHistoryRows(rows);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setAckHistoryError(t('logs.quarantine.ack.history.failed', { error: msg }));
+    } finally {
+      setAckHistoryBusy(false);
+    }
+  }, [project, t]);
+  const closeAckHistory = useCallback(() => {
+    setAckHistoryTarget(null);
+    setAckHistoryRows([]);
+    setAckHistoryError(null);
+  }, []);
+
+  const openAckModal = useCallback((g: QuarantineGroup) => {
+    setAckTarget(g);
+    setAckIsRereview(false);
+    setAckPreviousNote(null);
+    setAckNote('');
+    setAckError(null);
+  }, []);
+
+  /** Re-review — 이미 ack 된 group 을 다시 검토. 새 ack row 추가 (기존 ack 는 audit 보존). */
+  const openRereviewModal = useCallback(async (g: QuarantineGroup) => {
+    if (!project || !g.bindingId) return;
+    setAckTarget(g);
+    setAckIsRereview(true);
+    setAckPreviousNote(null);
+    setAckNote('');
+    setAckError(null);
+    // 이전 ack 의 note 를 모달 안내에 표시 — history endpoint 의 첫 row 가 latest.
+    try {
+      const rows = await quarantineAckApi.history({
+        projectId: project.id,
+        bindingId: g.bindingId,
+        ruleName: g.stage,
+        reason: g.reason,
+      });
+      if (rows.length > 0 && rows[0].note) setAckPreviousNote(rows[0].note);
+    } catch {
+      /* 이전 note 표시 실패 무시 — re-review 자체는 진행 가능. */
+    }
+  }, [project]);
+
+  const closeAckModal = useCallback(() => {
+    if (ackBusy) return;
+    setAckTarget(null);
+    setAckIsRereview(false);
+    setAckPreviousNote(null);
+    setAckNote('');
+    setAckError(null);
+  }, [ackBusy]);
+
+  const handleAckSave = useCallback(async () => {
+    const g = ackTarget;
+    if (!g || !project || !runPhase || !g.bindingId) return;
+    setAckBusy(true);
+    setAckError(null);
+    try {
+      await quarantineAckApi.acknowledge({
+        projectId: project.id,
+        bindingId: g.bindingId,
+        ruleName: g.stage,
+        reason: g.reason,
+        phase: runPhase,
+        // CSV fingerprint 전송 — 같은 CSV 로 재실행 시 carry-over (정책 3·6).
+        csvMtimeMs: g.csvMtimeMs ?? null,
+        csvSize: g.csvSize ?? null,
+        note: ackNote || null,
+      });
+      await refetchQuarantine();
+      await refetchAckGroups();
+      setAckTarget(null);
+      setAckNote('');
+    } catch (e: unknown) {
+      console.error('quarantine acknowledge failed', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      // BE 가 409 (ACK_DUPLICATE) 반환 시 친화적 메시지로 교체.
+      if (msg.includes('ACK_DUPLICATE') || msg.includes('409')) {
+        setAckError(t('logs.quarantine.ack.duplicate'));
+      } else {
+        setAckError(t('logs.quarantine.ack.failed', { error: msg }));
+      }
+    } finally {
+      setAckBusy(false);
+    }
+  }, [ackTarget, project, runPhase, ackNote, refetchQuarantine, refetchAckGroups, t]);
+  /* ack 된 group 도 dim+meta 로 표시 (사용자 결정 — hide 가 아닌 dim). QuarantineCard 가 g.ack 로 처리. */
   const allGroups: QuarantineGroup[] = allGroupsData ?? [];
   const groupStats = useMemo(() => {
-    let errRows = 0, warnRows = 0;
+    /* ack 된 WARN 은 'skip' 으로 분리 카운트. warning 카운트에서 제외 (사용자 결정).
+       error 는 ack 무관 — error 는 ack 시스템 X. */
+    let errRows = 0, warnRows = 0, skipRows = 0;
     for (const g of allGroups) {
-      if (g.severity === 'error') errRows += g.rowCount; else warnRows += g.rowCount;
+      if (g.severity === 'error') errRows += g.rowCount;
+      else if (g.ack) skipRows += g.rowCount;
+      else warnRows += g.rowCount;
     }
     const errGroups  = allGroups.filter((g) => g.severity === 'error').length;
-    const warnGroups = allGroups.filter((g) => g.severity === 'warning').length;
+    const warnGroups = allGroups.filter((g) => g.severity === 'warning' && !g.ack).length;
+    const skipGroups = allGroups.filter((g) => g.severity === 'warning' && !!g.ack).length;
     return {
       total: allGroups.length,
-      errGroups, warnGroups,
-      errRows, warnRows,
-      totalRows: errRows + warnRows,
+      errGroups, warnGroups, skipGroups,
+      errRows, warnRows, skipRows,
+      totalRows: errRows + warnRows + skipRows,
     };
   }, [allGroups]);
   /* 필터는 severity → table → group(개별) 순으로 AND 결합한다.
      - bySeverity : severity 탭 결과 (table dropdown 옵션의 모집단)
      - byTable    : 거기서 테이블 dropdown 적용 (group dropdown 옵션의 모집단)
      - filtered   : 거기서 개별 group dropdown 적용 → 최종 표시 카드 */
-  const bySeverity = useMemo(() => (
-    severityFilter === 'all'
-      ? allGroups
-      : allGroups.filter((g) => g.severity === severityFilter)
-  ), [allGroups, severityFilter]);
+  const bySeverity = useMemo(() => {
+    if (severityFilter === 'all')     return allGroups;
+    if (severityFilter === 'skip')    return allGroups.filter((g) => g.severity === 'warning' && !!g.ack);
+    if (severityFilter === 'warning') return allGroups.filter((g) => g.severity === 'warning' && !g.ack);
+    return allGroups.filter((g) => g.severity === severityFilter);
+  }, [allGroups, severityFilter]);
   const byTable = useMemo(() => (
     tableFilter ? bySeverity.filter((g) => g.table === tableFilter) : bySeverity
   ), [bySeverity, tableFilter]);
@@ -610,6 +755,7 @@ export function LogViewerPage() {
                     n: String(groupStats.totalRows),
                     err: String(groupStats.errRows),
                     warn: String(groupStats.warnRows),
+                    skip: String(groupStats.skipRows),
                   })}
                 </div>
               </div>
@@ -623,6 +769,8 @@ export function LogViewerPage() {
                     active={severityFilter === 'error'}   onClick={() => setSeverityFilter('error')}   tone="error" />
                   <SevTab label={t('logs.quarantine.filter.warnings')} count={groupStats.warnGroups}
                     active={severityFilter === 'warning'} onClick={() => setSeverityFilter('warning')} tone="warning" />
+                  <SevTab label={t('logs.quarantine.filter.skip')} count={groupStats.skipGroups}
+                    active={severityFilter === 'skip'} onClick={() => setSeverityFilter('skip')} />
                 </div>
                 {/* 테이블 dropdown — severity 탭 바로 옆. 한 테이블의 위반만 모아 보기. */}
                 <select
@@ -666,6 +814,16 @@ export function LogViewerPage() {
                     t={t}
                     open={openGroupId === g.id}
                     runId={runId}
+                    onAcknowledge={g.severity === 'warning' && g.bindingId && runPhase && !g.ack
+                      ? () => openAckModal(g)
+                      : null}
+                    onRereview={g.severity === 'warning' && g.bindingId && runPhase && g.ack
+                      ? () => void openRereviewModal(g)
+                      : null}
+                    ackInfo={g.ack ?? null}
+                    onOpenHistory={g.severity === 'warning' && g.bindingId
+                      ? () => void openAckHistory(g)
+                      : null}
                     onToggle={() => setOpenGroupId((cur) => (cur === g.id ? null : g.id))}
                     onOpenMapping={() => {
                       // 매핑 row highlight 대상 컬럼명 추출 — 3 단계로 robust 하게 시도.
@@ -811,6 +969,170 @@ export function LogViewerPage() {
         </aside>
         )}
       </div>
+
+      {/* WARN 그룹 ack Modal — 운영자가 검토 후 메모 입력. window.prompt 대체 (2026-06-01).
+          isRereview=true 면 같은 modal 을 재검토 용으로 재사용 — 제목/placeholder 동적,
+          이전 note 표시. Save 시 새 ack row 추가 (기존 ack 는 audit 보존). */}
+      <Modal
+        open={ackTarget !== null}
+        onClose={closeAckModal}
+        title={t(ackIsRereview ? 'logs.quarantine.ack.reReview.title' : 'logs.quarantine.ack.modal.title')}
+        width={520}
+      >
+        {ackTarget && (
+          <div>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 4 }}>
+                {t('logs.quarantine.ack.modal.reasonLabel')}
+              </div>
+              <div style={{ fontSize: 13, color: 'var(--text)' }}>{ackTarget.reason}</div>
+            </div>
+            {ackIsRereview && ackPreviousNote && (
+              <div style={{ marginBottom: 12, padding: 8, background: 'var(--panel-2)', borderRadius: 3, fontSize: 11, color: 'var(--text-2)' }}>
+                {t('logs.quarantine.ack.reReview.previousNote', { note: ackPreviousNote })}
+              </div>
+            )}
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ display: 'block', fontSize: 11, color: 'var(--text-3)', marginBottom: 4 }}>
+                {t('logs.quarantine.ack.modal.noteLabel')}
+              </label>
+              <textarea
+                value={ackNote}
+                onChange={(e) => setAckNote(e.target.value)}
+                placeholder={t(ackIsRereview ? 'logs.quarantine.ack.reReview.notePlaceholder' : 'logs.quarantine.ack.modal.notePlaceholder')}
+                rows={4}
+                disabled={ackBusy}
+                style={{
+                  width: '100%',
+                  fontFamily: 'inherit',
+                  fontSize: 12,
+                  border: '1px solid var(--border)',
+                  background: 'var(--panel)',
+                  color: 'var(--text)',
+                  padding: 8,
+                  borderRadius: 3,
+                  resize: 'vertical',
+                  boxSizing: 'border-box',
+                }}
+              />
+            </div>
+            {ackError && (
+              <div style={{ color: '#c92a3f', fontSize: 12, marginBottom: 8 }}>{ackError}</div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                type="button"
+                onClick={closeAckModal}
+                disabled={ackBusy}
+                style={{
+                  padding: '6px 14px',
+                  fontSize: 12,
+                  border: '1px solid var(--border)',
+                  background: 'var(--panel)',
+                  color: 'var(--text)',
+                  borderRadius: 3,
+                  cursor: ackBusy ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {t('logs.quarantine.ack.modal.cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleAckSave()}
+                disabled={ackBusy}
+                style={{
+                  padding: '6px 14px',
+                  fontSize: 12,
+                  border: '1px solid var(--navy)',
+                  background: 'var(--navy)',
+                  color: '#fff',
+                  borderRadius: 3,
+                  cursor: ackBusy ? 'not-allowed' : 'pointer',
+                  opacity: ackBusy ? 0.6 : 1,
+                }}
+              >
+                {t('logs.quarantine.ack.modal.save')}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Ack history popover — group 의 모든 ack 이력 (phase 무관 시간 역순). */}
+      <Modal
+        open={ackHistoryTarget !== null}
+        onClose={closeAckHistory}
+        title={t('logs.quarantine.ack.history.title')}
+        width={680}
+      >
+        {ackHistoryTarget && (
+          <div>
+            <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12 }}>
+              {t('logs.quarantine.ack.history.subtitle', {
+                table: ackHistoryTarget.table,
+                rule: ackHistoryTarget.stage,
+                reason: ackHistoryTarget.reason,
+              })}
+            </div>
+            {ackHistoryError && (
+              <div style={{ color: '#c92a3f', fontSize: 12, marginBottom: 8 }}>{ackHistoryError}</div>
+            )}
+            {ackHistoryBusy ? (
+              <div style={{ fontSize: 12, color: 'var(--text-3)', padding: '16px 0' }}>...</div>
+            ) : ackHistoryRows.length === 0 && !ackHistoryError ? (
+              <div style={{ fontSize: 12, color: 'var(--text-3)', padding: '16px 0' }}>
+                {t('logs.quarantine.ack.history.empty')}
+              </div>
+            ) : (
+              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border)', color: 'var(--text-3)' }}>
+                    <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{t('logs.quarantine.ack.history.col.phase')}</th>
+                    <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{t('logs.quarantine.ack.history.col.by')}</th>
+                    <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{t('logs.quarantine.ack.history.col.at')}</th>
+                    <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{t('logs.quarantine.ack.history.col.fp')}</th>
+                    <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{t('logs.quarantine.ack.history.col.note')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ackHistoryRows.map((r) => (
+                    <tr key={r.acknowledgmentId} style={{ borderBottom: '1px solid var(--border)' }}>
+                      <td style={{ padding: '6px 8px', fontFamily: 'var(--mono)', color: 'var(--text-2)' }}>[{r.phase}]</td>
+                      <td style={{ padding: '6px 8px' }}>{r.acknowledgedBy}</td>
+                      <td style={{ padding: '6px 8px', fontFamily: 'var(--mono)', color: 'var(--text-2)' }}>{new Date(r.acknowledgedAt).toLocaleString()}</td>
+                      <td style={{ padding: '6px 8px', fontFamily: 'var(--mono)', color: 'var(--text-3)', fontSize: 11 }}>
+                        {r.csvMtimeMs != null && r.csvSize != null
+                          ? `${r.csvMtimeMs} · ${r.csvSize}b`
+                          : '—'}
+                      </td>
+                      <td style={{ padding: '6px 8px', color: 'var(--text-2)', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.note ?? ''}>
+                        {r.note || '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+              <button
+                type="button"
+                onClick={closeAckHistory}
+                style={{
+                  padding: '6px 14px',
+                  fontSize: 12,
+                  border: '1px solid var(--border)',
+                  background: 'var(--panel)',
+                  color: 'var(--text)',
+                  borderRadius: 3,
+                  cursor: 'pointer',
+                }}
+              >
+                {t('logs.quarantine.ack.history.close')}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
@@ -861,19 +1183,30 @@ function SevTab({ label, count, active, onClick, tone }: {
 }
 
 /** Quarantine group card — 카드 클릭으로 열고 닫음. 열렸을 때만 액션바(이 테이블만 다시 이행/매핑/Requeue/...) 표시. */
-function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, runId }: {
+function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, onAcknowledge, onRereview, onOpenHistory, ackInfo, runId }: {
   g: QuarantineGroup;
   t: (k: string, v?: Record<string, string>) => string;
   open: boolean;
   onToggle: () => void;
   onOpenMapping: () => void;
   onOpenInspector: () => void;
+  /** WARN 그룹 ack 핸들러. null 이면 버튼 미노출 (severity!=warning / bindingId 없음 / phase 미상 / 이미 ack 됨). */
+  onAcknowledge: (() => void) | null;
+  /** Re-review 핸들러 — 이미 ack 된 group 의 재검토. ack 된 상태에서만 활성. */
+  onRereview: (() => void) | null;
+  /** Ack history popover 핸들러. null 이면 link 미노출. */
+  onOpenHistory: (() => void) | null;
+  /** 이 group 의 명시 ack 메타 — 있으면 dim 처리 + "검토 완료" 라벨 표시. */
+  ackInfo: import('./quarantineMock').QuarantineGroupAck | null;
   runId: string | null;
 }) {
   const isErr = g.severity === 'error';
-  const sevColor = isErr ? '#c92a3f' : '#a86b00';
-  const sevBg    = isErr ? 'rgba(232,93,117,0.08)' : 'rgba(232,181,99,0.10)';
-  const sevBorder = isErr ? '#e85d75' : '#e8b563';
+  /* ack 된 group(=skip 처리 완료) 은 carry-over 표시. severity tone 대신 회색으로 — 운영자가
+     한 눈에 "이 group 은 처리됨" 알 수 있도록. */
+  const isAcked = !!ackInfo;
+  const sevColor  = isAcked ? 'var(--text-3)' : isErr ? '#c92a3f' : '#a86b00';
+  const sevBg     = isAcked ? 'var(--panel-2)' : isErr ? 'rgba(232,93,117,0.08)' : 'rgba(232,181,99,0.10)';
+  const sevBorder = isAcked ? 'var(--border)' : isErr ? '#e85d75' : '#e8b563';
   const sample = g.sampleRows;
   const tt = t as unknown as (k: string, v?: Record<string, string>) => string;
   const human  = humanizeQuarantineDetail(g, tt);
@@ -900,7 +1233,11 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, 
       ref={rootRef}
       aria-expanded={open}
       className="quar-card"
-      style={{ ...styles.cardRoot, ...(open ? styles.cardRootOpen : {}) }}
+      style={{
+        ...styles.cardRoot,
+        ...(open ? styles.cardRootOpen : {}),
+        ...(isAcked ? { background: 'var(--panel-2)', opacity: 0.85 } : {}),
+      }}
     >
       <div style={{ ...styles.cardLeftBar, background: sevBorder }} />
       <div style={styles.cardBody}>
@@ -989,10 +1326,12 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, 
               >
                 {t('logs.quarantine.act.openMapping')}
               </button>
-              {/* 위반 row 전수 parquet 다운로드 — BE 가 bindingId 채운 경우만 노출.
-                  fetch 로 blob 받아 직접 다운로드 — 4xx 응답이 새 탭의 빈 페이지로
-                  표시되던 문제 회피. 파일 미생성 / audit stage 미실행 등은 alert 으로 안내. */}
-              {runId && g.bindingId && (
+              {/* 위반 row 전수 parquet 다운로드 — BE 가 bindingId 채운 경우 + ERROR 만 노출.
+                  WARN entry 는 ValidationReportService 의 aggregate diff (SUM/MIN/MAX/SHA256) 라
+                  row-level parquet 파일이 없음 → 다운로드 버튼 노출 X. AuditStage 의 ERROR 만
+                  exportViolationParquet 로 파일 생성. fetch 로 blob 받아 직접 다운로드 —
+                  4xx 응답이 새 탭의 빈 페이지로 표시되던 문제 회피. */}
+              {runId && g.bindingId && g.severity === 'error' && (
                 <button
                   type="button"
                   onClick={async () => {
@@ -1017,6 +1356,69 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, 
                 </button>
               )}
               <div style={{ flex: 1 }} />
+              {/* WARN 그룹 명시 ack — 2026-06-01. 운영자가 검토 후 OK 표시 → 다음 run 에서
+                  같은 fingerprint (project + binding + rule + reason + csv_mtime + csv_size) 의
+                  WARN 은 자동 carry-over. 정책 7 — Rehearsal ack → Cutover 도 자동 적용.
+                  이미 ack 됐으면 라벨을 "by {운영자} · {시각}" 으로 바꾸고 비활성화. */}
+              {ackInfo ? (
+                <>
+                  <button
+                    type="button"
+                    style={{ ...styles.actPrimary, opacity: 0.6, cursor: 'default' }}
+                    disabled
+                    title={ackInfo.acknowledgedBy + ' · ' + ackInfo.phase}
+                  >
+                    {t('logs.quarantine.ack.acknowledgedBy', {
+                      phase: ackInfo.phase,
+                      by: ackInfo.acknowledgedBy,
+                      at: new Date(ackInfo.acknowledgedAt).toLocaleString(),
+                    })}
+                  </button>
+                  {onRereview && (
+                    <button
+                      type="button"
+                      style={styles.actLink}
+                      onClick={onRereview}
+                      title={t('logs.quarantine.ack.reReview.title')}
+                    >
+                      {t('logs.quarantine.ack.reReview.link')}
+                    </button>
+                  )}
+                </>
+              ) : onAcknowledge && (
+                <>
+                  {/* 이전 ack 가 있지만 fingerprint 다름 (다른 CSV/phase) — 운영자가 즉시
+                      과거 검토 이력 확인 가능하도록 hint + history 링크. carry-over 정책 3·6
+                      유지 (자동 통과 X), 단 audit 친화. */}
+                  {(g.priorAckCount ?? 0) > 0 && onOpenHistory && (
+                    <button
+                      type="button"
+                      style={{ ...styles.actLink, color: 'var(--amber)' }}
+                      onClick={onOpenHistory}
+                      title={t('logs.quarantine.ack.history.title')}
+                    >
+                      {t('logs.quarantine.ack.priorHint', { n: String(g.priorAckCount ?? 0) })}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    style={styles.actWarn}
+                    onClick={onAcknowledge}
+                  >
+                    {t('logs.quarantine.act.acknowledgeGroup')}
+                  </button>
+                </>
+              )}
+              {onOpenHistory && (
+                <button
+                  type="button"
+                  style={styles.actLink}
+                  onClick={onOpenHistory}
+                  title={t('logs.quarantine.ack.history.title')}
+                >
+                  {t('logs.quarantine.ack.history.link')}
+                </button>
+              )}
               <button
                 type="button"
                 style={styles.actLink}
@@ -1658,6 +2060,11 @@ const styles: Record<string, React.CSSProperties> = {
   actPrimary: {
     padding: '6px 14px', border: '1px solid #1f8a5c', borderRadius: 4,
     background: '#21946a', color: '#fff',
+    fontSize: 11.5, fontWeight: 700, cursor: 'pointer',
+  },
+  actWarn: {
+    padding: '6px 14px', border: '1px solid var(--amber)', borderRadius: 4,
+    background: 'var(--amber)', color: '#fff',
     fontSize: 11.5, fontWeight: 700, cursor: 'pointer',
   },
   actSecondary: {

@@ -1,5 +1,7 @@
 package com.ksinfo.modernize_pro_data.coordinator.run;
 
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineAckService;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntry;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntryRepository;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
@@ -31,6 +33,7 @@ public class ExecutionOverviewService {
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
     private final QuarantineEntryRepository quarantineRepo;
+    private final QuarantineAckService ackService;
     private final SnapshotRepository snapshotRepo;
 
     /**
@@ -59,6 +62,8 @@ public class ExecutionOverviewService {
             int tablesDone,
             long errorCount,
             long warningCount,
+            /** 운영자가 명시 ack 한 WARN entry 수 — KPI/그리드 의 "M/N 처리" 분수 표시용. */
+            long warningAckedCount,
             int progressPct,
             /**
              * 7-stage の現在状態. run 履歴が無ければ空 List.
@@ -90,7 +95,7 @@ public class ExecutionOverviewService {
         }
         if (latest == null) {
             return new ProjectExecMetrics(p.getId(), p.getName(), null, null,
-                    0, p.getTobeTableCount(), 0, 0, 0, 0, List.of());
+                    0, p.getTobeTableCount(), 0, 0, 0, 0, 0, List.of());
         }
         String runId = latest.getId();
         List<StageInstance> stages = stageInstanceRepo.findByRunIdOrderBySeqAsc(runId);
@@ -140,10 +145,35 @@ public class ExecutionOverviewService {
                 .toList();
 
         long errorCount = quarantineRepo.countByRunIdAndSeverity(runId, QuarantineSeverity.error);
-        long warningCount = quarantineRepo.countByRunIdAndSeverity(runId, QuarantineSeverity.warning);
+        // WARN entry 전체 + group 별 ack 매칭 → ackedCount = ack 된 group 의 entry 합.
+        // KPI/그리드 "M/N 처리" 분수 표시용 (단위 = entry, group 단위 아님 — 기존 warningCount 와 통일).
+        List<QuarantineEntry> warnEntries = quarantineRepo.findByRunIdOrderByCreatedAtAsc(runId).stream()
+                .filter(q -> q.getSeverity() == QuarantineSeverity.warning)
+                .toList();
+        long warningCount = warnEntries.size();
+        long warningAckedCount = 0;
+        if (!warnEntries.isEmpty()) {
+            java.util.Map<String, java.util.List<QuarantineEntry>> byGroup = new java.util.LinkedHashMap<>();
+            for (QuarantineEntry q : warnEntries) {
+                String reason = q.getSampleData() == null ? ""
+                        : String.valueOf(q.getSampleData().getOrDefault("reason", ""));
+                String key = q.getBindingId() + "|" + q.getRuleName() + "|" + reason;
+                byGroup.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(q);
+            }
+            for (java.util.Map.Entry<String, java.util.List<QuarantineEntry>> e : byGroup.entrySet()) {
+                QuarantineEntry sample = e.getValue().get(0);
+                String reason = sample.getSampleData() == null ? ""
+                        : String.valueOf(sample.getSampleData().getOrDefault("reason", ""));
+                if (ackService.findExplicitAck(p.getId(), sample.getBindingId(),
+                        sample.getRuleName(), reason, latest.getRunType()).isPresent()) {
+                    warningAckedCount += e.getValue().size();
+                }
+            }
+        }
 
         return new ProjectExecMetrics(p.getId(), p.getName(), runId, latest.getStatus().name(),
-                rows, tablesTotal, tablesDone, errorCount, warningCount, progressPct, stageSummaries);
+                rows, tablesTotal, tablesDone, errorCount, warningCount, warningAckedCount,
+                progressPct, stageSummaries);
     }
 
     /**
@@ -160,7 +190,8 @@ public class ExecutionOverviewService {
         int pct = switch (s.getStatus()) {
             case pending -> 0;
             case success -> 100;
-            case running, failed -> total == 0 ? 0 : (int) Math.floor(100.0 * ok / total);
+            case running, failed, failed_with_pending_warnings ->
+                    total == 0 ? 0 : (int) Math.floor(100.0 * ok / total);
         };
         return new StageSummary(s.getStageKey(), s.getSeq(), s.getStatus().name(),
                 Math.max(0, Math.min(100, pct)), total, ok, failed);

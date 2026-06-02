@@ -17,6 +17,9 @@ import { tobeDbApi } from '../api/tobeDb';
 import { csvPreviewApi } from '../api/csvPreview';
 import { mappingImportApi } from '../api/mappingImport';
 import { runsApi, type RunHistoryDto, type StageView } from '../api/runs';
+import { quarantineApi } from '../api/quarantine';
+import { quarantineAckApi, type CutoverReviewRequest } from '../api/quarantineAck';
+import { CutoverReviewModal, buildReviewItems, type CutoverReviewItem } from '../components/CutoverReviewModal';
 import { usePipelineProgress, isTerminal } from '../hooks/usePipelineProgress';
 import { PreflightResultPanel } from '../components/PreflightResultPanel';
 import {
@@ -519,6 +522,52 @@ export function ExecutionPage() {
     }
   };
 
+  /* Cutover review state (정책 4·8 — 2026-06-01).
+     Cutover Start 버튼 클릭 직후 rehearsal phase 의 ack 된 group 목록을 review modal 에 표시.
+     운영자가 group 별 confirm/reject 후 [Confirm & Start cutover] → startrun + confirmCutoverReview. */
+  const [cutoverReviewOpen, setCutoverReviewOpen] = useState(false);
+  const [cutoverReviewItems, setCutoverReviewItems] = useState<CutoverReviewItem[]>([]);
+  const [cutoverReviewTables, setCutoverReviewTables] = useState<string[]>([]);
+
+  const closeCutoverReview = () => {
+    setCutoverReviewOpen(false);
+    setCutoverReviewItems([]);
+    setCutoverReviewTables([]);
+  };
+
+  /** Confirm & Start — startrun 직후 즉시 cutover-review 전송. */
+  const handleCutoverReviewConfirm = async (confirmed: Set<string>, note: string | null) => {
+    if (!runMode) return;
+    const tables = cutoverReviewTables;
+    try {
+      const result = await runsApi.start(project.id, runMode, tables);
+      if (result.status !== 'STARTED' || !result.runId) {
+        console.warn('[execution] cutover startRun rejected:', result.status, result.reason);
+        alert(`Start rejected: ${result.status}\n${result.reason ?? ''}`);
+        return;
+      }
+      setActiveRunId(result.runId);
+      void queryClient.invalidateQueries({ queryKey: ['run-history', project.id] });
+      // review 전송 — runId 받자마자 즉시. validation stage 실행 전 cutover ack 가 DB 에 적재되어야 함.
+      const body: CutoverReviewRequest = {
+        groups: cutoverReviewItems.map((it) => ({
+          bindingId: it.bindingId,
+          ruleName: it.ruleName,
+          reason: it.reason,
+          csvMtimeMs: null,
+          csvSize: null,
+          confirmed: confirmed.has(it.bindingId + '|' + it.ruleName + '|' + it.reason),
+        })),
+        note,
+      };
+      await quarantineAckApi.confirmCutoverReview(result.runId, body);
+      closeCutoverReview();
+    } catch (e) {
+      console.error('[execution] cutover review failed:', e);
+      throw e; // modal 이 표시
+    }
+  };
+
   const handleStartRun = async () => {
     if (!preflightPassed || selectedTables.size === 0) return;
     if (!hasPinnedSnapshot || !pinnedSnapshot) return;
@@ -532,6 +581,29 @@ export function ExecutionPage() {
        halted (success/failed/aborted/timed_out) 면 같은 버튼이 'Start over' 로 노출되며
        새 run 시작 허용. 이전엔 activeRunId 만 체크해서 Start over 가 항상 noop 이었음 (2026-05-29 수정). */
     if (activeRunId && run && !isTerminal(run.status)) return;
+
+    /* Cutover 전 review (정책 4·8) — rehearsal phase 의 ack 된 group 들을 가져와
+       운영자가 group 별 confirm/reject. ack 없으면 review skip 하고 바로 start. */
+    if (runMode === 'cutover') {
+      const latestRehearsal = runs.find(
+        (r) => r.runType === 'rehearsal' && (r.result === 'ok' || r.status === 'completed'),
+      );
+      if (latestRehearsal) {
+        try {
+          const groups = await quarantineApi.byRun(latestRehearsal.id);
+          const items = buildReviewItems(groups);
+          if (items.length > 0) {
+            setCutoverReviewItems(items);
+            setCutoverReviewTables(tables);
+            setCutoverReviewOpen(true);
+            return; // modal 의 Confirm 핸들러가 실제 start.
+          }
+        } catch (e) {
+          console.warn('[execution] cutover review fetch failed — proceeding without review:', e);
+        }
+      }
+    }
+
     if (activeRunId) setActiveRunId(null);  // halted run UI 정리 후 새 run.
     setDiscardedSnapshotId(null);  // 新 run 起動で Discard 状態クリア (次の run 結果は通常通り表示).
     await startRealRun(tables, runMode);
@@ -626,6 +698,14 @@ export function ExecutionPage() {
       </DisabledOverlay>
       <OverallProgress t={t} stages={stages} />
       <PipelineStages t={t} stages={stages} />
+      {/* Cutover review modal (정책 4·8 — 2026-06-01). cutover Start 시 rehearsal ack
+          목록을 운영자가 confirm/reject 후 [Confirm & Start] → startrun + review 전송. */}
+      <CutoverReviewModal
+        open={cutoverReviewOpen}
+        items={cutoverReviewItems}
+        onConfirm={handleCutoverReviewConfirm}
+        onClose={closeCutoverReview}
+      />
     </div>
   );
 }
@@ -671,6 +751,17 @@ function RunHeader({
 }) {
   const canStart = canControl && preflightPassed && selectedTablesCount > 0 && hasPinnedSnapshot && runMode !== null;
   const isDone = project.phase === 'done';
+
+  /* run 에 미승인 WARN group 이 있으면 상태를 completed 대신 warning 으로 표시.
+     Log Viewer 에서 Acknowledge 하면 ack=non-null → warningPending=false → completed 로 자동 전환. */
+  const { data: ackGroups } = useQuery({
+    queryKey: ['exec-ack-groups', activeRun?.runId],
+    enabled: !!activeRun?.runId && activeRun.runStatus === 'completed',
+    queryFn: () => quarantineAckApi.listGroups(activeRun!.runId),
+    refetchInterval: 5_000,
+    staleTime: 2_000,
+  });
+  const warningPending = (ackGroups ?? []).some((g) => g.severity === 'warning' && !g.ack);
 
   const startTooltip = !canControl
     ? 'Only the assignee or master can start a run'
@@ -762,13 +853,16 @@ function RunHeader({
     elapsed: formatDuration(elapsedMs),
   });
 
+  const isWarning = isCompleted && warningPending;
   const statusChipTone: BadgeTone =
     isFailed ? 'err'
+    : isWarning ? 'warn'
     : isAborted ? 'warn'
     : isCompleted ? 'queued'
     : 'ok';
   const statusChipText =
     isFailed ? t('execution.run.status.failed')
+    : isWarning ? t('execution.run.status.warning')
     : isAborted ? t('execution.run.status.aborted')
     : isCompleted ? t('execution.run.status.completed')
     : t('execution.run.status.running');
@@ -1092,6 +1186,7 @@ function OverallProgress({ t, stages }: { t: T; stages: Stage[] }) {
                   st.tone === 'ok' ? 'var(--text-3)'
                   : st.tone === 'running' ? 'var(--green)'
                   : st.tone === 'err' ? 'var(--red)'
+                  : st.tone === 'warn' ? 'var(--amber)'
                   : 'var(--amber)',
                 // transition 제거 — JavaFX WebView (WebKit ~v608) 에서 빠른 polling +
 // width 변경이 compositing layer 재구성 폭주를 일으켜 native crash 유발.
@@ -1134,6 +1229,7 @@ function PipelineStages({ t, stages }: { t: T; stages: Stage[] }) {
                   st.tone === 'running' ? 'var(--green-50)'
                   : st.tone === 'idle' ? 'var(--amber-50)'
                   : st.tone === 'err' ? 'var(--red-50)'
+                  : st.tone === 'warn' ? 'var(--amber-50)'
                   : 'var(--panel)',
               }}
             >
@@ -1152,6 +1248,7 @@ function PipelineStages({ t, stages }: { t: T; stages: Stage[] }) {
                 {st.tone === 'ok' && <StatusBadge tone="queued">{t('execution.stages.status.done')}</StatusBadge>}
                 {st.tone === 'running' && <StatusBadge tone="ok">{t('execution.stages.status.live')}</StatusBadge>}
                 {st.tone === 'err' && <StatusBadge tone="err">{t('execution.stages.status.failed')}</StatusBadge>}
+                {st.tone === 'warn' && <StatusBadge tone="warn">{t('execution.stages.status.awaitingReview')}</StatusBadge>}
                 {st.tone === 'idle' && <StatusBadge tone="running">{t('execution.stages.status.queued')}</StatusBadge>}
               </div>
             </div>
@@ -1195,6 +1292,7 @@ function ProgressBar({ pct, tone }: { pct: number; tone: StageTone }) {
     tone === 'ok'       ? 'var(--text-3)'
     : tone === 'running'? 'var(--green)'
     : tone === 'err'    ? 'var(--red)'
+    : tone === 'warn'   ? 'var(--amber)'
     : 'var(--amber)';
   return (
     <div style={{ flex: 1, height: 6, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>

@@ -7,6 +7,8 @@ import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTable;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository;
 import com.ksinfo.modernize_pro_data.coordinator.load.PgCopyManager;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineAckService;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineAcknowledgment;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntry;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntryRepository;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
@@ -17,6 +19,9 @@ import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableResult;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableResultRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableStatus;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunHistory;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunHistoryRepository;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunType;
 import com.ksinfo.modernize_pro_data.coordinator.runlog.RunLogIngestService;
 import com.ksinfo.modernize_pro_data.coordinator.site.Site;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageContext;
@@ -41,6 +46,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
@@ -62,6 +68,7 @@ public class ValidationReportService implements StageRunner {
     private static final String STAGE_KEY = "validation";
 
     private final ValidationReportRepository reportRepo;
+    private final RunHistoryRepository runHistoryRepo;
     private final DdlTableRepository ddlTableRepo;
     private final DdlColumnRepository ddlColumnRepo;
     private final DuckDbService duckDbService;
@@ -71,6 +78,7 @@ public class ValidationReportService implements StageRunner {
     private final StageTableResultRepository stageTableResultRepo;
     private final QuarantineService quarantineService;
     private final QuarantineEntryRepository quarantineEntryRepo;
+    private final QuarantineAckService ackService;
     private final StageProgressBroadcaster broadcaster;
 
     @Override
@@ -105,6 +113,7 @@ public class ValidationReportService implements StageRunner {
 
         int successCount = 0;
         int failedCount  = 0;
+        int pendingWarningsCount = 0;
 
         for (MappingTableBinding binding : ctx.getBindings()) {
             OffsetDateTime tableStart = OffsetDateTime.now();
@@ -130,11 +139,19 @@ public class ValidationReportService implements StageRunner {
                 report.setErrorSummary(null);
                 reportRepo.save(report);
 
-                /* StageTableResult — passedChecks == totalChecks 면 success, 아니면 failed.
-                   FE pipeline 에서 "{n}/{m} tables" 표기에 활용. */
+                /* StageTableResult — 2026-06-01 WARN ack 시스템 도입:
+                 *   - FAIL 있음 → failed (기존)
+                 *   - FAIL 0 + WARN 0 → success
+                 *   - FAIL 0 + WARN 있고 ack 미존재 → failed_with_pending_warnings
+                 *     (Request Review 차단, FE pipeline tile amber)
+                 *   - FAIL 0 + WARN 있고 ack 존재 (carry-over) → success
+                 * passedChecks 는 PASS+WARN 합산 (line 691) 이라 "no FAIL" 만 의미. */
                 boolean allPassed = report.getPassedChecks() == report.getTotalChecks();
+                StageTableStatus resolvedStatus = resolveTableStatus(
+                        ctx, stage, binding, allPassed);
                 OffsetDateTime tableEnd = OffsetDateTime.now();
-                tableResult.setStatus(allPassed ? StageTableStatus.success : StageTableStatus.failed);
+                tableResult.setStatus(resolvedStatus);
+                boolean countAsSuccess = resolvedStatus == StageTableStatus.success;
                 Map<String, Object> rd = new HashMap<>();
                 rd.put("passed", report.getPassedChecks());
                 rd.put("total",  report.getTotalChecks());
@@ -143,15 +160,48 @@ public class ValidationReportService implements StageRunner {
                 tableResult.setDurationMs(Duration.between(tableStart, tableEnd).toMillis());
                 stageTableResultRepo.save(tableResult);
 
-                if (allPassed) successCount++; else failedCount++;
-                ingest(ctx, "Validation " + tableLabel + ": " + report.getPassedChecks()
-                        + "/" + report.getTotalChecks() + " PASS", allPassed);
+                if (countAsSuccess) {
+                    successCount++;
+                } else if (resolvedStatus == StageTableStatus.failed_with_pending_warnings) {
+                    pendingWarningsCount++;
+                    failedCount++;
+                } else {
+                    failedCount++;
+                }
+                String validationMsg = "Validation " + tableLabel + ": " + report.getPassedChecks()
+                        + "/" + report.getTotalChecks() + " PASS"
+                        + (resolvedStatus == StageTableStatus.failed_with_pending_warnings
+                                ? " (warnings pending review)" : "");
+                if (resolvedStatus == StageTableStatus.failed_with_pending_warnings) {
+                    // PASS + 경고 검토대기 = 실패(FAIL)가 아님 → ERROR 가 아니라 WARN 으로 로깅.
+                    ingestWarn(ctx, validationMsg);
+                } else {
+                    ingest(ctx, validationMsg, countAsSuccess);
+                }
                 stage.setTablesSuccess(successCount);
                 stage.setTablesFailed(failedCount);
                 stageInstanceRepo.save(stage);
                 broadcaster.stageProgress(runId, stage);
             } catch (Exception e) {
                 log.warn("ValidationReport compute failed for {} ({}): {}", tableLabel, binding.getId(), e.getMessage());
+                /* 2026-06-01 Fix #1 — Validation 자체 fail (SQL exception 등) 도 quarantine 에 적재.
+                   이전엔 empty fallback + stage_table_results.errorDetail 만 — Quarantine 페이지에
+                   카드 없어 사용자 진단 어려움. 'validate.stage_failure' stageLabel 로 명시 적재. */
+                try {
+                    String errMsg = e.getMessage() == null ? "(no message)" : e.getMessage();
+                    recordQuarantine(ctx, stage, binding, tableLabel,
+                            "validate.stage_failure",
+                            "Validation stage failed — " + tableLabel + ": " + errMsg,
+                            List.of("table", "error"),
+                            List.of("table", "error"),
+                            List.of(List.of(tableLabel, errMsg)),
+                            1L, QuarantineSeverity.error);
+                } catch (Exception qe) {
+                    /* catastrophic 케이스 — quarantine 적재 자체 실패. 무시하고 진행 (stage_table_results
+                       에는 errorDetail 남음). OOM 등은 본질적으로 quarantine 적재 불가. */
+                    log.warn("Failed to record stage_failure quarantine for {}: {}",
+                            tableLabel, qe.getMessage());
+                }
                 Map<String, Object> empty = new LinkedHashMap<>();
                 empty.put("overview", List.of(Map.of(
                         "item", "Validation aggregate", "asis", "ERROR", "tobe", "ERROR", "verdict", "FAIL")));
@@ -194,8 +244,21 @@ public class ValidationReportService implements StageRunner {
         stage.setTablesSuccess(successCount);
         stage.setTablesFailed(failedCount);
         /* 2026-05-30 합병 정책: validation 도 다른 stage 와 동일 — failedCount>0 면 run 도 failed.
-           각 FAIL 항목별 quarantine entry 도 발생 (computeOne 안에서 record). */
-        stage.setStatus(failedCount == 0 ? StageStatus.success : StageStatus.failed);
+           각 FAIL 항목별 quarantine entry 도 발생 (computeOne 안에서 record).
+           2026-06-01 WARN ack 시스템: failedCount 안에서 pendingWarningsCount 만 따로 분류.
+           - failedCount=0 → success
+           - failedCount>0 && pendingWarningsCount==failedCount → failed_with_pending_warnings
+             (WARN 만, 운영자 ack 후 통과 가능)
+           - failedCount > pendingWarningsCount → failed (FAIL 있음, 강한 상태) */
+        StageStatus newStageStatus;
+        if (failedCount == 0) {
+            newStageStatus = StageStatus.success;
+        } else if (pendingWarningsCount == failedCount) {
+            newStageStatus = StageStatus.failed_with_pending_warnings;
+        } else {
+            newStageStatus = StageStatus.failed;
+        }
+        stage.setStatus(newStageStatus);
 
         /* 2026-05-31 추가: stage 의 quarantine_entries 를 stageLabel × severity 별로 집계 →
            운영자가 LogViewer / errorSummary 만 봐도 어느 check 가 fail/warn 인지 즉시 파악. */
@@ -213,8 +276,15 @@ public class ValidationReportService implements StageRunner {
             target.computeIfAbsent(label, k -> new ArrayList<>()).add(reason);
         }
 
+        /* 2026-06-01 A2 — warn 카운트도 명시 + failedCount=0 + warn>0 시 errorSummary 설정.
+           이전엔 warn 만 있어도 errorSummary null → 운영자가 warn 발생 인지 어려움. */
+        int warnTotal = warnBreakdown.values().stream().mapToInt(List::size).sum();
+
         StringBuilder summary = new StringBuilder();
         summary.append(successCount).append(" success, ").append(failedCount).append(" failed");
+        if (warnTotal > 0) {
+            summary.append(", ").append(warnTotal).append(" with warnings");
+        }
         if (!failBreakdown.isEmpty() || !warnBreakdown.isEmpty()) {
             for (var e : failBreakdown.entrySet()) {
                 summary.append("\n  · ").append(friendlyStageLabel(e.getKey()))
@@ -228,7 +298,7 @@ public class ValidationReportService implements StageRunner {
             }
         }
 
-        if (failedCount > 0) {
+        if (failedCount > 0 || warnTotal > 0) {
             stage.setErrorSummary(summary.toString());
         }
         stageInstanceRepo.save(stage);
@@ -255,6 +325,61 @@ public class ValidationReportService implements StageRunner {
         };
     }
 
+    /**
+     * Stage table status 3-way 분기 (2026-06-01 WARN ack 시스템).
+     *
+     * @param allPassed report.passedChecks == totalChecks (PASS + WARN 합산이라 "no FAIL" 의미)
+     * @return success / failed / failed_with_pending_warnings
+     *
+     * 로직:
+     *   - !allPassed → failed (FAIL 있음, 강한 상태)
+     *   - allPassed && quarantine entry 中 warning 0개 → success
+     *   - allPassed && warning entry 있고 모든 WARN 그룹에 ack 존재 (carry-over) → success
+     *   - allPassed && warning entry 있고 ack 미존재 → failed_with_pending_warnings
+     *
+     * Carry-over (옵션 C — 조건부): csv_mtime_ms + csv_size 일치 + phase 매칭 시 자동 ack.
+     * 첫 도입: csv fingerprint 미전달 = carry-over 없음. ExtractStage 가 CSV 메타데이터
+     * 저장 후 carry-over 활성 — Commit 3.
+     */
+    private StageTableStatus resolveTableStatus(StageContext ctx, StageInstance stage,
+                                                MappingTableBinding binding, boolean allPassed) {
+        if (!allPassed) return StageTableStatus.failed;
+
+        List<QuarantineEntry> bindingEntries = quarantineEntryRepo
+                .findByStageInstanceIdAndBindingIdOrderByCreatedAtAsc(stage.getId(), binding.getId());
+        long warnCount = bindingEntries.stream()
+                .filter(q -> q.getSeverity() == QuarantineSeverity.warning)
+                .count();
+        if (warnCount == 0) return StageTableStatus.success;
+
+        // WARN 그룹 별로 ack carry-over 조회. 모든 그룹에 ack 있어야 success.
+        // 그룹 키 = (rule_name + reason) — per-stageLabel scope (정책 2).
+        java.util.Set<String> warnGroupKeys = new java.util.LinkedHashSet<>();
+        for (QuarantineEntry q : bindingEntries) {
+            if (q.getSeverity() != QuarantineSeverity.warning) continue;
+            String reason = q.getSampleData() == null ? ""
+                    : String.valueOf(q.getSampleData().getOrDefault("reason", ""));
+            warnGroupKeys.add(q.getRuleName() + "|" + reason);
+        }
+
+        String projectId = ctx.getProject().getId();
+        com.ksinfo.modernize_pro_data.coordinator.run.RunType phase = ctx.getRunHistory().getRunType();
+        // 정책 3·6: ExtractStage 가 적재한 CSV fingerprint (mtime+size) 일치 + phase 매칭 시에만 carry-over.
+        // fingerprint null (첫 도입 / 미측정) 이면 carry-over 비활성 = 운영자 재 ack 필요 (안전 우선).
+        var fp = ctx.getCsvFingerprint(binding.getId());
+        Long csvMtimeMs = fp == null ? null : fp.mtimeMs();
+        Long csvSize    = fp == null ? null : fp.size();
+        for (String key : warnGroupKeys) {
+            int sep = key.indexOf('|');
+            String ruleName = key.substring(0, sep);
+            String reason = key.substring(sep + 1);
+            var found = ackService.findCarryOver(projectId, binding.getId(),
+                    ruleName, reason, csvMtimeMs, csvSize, phase);
+            if (found.isEmpty()) return StageTableStatus.failed_with_pending_warnings;
+        }
+        return StageTableStatus.success;
+    }
+
     private void failStage(StageInstance stage, OffsetDateTime startedAt,
                            int successCount, int failedCount, String errorSummary) {
         OffsetDateTime finishedAt = OffsetDateTime.now();
@@ -265,6 +390,79 @@ public class ValidationReportService implements StageRunner {
         stage.setTablesFailed(failedCount);
         stage.setErrorSummary(errorSummary);
         stageInstanceRepo.save(stage);
+    }
+
+    /* ---------- Read time API — ack overlay 적용된 응답 (운영자 ack 즉시 반영) ---------- */
+
+    /**
+     * Run + binding 의 validation report — 박제된 row 에 ack overlay (WARN→SKIP) 적용 후 반환.
+     * stage_table_results 박제 verdict 는 보존, FE 응답만 동적 변환.
+     */
+    @org.springframework.transaction.annotation.Transactional(readOnly = true)
+    public Optional<ValidationReportDto> findByRunAndBinding(String runId, String bindingId) {
+        return reportRepo.findByRunIdAndBindingId(runId, bindingId)
+                .map(ValidationReportDto::from)
+                .map(this::applyAckOverlay);
+    }
+
+    @org.springframework.transaction.annotation.Transactional(readOnly = true)
+    public Optional<ValidationReportDto> findByRunAndTobeTable(String runId, String tobeTable) {
+        return reportRepo.findByRunIdAndTobeTable(runId, tobeTable)
+                .map(ValidationReportDto::from)
+                .map(this::applyAckOverlay);
+    }
+
+    @org.springframework.transaction.annotation.Transactional(readOnly = true)
+    public List<ValidationReportDto> listByRun(String runId) {
+        return reportRepo.findByRunId(runId).stream()
+                .map(ValidationReportDto::from)
+                .map(this::applyAckOverlay)
+                .toList();
+    }
+
+    /**
+     * verdict='WARN' 인 row 에 대해 같은 group (binding, ruleName, reason) 의 명시 ack 매칭 →
+     * 'SKIP' 변환 + ack note 덮어쓰기. 박제 DB 는 건드리지 않음 (audit 보존).
+     */
+    private ValidationReportDto applyAckOverlay(ValidationReportDto dto) {
+        RunHistory run = runHistoryRepo.findById(dto.runId()).orElse(null);
+        if (run == null) return dto;
+        RunType phase = run.getRunType();
+        String projectId = run.getProjectId();
+        String bindingId = dto.bindingId();
+        String tableLabel = (dto.tobeSchema() == null || dto.tobeSchema().isBlank())
+                ? dto.tobeTable() : dto.tobeSchema() + "." + dto.tobeTable();
+
+        // checksum WARN → SKIP (canonical match case only — PK 없음은 quarantine entry 없음)
+        Map<String, Object> checksum = dto.checksum();
+        if (checksum != null && !checksum.isEmpty() && "WARN".equals(checksum.get("verdict"))) {
+            String reason = "Data integrity format differs (values match canonical) — " + tableLabel;
+            ackService.findExplicitAck(projectId, bindingId, "validate.checksum", reason, phase)
+                    .ifPresent(a -> applySkip(checksum, a));
+        }
+        // overview 의 checksum row 를 checksum map 과 동기화
+        for (Map<String, Object> ov : dto.overview()) {
+            if ("Checksum SHA-256".equals(ov.get("item")) && checksum != null && !checksum.isEmpty()) {
+                ov.put("verdict", checksum.get("verdict"));
+                if (checksum.get("note") != null) ov.put("note", checksum.get("note"));
+            }
+        }
+        // minMax WARN → SKIP
+        for (Map<String, Object> mm : dto.minMax()) {
+            if ("WARN".equals(mm.get("verdict"))) {
+                String col = String.valueOf(mm.get("column"));
+                String reason = "Validation date MIN/MAX format differs (values match) — " + col;
+                ackService.findExplicitAck(projectId, bindingId, "validate.min_max", reason, phase)
+                        .ifPresent(a -> applySkip(mm, a));
+            }
+        }
+        return dto;
+    }
+
+    private static void applySkip(Map<String, Object> row, QuarantineAcknowledgment ack) {
+        row.put("verdict", "SKIP");
+        String note = ack.getNote();
+        if (note != null && !note.isBlank()) row.put("note", note);
     }
 
     /* ---------- per-binding 계산 (2026-05-30 합병 정책 — FAIL 시 quarantine record) ---------- */
@@ -437,6 +635,8 @@ public class ValidationReportService implements StageRunner {
                 mm.put("tobeMax", pgQuad[1]);
                 mm.put("verdict", verdict);
                 if (note != null) mm.put("note", note);
+                // SKIP 변환은 read time (ValidationReportDto.from + applyAckOverlay) 에서 처리.
+                // 박제 verdict 는 WARN/FAIL/PASS 원본 그대로 — audit log 로 보존.
                 minMax.add(mm);
                 /* FAIL = severity=error, WARN = severity=warning (2026-05-31).
                    WARN 도 KPI/Quarantine 통일성을 위해 적재. 단 reason 은 "format differs (canonical match)" 로 명시. */
@@ -623,8 +823,10 @@ public class ValidationReportService implements StageRunner {
         if (!rowCountPass) {
             recordQuarantine(ctx, stage, binding, tableLabel,
                     "validate.row_count", "Validation row count mismatch — " + tableLabel
-                            + " (ASIS " + duckRows + " ≠ TOBE " + pgRows
-                            + (quarantinedRows > 0 ? "; " + quarantinedRows + " row(s) quarantined" : "")
+                            + " (ASIS " + duckRows + " ≠ TOBE " + pgRows + " — data loss"
+                            + (quarantinedRows > 0
+                                ? "; " + quarantinedRows + " row(s) audit-quarantined"
+                                : "")
                             + ")",
                     List.of("table", "ASIS rows", "Quarantined", "TOBE rows"),
                     List.of("metric", "asis_value", "quarantined", "tobe_value"),
@@ -655,6 +857,7 @@ public class ValidationReportService implements StageRunner {
         if ("WARN".equals(checksumVerdict) && duckChecksumRaw != null) {
             checksum.put("note", "values match in canonical form — display format differs (e.g., timestamp .0 padding)");
         }
+        // SKIP 변환은 read time (applyAckOverlay) 에서. 박제는 원본 verdict 보존.
         if ("FAIL".equals(checksumVerdict)) {
             recordQuarantine(ctx, stage, binding, tableLabel,
                     "validate.checksum", "Validation SHA-256 checksum mismatch — " + tableLabel,
@@ -680,10 +883,13 @@ public class ValidationReportService implements StageRunner {
         List<Map<String, Object>> overview = new ArrayList<>();
         overview.add(orderedMap("item", "Row count", "asis", duckRows, "tobe", pgRows,
                 "verdict", duckRows == pgRows ? "PASS" : "FAIL"));
-        overview.add(orderedMap("item", "Checksum SHA-256",
+        Map<String, Object> overviewChecksum = orderedMap("item", "Checksum SHA-256",
                 "asis", duckChecksumRaw == null ? "(no PK)" : shortHash(duckChecksumRaw),
                 "tobe", pgChecksumRaw   == null ? "(no PK)" : shortHash(pgChecksumRaw),
-                "verdict", checksum.get("verdict")));
+                "verdict", checksum.get("verdict"));
+        // checksum 의 note (canonical match / ack note) 를 overview row 에 전파 → FE 의 Note 컬럼 표시.
+        if (checksum.get("note") != null) overviewChecksum.put("note", checksum.get("note"));
+        overview.add(overviewChecksum);
         overview.add(orderedMap("item", "Sum reconciliation (" + numericCols.size() + " cols)",
                 "asis", numericCols.size() + " cols", "tobe", numericCols.size() + " cols",
                 "verdict", rollupVerdict(sumRecon)));
@@ -702,7 +908,23 @@ public class ValidationReportService implements StageRunner {
                 "asis", typeValid.isEmpty() ? "OK" : typeValid.size() + " issues",
                 "tobe", typeValid.isEmpty() ? "OK" : typeValid.size() + " issues",
                 "verdict", typeValid.isEmpty() ? "PASS" : "FAIL"));
-        overview.add(orderedMap("item", "PK uniqueness", "asis", "OK", "tobe", "OK", "verdict", "PASS"));
+        /* 2026-06-01 Fix #3 — PK uniqueness 를 동적 계산. AuditStage 의 validate.pk_unique
+           quarantine 개수 기반. 이전엔 항상 "OK / PASS" 하드코딩이라 Quarantine 페이지의 PK
+           duplicate entry 가 있어도 Validation Overview 가 PASS 표시 — UX 불일치 해소. */
+        long pkUniqueViolations = bindingQuarantine.stream()
+                .filter(q -> {
+                    Map<String, Object> s = q.getSampleData();
+                    return s != null && "validate.pk_unique".equals(s.get("stageLabel"));
+                })
+                .mapToLong(q -> q.getRowCount() == null ? 0L : q.getRowCount())
+                .sum();
+        if (pkUniqueViolations > 0) {
+            String dupLabel = pkUniqueViolations + " duplicate" + (pkUniqueViolations == 1 ? "" : "s");
+            overview.add(orderedMap("item", "PK uniqueness",
+                    "asis", dupLabel, "tobe", dupLabel, "verdict", "FAIL"));
+        } else {
+            overview.add(orderedMap("item", "PK uniqueness", "asis", "OK", "tobe", "OK", "verdict", "PASS"));
+        }
 
         int totalChecks = overview.size();
         /* WARN 은 passed 로 카운트 — 실 데이터 동일 (format diff only) 이므로 audit 통과.
@@ -748,12 +970,18 @@ public class ValidationReportService implements StageRunner {
         data.put("columns", columns);
         data.put("columnRoles", columnRoles);
         data.put("sampleRows", sampleRows);
+        /* CSV fingerprint 동봉 — FE 가 ack 시 그대로 돌려보내 carry-over 매칭(정책 3·6)에 사용. */
+        var fp = ctx.getCsvFingerprint(binding.getId());
+        if (fp != null) {
+            data.put("csvMtimeMs", fp.mtimeMs());
+            data.put("csvSize", fp.size());
+        }
         quarantineService.record(
                 ctx.getRunHistory().getId(),
                 stage.getId(),
                 binding.getId(),
                 null,
-                reason,
+                stageLabel,   // rule_name = stageLabel (정책 2: rule_name·reason 분리). ack 매칭 키 — FE g.stage 와 동일.
                 severity,
                 data,
                 rowCount,
@@ -985,6 +1213,13 @@ public class ValidationReportService implements StageRunner {
         var line = info
                 ? StageHelpers.info(seq, ctx.getRunHistory().getId(), STAGE_KEY, message)
                 : StageHelpers.error(seq, ctx.getRunHistory().getId(), STAGE_KEY, message);
+        runLogIngest.ingest(ctx.getRunHistory().getId(), ctx.getProject().getId(), List.of(line));
+    }
+
+    /** WARN 레벨 로그. PASS + 경고 검토대기(failed_with_pending_warnings)처럼 '실패는 아니나 주의' 상태용. */
+    private void ingestWarn(StageContext ctx, String message) {
+        long seq = ctx.nextLogSeq();
+        var line = StageHelpers.warn(seq, ctx.getRunHistory().getId(), STAGE_KEY, message);
         runLogIngest.ingest(ctx.getRunHistory().getId(), ctx.getProject().getId(), List.of(line));
     }
 }

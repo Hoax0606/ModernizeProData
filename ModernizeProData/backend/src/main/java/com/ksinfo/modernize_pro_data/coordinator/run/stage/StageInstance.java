@@ -39,7 +39,7 @@ public class StageInstance {
     private Short seq;
 
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false, length = 16)
+    @Column(nullable = false, length = 40)   // 'failed_with_pending_warnings'(28자) 수용
     private StageStatus status;
 
     @Column(name = "started_at")

@@ -45,7 +45,7 @@ public class StageTableResult {
     private String tobeTable;
 
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false, length = 16)
+    @Column(nullable = false, length = 40)   // 'failed_with_pending_warnings'(28자) 수용
     private StageTableStatus status;
 
     @Column(name = "started_at", nullable = false)
