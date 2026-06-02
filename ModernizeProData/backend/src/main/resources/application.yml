@@ -75,6 +75,12 @@ server:
 
 # ── ModernizeProData 자체 설정 ──────────────────────────────────────────
 modernize:
+  # 빌드 시점 version (pom.xml 의 <version>). Spring Boot 의 application.yml
+  # resource filtering 이 @project.version@ 을 maven build 때 실 값으로 치환.
+  # UpdateService 가 jar manifest 의 Implementation-Version 대신 이 값을 우선
+  # 사용 → mvnw spring-boot:run (dev) 에서도 정상 표시.
+  version: @project.version@
+
   # 도구 동작 모드: coordinator | worker | standalone
   # 인스톨러가 사용자 선택을 MPD_MODE env 로 전달하면 그 값이 우선.
   mode: ${MPD_MODE:coordinator}

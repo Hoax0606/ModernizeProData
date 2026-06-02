@@ -17,11 +17,12 @@ internal static class Program
     {
         var opts = HostOptions.Parse(args);
 
-        // taskbar 우클릭 시 "Microsoft Edge" 대신 우리 도구로 표시되게 한다.
-        // Edge `--app` 의 경우 host process = Edge 라서 OS 가 Edge 로 인식했지만,
-        // 이 host = 우리 process 라 SetCurrentProcessExplicitAppUserModelID 가 효과 있음.
-        try { NativeMethods.SetCurrentProcessExplicitAppUserModelID(opts.AppId); }
-        catch { /* W7 미만 또는 권한 부재 */ }
+        // 명시적 AUMID 호출 제거 (2026-06-02) — system 에 등록 안 된 AUMID 를 박으면
+        // Windows 가 그 ID 의 icon / display name 을 찾지 못해 taskbar icon 자체가
+        // 누락된다 (group lookup miss). process 의 main module (.exe) 기반 자동
+        // grouping 을 사용 — 이 경우 ApplicationIcon (mpd.ico) 가 taskbar 에 정상 표시.
+        // 향후 AUMID 가 필요해지면 registry (HKCU\Software\Classes\AppUserModelId\<id>)
+        // 에 IconUri / DisplayName 같이 등록한 뒤 다시 호출해야 한다.
 
         ApplicationConfiguration.Initialize();
         Application.Run(new MainForm(opts));

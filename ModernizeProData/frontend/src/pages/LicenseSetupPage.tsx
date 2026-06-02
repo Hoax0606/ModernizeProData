@@ -89,7 +89,7 @@ export function LicenseSetupPage() {
             <div style={styles.cardHint}>{t('licenseSetup.workerBlocked')}</div>
           </div>
           <div style={styles.footer}>
-            © KS Info System Co., Ltd. <span style={styles.footerVersion}>v0.1.0-dev</span>
+            © KS Info System Co., Ltd. <span style={styles.footerVersion}>v1.0.0</span>
           </div>
         </div>
       </div>
@@ -136,10 +136,19 @@ export function LicenseSetupPage() {
           >
             {busy ? t('licenseSetup.applying') : t('licenseSetup.apply')}
           </button>
+
+          {/* Re-enter 실수로 진입한 경우 빠져나갈 path — login 화면으로 복귀. */}
+          <button
+            type="button"
+            onClick={() => nav('/login', { replace: true })}
+            style={styles.cancelBtn}
+          >
+            {t('licenseSetup.back')}
+          </button>
         </form>
 
         <div style={styles.footer}>
-          © KS Info System Co., Ltd. <span style={styles.footerVersion}>v0.1.0-dev</span>
+          © KS Info System Co., Ltd. <span style={styles.footerVersion}>v1.0.0</span>
         </div>
       </div>
     </div>
@@ -222,6 +231,16 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 4,
   },
   buttonDisabled: { opacity: 0.6, cursor: 'wait' },
+  cancelBtn: {
+    padding: '9px 12px',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 4,
+    background: 'var(--panel-2)',
+    color: 'var(--text-2)',
+    fontSize: 12.5,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
   error: {
     padding: '8px 10px',
     background: 'var(--red-50)',

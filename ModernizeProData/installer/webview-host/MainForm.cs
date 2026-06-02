@@ -30,12 +30,19 @@ internal sealed class MainForm : Form
     {
         _opts = opts;
         Text = opts.Title;
-        // Edge `--app` 의 기본 size 와 동일 (1280x800).
-        ClientSize = new Size(1280, 800);
+        // 화면 working area 의 65% × 75% — 어떤 해상도 / DPI 에서도 적절한 size.
+        // primary screen 없으면 1280x800 fallback. Hoax 해상도 2880x1880 → 약 1872×1410.
+        var work = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 800);
+        ClientSize = new Size(
+            Math.Max(900, (int)(work.Width  * 0.65)),
+            Math.Max(600, (int)(work.Height * 0.75)));
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(900, 600);
         // FormBorderStyle = Sizable 유지 (사용자가 resize / move 가능). 완전 borderless
         // 는 운영 정책 정해진 후 옵션화.
+
+        // taskbar 항목 강제. WinForms default 가 true 지만 명시해 회귀 방지.
+        ShowInTaskbar = true;
 
         // exe 의 embedded icon (csproj ApplicationIcon = ..\assets\mpd.ico) 을 Form 으로.
         // staging 에 별도 .ico copy 없이도 title bar / taskbar 에 brand icon 표시.

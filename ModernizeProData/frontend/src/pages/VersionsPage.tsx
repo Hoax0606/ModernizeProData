@@ -575,11 +575,16 @@ function ChangeRow({ kind, category, rawKey, detail, fieldChanges }: {
   // 헤더에 표시할 이름 — rule 은 schema.table.column 풀 경로 그대로.
   const displayName = rawKey;
 
-  // 표시 대상은 asisColumn / transformSql 두 필드만.
-  // 옛 snapshot 의 changes JSON 이 4 필드(asisSchema/Table 포함) 로 박제돼 있을 수도 있어
-  // frontend 에서 필터링 — 옛/새 snapshot 무관하게 동일한 화면.
-  const fields = (fieldChanges ?? []).filter(
-    (fc) => fc.field === 'asisColumn' || fc.field === 'transformSql'
+  // 표시 필드는 category 별로 다르다.
+  //  - rule    : asisColumn / transformSql 만 (옛 snapshot 의 asisSchema/asisTable 4필드는 숨김).
+  //  - binding : sources / compositionKind / whereFilter / groupByExpr / expandExpr / sharedFromProjectId.
+  //  - codeMap : targetValue,  asisSkip : asisSkip.
+  // 과거엔 rule 용 화이트리스트(asisColumn/transformSql)를 전 category 에 적용해
+  // binding/codeMap/asisSkip 의 변경 필드가 전부 걸러져 "무엇이 변경됐는지" 가 안 보였다 (2026-06-01 fix).
+  const fields = (fieldChanges ?? []).filter((fc) =>
+    category === 'rule'
+      ? (fc.field === 'asisColumn' || fc.field === 'transformSql')
+      : true
   );
 
   // "사실상 삭제" detect — mapping page 에서 초기화하면 row 는 남고 값만 비워짐.
@@ -603,9 +608,17 @@ function ChangeRow({ kind, category, rawKey, detail, fieldChanges }: {
   // backend 의 field 식별자 → 사용자에게 보여줄 라벨 (i18n)
   const fieldLabel = (f: string): string => {
     switch (f) {
-      case 'asisColumn':   return t('versions.changes.field.asisColumn');
-      case 'transformSql': return t('versions.changes.field.rule');
-      default:             return f;
+      case 'asisColumn':          return t('versions.changes.field.asisColumn');
+      case 'transformSql':        return t('versions.changes.field.rule');
+      case 'sources':             return t('versions.changes.field.sources');
+      case 'compositionKind':     return t('versions.changes.field.compositionKind');
+      case 'whereFilter':         return t('versions.changes.field.whereFilter');
+      case 'groupByExpr':         return t('versions.changes.field.groupByExpr');
+      case 'expandExpr':          return t('versions.changes.field.expandExpr');
+      case 'sharedFromProjectId': return t('versions.changes.field.sharedFromProjectId');
+      case 'targetValue':         return t('versions.changes.field.targetValue');
+      case 'asisSkip':            return t('versions.changes.field.asisSkip');
+      default:                    return f;
     }
   };
 
@@ -793,8 +806,7 @@ function SnapshotDetailView({
       : notCompletedTables.length > 0
         ? t('versions.runReadiness.notCompleted', {
             count: String(notCompletedTables.length),
-            tables: notCompletedTables.slice(0, 3).join(', ')
-              + (notCompletedTables.length > 3 ? ' …' : ''),
+            tables: notCompletedTables.slice(0, 3).join(', '),
           })
         : '';
   const canRequest = !readOnly && runReadinessAllReady;

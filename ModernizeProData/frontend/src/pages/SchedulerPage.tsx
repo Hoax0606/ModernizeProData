@@ -451,7 +451,7 @@ export function SchedulerPage() {
           }}
           title={dirty && !canSave ? t('scheduler.save.tooltip.invalidInternal') : ''}
         >
-          {saving ? '…' : t('common.save')}
+          {saving ? '' : t('common.save')}
         </button>
       </div>
 
@@ -629,7 +629,7 @@ export function SchedulerPage() {
                   whiteSpace: 'nowrap',
                 }}
               >
-                {registering ? '…' : (credential?.maskedDisplay ? t('scheduler.external.tokenReplace') : t('scheduler.external.tokenRegister'))}
+                {registering ? '' : (credential?.maskedDisplay ? t('scheduler.external.tokenReplace') : t('scheduler.external.tokenRegister'))}
               </button>
             </div>
             {credential?.maskedDisplay && (
@@ -841,7 +841,7 @@ export function SchedulerPage() {
                             <span style={{ color: 'var(--text-3)' }}>{s.total}</span>
                             {s.success > 0 && <span style={schedSummaryBadge('#166534', '#dcfce7', '#86efac')}>{s.success}✓</span>}
                             {s.failed > 0 && <span style={schedSummaryBadge('#991b1b', '#fee2e2', '#fca5a5')}>{s.failed}✗</span>}
-                            {s.running > 0 && <span style={schedSummaryBadge('#92400e', '#fef3c7', '#fcd34d')}>{s.running}…</span>}
+                            {s.running > 0 && <span style={schedSummaryBadge('#92400e', '#fef3c7', '#fcd34d')}>{s.running}</span>}
                           </span>
                         )}
                       </td>
@@ -932,7 +932,7 @@ function SchedulerRunDrilldown({ runId, t }: { runId: string; t: (k: string, v?:
             const color = r.status === 'success' ? '#166534'
               : r.status === 'failed' ? '#991b1b'
               : '#92400e';
-            const icon = r.status === 'success' ? '✓' : r.status === 'failed' ? '✗' : '…';
+            const icon = r.status === 'success' ? '✓' : r.status === 'failed' ? '✗' : '';
             return (
               <tr key={fullName}>
                 <td style={{ ...schedDrillStyles.td, color, fontWeight: 700 }}>{icon} {r.status}</td>

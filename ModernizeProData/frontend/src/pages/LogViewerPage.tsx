@@ -601,7 +601,7 @@ export function LogViewerPage() {
                 </div>
                 <div style={styles.quarStatsLine}>
                   {historyLoading
-                    ? '…'
+                    ? ''
                     : filteredHistoryRows.length === historyRows.length
                       ? `${historyRows.length} runs`
                       : `${filteredHistoryRows.length} / ${historyRows.length} runs`}
@@ -655,7 +655,7 @@ export function LogViewerPage() {
                   disabled={historyLoading || !activeProjectId}
                   style={styles.historyRefreshBtn}
                 >
-                  {historyLoading ? '…' : t('projectSettings.action.refresh')}
+                  {historyLoading ? '' : t('projectSettings.action.refresh')}
                 </button>
                 <div style={{ flex: 1 }} />
               </div>
@@ -1493,7 +1493,7 @@ function HistoryTablesCell({ h, t }: { h: RunHistoryDto; t: (k: string, v?: Reco
       )}
       {s.running > 0 && (
         <span style={{ ...summaryBadgeStyle, color: '#92400e', background: '#fef3c7', borderColor: '#fcd34d' }}>
-          {s.running}…
+          {s.running}
         </span>
       )}
     </span>
@@ -1545,7 +1545,7 @@ function HistoryRunDrilldown({ runId, t }: { runId: string; t: (k: string, v?: R
               : '#92400e';
             const statusIcon = r.status === 'success' ? '✓'
               : r.status === 'failed' ? '✗'
-              : '…';
+              : '';
             return (
               <tr key={fullName}>
                 <td style={{ ...drillStyles.td, color: statusColor, fontWeight: 700 }}>

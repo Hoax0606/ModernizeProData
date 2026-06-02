@@ -54,6 +54,12 @@ modernize:
     password: ${WORKER_PASSWORD:}
     hostname: ${WORKER_HOSTNAME:}
 
+  # Worker 자동 업데이트 — Spring 시작 직후 background thread 가 manifest URL 에서
+  # latest fetch + 새 버전 있으면 자동 apply (next 부팅에 swap). 본사 외부망 = 자동 갱신,
+  # 사이트 폐쇄망 = outbound fail = silent skip. Coord 는 default OFF (master 가 UI click).
+  update:
+    auto-apply-on-start: ${MPD_UPDATE_AUTO_APPLY:true}
+
   # Run 실행 튜닝 — Coordinator 와 동일 default 4 thread 병렬 적재.
   # 단 Worker HikariCP pool size = 5 (이 yml line 29) 라 parallel 4 thread 가
   # 메타 DB connection 을 동시 점유하면 pool 거의 고갈. P3-7 HikariCP 검증

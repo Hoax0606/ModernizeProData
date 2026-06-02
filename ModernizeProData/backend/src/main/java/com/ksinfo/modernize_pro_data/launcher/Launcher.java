@@ -53,6 +53,9 @@ public class Launcher {
         redirectStdoutToFile();
         readInstallerChoicesFromRegistry();
 
+        // pending update 있으면 jar / host swap (Spring 부팅 전). 실패는 silent log.
+        UpdateApplier.applyPendingIfAny();
+
         if (Boolean.getBoolean("mpd.gui.enabled")) {
             String mode = System.getProperty("MPD_MODE", "coordinator");
             if ("worker".equalsIgnoreCase(mode)) {
@@ -173,6 +176,14 @@ public class Launcher {
                         java.util.Map.entry("url.timeout",     "Timed out connecting to {url}."),
                         java.util.Map.entry("url.probeFailed", "Probe failed: {reason}"),
                         java.util.Map.entry("url.httpStatus",  "Coordinator responded HTTP {status}."),
+                        java.util.Map.entry("url.checkUpdates",      "Check for updates"),
+                        java.util.Map.entry("url.checkingUpdates",   "Checking for updates…"),
+                        java.util.Map.entry("url.update.availableTitle", "Update available"),
+                        java.util.Map.entry("url.update.availableBody",  "A newer version ({latest}) is available (current: {current}). The new binary is being downloaded in the background. Restart this application once to finish applying."),
+                        java.util.Map.entry("url.update.upToDateTitle",  "Up to date"),
+                        java.util.Map.entry("url.update.upToDateBody",   "Current version {current} is the latest."),
+                        java.util.Map.entry("url.update.failTitle",      "Update check failed"),
+                        java.util.Map.entry("url.update.failBody",       "Could not reach the update server. If you are on a closed network, this is expected."),
                         java.util.Map.entry("creds.title",       "Sign in"),
                         java.util.Map.entry("creds.hint",        "Use the Coordinator account your master created for you."),
                         java.util.Map.entry("creds.coordinator", "Coordinator: {url}"),
@@ -202,6 +213,14 @@ public class Launcher {
                         java.util.Map.entry("url.timeout",     "{url} 연결 시간이 초과됐습니다."),
                         java.util.Map.entry("url.probeFailed", "연결 확인 실패: {reason}"),
                         java.util.Map.entry("url.httpStatus",  "Coordinator 가 HTTP {status} 로 응답했습니다."),
+                        java.util.Map.entry("url.checkUpdates",      "업데이트 확인"),
+                        java.util.Map.entry("url.checkingUpdates",   "업데이트 확인 중…"),
+                        java.util.Map.entry("url.update.availableTitle", "업데이트 가능"),
+                        java.util.Map.entry("url.update.availableBody",  "새 버전 {latest} 이 있습니다 (현재: {current}). 새 binary 는 백그라운드에서 다운로드 중입니다. 도구를 한 번 재실행하시면 적용이 완료됩니다."),
+                        java.util.Map.entry("url.update.upToDateTitle",  "최신 상태"),
+                        java.util.Map.entry("url.update.upToDateBody",   "현재 버전 {current} 이 최신입니다."),
+                        java.util.Map.entry("url.update.failTitle",      "업데이트 확인 실패"),
+                        java.util.Map.entry("url.update.failBody",       "업데이트 서버에 연결할 수 없습니다. 폐쇄망 환경이라면 정상입니다."),
                         java.util.Map.entry("creds.title",       "로그인"),
                         java.util.Map.entry("creds.hint",        "master 가 생성해 준 Coordinator 계정으로 로그인하세요."),
                         java.util.Map.entry("creds.coordinator", "Coordinator: {url}"),
@@ -231,6 +250,14 @@ public class Launcher {
                         java.util.Map.entry("url.timeout",     "{url} への接続がタイムアウトしました。"),
                         java.util.Map.entry("url.probeFailed", "接続確認に失敗しました: {reason}"),
                         java.util.Map.entry("url.httpStatus",  "Coordinator が HTTP {status} を返しました。"),
+                        java.util.Map.entry("url.checkUpdates",      "更新を確認"),
+                        java.util.Map.entry("url.checkingUpdates",   "更新を確認中…"),
+                        java.util.Map.entry("url.update.availableTitle", "更新あり"),
+                        java.util.Map.entry("url.update.availableBody",  "新しいバージョン {latest} があります (現在: {current})。バックグラウンドで新しい binary をダウンロード中です。アプリを一度再起動すると適用が完了します。"),
+                        java.util.Map.entry("url.update.upToDateTitle",  "最新"),
+                        java.util.Map.entry("url.update.upToDateBody",   "現在のバージョン {current} が最新です。"),
+                        java.util.Map.entry("url.update.failTitle",      "更新確認に失敗"),
+                        java.util.Map.entry("url.update.failBody",       "更新サーバーに到達できませんでした。閉じたネットワーク環境では正常です。"),
                         java.util.Map.entry("creds.title",       "サインイン"),
                         java.util.Map.entry("creds.hint",        "master が発行した Coordinator アカウントでサインインしてください。"),
                         java.util.Map.entry("creds.coordinator", "Coordinator: {url}"),
@@ -473,9 +500,35 @@ public class Launcher {
             Button testBtn = primaryButton(WorkerI18n.t("url.test"));
             testBtn.setDefaultButton(true);
 
+            // Check for updates — ghost button. click → 별 thread 에서 manifest 받기.
+            Button updateBtn = new Button(WorkerI18n.t("url.checkUpdates"));
+            updateBtn.setMaxWidth(Double.MAX_VALUE);
+            updateBtn.setStyle(
+                "-fx-background-color: transparent;" +
+                "-fx-border-color: " + C_BORDER_STRONG + ";" +
+                "-fx-text-fill: " + C_MUTED + ";" +
+                "-fx-font-size: 12px;" +
+                "-fx-padding: 8 12;" +
+                "-fx-background-radius: 4;" +
+                "-fx-border-radius: 4;" +
+                "-fx-cursor: hand;");
+            updateBtn.setOnAction(ev -> {
+                updateBtn.setDisable(true);
+                updateBtn.setText(WorkerI18n.t("url.checkingUpdates"));
+                new Thread(() -> {
+                    WorkerUpdateProbe.Result r = WorkerUpdateProbe.probe();
+                    Platform.runLater(() -> {
+                        updateBtn.setDisable(false);
+                        updateBtn.setText(WorkerI18n.t("url.checkUpdates"));
+                        showUpdateDialog(r);
+                    });
+                }, "worker-update-probe").start();
+            });
+
             card.getChildren().add(labeledField(WorkerI18n.t("url.field"), urlField));
             if (errorMsg != null) card.getChildren().add(errorLabel(errorMsg));
             card.getChildren().add(testBtn);
+            card.getChildren().add(updateBtn);
 
             testBtn.setOnAction(ev -> {
                 String u = urlField.getText().trim();
@@ -625,6 +678,33 @@ public class Launcher {
                 String reason = m == null ? e.getClass().getSimpleName() : m;
                 return WorkerI18n.t("creds.connectFailed", java.util.Map.of("reason", reason));
             }
+        }
+
+        /** Update probe 결과 dialog. JavaFX Alert 단순 표시. */
+        private void showUpdateDialog(WorkerUpdateProbe.Result r) {
+            javafx.scene.control.Alert alert;
+            String header;
+            String body;
+            if (!r.ok) {
+                alert = new javafx.scene.control.Alert(javafx.scene.control.Alert.AlertType.WARNING);
+                header = WorkerI18n.t("url.update.failTitle");
+                body = WorkerI18n.t("url.update.failBody") + "\n\n" + (r.error == null ? "" : r.error);
+            } else if (r.updateAvailable) {
+                alert = new javafx.scene.control.Alert(javafx.scene.control.Alert.AlertType.INFORMATION);
+                header = WorkerI18n.t("url.update.availableTitle");
+                body = WorkerI18n.t("url.update.availableBody",
+                        java.util.Map.of("current", String.valueOf(r.currentVersion),
+                                          "latest",  String.valueOf(r.latestVersion)));
+            } else {
+                alert = new javafx.scene.control.Alert(javafx.scene.control.Alert.AlertType.INFORMATION);
+                header = WorkerI18n.t("url.update.upToDateTitle");
+                body = WorkerI18n.t("url.update.upToDateBody",
+                        java.util.Map.of("current", String.valueOf(r.currentVersion)));
+            }
+            alert.setTitle("ModernizeProData");
+            alert.setHeaderText(header);
+            alert.setContentText(body);
+            alert.showAndWait();
         }
 
         /** Persist the URL (only) so the next launch pre-fills it. Username

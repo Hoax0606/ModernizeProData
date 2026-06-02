@@ -59,7 +59,9 @@
   --phase-done:         #678b86; /* 회색 */
   --phase-done-50:      #f2f4f3;
 
-  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* 가독성 통일: 코드/식별자 표기도 본문(Pretendard)과 동일 글꼴로 — 작은 크기에서
+     모노(JetBrains Mono)가 얇고 아리아싱돼 보이는 문제 해소. (PROJECTS 사이드바와 동일) */
+  --mono: 'Pretendard Variable', 'Noto Sans JP', ui-monospace, SFMono-Regular, Menlo, monospace;
   /* 본문: Pretendard Variable 이 한·영을 깔끔하게 처리.
      일본어 글자는 Noto Sans JP 로 fallback (브라우저 자동 코드포인트 매칭). */
   --sans: 'Pretendard Variable', 'Noto Sans JP', -apple-system, system-ui, sans-serif;
@@ -123,7 +125,9 @@ html, body {
   font-size: 12px;
   line-height: 1.45;
   letter-spacing: -0.005em;
-  font-feature-settings: 'ss01', 'cv01', 'cv11', 'tnum';
+  /* 'zero' = 슬래시 제로 (숫자 0 ↔ 영문 O 구분). Pretendard 가 지원. */
+  font-feature-settings: 'ss01', 'cv01', 'cv11', 'tnum', 'zero';
+  font-variant-numeric: slashed-zero tabular-nums;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
@@ -132,7 +136,13 @@ html, body {
 #root { height: 100vh; }
 
 button { font-family: inherit; font-size: inherit; color: inherit; }
-input, select, textarea { font-family: inherit; }
+/* 폼 요소는 폰트 피처가 자동 상속되지 않으므로(브라우저 UA 리셋) 명시적으로 부여 —
+   검색창 등 input 안에서도 슬래시 제로(0̸)가 보이도록. */
+input, select, textarea {
+  font-family: inherit;
+  font-feature-settings: 'ss01', 'cv01', 'cv11', 'tnum', 'zero';
+  font-variant-numeric: slashed-zero tabular-nums;
+}
 
 /* Tightened scrollbars */
 *::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -145,19 +155,32 @@ input, select, textarea { font-family: inherit; }
 *::-webkit-scrollbar-thumb:hover { background: var(--text-4); }
 
 /* Pre-flight Fix 도착지 강조 — DdlSchemaPanel 의 정적 highlight 효과를 className 으로
-   재사용 가능하게. 부모가 className 을 1초간 토글 → 0.4s transition 으로 부드럽게 ON/OFF. */
+   재사용 가능하게. 부모가 className 을 1초간 토글 → 0.4s transition 으로 부드럽게 ON/OFF.
+   8번 (Mint Breath) — 정적 색은 거의 안 보이지만 호흡 펄스가 시선을 끈다.
+   1번~7번 후보 이력은 highlight-colors 메모리 참조. */
+@keyframes mpd-fix-breath {
+  0%, 100% {
+    background-color: #ECFDF5;
+    box-shadow: 0 0 0 1.5px rgba(16, 185, 129, 0.45),
+                0 0 0 0 rgba(16, 185, 129, 0);
+  }
+  50% {
+    background-color: #A7F3D0;
+    box-shadow: 0 0 0 1.5px rgba(16, 185, 129, 0.75),
+                0 0 18px 6px rgba(16, 185, 129, 0.32);
+  }
+}
+@keyframes mpd-fix-breath-td {
+  0%, 100% { background-color: #ECFDF5; }
+  50%      { background-color: #A7F3D0; }
+}
 .mpd-fix-highlight {
-  background-color: #D0EAEA !important;
-  /* 외곽 2px deep teal (DdlSchemaPanel border 와 동일, layout shift 없음)
-     + 그 바깥 4px glow (DdlSchemaPanel box-shadow 와 동일) → 총 spread 6px. */
-  box-shadow: 0 0 0 2px #0E7C7B, 0 0 0 6px rgba(14, 124, 123, 0.22) !important;
+  animation: mpd-fix-breath 1.6s ease-in-out infinite;
   border-radius: 4px;
-  transition: background-color 0.4s ease, box-shadow 0.4s ease;
 }
 /* table row 의 td inline background (zebra / isActive) 를 덮기 위한 자식 셀렉터. */
 .mpd-fix-highlight > td {
-  background-color: #D0EAEA !important;
-  transition: background-color 0.4s ease;
+  animation: mpd-fix-breath-td 1.6s ease-in-out infinite;
 }
 
 /* Quarantine 매핑 열기 도착지 강조 — 빨간 펄스 무한 반복. 사용자가 어떤 source field 가
@@ -172,6 +195,11 @@ input, select, textarea { font-family: inherit; }
 @keyframes mpd-quarantine-pulse-td {
   0%, 100% { background-color: transparent; }
   50%      { background-color: #FFD9D9; }
+}
+
+/* UpdateModal apply busy spinner — inline style 의 animation: mpd-spin ... 참조. */
+@keyframes mpd-spin {
+  to { transform: rotate(360deg); }
 }
 .mpd-quarantine-highlight {
   animation: mpd-quarantine-pulse 0.8s ease-in-out infinite;

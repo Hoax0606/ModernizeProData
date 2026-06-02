@@ -762,7 +762,7 @@ export function MappingPage() {
     return (
       <div style={styles.fullBleed}>
         <div style={styles.centerEmpty}>
-          <div style={{ color: 'var(--text-3)', fontSize: 13 }}>DDL 로딩 중…</div>
+          <div style={{ color: 'var(--text-3)', fontSize: 13 }}>DDL 로딩 중</div>
         </div>
       </div>
     );
@@ -890,7 +890,7 @@ function DualInventory({
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Filter…"
+            placeholder="Filter"
             style={styles.searchInput}
           />
         </div>
@@ -1772,7 +1772,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
           onClick={startTest}
           title={
             reportOpen ? 'Close the Report to run Trial again'
-            : testStatus === 'running' ? `Running… ${testProgress}%`
+            : testStatus === 'running' ? `Running ${testProgress}%`
             : testStatus === 'completed' ? 'Trial completed. Click to re-run.'
             : testDisabledReason
           }
@@ -1885,7 +1885,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
       <div style={{ ...styles.toolbar, display: reportOpen ? 'none' : 'flex' }}>
         <div style={styles.toolbarSearch}>
           <Ic.search />
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by field name…" style={styles.searchInput} />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by field name" style={styles.searchInput} />
         </div>
         <div style={{ flex: 1 }} />
         {!readOnly && (
@@ -2182,7 +2182,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                     applyLink(pid);
                   }
                 }}
-              >{linkSaving ? 'Saving…' : 'Apply'}</button>
+              >{linkSaving ? 'Saving' : 'Apply'}</button>
             </div>
           </div>
         </div>
@@ -2242,6 +2242,8 @@ function AutocompleteInput({
   const [focused, setFocused] = useState(false);
   const [acItems, setAcItems] = useState<string[]>([]);
   const [acIdx, setAcIdx] = useState(0);
+  // Ctrl+Space 로 강제 popup 트리거 — 빈 word 일 때도 전체 completions 표시.
+  const [force, setForce] = useState(false);
   const savedCursor = useRef<number | null>(null);
 
   useLayoutEffect(() => {
@@ -2260,12 +2262,14 @@ function AutocompleteInput({
     let s = pos;
     while (s > 0 && /[\w.]/.test(value[s - 1])) s--;
     const word = value.slice(s, pos);
-    if (word.length < 1) {
+    if (!force && word.length < 1) {
       setAcItems((prev) => { if (prev.length) { setAcIdx(0); return []; } return prev; });
       return;
     }
     const lo = word.toLowerCase();
-    const hits = completions.filter((c) => c.toLowerCase().includes(lo) && c.toLowerCase() !== lo).slice(0, 10);
+    const hits = force && word.length === 0
+      ? completions.slice(0, 10)
+      : completions.filter((c) => c.toLowerCase().includes(lo) && c.toLowerCase() !== lo).slice(0, 10);
     // hits 가 *실제로 변경됐을 때만* acIdx reset — 사용자 ArrowDown 선택이 effect 재실행으로
     // 첫 항목으로 되돌아가는 것 방지.
     setAcItems((prev) => {
@@ -2274,7 +2278,7 @@ function AutocompleteInput({
       setAcIdx(0);
       return hits;
     });
-  }, [value, focused, completions]);
+  }, [value, focused, completions, force]);
 
   const applyAc = (item: string) => {
     if (!inputRef.current) return;
@@ -2286,14 +2290,22 @@ function AutocompleteInput({
     savedCursor.current = before.length + item.length;
     onChange(before + item + after);
     setAcItems([]);
+    setForce(false);
     inputRef.current.focus();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Ctrl+Space — 강제 자동완성 popup 트리거.
+    if ((e.ctrlKey || e.metaKey) && e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      setForce(true);
+      return;
+    }
     if (!acItems.length) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); setAcIdx((i) => Math.min(i + 1, acItems.length - 1)); return; }
     if (e.key === 'ArrowUp')   { e.preventDefault(); setAcIdx((i) => Math.max(i - 1, 0)); return; }
-    if (e.key === 'Escape')    { setAcItems([]); return; }
+    if (e.key === 'Escape')    { e.stopPropagation(); setForce(false); setAcItems([]); return; }
     if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); applyAc(acItems[acIdx]); return; }
   };
 
@@ -2309,7 +2321,7 @@ function AutocompleteInput({
         }}
         onKeyDown={handleKeyDown}
         onFocus={() => setFocused(true)}
-        onBlur={() => { setFocused(false); setAcItems([]); }}
+        onBlur={() => { setFocused(false); setAcItems([]); setForce(false); }}
         placeholder={placeholder}
         spellCheck={false}
         style={{ width: '100%', boxSizing: 'border-box', ...style }}
@@ -2927,7 +2939,7 @@ function AggregateTemplateMenu({ onPick, disabled }: {
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false); }}
-              placeholder="Filter… (e.g. sum, unpack, mask)"
+              placeholder="Filter (e.g. sum, unpack, mask)"
               style={{
                 width: '100%',
                 fontSize: 11,
@@ -3237,7 +3249,7 @@ function highlightJava(raw: string): string {
 }
 
 function HighlightEditor({
-  value, onChange, language, placeholder, minHeight, hasError, completions,
+  value, onChange, language, placeholder, minHeight, hasError, completions, onCancel,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -3246,6 +3258,8 @@ function HighlightEditor({
   minHeight?: number;
   hasError?: boolean;
   completions?: string[];
+  /** Esc 시 호출 (autocomplete dropdown 떠있지 않을 때만). Cancel 버튼과 동등. */
+  onCancel?: () => void;
 }) {
   const preRef = useRef<HTMLPreElement>(null);
   const taRef  = useRef<HTMLTextAreaElement>(null);
@@ -3253,6 +3267,8 @@ function HighlightEditor({
   const [isFocused, setIsFocused] = useState(false);
   const [acItems, setAcItems] = useState<string[]>([]);
   const [acIdx, setAcIdx] = useState(0);
+  // Ctrl+Space 로 강제 popup 트리거 — 빈 word 일 때도 전체 completions 표시.
+  const [force, setForce] = useState(false);
 
   useLayoutEffect(() => {
     if (savedCursor.current !== null && taRef.current) {
@@ -3274,19 +3290,21 @@ function HighlightEditor({
     let s = pos;
     while (s > 0 && /[\w.]/.test(value[s - 1])) s--;
     const word = value.slice(s, pos);
-    if (word.length < 1) {
+    if (!force && word.length < 1) {
       setAcItems((prev) => { if (prev.length) { setAcIdx(0); return []; } return prev; });
       return;
     }
     const lo = word.toLowerCase();
-    const hits = completions.filter((c) => c.toLowerCase().includes(lo) && c.toLowerCase() !== lo).slice(0, 10);
+    const hits = force && word.length === 0
+      ? completions.slice(0, 10)
+      : completions.filter((c) => c.toLowerCase().includes(lo) && c.toLowerCase() !== lo).slice(0, 10);
     setAcItems((prev) => {
       const same = prev.length === hits.length && prev.every((p, i) => p === hits[i]);
       if (same) return prev;
       setAcIdx(0);
       return hits;
     });
-  }, [value, isFocused]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [value, isFocused, force]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const applyAc = (item: string) => {
     if (!taRef.current) return;
@@ -3316,14 +3334,33 @@ function HighlightEditor({
     savedCursor.current = { start: before.length + cursorOffset, end: before.length + cursorOffset };
     onChange(before + inserted + after);
     setAcItems([]);
+    setForce(false);
     taRef.current.focus();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Ctrl+Space — 강제 자동완성 popup 트리거.
+    if ((e.ctrlKey || e.metaKey) && e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      setForce(true);
+      return;
+    }
+    // Esc — dropdown 떠있으면 dropdown 만 닫음, 아니면 onCancel 호출 (Cancel 버튼 동등).
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      if (acItems.length) {
+        setForce(false);
+        setAcItems([]);
+      } else if (onCancel) {
+        e.preventDefault();
+        onCancel();
+      }
+      return;
+    }
     if (!acItems.length) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); setAcIdx((i) => Math.min(i + 1, acItems.length - 1)); return; }
     if (e.key === 'ArrowUp')   { e.preventDefault(); setAcIdx((i) => Math.max(i - 1, 0)); return; }
-    if (e.key === 'Escape')    { setAcItems([]); return; }
     if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); applyAc(acItems[acIdx]); return; }
   };
 
@@ -3363,7 +3400,7 @@ function HighlightEditor({
         }}
         onKeyDown={handleKeyDown}
         onFocus={() => setIsFocused(true)}
-        onBlur={() => { setIsFocused(false); setAcItems([]); }}
+        onBlur={() => { setIsFocused(false); setAcItems([]); setForce(false); }}
         onScroll={syncScroll}
         spellCheck={false}
         style={{ ...shared, position: 'relative', zIndex: 1, color: 'transparent', caretColor: '#cad7e8', background: 'transparent', resize: 'vertical', outline: 'none', overflow: 'auto' }}
@@ -3425,6 +3462,25 @@ function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, 
   const [javaCode, setJavaCode] = useState('');
   const [notesOpen, setNotesOpen] = useState(false);
   useEffect(() => { setNotesOpen(false); }, [active?.tgt]);
+
+  // Esc — 편집 중이면 cancel, 아니면 inspector 닫기. textarea/input focus 일 때는
+  // 그쪽 (HighlightEditor / AutocompleteInput) 이 우선 처리 — focus 체크로 양보.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.isComposing) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.isContentEditable)) return;
+      if (editingRule) {
+        setEditingRule(false);
+        setRuleError(null);
+      } else {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [editingRule, onClose]);
+
   useEffect(() => {
     // 같은 컬럼이면 effective rule 갱신으로 active 객체 reference 가 새로 만들어져도
     // 편집 모드를 종료하지 않는다 — active.tgt 만 dep 로 사용.
@@ -3799,6 +3855,7 @@ function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, 
                     hasError={!!ruleError}
                     completions={localCompletions}
                     minHeight={72}
+                    onCancel={() => setEditingRule(false)}
                   />
                   {ruleError && <div style={styles.ruleErrorMsg}>{ruleError}</div>}
                 </>
@@ -3817,6 +3874,7 @@ function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, 
                 language="sql"
                 placeholder={`예: 0  /  'N'  /  CURRENT_TIMESTAMP  (비우면 NULL — 모든 행에 이 값으로 채움)`}
                 minHeight={48}
+                onCancel={() => setEditingRule(false)}
               />
             )}
           </>
@@ -4232,7 +4290,7 @@ function MappingDefinitionImportModal({
             style={!saving ? styles.btnPrimary : styles.btnPrimaryDisabled}
             disabled={saving}
             onClick={handleApply}
-          >{saving ? 'Applying…' : 'Apply'}</button>
+          >{saving ? 'Applying' : 'Apply'}</button>
           <button style={styles.btnSecondary} disabled={saving} onClick={onClose}>Close</button>
         </div>
       </div>
@@ -4658,7 +4716,7 @@ function ReportView({ table, rows, sources, onClose, onPickColumn }: {
       )}
       {viewMode === 'asis' && asisPreviewLoading && (
         <div style={{ padding: '8px 14px', background: '#fff8e1', color: '#856404', borderBottom: '1px solid #e8e8e8', fontSize: 11.5 }}>
-          ⏳ AS-IS raw CSV 로드 중…
+          ⏳ AS-IS raw CSV 로드 중
         </div>
       )}
       {viewMode === 'asis' && !asisPreviewLoading && !asisPreview && firstSource && (
@@ -5071,7 +5129,7 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
                 <span style={{ color: 'var(--navy)', fontWeight: 500 }}>{to.short}</span>
                 {to.whereFilter && (
                   <span style={styles.whereTag} title={`WHERE: ${to.whereFilter}`}>
-                    WHERE {to.whereFilter.length > 40 ? to.whereFilter.slice(0, 40) + '…' : to.whereFilter}
+                    WHERE {to.whereFilter.length > 40 ? to.whereFilter.slice(0, 40) : to.whereFilter}
                   </span>
                 )}
                 <span style={{ flex: 1 }} />
@@ -5494,7 +5552,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex', alignItems: 'center', gap: 6,
     fontFamily: 'var(--mono)', fontSize: 11.5,
   },
-  invItemName: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 },
+  invItemName: { fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 },
   invItemBadge: {
     fontSize: 9, fontFamily: 'var(--mono)', fontWeight: 600,
     padding: '0 4px', borderRadius: 2,

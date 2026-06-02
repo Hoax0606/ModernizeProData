@@ -51,7 +51,7 @@ export function CsvPathField({ value, onChange }: Props) {
         disabled={busy}
         style={busy ? { ...styles.btnGhost, opacity: 0.5, cursor: 'wait' } : styles.btnGhost}
       >
-        {busy ? '…' : t('siteSettings.csvPathBrowse')}
+        {busy ? '' : t('siteSettings.csvPathBrowse')}
       </button>
     </div>
   );

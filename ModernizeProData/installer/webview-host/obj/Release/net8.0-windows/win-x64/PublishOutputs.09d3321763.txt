@@ -1,4 +1,0 @@
-C:\KSINFO\DataMigrationTool\ModernizeProData\installer\webview-host\dist\Microsoft.Web.WebView2.Core.xml
-C:\KSINFO\DataMigrationTool\ModernizeProData\installer\webview-host\dist\Microsoft.Web.WebView2.Wpf.xml
-C:\KSINFO\DataMigrationTool\ModernizeProData\installer\webview-host\dist\Microsoft.Web.WebView2.WinForms.xml
-C:\KSINFO\DataMigrationTool\ModernizeProData\installer\webview-host\dist\ModernizeProDataUI.exe

@@ -81,26 +81,21 @@ export function DdlSchemaPanel({ project, side, highlight }: Props) {
   };
 
   // imported = green, not imported = red.
-  // highlight (램프 클릭으로 들어왔을 때) 는 양쪽과 겹치지 않도록 teal pulse.
-  const HIGHLIGHT_BORDER = '#0E7C7B'; // deep teal
-  const HIGHLIGHT_BG = '#D0EAEA';     // 薄 teal
+  // highlight (램프 클릭으로 들어왔을 때) = 8번 (Mint Breath) — CSS class 의 호흡 펄스 위임.
+  // highlight-colors 메모리 참조. 정적 색은 거의 안 보이지만 animation 이 시선을 끈다.
   const outer: React.CSSProperties = {
-    border: `${highlight ? 2 : 1}px solid ${highlight ? HIGHLIGHT_BORDER : hasSchema ? 'var(--green)' : 'var(--red)'}`,
+    border: `1px solid ${highlight ? 'transparent' : hasSchema ? 'var(--green)' : 'var(--red)'}`,
     borderRadius: 4,
-    background: highlight
-      ? HIGHLIGHT_BG
-      : hasSchema ? 'var(--green-50)' : 'var(--red-50)',
-    boxShadow: highlight ? `0 0 0 4px rgba(14, 124, 123, 0.22)` : undefined,
-    transition: 'border-color 0.4s ease, background-color 0.4s ease, box-shadow 0.4s ease',
+    background: highlight ? undefined : hasSchema ? 'var(--green-50)' : 'var(--red-50)',
+    transition: 'border-color 0.4s ease, background-color 0.4s ease',
     marginBottom: 14,
   };
   // not-imported 상태에선 body 도 외곽 빨간 패널과 같은 red-50 으로 통일.
   // imported 상태(상세 정보 표시)는 가독성을 위해 패널 화이트 그대로.
+  // highlight 중에는 outer 의 호흡 bg 가 비쳐 보이도록 body 는 transparent.
   const bodyStyle: React.CSSProperties = {
     ...styles.body,
-    background: highlight
-      ? HIGHLIGHT_BG
-      : hasSchema ? 'var(--panel)' : 'var(--red-50)',
+    background: highlight ? 'transparent' : hasSchema ? 'var(--panel)' : 'var(--red-50)',
     transition: 'background-color 0.4s ease',
   };
 
@@ -113,7 +108,7 @@ export function DdlSchemaPanel({ project, side, highlight }: Props) {
   };
 
   return (
-    <div ref={panelRef} style={outer}>
+    <div ref={panelRef} style={outer} className={highlight ? 'mpd-fix-highlight' : undefined}>
       <div style={headerStyle}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={styles.titleRow}>
