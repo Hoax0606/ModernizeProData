@@ -199,6 +199,7 @@ export function ExecutionOverviewPage() {
 
   const errorCount = (p: Project) => metrics[p.id]?.errorCount ?? 0;
   const warningCount = (p: Project) => metrics[p.id]?.warningCount ?? 0;
+  const warningAckedCount = (p: Project) => metrics[p.id]?.warningAckedCount ?? 0;
 
   // redirect 는 sidebar 프로젝트 클릭 핸들러가 직접 처리 (race 회피).
   if (activeProjectId || !site) return null;
@@ -352,6 +353,7 @@ export function ExecutionOverviewPage() {
   const totalTablesDone = siteProjects.reduce((a, p) => a + (metrics[p.id]?.tablesDone ?? 0), 0);
   const totalErrors = siteProjects.reduce((a, p) => a + (metrics[p.id]?.errorCount ?? 0), 0);
   const totalWarnings = siteProjects.reduce((a, p) => a + (metrics[p.id]?.warningCount ?? 0), 0);
+  const totalWarningsAcked = siteProjects.reduce((a, p) => a + (metrics[p.id]?.warningAckedCount ?? 0), 0);
   const overallProgressPct = siteProjects.length
     ? siteProjects.reduce((a, p) => a + (metrics[p.id]?.progressPct ?? 0), 0) / siteProjects.length
     : 0;
@@ -365,7 +367,7 @@ export function ExecutionOverviewPage() {
         <Kpi label={t('executionOverview.kpi.tables')}   value={`${totalTablesDone} / ${totalTables}`} />
         <Kpi label={t('executionOverview.kpi.rows')}     value={totalRows.toLocaleString()} />
         <Kpi label={t('executionOverview.kpi.errors')}   value={totalErrors}   tone="err" />
-        <Kpi label={t('executionOverview.kpi.warnings')} value={totalWarnings} tone="warn" />
+        <Kpi label={t('executionOverview.kpi.warnings')} value={totalWarnings > 0 ? `${totalWarningsAcked} / ${totalWarnings}` : 0} tone="warn" />
       </div>
 
       {/* Overall progress bar */}
@@ -606,7 +608,9 @@ export function ExecutionOverviewPage() {
                       </div>
                     </td>
                     <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)', color: errorCount(p) > 0 ? 'var(--red)' : 'var(--text-4)' }}>{errorCount(p)}</td>
-                    <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)', color: warningCount(p) > 0 ? 'var(--amber)' : 'var(--text-4)' }}>{warningCount(p)}</td>
+                    <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)', color: warningCount(p) > 0 ? 'var(--amber)' : 'var(--text-4)' }}>
+                      {warningCount(p) > 0 ? `${warningAckedCount(p)} / ${warningCount(p)}` : 0}
+                    </td>
                   </tr>
                 );
               })

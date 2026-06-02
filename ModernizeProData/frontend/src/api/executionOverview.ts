@@ -28,6 +28,8 @@ export interface ProjectExecMetrics {
   tablesDone: number;
   errorCount: number;
   warningCount: number;
+  /** 운영자가 명시 ack 한 WARN entry 수 — "M/N 처리" 분수 표시용. */
+  warningAckedCount: number;
   progressPct: number;
   /**
    * 7-stage の現在状態. 空配列 = run 履歴なし. FE はこれを buildStagesFromStageViews に

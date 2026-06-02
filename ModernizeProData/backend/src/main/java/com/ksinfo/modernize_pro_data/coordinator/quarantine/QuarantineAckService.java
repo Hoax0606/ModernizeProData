@@ -90,6 +90,17 @@ public class QuarantineAckService {
         return ackRepo.findLatestExplicit(projectId, bindingId, ruleName, reason, allowedPhases);
     }
 
+    /**
+     * Group key (binding + rule_name + reason) 의 explicit ack 총 개수 — fingerprint·phase 무관.
+     * FE 의 "이전 ack 있음" hint 트리거용 (다른 CSV/phase 의 ack 까지 카운트).
+     */
+    @Transactional(readOnly = true)
+    public int countExplicitAckByGroup(String projectId, String bindingId,
+                                       String ruleName, String reason) {
+        return ackRepo.findHistoryByGroup(projectId, bindingId, ruleName,
+                QuarantineAcknowledgment.sha256Hex(reason)).size();
+    }
+
     /** carry-over 가능한 ack 의 phase 후보 — 정책 7. */
     public static List<String> allowedPhasesForLookup(RunType currentPhase) {
         return switch (currentPhase) {

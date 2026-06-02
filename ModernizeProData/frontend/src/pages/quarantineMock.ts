@@ -73,8 +73,11 @@ export interface QuarantineGroup {
   /** AS-IS CSV fingerprint (BE 만 채움). WARN ack 시 그대로 전송 → 같은 CSV 재실행 시 carry-over (정책 3·6). */
   csvMtimeMs?: number | null;
   csvSize?: number | null;
-  /** 명시 ack 메타. null/undefined = ack 없음. 같은 (binding, rule, reason) 의 ack. */
+  /** 명시 ack 메타. null/undefined = ack 없음. 같은 (binding, rule, reason) 의 carry-over ack. */
   ack?: QuarantineGroupAck | null;
+  /** 같은 group key (binding+rule+reason) 의 explicit ack 총 개수 — fingerprint 무관.
+   *  ack==null + priorAckCount>0 = "다른 CSV/phase 의 ack 만 있음" → FE 가 hint 표시. */
+  priorAckCount?: number;
 }
 
 /**

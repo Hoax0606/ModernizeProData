@@ -1321,7 +1321,8 @@ export const ja: Record<TranslationKey, string> = {
   'logs.quarantine.alreadyIn':  'すでに隔離キューにあります',
 
   'logs.quarantine.statsGroups':   '{n} groups',
-  'logs.quarantine.statsRows':     '{n} rows ({err} error · {warn} warning)',
+  'logs.quarantine.filter.skip':   'Skip',
+  'logs.quarantine.statsRows':     '{n} rows ({err} error · {warn} warning · {skip} skip)',
   'logs.quarantine.filter.all':    'All',
   'logs.quarantine.filter.errors': 'Errors',
   'logs.quarantine.filter.warnings': 'Warnings',
@@ -1363,7 +1364,7 @@ export const ja: Record<TranslationKey, string> = {
   'logs.quarantine.act.openInspector': 'ストリームで表示',
   'logs.quarantine.act.downloadParquet': '⬇ 違反行のダウンロード',
   'logs.quarantine.act.downloadFailed':  '違反行ファイルがまだ生成されていません。(Audit stage が完了した run でのみダウンロード可能です。)',
-  'logs.quarantine.act.acknowledgeGroup': 'グループを承認',
+  'logs.quarantine.act.acknowledgeGroup': '要レビュー',
 
   'logs.quarantine.ack.modal.title':       'Acknowledge WARN group',
   'logs.quarantine.ack.modal.reasonLabel': '理由',
@@ -1382,13 +1383,14 @@ export const ja: Record<TranslationKey, string> = {
   'logs.quarantine.ack.history.col.by':    '承認者',
   'logs.quarantine.ack.history.col.at':    '日時',
   'logs.quarantine.ack.history.col.note':  'メモ',
-  'logs.quarantine.ack.history.col.fp':    'CSV fingerprint',
+  'logs.quarantine.ack.history.col.fp':    'group key (csv_mtime_ms · csv_size)',
   'logs.quarantine.ack.history.close':     '閉じる',
   'logs.quarantine.ack.history.failed':    '履歴の取得に失敗しました: {error}',
   'logs.quarantine.ack.reReview.link':     '↺ 再確認',
   'logs.quarantine.ack.reReview.title':    'WARN グループ再確認',
   'logs.quarantine.ack.reReview.notePlaceholder': '再確認の理由 (任意)',
   'logs.quarantine.ack.reReview.previousNote': '前回: {note}',
+  'logs.quarantine.ack.priorHint':         '過去の承認 {n}件 (別の CSV/phase) — ↗ history',
 
   /* Cutover review modal (정책 4·8 — 2026-06-01) */
   'cutoverReview.modal.title':            'Cutover review',

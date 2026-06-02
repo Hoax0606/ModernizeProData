@@ -1319,10 +1319,11 @@ export const ko = {
   'logs.quarantine.alreadyIn':  '이미 격리 큐에 있음',
 
   'logs.quarantine.statsGroups':   '{n} groups',
-  'logs.quarantine.statsRows':     '{n} rows ({err} error · {warn} warning)',
+  'logs.quarantine.statsRows':     '{n} rows ({err} error · {warn} warning · {skip} skip)',
   'logs.quarantine.filter.all':    'All',
   'logs.quarantine.filter.errors': 'Errors',
   'logs.quarantine.filter.warnings': 'Warnings',
+  'logs.quarantine.filter.skip':   'Skip',
   'logs.quarantine.pick.all':      '항목 선택…',
   'logs.quarantine.pickTable.all': '모든 테이블',
   'logs.quarantine.rowsBadge':     '{n} ROWS',
@@ -1363,7 +1364,7 @@ export const ko = {
   'logs.quarantine.act.openInspector': '스트림에서 보기',
   'logs.quarantine.act.downloadParquet': '⬇ 위반 row 다운로드',
   'logs.quarantine.act.downloadFailed':  '위반 row 파일이 아직 생성되지 않았습니다. (Audit stage 가 완료된 run 이어야 다운로드 가능합니다.)',
-  'logs.quarantine.act.acknowledgeGroup': '그룹 검토 완료',
+  'logs.quarantine.act.acknowledgeGroup': '검토 필요',
 
   'logs.quarantine.ack.modal.title':       'Acknowledge WARN group',
   'logs.quarantine.ack.modal.reasonLabel': '사유',
@@ -1382,13 +1383,14 @@ export const ko = {
   'logs.quarantine.ack.history.col.by':    '검토자',
   'logs.quarantine.ack.history.col.at':    '시각',
   'logs.quarantine.ack.history.col.note':  '메모',
-  'logs.quarantine.ack.history.col.fp':    'CSV fingerprint',
+  'logs.quarantine.ack.history.col.fp':    'group key (csv_mtime_ms · csv_size)',
   'logs.quarantine.ack.history.close':     '닫기',
   'logs.quarantine.ack.history.failed':    '이력 조회 실패: {error}',
   'logs.quarantine.ack.reReview.link':     '↺ 재검토',
   'logs.quarantine.ack.reReview.title':    'WARN 그룹 재검토',
   'logs.quarantine.ack.reReview.notePlaceholder': '재검토 사유 (선택)',
   'logs.quarantine.ack.reReview.previousNote': '이전: {note}',
+  'logs.quarantine.ack.priorHint':         '이전 ack {n}건 (다른 CSV/phase) — ↗ history',
 
   /* Cutover review modal (정책 4·8 — 2026-06-01) */
   'cutoverReview.modal.title':            'Cutover review',

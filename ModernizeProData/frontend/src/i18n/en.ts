@@ -1315,7 +1315,8 @@ export const en: Record<TranslationKey, string> = {
   'logs.quarantine.alreadyIn':  'Already in quarantine queue',
 
   'logs.quarantine.statsGroups':   '{n} groups',
-  'logs.quarantine.statsRows':     '{n} rows ({err} error · {warn} warning)',
+  'logs.quarantine.statsRows':     '{n} rows ({err} error · {warn} warning · {skip} skip)',
+  'logs.quarantine.filter.skip':   'Skip',
   'logs.quarantine.filter.all':    'All',
   'logs.quarantine.filter.errors': 'Errors',
   'logs.quarantine.filter.warnings': 'Warnings',
@@ -1357,7 +1358,7 @@ export const en: Record<TranslationKey, string> = {
   'logs.quarantine.act.openInspector': 'View in stream',
   'logs.quarantine.act.downloadParquet': '⬇ Download violating rows',
   'logs.quarantine.act.downloadFailed':  'The violating-row file has not been generated yet. (Download is available only after the Audit stage completes.)',
-  'logs.quarantine.act.acknowledgeGroup': 'Acknowledge group',
+  'logs.quarantine.act.acknowledgeGroup': 'Needs review',
 
   'logs.quarantine.ack.modal.title':       'Acknowledge WARN group',
   'logs.quarantine.ack.modal.reasonLabel': 'Reason',
@@ -1376,13 +1377,14 @@ export const en: Record<TranslationKey, string> = {
   'logs.quarantine.ack.history.col.by':    'By',
   'logs.quarantine.ack.history.col.at':    'At',
   'logs.quarantine.ack.history.col.note':  'Note',
-  'logs.quarantine.ack.history.col.fp':    'CSV fingerprint',
+  'logs.quarantine.ack.history.col.fp':    'group key (csv_mtime_ms · csv_size)',
   'logs.quarantine.ack.history.close':     'Close',
   'logs.quarantine.ack.history.failed':    'Failed to load history: {error}',
   'logs.quarantine.ack.reReview.link':     '↺ Re-review',
   'logs.quarantine.ack.reReview.title':    'Re-review WARN group',
   'logs.quarantine.ack.reReview.notePlaceholder': 'Reason for re-review (optional)',
   'logs.quarantine.ack.reReview.previousNote': 'Previous: {note}',
+  'logs.quarantine.ack.priorHint':         '{n} prior ack(s) on different CSV/phase — ↗ history',
 
   /* Cutover review modal (정책 4·8 — 2026-06-01) */
   'cutoverReview.modal.title':            'Cutover review',

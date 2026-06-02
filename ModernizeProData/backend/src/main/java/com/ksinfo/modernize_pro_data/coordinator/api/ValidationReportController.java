@@ -4,9 +4,8 @@ import com.ksinfo.modernize_pro_data.common.dto.ApiResponse;
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
 import com.ksinfo.modernize_pro_data.coordinator.run.validation.ValidationDiffSampleDto;
 import com.ksinfo.modernize_pro_data.coordinator.run.validation.ValidationDiffService;
-import com.ksinfo.modernize_pro_data.coordinator.run.validation.ValidationReport;
 import com.ksinfo.modernize_pro_data.coordinator.run.validation.ValidationReportDto;
-import com.ksinfo.modernize_pro_data.coordinator.run.validation.ValidationReportRepository;
+import com.ksinfo.modernize_pro_data.coordinator.run.validation.ValidationReportService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -34,27 +33,23 @@ import java.util.List;
 @RequiredArgsConstructor
 public class ValidationReportController {
 
-    private final ValidationReportRepository reportRepo;
+    private final ValidationReportService reportService;
     private final ValidationDiffService diffService;
 
     @GetMapping("/api/v1/runs/{runId}/validation")
     @PreAuthorize("isAuthenticated()")
     public ApiResponse<List<ValidationReportDto>> listByRun(@PathVariable String runId) {
-        List<ValidationReportDto> list = reportRepo.findByRunId(runId).stream()
-                .map(ValidationReportDto::from)
-                .toList();
-        return ApiResponse.ok(list);
+        return ApiResponse.ok(reportService.listByRun(runId));
     }
 
     @GetMapping("/api/v1/runs/{runId}/validation/{bindingId}")
     @PreAuthorize("isAuthenticated()")
     public ApiResponse<ValidationReportDto> getByBinding(@PathVariable String runId,
                                                          @PathVariable String bindingId) {
-        ValidationReport r = reportRepo.findByRunIdAndBindingId(runId, bindingId)
+        return ApiResponse.ok(reportService.findByRunAndBinding(runId, bindingId)
                 .orElseThrow(() -> new ApiException("VALIDATION_NOT_FOUND",
                         "Validation report not found for run=" + runId + " binding=" + bindingId,
-                        HttpStatus.NOT_FOUND));
-        return ApiResponse.ok(ValidationReportDto.from(r));
+                        HttpStatus.NOT_FOUND)));
     }
 
     /**
@@ -77,10 +72,9 @@ public class ValidationReportController {
     @PreAuthorize("isAuthenticated()")
     public ApiResponse<ValidationReportDto> getByTable(@PathVariable String runId,
                                                        @RequestParam String tobeTable) {
-        ValidationReport r = reportRepo.findByRunIdAndTobeTable(runId, tobeTable)
+        return ApiResponse.ok(reportService.findByRunAndTobeTable(runId, tobeTable)
                 .orElseThrow(() -> new ApiException("VALIDATION_NOT_FOUND",
                         "Validation report not found for run=" + runId + " table=" + tobeTable,
-                        HttpStatus.NOT_FOUND));
-        return ApiResponse.ok(ValidationReportDto.from(r));
+                        HttpStatus.NOT_FOUND)));
     }
 }

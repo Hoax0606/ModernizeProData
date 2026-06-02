@@ -8,6 +8,7 @@ import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository;
 import com.ksinfo.modernize_pro_data.coordinator.load.PgCopyManager;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineAckService;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineAcknowledgment;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntry;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntryRepository;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
@@ -18,6 +19,9 @@ import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableResult;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableResultRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableStatus;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunHistory;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunHistoryRepository;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunType;
 import com.ksinfo.modernize_pro_data.coordinator.runlog.RunLogIngestService;
 import com.ksinfo.modernize_pro_data.coordinator.site.Site;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageContext;
@@ -42,6 +46,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
@@ -63,6 +68,7 @@ public class ValidationReportService implements StageRunner {
     private static final String STAGE_KEY = "validation";
 
     private final ValidationReportRepository reportRepo;
+    private final RunHistoryRepository runHistoryRepo;
     private final DdlTableRepository ddlTableRepo;
     private final DdlColumnRepository ddlColumnRepo;
     private final DuckDbService duckDbService;
@@ -386,6 +392,79 @@ public class ValidationReportService implements StageRunner {
         stageInstanceRepo.save(stage);
     }
 
+    /* ---------- Read time API — ack overlay 적용된 응답 (운영자 ack 즉시 반영) ---------- */
+
+    /**
+     * Run + binding 의 validation report — 박제된 row 에 ack overlay (WARN→SKIP) 적용 후 반환.
+     * stage_table_results 박제 verdict 는 보존, FE 응답만 동적 변환.
+     */
+    @org.springframework.transaction.annotation.Transactional(readOnly = true)
+    public Optional<ValidationReportDto> findByRunAndBinding(String runId, String bindingId) {
+        return reportRepo.findByRunIdAndBindingId(runId, bindingId)
+                .map(ValidationReportDto::from)
+                .map(this::applyAckOverlay);
+    }
+
+    @org.springframework.transaction.annotation.Transactional(readOnly = true)
+    public Optional<ValidationReportDto> findByRunAndTobeTable(String runId, String tobeTable) {
+        return reportRepo.findByRunIdAndTobeTable(runId, tobeTable)
+                .map(ValidationReportDto::from)
+                .map(this::applyAckOverlay);
+    }
+
+    @org.springframework.transaction.annotation.Transactional(readOnly = true)
+    public List<ValidationReportDto> listByRun(String runId) {
+        return reportRepo.findByRunId(runId).stream()
+                .map(ValidationReportDto::from)
+                .map(this::applyAckOverlay)
+                .toList();
+    }
+
+    /**
+     * verdict='WARN' 인 row 에 대해 같은 group (binding, ruleName, reason) 의 명시 ack 매칭 →
+     * 'SKIP' 변환 + ack note 덮어쓰기. 박제 DB 는 건드리지 않음 (audit 보존).
+     */
+    private ValidationReportDto applyAckOverlay(ValidationReportDto dto) {
+        RunHistory run = runHistoryRepo.findById(dto.runId()).orElse(null);
+        if (run == null) return dto;
+        RunType phase = run.getRunType();
+        String projectId = run.getProjectId();
+        String bindingId = dto.bindingId();
+        String tableLabel = (dto.tobeSchema() == null || dto.tobeSchema().isBlank())
+                ? dto.tobeTable() : dto.tobeSchema() + "." + dto.tobeTable();
+
+        // checksum WARN → SKIP (canonical match case only — PK 없음은 quarantine entry 없음)
+        Map<String, Object> checksum = dto.checksum();
+        if (checksum != null && !checksum.isEmpty() && "WARN".equals(checksum.get("verdict"))) {
+            String reason = "Data integrity format differs (values match canonical) — " + tableLabel;
+            ackService.findExplicitAck(projectId, bindingId, "validate.checksum", reason, phase)
+                    .ifPresent(a -> applySkip(checksum, a));
+        }
+        // overview 의 checksum row 를 checksum map 과 동기화
+        for (Map<String, Object> ov : dto.overview()) {
+            if ("Checksum SHA-256".equals(ov.get("item")) && checksum != null && !checksum.isEmpty()) {
+                ov.put("verdict", checksum.get("verdict"));
+                if (checksum.get("note") != null) ov.put("note", checksum.get("note"));
+            }
+        }
+        // minMax WARN → SKIP
+        for (Map<String, Object> mm : dto.minMax()) {
+            if ("WARN".equals(mm.get("verdict"))) {
+                String col = String.valueOf(mm.get("column"));
+                String reason = "Validation date MIN/MAX format differs (values match) — " + col;
+                ackService.findExplicitAck(projectId, bindingId, "validate.min_max", reason, phase)
+                        .ifPresent(a -> applySkip(mm, a));
+            }
+        }
+        return dto;
+    }
+
+    private static void applySkip(Map<String, Object> row, QuarantineAcknowledgment ack) {
+        row.put("verdict", "SKIP");
+        String note = ack.getNote();
+        if (note != null && !note.isBlank()) row.put("note", note);
+    }
+
     /* ---------- per-binding 계산 (2026-05-30 합병 정책 — FAIL 시 quarantine record) ---------- */
 
     private Map<String, Object> computeOne(StageContext ctx, StageInstance stage,
@@ -556,6 +635,8 @@ public class ValidationReportService implements StageRunner {
                 mm.put("tobeMax", pgQuad[1]);
                 mm.put("verdict", verdict);
                 if (note != null) mm.put("note", note);
+                // SKIP 변환은 read time (ValidationReportDto.from + applyAckOverlay) 에서 처리.
+                // 박제 verdict 는 WARN/FAIL/PASS 원본 그대로 — audit log 로 보존.
                 minMax.add(mm);
                 /* FAIL = severity=error, WARN = severity=warning (2026-05-31).
                    WARN 도 KPI/Quarantine 통일성을 위해 적재. 단 reason 은 "format differs (canonical match)" 로 명시. */
@@ -776,6 +857,7 @@ public class ValidationReportService implements StageRunner {
         if ("WARN".equals(checksumVerdict) && duckChecksumRaw != null) {
             checksum.put("note", "values match in canonical form — display format differs (e.g., timestamp .0 padding)");
         }
+        // SKIP 변환은 read time (applyAckOverlay) 에서. 박제는 원본 verdict 보존.
         if ("FAIL".equals(checksumVerdict)) {
             recordQuarantine(ctx, stage, binding, tableLabel,
                     "validate.checksum", "Validation SHA-256 checksum mismatch — " + tableLabel,
@@ -801,10 +883,13 @@ public class ValidationReportService implements StageRunner {
         List<Map<String, Object>> overview = new ArrayList<>();
         overview.add(orderedMap("item", "Row count", "asis", duckRows, "tobe", pgRows,
                 "verdict", duckRows == pgRows ? "PASS" : "FAIL"));
-        overview.add(orderedMap("item", "Checksum SHA-256",
+        Map<String, Object> overviewChecksum = orderedMap("item", "Checksum SHA-256",
                 "asis", duckChecksumRaw == null ? "(no PK)" : shortHash(duckChecksumRaw),
                 "tobe", pgChecksumRaw   == null ? "(no PK)" : shortHash(pgChecksumRaw),
-                "verdict", checksum.get("verdict")));
+                "verdict", checksum.get("verdict"));
+        // checksum 의 note (canonical match / ack note) 를 overview row 에 전파 → FE 의 Note 컬럼 표시.
+        if (checksum.get("note") != null) overviewChecksum.put("note", checksum.get("note"));
+        overview.add(overviewChecksum);
         overview.add(orderedMap("item", "Sum reconciliation (" + numericCols.size() + " cols)",
                 "asis", numericCols.size() + " cols", "tobe", numericCols.size() + " cols",
                 "verdict", rollupVerdict(sumRecon)));

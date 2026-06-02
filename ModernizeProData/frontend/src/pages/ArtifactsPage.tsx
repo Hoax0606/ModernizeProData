@@ -134,6 +134,7 @@ export const SHEETS: Record<CategoryKey, SheetSchema[]> = {
       { name: 'ASIS',    type: 'TEXT' },
       { name: 'TOBE',    type: 'TEXT' },
       { name: 'Verdict', type: 'TEXT' },
+      { name: 'Note',    type: 'TEXT' },
     ]},
     { name: 'Sum recon', columns: [
       { name: 'Column',    type: 'VARCHAR' },
@@ -937,10 +938,11 @@ function highlightSqlLine(line: string, lineKey: number): React.ReactNode {
 
    Cell verdict 텍스트는 mock 과 동일하게 '✓ PASS' / '✗ FAIL' / '⚠ WARN' — ARGB_BY_VERDICT 가
    이 텍스트를 보고 색상 배지를 매긴다. */
-function verdictText(v: 'PASS' | 'FAIL' | 'WARN' | string): string {
+function verdictText(v: 'PASS' | 'FAIL' | 'WARN' | 'SKIP' | string): string {
   if (v === 'PASS') return '✓ PASS';
   if (v === 'FAIL') return '✗ FAIL';
   if (v === 'WARN') return '⚠ WARN';
+  if (v === 'SKIP') return '⏭ SKIP';
   return String(v ?? '');
 }
 
@@ -960,13 +962,15 @@ function fmtCell(v: unknown): Cell {
 
 function validationOverviewRows(dto: ValidationReportDto): Cell[][] {
   const meta: Cell[][] = [
-    [`Validation report · ${dto.tobeTable}`, null, null, null],
-    ['TOBE table', dto.tobeSchema ? `${dto.tobeSchema}.${dto.tobeTable}` : dto.tobeTable, null, null],
-    ['Generated', dto.generatedAt ?? '', null, null],
-    ['Check', 'ASIS', 'TOBE', 'Verdict'],
+    [`Validation report · ${dto.tobeTable}`, null, null, null, null],
+    ['TOBE table', dto.tobeSchema ? `${dto.tobeSchema}.${dto.tobeTable}` : dto.tobeTable, null, null, null],
+    ['Generated', dto.generatedAt ?? '', null, null, null],
+    ['Check', 'ASIS', 'TOBE', 'Verdict', 'Note'],
   ];
   const items: Cell[][] = (dto.overview ?? []).map((r) => {
     const itemRaw = String(r.item ?? '');
+    /* note 는 BE 가 보내준 텍스트 — SKIP 시 ack note (운영자 메모), WARN canonical-match 시 안내. */
+    const noteCell: Cell = r.note ?? '';
     /* SHA-256 checksum row 의 ASIS/TOBE 는 BE 가 hash prefix (8자+…) 전송. 고객사 입장에서
        hex string 은 의미 전달 X — verdict 기반으로 'Match' / 'Mismatch' 로 변환해 가독성 ↑.
        단 '(no PK)' 같은 sentinel 값은 보존. (2026-05-31 친숙화) */
@@ -977,20 +981,25 @@ function validationOverviewRows(dto: ValidationReportDto): Cell[][] {
       const matchLabel = isSentinel
         ? fmtCell(r.asis)
         : (r.verdict === 'PASS' ? '✓ Match'
+         : r.verdict === 'SKIP' ? '⏭ Match (acked)'
          : r.verdict === 'WARN' ? '⚠ Match (display differs)'
          : '✗ Mismatch');
       const matchLabel2 = isSentinel ? fmtCell(r.tobe) : matchLabel;
-      return [friendlyOverviewItem(itemRaw), matchLabel, matchLabel2, verdictText(r.verdict)];
+      return [friendlyOverviewItem(itemRaw), matchLabel, matchLabel2, verdictText(r.verdict), noteCell];
     }
     return [
       friendlyOverviewItem(itemRaw),
-      fmtCell(r.asis), fmtCell(r.tobe), verdictText(r.verdict),
+      fmtCell(r.asis), fmtCell(r.tobe), verdictText(r.verdict), noteCell,
     ];
   });
+  /* Total — pass / fail / skip 분리 카운트. skip 은 BE 가 verdict='SKIP' 보낸 행 합계. */
+  const skipCount = (dto.overview ?? []).filter((r) => r.verdict === 'SKIP').length;
+  const failCount = dto.totalChecks - dto.passedChecks - skipCount;
   const total: Cell[][] = [
     ['Total', String(dto.totalChecks),
      `${dto.passedChecks} pass`,
-     `${dto.totalChecks - dto.passedChecks} fail`],
+     `${failCount} fail`,
+     skipCount > 0 ? `${skipCount} skip` : ''],
   ];
   return [...meta, ...items, ...total];
 }
@@ -1127,6 +1136,11 @@ const ARGB_BY_VERDICT: Record<string, { bg: string; fg: string }> = {
   '⚠':         { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
   Warning:     { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
   WARN:        { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  /* SKIP — 운영자가 명시 ack 한 WARN. 회색 — "처리됨" 표시. */
+  '⏭ SKIP':    { bg: 'FFE8EBEC', fg: 'FF555F6B' },
+  '⏭':         { bg: 'FFE8EBEC', fg: 'FF555F6B' },
+  SKIP:        { bg: 'FFE8EBEC', fg: 'FF555F6B' },
+  Skip:        { bg: 'FFE8EBEC', fg: 'FF555F6B' },
   /* Checksum SHA-256 친숙화 — '✓ Match' / '⚠ Match (display differs)' / '✗ Mismatch'
      (2026-05-31). hex string 노출 대신 사용자 친화 표현. */
   '✓ Match':                     { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },

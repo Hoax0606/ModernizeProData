@@ -103,7 +103,8 @@ export function LogViewerPage() {
   /** 화면 모드. stream = 전체 로그 tail, quarantine = 규칙 위반 group 카드 뷰, history = run 履歴. */
   const [view, setView] = useState<'stream' | 'quarantine' | 'history'>('stream');
   /** Quarantine 화면의 severity 필터. */
-  const [severityFilter, setSeverityFilter] = useState<'all' | QuarantineSeverity>('all');
+  /* 'skip' = ack 된 WARN group. severity 와 별개 분류 — warning 카운트에서 제외. */
+  const [severityFilter, setSeverityFilter] = useState<'all' | QuarantineSeverity | 'skip'>('all');
   /** 펼쳐진 (= 액션바 표시) group 의 id. 한 번에 하나만. 같은 카드 다시 클릭 → 접힘. */
   const [openGroupId, setOpenGroupId] = useState<string | null>(null);
   /** 우상단 group dropdown 선택 — null 이면 severity 결과 다 표시, id 면 그 group 만 표시 + 자동 펼침. */
@@ -288,28 +289,34 @@ export function LogViewerPage() {
   /* ack 된 group 도 dim+meta 로 표시 (사용자 결정 — hide 가 아닌 dim). QuarantineCard 가 g.ack 로 처리. */
   const allGroups: QuarantineGroup[] = allGroupsData ?? [];
   const groupStats = useMemo(() => {
-    let errRows = 0, warnRows = 0;
+    /* ack 된 WARN 은 'skip' 으로 분리 카운트. warning 카운트에서 제외 (사용자 결정).
+       error 는 ack 무관 — error 는 ack 시스템 X. */
+    let errRows = 0, warnRows = 0, skipRows = 0;
     for (const g of allGroups) {
-      if (g.severity === 'error') errRows += g.rowCount; else warnRows += g.rowCount;
+      if (g.severity === 'error') errRows += g.rowCount;
+      else if (g.ack) skipRows += g.rowCount;
+      else warnRows += g.rowCount;
     }
     const errGroups  = allGroups.filter((g) => g.severity === 'error').length;
-    const warnGroups = allGroups.filter((g) => g.severity === 'warning').length;
+    const warnGroups = allGroups.filter((g) => g.severity === 'warning' && !g.ack).length;
+    const skipGroups = allGroups.filter((g) => g.severity === 'warning' && !!g.ack).length;
     return {
       total: allGroups.length,
-      errGroups, warnGroups,
-      errRows, warnRows,
-      totalRows: errRows + warnRows,
+      errGroups, warnGroups, skipGroups,
+      errRows, warnRows, skipRows,
+      totalRows: errRows + warnRows + skipRows,
     };
   }, [allGroups]);
   /* 필터는 severity → table → group(개별) 순으로 AND 결합한다.
      - bySeverity : severity 탭 결과 (table dropdown 옵션의 모집단)
      - byTable    : 거기서 테이블 dropdown 적용 (group dropdown 옵션의 모집단)
      - filtered   : 거기서 개별 group dropdown 적용 → 최종 표시 카드 */
-  const bySeverity = useMemo(() => (
-    severityFilter === 'all'
-      ? allGroups
-      : allGroups.filter((g) => g.severity === severityFilter)
-  ), [allGroups, severityFilter]);
+  const bySeverity = useMemo(() => {
+    if (severityFilter === 'all')     return allGroups;
+    if (severityFilter === 'skip')    return allGroups.filter((g) => g.severity === 'warning' && !!g.ack);
+    if (severityFilter === 'warning') return allGroups.filter((g) => g.severity === 'warning' && !g.ack);
+    return allGroups.filter((g) => g.severity === severityFilter);
+  }, [allGroups, severityFilter]);
   const byTable = useMemo(() => (
     tableFilter ? bySeverity.filter((g) => g.table === tableFilter) : bySeverity
   ), [bySeverity, tableFilter]);
@@ -748,6 +755,7 @@ export function LogViewerPage() {
                     n: String(groupStats.totalRows),
                     err: String(groupStats.errRows),
                     warn: String(groupStats.warnRows),
+                    skip: String(groupStats.skipRows),
                   })}
                 </div>
               </div>
@@ -761,6 +769,8 @@ export function LogViewerPage() {
                     active={severityFilter === 'error'}   onClick={() => setSeverityFilter('error')}   tone="error" />
                   <SevTab label={t('logs.quarantine.filter.warnings')} count={groupStats.warnGroups}
                     active={severityFilter === 'warning'} onClick={() => setSeverityFilter('warning')} tone="warning" />
+                  <SevTab label={t('logs.quarantine.filter.skip')} count={groupStats.skipGroups}
+                    active={severityFilter === 'skip'} onClick={() => setSeverityFilter('skip')} />
                 </div>
                 {/* 테이블 dropdown — severity 탭 바로 옆. 한 테이블의 위반만 모아 보기. */}
                 <select
@@ -1191,9 +1201,12 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, 
   runId: string | null;
 }) {
   const isErr = g.severity === 'error';
-  const sevColor = isErr ? '#c92a3f' : '#a86b00';
-  const sevBg    = isErr ? 'rgba(232,93,117,0.08)' : 'rgba(232,181,99,0.10)';
-  const sevBorder = isErr ? '#e85d75' : '#e8b563';
+  /* ack 된 group(=skip 처리 완료) 은 carry-over 표시. severity tone 대신 회색으로 — 운영자가
+     한 눈에 "이 group 은 처리됨" 알 수 있도록. */
+  const isAcked = !!ackInfo;
+  const sevColor  = isAcked ? 'var(--text-3)' : isErr ? '#c92a3f' : '#a86b00';
+  const sevBg     = isAcked ? 'var(--panel-2)' : isErr ? 'rgba(232,93,117,0.08)' : 'rgba(232,181,99,0.10)';
+  const sevBorder = isAcked ? 'var(--border)' : isErr ? '#e85d75' : '#e8b563';
   const sample = g.sampleRows;
   const tt = t as unknown as (k: string, v?: Record<string, string>) => string;
   const human  = humanizeQuarantineDetail(g, tt);
@@ -1220,7 +1233,11 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, 
       ref={rootRef}
       aria-expanded={open}
       className="quar-card"
-      style={{ ...styles.cardRoot, ...(open ? styles.cardRootOpen : {}) }}
+      style={{
+        ...styles.cardRoot,
+        ...(open ? styles.cardRootOpen : {}),
+        ...(isAcked ? { background: 'var(--panel-2)', opacity: 0.85 } : {}),
+      }}
     >
       <div style={{ ...styles.cardLeftBar, background: sevBorder }} />
       <div style={styles.cardBody}>
@@ -1309,10 +1326,12 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, 
               >
                 {t('logs.quarantine.act.openMapping')}
               </button>
-              {/* 위반 row 전수 parquet 다운로드 — BE 가 bindingId 채운 경우만 노출.
-                  fetch 로 blob 받아 직접 다운로드 — 4xx 응답이 새 탭의 빈 페이지로
-                  표시되던 문제 회피. 파일 미생성 / audit stage 미실행 등은 alert 으로 안내. */}
-              {runId && g.bindingId && (
+              {/* 위반 row 전수 parquet 다운로드 — BE 가 bindingId 채운 경우 + ERROR 만 노출.
+                  WARN entry 는 ValidationReportService 의 aggregate diff (SUM/MIN/MAX/SHA256) 라
+                  row-level parquet 파일이 없음 → 다운로드 버튼 노출 X. AuditStage 의 ERROR 만
+                  exportViolationParquet 로 파일 생성. fetch 로 blob 받아 직접 다운로드 —
+                  4xx 응답이 새 탭의 빈 페이지로 표시되던 문제 회피. */}
+              {runId && g.bindingId && g.severity === 'error' && (
                 <button
                   type="button"
                   onClick={async () => {
@@ -1367,13 +1386,28 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, 
                   )}
                 </>
               ) : onAcknowledge && (
-                <button
-                  type="button"
-                  style={styles.actPrimary}
-                  onClick={onAcknowledge}
-                >
-                  {t('logs.quarantine.act.acknowledgeGroup')}
-                </button>
+                <>
+                  {/* 이전 ack 가 있지만 fingerprint 다름 (다른 CSV/phase) — 운영자가 즉시
+                      과거 검토 이력 확인 가능하도록 hint + history 링크. carry-over 정책 3·6
+                      유지 (자동 통과 X), 단 audit 친화. */}
+                  {(g.priorAckCount ?? 0) > 0 && onOpenHistory && (
+                    <button
+                      type="button"
+                      style={{ ...styles.actLink, color: 'var(--amber)' }}
+                      onClick={onOpenHistory}
+                      title={t('logs.quarantine.ack.history.title')}
+                    >
+                      {t('logs.quarantine.ack.priorHint', { n: String(g.priorAckCount ?? 0) })}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    style={styles.actWarn}
+                    onClick={onAcknowledge}
+                  >
+                    {t('logs.quarantine.act.acknowledgeGroup')}
+                  </button>
+                </>
               )}
               {onOpenHistory && (
                 <button
@@ -2026,6 +2060,11 @@ const styles: Record<string, React.CSSProperties> = {
   actPrimary: {
     padding: '6px 14px', border: '1px solid #1f8a5c', borderRadius: 4,
     background: '#21946a', color: '#fff',
+    fontSize: 11.5, fontWeight: 700, cursor: 'pointer',
+  },
+  actWarn: {
+    padding: '6px 14px', border: '1px solid var(--amber)', borderRadius: 4,
+    background: 'var(--amber)', color: '#fff',
     fontSize: 11.5, fontWeight: 700, cursor: 'pointer',
   },
   actSecondary: {
