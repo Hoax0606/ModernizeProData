@@ -179,17 +179,18 @@ export function LogViewerPage() {
   const [ackBusy, setAckBusy] = useState(false);
   const [ackError, setAckError] = useState<string | null>(null);
 
-  /** Ack history popover state — dim 카드의 (↗ history) 클릭 시 group 의 전체 ack 이력 표시. */
-  const [historyTarget, setHistoryTarget] = useState<QuarantineGroup | null>(null);
-  const [historyRows, setHistoryRows] = useState<AckHistoryEntry[]>([]);
-  const [historyBusy, setHistoryBusy] = useState(false);
-  const [historyError, setHistoryError] = useState<string | null>(null);
-  const openHistory = useCallback(async (g: QuarantineGroup) => {
+  /** Ack history popover state — dim 카드의 (↗ history) 클릭 시 group 의 전체 ack 이력 표시.
+      run history 의 historyRows 와 충돌 피하기 위해 ackHistory* prefix 사용. */
+  const [ackHistoryTarget, setAckHistoryTarget] = useState<QuarantineGroup | null>(null);
+  const [ackHistoryRows, setAckHistoryRows] = useState<AckHistoryEntry[]>([]);
+  const [ackHistoryBusy, setAckHistoryBusy] = useState(false);
+  const [ackHistoryError, setAckHistoryError] = useState<string | null>(null);
+  const openAckHistory = useCallback(async (g: QuarantineGroup) => {
     if (!project || !g.bindingId) return;
-    setHistoryTarget(g);
-    setHistoryRows([]);
-    setHistoryError(null);
-    setHistoryBusy(true);
+    setAckHistoryTarget(g);
+    setAckHistoryRows([]);
+    setAckHistoryError(null);
+    setAckHistoryBusy(true);
     try {
       const rows = await quarantineAckApi.history({
         projectId: project.id,
@@ -197,18 +198,18 @@ export function LogViewerPage() {
         ruleName: g.stage,
         reason: g.reason,
       });
-      setHistoryRows(rows);
+      setAckHistoryRows(rows);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
-      setHistoryError(t('logs.quarantine.ack.history.failed', { error: msg }));
+      setAckHistoryError(t('logs.quarantine.ack.history.failed', { error: msg }));
     } finally {
-      setHistoryBusy(false);
+      setAckHistoryBusy(false);
     }
   }, [project, t]);
-  const closeHistory = useCallback(() => {
-    setHistoryTarget(null);
-    setHistoryRows([]);
-    setHistoryError(null);
+  const closeAckHistory = useCallback(() => {
+    setAckHistoryTarget(null);
+    setAckHistoryRows([]);
+    setAckHistoryError(null);
   }, []);
 
   const openAckModal = useCallback((g: QuarantineGroup) => {
@@ -811,7 +812,7 @@ export function LogViewerPage() {
                       : null}
                     ackInfo={g.ack ?? null}
                     onOpenHistory={g.severity === 'warning' && g.bindingId
-                      ? () => void openHistory(g)
+                      ? () => void openAckHistory(g)
                       : null}
                     onToggle={() => setOpenGroupId((cur) => (cur === g.id ? null : g.id))}
                     onOpenMapping={() => {
@@ -1049,26 +1050,26 @@ export function LogViewerPage() {
 
       {/* Ack history popover — group 의 모든 ack 이력 (phase 무관 시간 역순). */}
       <Modal
-        open={historyTarget !== null}
-        onClose={closeHistory}
+        open={ackHistoryTarget !== null}
+        onClose={closeAckHistory}
         title={t('logs.quarantine.ack.history.title')}
         width={680}
       >
-        {historyTarget && (
+        {ackHistoryTarget && (
           <div>
             <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12 }}>
               {t('logs.quarantine.ack.history.subtitle', {
-                table: historyTarget.table,
-                rule: historyTarget.stage,
-                reason: historyTarget.reason,
+                table: ackHistoryTarget.table,
+                rule: ackHistoryTarget.stage,
+                reason: ackHistoryTarget.reason,
               })}
             </div>
-            {historyError && (
-              <div style={{ color: '#c92a3f', fontSize: 12, marginBottom: 8 }}>{historyError}</div>
+            {ackHistoryError && (
+              <div style={{ color: '#c92a3f', fontSize: 12, marginBottom: 8 }}>{ackHistoryError}</div>
             )}
-            {historyBusy ? (
+            {ackHistoryBusy ? (
               <div style={{ fontSize: 12, color: 'var(--text-3)', padding: '16px 0' }}>...</div>
-            ) : historyRows.length === 0 && !historyError ? (
+            ) : ackHistoryRows.length === 0 && !ackHistoryError ? (
               <div style={{ fontSize: 12, color: 'var(--text-3)', padding: '16px 0' }}>
                 {t('logs.quarantine.ack.history.empty')}
               </div>
@@ -1084,7 +1085,7 @@ export function LogViewerPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {historyRows.map((r) => (
+                  {ackHistoryRows.map((r) => (
                     <tr key={r.acknowledgmentId} style={{ borderBottom: '1px solid var(--border)' }}>
                       <td style={{ padding: '6px 8px', fontFamily: 'var(--mono)', color: 'var(--text-2)' }}>[{r.phase}]</td>
                       <td style={{ padding: '6px 8px' }}>{r.acknowledgedBy}</td>
@@ -1105,7 +1106,7 @@ export function LogViewerPage() {
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
               <button
                 type="button"
-                onClick={closeHistory}
+                onClick={closeAckHistory}
                 style={{
                   padding: '6px 14px',
                   fontSize: 12,
