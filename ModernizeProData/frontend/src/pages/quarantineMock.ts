@@ -40,6 +40,14 @@ export type QuarantineSeverity = 'error' | 'warning';
 
 export type QuarantineCell = string | number | null;
 
+/** WARN 그룹의 명시 ack 메타 — BE QuarantineController.byRun 응답의 ack 필드. */
+export interface QuarantineGroupAck {
+  acknowledgmentId: number;
+  acknowledgedBy: string;
+  acknowledgedAt: string;                        // ISO timestamp
+  phase: 'test' | 'rehearsal' | 'cutover';
+}
+
 export interface QuarantineGroup {
   id: string;
   bindingId?: string;                            // BE 만 채움. mock 은 비움. parquet 다운로드 endpoint key.
@@ -65,6 +73,8 @@ export interface QuarantineGroup {
   /** AS-IS CSV fingerprint (BE 만 채움). WARN ack 시 그대로 전송 → 같은 CSV 재실행 시 carry-over (정책 3·6). */
   csvMtimeMs?: number | null;
   csvSize?: number | null;
+  /** 명시 ack 메타. null/undefined = ack 없음. 같은 (binding, rule, reason) 의 ack. */
+  ack?: QuarantineGroupAck | null;
 }
 
 /**

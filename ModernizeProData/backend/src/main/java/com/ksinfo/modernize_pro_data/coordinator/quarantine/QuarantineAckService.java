@@ -1,8 +1,11 @@
 package com.ksinfo.modernize_pro_data.coordinator.quarantine;
 
+import com.ksinfo.modernize_pro_data.common.exception.ApiException;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -31,7 +34,12 @@ public class QuarantineAckService {
 
     private final QuarantineAcknowledgmentRepository ackRepo;
 
-    /** 운영자가 WARN 그룹 명시 ack — group view 에서 [Acknowledge group] 클릭. */
+    /**
+     * 운영자가 WARN 그룹 명시 ack — group view 에서 [Acknowledge group] 클릭.
+     *
+     * 중복 ack: DB 의 ux_qack_dedup UNIQUE constraint 가 같은 (project, binding, rule,
+     * reason_hash, phase, fingerprint) 조합을 거부 → 409 Conflict 변환.
+     */
     @Transactional
     public QuarantineAcknowledgment acknowledge(String projectId, String bindingId,
                                                 String ruleName, String reason,
@@ -43,7 +51,12 @@ public class QuarantineAckService {
                 csvMtimeMs, csvSize, phase.name(), acknowledgedBy, note);
         log.info("quarantine ack project={} binding={} rule={} reason={} phase={} by={}",
                 projectId, bindingId, ruleName, reason, phase, acknowledgedBy);
-        return ackRepo.save(ack);
+        try {
+            return ackRepo.save(ack);
+        } catch (DataIntegrityViolationException e) {
+            throw new ApiException("ACK_DUPLICATE",
+                    "Already acknowledged", HttpStatus.CONFLICT);
+        }
     }
 
     /**
@@ -59,6 +72,22 @@ public class QuarantineAckService {
         List<String> allowedPhases = allowedPhasesForLookup(currentPhase);
         return ackRepo.findLatestCarryOver(projectId, bindingId, ruleName, reason,
                                             csvMtimeMs, csvSize, allowedPhases);
+    }
+
+    /**
+     * 명시 ack lookup — fingerprint 무관. listGroups 의 "ack 됐나?" 판정과
+     * Validation status (WARN 만 + ack 있음 → success) 양쪽 사용.
+     *
+     * carry-over 와의 차이:
+     *   - findCarryOver: fingerprint 일치 + 보호적 (다음 run 자동 적용)
+     *   - findExplicitAck: 명시 ack 가 1건이라도 있나 — UI/판정 표시용
+     */
+    @Transactional(readOnly = true)
+    public Optional<QuarantineAcknowledgment> findExplicitAck(String projectId, String bindingId,
+                                                              String ruleName, String reason,
+                                                              RunType currentPhase) {
+        List<String> allowedPhases = allowedPhasesForLookup(currentPhase);
+        return ackRepo.findLatestExplicit(projectId, bindingId, ruleName, reason, allowedPhases);
     }
 
     /** carry-over 가능한 ack 의 phase 후보 — 정책 7. */

@@ -68,14 +68,16 @@ public class QuarantineAckController {
                 || req.reason() == null
                 || req.phase() == null) {
             throw new ApiException("ACK_INVALID",
-                    "projectId/bindingId/ruleName/reason/phase 必須", HttpStatus.BAD_REQUEST);
+                    "projectId/bindingId/ruleName/reason/phase required",
+                    HttpStatus.BAD_REQUEST);
         }
         RunType phase;
         try {
             phase = RunType.valueOf(req.phase());
         } catch (IllegalArgumentException e) {
             throw new ApiException("ACK_PHASE_INVALID",
-                    "phase は test/rehearsal/cutover のみ", HttpStatus.BAD_REQUEST);
+                    "phase must be one of test/rehearsal/cutover",
+                    HttpStatus.BAD_REQUEST);
         }
         String username = auth == null ? "unknown" : auth.getName();
         QuarantineAcknowledgment saved = ackService.acknowledge(
@@ -91,6 +93,7 @@ public class QuarantineAckController {
      * FE Quarantine 페이지의 group view backend.
      */
     @GetMapping("/api/v1/runs/{runId}/quarantine-groups")
+    @PreAuthorize("hasAnyRole('MASTER','ADMIN','OPERATOR','VIEWER')")
     public ApiResponse<List<QuarantineGroupAckView>> listGroups(@PathVariable String runId) {
         RunHistory run = runRepo.findById(runId)
                 .orElseThrow(() -> new ApiException("RUN_NOT_FOUND",
@@ -122,17 +125,17 @@ public class QuarantineAckController {
             g.entryCount++;
         }
 
-        // 각 group 별 ack carry-over 조회
+        // 각 group 별 ack lookup — carry-over 정책 (정책 3·6): fingerprint 일치 + phase 매칭일 때만.
+        // fingerprint null (첫 도입 / 미측정) 이면 carry-over 비활성. FE 는 ack 존재 시 dim+meta 표시.
         List<String> allowedPhases = QuarantineAckService.allowedPhasesForLookup(run.getRunType());
         List<QuarantineGroupAckView> result = new ArrayList<>(groups.size());
         for (GroupAggregator g : groups.values()) {
-            // Carry-over 조회 — csv fingerprint null 일 수도 (첫 도입)
             Optional<QuarantineAcknowledgment> carryOver = ackRepo.findLatestCarryOver(
                     project.getId(), g.bindingId, g.ruleName, g.reason,
                     g.csvMtimeMs, g.csvSize, allowedPhases);
             AckInfo ackInfo = carryOver.map(a -> new AckInfo(
                     a.getId(), a.getAcknowledgedBy(), a.getAcknowledgedAt(),
-                    a.getPhase(), true /*carryOver*/)).orElse(null);
+                    a.getPhase(), !a.getPhase().equals(run.getRunType().name()))).orElse(null);
             result.add(new QuarantineGroupAckView(
                     g.bindingId, g.tableName, g.ruleName, g.reason, g.stageLabel,
                     g.severity.name(), g.rowCount, g.entryCount, ackInfo));
@@ -175,6 +178,35 @@ public class QuarantineAckController {
         log.info("cutover review run={} confirmed={} rejected={} by={}",
                 runId, confirmedCount, rejectedCount, username);
         return ApiResponse.ok(new CutoverReviewResponse(confirmedCount, rejectedCount));
+    }
+
+    /**
+     * Group 별 ack history — LogViewer 의 (↗ history) popover.
+     * 같은 (project, binding, rule_name, reason) 의 모든 ack 이력 (phase 무관 시간 역순).
+     */
+    @GetMapping("/api/v1/quarantine/ack-history")
+    @PreAuthorize("hasAnyRole('MASTER','ADMIN','OPERATOR','VIEWER')")
+    public ApiResponse<List<AckHistoryEntry>> ackHistory(
+            @org.springframework.web.bind.annotation.RequestParam String projectId,
+            @org.springframework.web.bind.annotation.RequestParam String bindingId,
+            @org.springframework.web.bind.annotation.RequestParam String ruleName,
+            @org.springframework.web.bind.annotation.RequestParam String reason) {
+        if (projectId == null || projectId.isBlank()
+                || bindingId == null || bindingId.isBlank()
+                || ruleName == null || ruleName.isBlank()
+                || reason == null) {
+            throw new ApiException("ACK_HISTORY_INVALID",
+                    "projectId/bindingId/ruleName/reason required", HttpStatus.BAD_REQUEST);
+        }
+        String reasonHash = QuarantineAcknowledgment.sha256Hex(reason);
+        List<QuarantineAcknowledgment> rows = ackRepo.findHistoryByGroup(
+                projectId, bindingId, ruleName, reasonHash);
+        List<AckHistoryEntry> result = rows.stream()
+                .map(a -> new AckHistoryEntry(
+                        a.getId(), a.getAcknowledgedBy(), a.getAcknowledgedAt(),
+                        a.getPhase(), a.getCsvMtimeMs(), a.getCsvSize(), a.getNote()))
+                .toList();
+        return ApiResponse.ok(result);
     }
 
     /* ─────────────────────── helpers ─────────────────────── */
@@ -243,6 +275,16 @@ public class QuarantineAckController {
     public record CutoverReviewResponse(
             int confirmedCount,
             int rejectedCount
+    ) {}
+
+    public record AckHistoryEntry(
+            Long acknowledgmentId,
+            String acknowledgedBy,
+            OffsetDateTime acknowledgedAt,
+            String phase,                  // test / rehearsal / cutover
+            Long csvMtimeMs,               // null = 첫 적용 (fingerprint 미측정)
+            Long csvSize,
+            String note                    // 운영자 메모 (선택)
     ) {}
 
     /* group 집계용 — DTO 만들기 전 단계. */

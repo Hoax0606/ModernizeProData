@@ -358,7 +358,8 @@ public class ValidationReportService implements StageRunner {
 
         String projectId = ctx.getProject().getId();
         com.ksinfo.modernize_pro_data.coordinator.run.RunType phase = ctx.getRunHistory().getRunType();
-        // CSV fingerprint (ExtractStage 가 적재). null 이면 carry-over 비활성(안전 — 정책 3·6).
+        // 정책 3·6: ExtractStage 가 적재한 CSV fingerprint (mtime+size) 일치 + phase 매칭 시에만 carry-over.
+        // fingerprint null (첫 도입 / 미측정) 이면 carry-over 비활성 = 운영자 재 ack 필요 (안전 우선).
         var fp = ctx.getCsvFingerprint(binding.getId());
         Long csvMtimeMs = fp == null ? null : fp.mtimeMs();
         Long csvSize    = fp == null ? null : fp.size();

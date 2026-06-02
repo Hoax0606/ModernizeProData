@@ -70,6 +70,16 @@ export interface CutoverReviewResponse {
   rejectedCount: number;
 }
 
+export interface AckHistoryEntry {
+  acknowledgmentId: number;
+  acknowledgedBy: string;
+  acknowledgedAt: string;        // ISO timestamp
+  phase: RunPhase;
+  csvMtimeMs?: number | null;    // null = fingerprint 미측정
+  csvSize?: number | null;
+  note?: string | null;
+}
+
 export const quarantineAckApi = {
   /** 운영자가 WARN 그룹 명시 ack. */
   acknowledge: (req: AckRequest) =>
@@ -85,5 +95,12 @@ export const quarantineAckApi = {
   confirmCutoverReview: (runId: string, req: CutoverReviewRequest) =>
     unwrap(api.post<ApiResponse<CutoverReviewResponse>>(
       `/api/v1/runs/${runId}/cutover-review/confirm`, req,
+    )),
+
+  /** Group 별 ack 전체 이력 (phase 무관 시간 역순). LogViewer 의 (↗ history) popover. */
+  history: (params: { projectId: string; bindingId: string; ruleName: string; reason: string }) =>
+    unwrap(api.get<ApiResponse<AckHistoryEntry[]>>(
+      '/api/v1/quarantine/ack-history',
+      { params },
     )),
 };

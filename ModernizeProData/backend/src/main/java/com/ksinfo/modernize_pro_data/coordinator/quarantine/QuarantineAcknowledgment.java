@@ -11,6 +11,9 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.OffsetDateTime;
 
 /**
@@ -54,6 +57,10 @@ public class QuarantineAcknowledgment {
     @Column(name = "reason", nullable = false, columnDefinition = "TEXT")
     private String reason;
 
+    /** sha256(reason) hex — TEXT 컬럼 인덱스 회피용 lookup 키. */
+    @Column(name = "reason_hash", nullable = false, length = 64)
+    private String reasonHash;
+
     /** CSV file last-modified (ms). NULL = unknown — carry-over 미적용. */
     @Column(name = "csv_mtime_ms")
     private Long csvMtimeMs;
@@ -85,6 +92,7 @@ public class QuarantineAcknowledgment {
         a.bindingId = bindingId;
         a.ruleName = ruleName;
         a.reason = reason;
+        a.reasonHash = sha256Hex(reason);
         a.csvMtimeMs = csvMtimeMs;
         a.csvSize = csvSize;
         a.phase = phase;
@@ -92,5 +100,20 @@ public class QuarantineAcknowledgment {
         a.acknowledgedAt = OffsetDateTime.now();
         a.note = note;
         return a;
+    }
+
+    /** lookup 키용 sha256 hex — Repository / Service 에서 같은 함수 사용. */
+    public static String sha256Hex(String s) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(s.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                hex.append(String.format("%02x", b));
+            }
+            return hex.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 not available", e);
+        }
     }
 }
