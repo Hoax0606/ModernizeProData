@@ -175,7 +175,9 @@ export function AppShell() {
       }
     };
     void heavySync();
-    const id = setInterval(() => void heavySync(), 10_000);
+    // 30s 주기 — sites/snapshots/audit 는 payload 가 커서 5 user 동시 시 부하 비중 큼.
+    // 60s 는 phase/snapshot 반영 지연이 동시 작업 confusion 유발해 30s 절충.
+    const id = setInterval(() => void heavySync(), 30_000);
     return () => clearInterval(id);
   }, [fetchSites, fetchSnapshots]);
 

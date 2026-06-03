@@ -20,10 +20,11 @@ spring:
     driver-class-name: org.postgresql.Driver
     hikari:
       # Coord = LoadStage 병렬 4 thread + Quartz 5 thread + REST handler 여유.
-      # Coord 1 + Worker 3 동시 polling (lightSync 5s / heavySync 10s / 각 화면별
-      # 5s polling) + LoadStage / Quartz 까지 = 25+ slot 필요. HIKARI_POOL_MAX
-      # 로 site 별 override.
-      maximum-pool-size: ${HIKARI_POOL_MAX:30}
+      # 5 user 동시 polling peak = lightSync 5s + heavySync 30s + 화면별 polling
+      # + csv-row-count + LoadStage/Quartz → 25-35 동시 req. pool 50 안전 마진.
+      # PG default max_connections=100 의 절반 — Coord 1 노드만 PG 점유 (Worker 는
+      # REST only). 현장 PG max_connections 가 낮으면 HIKARI_POOL_MAX 로 override.
+      maximum-pool-size: ${HIKARI_POOL_MAX:50}
       connection-timeout: 5000
       # 5분 idle 이후 회수. 작업 burst 후 connection slot 빠르게 반환.
       idle-timeout: 300000
@@ -41,6 +42,9 @@ spring:
       hibernate:
         format_sql: true
         dialect: org.hibernate.dialect.PostgreSQLDialect
+        # query count/time 통계 — 측정 cycle 에만 HIBERNATE_STATS=true 로 켠다.
+        # 항상 켜면 5-10% overhead (Heisenberg). default false.
+        generate_statistics: ${HIBERNATE_STATS:false}
 
   # ── Flyway — 스키마 마이그레이션 단독 관리 ───────────────────────────
   flyway:
@@ -142,4 +146,6 @@ logging:
     org.hibernate.SQL: ${LOG_SQL_LEVEL:WARN}
     org.hibernate.orm.jdbc.bind: ${LOG_SQL_LEVEL:WARN}
   pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+    # %X{traceId} = PerfTraceFilter 가 요청별로 넣는 짧은 id. 5-user 동시 측정 시
+    # 같은 요청의 로그 묶기 (correlation) 용. 비-요청 thread 는 빈 값.
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] [%X{traceId}] %logger{36} - %msg%n"

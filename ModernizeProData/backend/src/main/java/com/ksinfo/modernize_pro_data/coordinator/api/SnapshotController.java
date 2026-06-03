@@ -72,6 +72,9 @@ public class SnapshotController {
     /** self proxy — setBaseline retry loop 가 transaction 경계를 넘어 재호출하기 위함.
      *  ObjectProvider 로 지연 주입 (생성자 순환 회피). */
     private final org.springframework.beans.factory.ObjectProvider<SnapshotController> selfProvider;
+    /** setBaseline 의 project 단위 advisory lock 용. */
+    @jakarta.persistence.PersistenceContext
+    private jakarta.persistence.EntityManager entityManager;
 
     /* ── DTOs ──────────────────────────────────── */
 
@@ -340,6 +343,17 @@ public class SnapshotController {
      *  public 필수 (self proxy 가 AOP transaction advice 적용하려면). */
     @Transactional
     public ApiResponse<Snapshot> setBaselineTx(String id, String actor) {
+        Snapshot probe = findOrThrow(id);
+        // 같은 project 의 baseline 변경을 직렬화 — PG advisory xact lock (transaction
+        // 종료 시 자동 해제). 동시 setBaseline 이 partial unique index
+        // (uq_snapshot_baseline_per_project) 를 동시에 건드려 DataIntegrityViolation
+        // (500) 나거나 restoreMapping cascade DELETE 가 OptimisticLock race 나는 것을
+        // 원천 차단. 다른 project 는 다른 lock key 라 병렬 유지.
+        entityManager.createNativeQuery("SELECT pg_advisory_xact_lock(hashtext(?1))")
+                .setParameter(1, probe.getProjectId())
+                .getSingleResult();
+        // lock 획득 후 fresh 재조회 (대기 중 다른 tx 가 이미 set 했을 수 있음). 이후
+        // 작업 대상은 s — 재할당 없이 한 번만 할당해 lambda 캡처 안전.
         Snapshot s = findOrThrow(id);
         if (s.isBaseline()) {
             return ApiResponse.ok(s);
