@@ -325,6 +325,7 @@ public class SnapshotController {
     @PostMapping("/api/v1/snapshots/{id}/baseline")
     public ApiResponse<Snapshot> setBaseline(@PathVariable String id, Authentication auth) {
         String actor = auth.getName();
+        requireProjectWriteAccess(findOrThrow(id).getProjectId(), auth);
         int maxAttempts = 3;
         for (int attempt = 1; ; attempt++) {
             try {
@@ -526,11 +527,30 @@ public class SnapshotController {
         }
     }
 
+    /**
+     * Read-only 사용자 (master 도 아니고 project assignee 도 아닌 경우) 의 baseline
+     * pin 변경 차단 (2026-06-03). setBaseline 은 mapping_* 을 wipe+replace 하는
+     * 쓰기 작업 — FE 가드 (VersionsPage readOnly disable) 의 서버측 짝.
+     */
+    private void requireProjectWriteAccess(String projectId, Authentication auth) {
+        boolean isMaster = auth.getAuthorities().stream()
+                .anyMatch(a -> "ROLE_MASTER".equals(a.getAuthority()));
+        if (isMaster) return;
+        String assignee = projectRepository.findById(projectId)
+                .map(Project::getAssignee).orElse(null);
+        if (assignee == null || !assignee.equals(auth.getName())) {
+            throw new ApiException("PROJECT_READ_ONLY",
+                    "프로젝트 읽기 전용 — 담당자 또는 master 만 변경할 수 있습니다",
+                    HttpStatus.FORBIDDEN);
+        }
+    }
+
     /** baseline 해제 — 현재 baseline 이 아니더라도 idempotent. */
     @DeleteMapping("/api/v1/snapshots/{id}/baseline")
     @Transactional
     public ApiResponse<Snapshot> clearBaseline(@PathVariable String id, Authentication auth) {
         Snapshot s = findOrThrow(id);
+        requireProjectWriteAccess(s.getProjectId(), auth);
         if (!s.isBaseline()) {
             return ApiResponse.ok(s);
         }

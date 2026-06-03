@@ -978,20 +978,24 @@ function SnapshotDetailView({
                 type="button"
                 role="switch"
                 onClick={onTogglePin}
-                disabled={!isPinned && !pinEligible}
+                /* read-only 사용자는 pin 변경 불가 (2026-06-03) — setBaseline 이 live
+                   mapping_* 을 wipe+replace 하는 쓰기 작업이므로. */
+                disabled={readOnly || (!isPinned && !pinEligible)}
                 style={{
                   ...styles.pinToggle,
                   ...(isPinned ? styles.pinToggleOn : {}),
-                  ...(!isPinned && !pinEligible ? styles.pinToggleDisabled : {}),
+                  ...((readOnly || (!isPinned && !pinEligible)) ? styles.pinToggleDisabled : {}),
                 }}
                 aria-checked={isPinned}
                 aria-label={isPinned ? t('versions.pin.toggleTitleUnpin') : t('versions.pin.toggleTitlePin')}
                 title={
-                  !isPinned && !pinEligible
-                    ? t('versions.pin.toggleTitleIneligible')
-                    : isPinned
-                      ? t('versions.pin.toggleTitleUnpin')
-                      : t('versions.pin.toggleTitlePin')
+                  readOnly
+                    ? t('versions.pin.toggleTitleReadOnly')
+                    : !isPinned && !pinEligible
+                      ? t('versions.pin.toggleTitleIneligible')
+                      : isPinned
+                        ? t('versions.pin.toggleTitleUnpin')
+                        : t('versions.pin.toggleTitlePin')
                 }
               >
                 <span

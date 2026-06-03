@@ -599,7 +599,9 @@ export function AppShell() {
                   >
                     <div style={styles.projectNameRow}>
                       <span style={styles.projectName}>{p.name}</span>
-                      {pendingProjectIds.has(p.id) && p.phase === 'test' && p.runStatus === 'completed' && (
+                      {/* pending snapshot 모래시계 — phase/runStatus 조건은 제거 (2026-06-03).
+                          Request Review 後 runStatus 가 completed 가 아닌 경우에도 pending 표시 필요. */}
+                      {pendingProjectIds.has(p.id) && (
                         <span
                           style={styles.projectPendingIcon}
                           title={t('siteOverview.pendingSnapshotIcon.title')}

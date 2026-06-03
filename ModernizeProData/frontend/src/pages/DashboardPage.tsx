@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { tobeDdlApi, type DdlSchema } from '../api/tobeDdl';
-import { mappingImportApi, type MappingRuleDto } from '../api/mappingImport';
+import { mappingImportApi, type MappingRuleDto, type MappingTableBindingDto } from '../api/mappingImport';
 import { useWorkspaceStore, type Project } from '../store/workspace';
 import { useUsersStore } from '../store/users';
 import { useAuthStore } from '../store/auth';
@@ -13,6 +13,7 @@ import { CreateSiteModal } from '../components/CreateSiteModal';
 import { CreateProjectModal } from '../components/CreateProjectModal';
 import { DdlImportButton } from '../components/DdlImportButton';
 import { HourglassHalfIcon } from '../components/HourglassHalfIcon';
+import { csvPreviewApi } from '../api/csvPreview';
 import { useT } from '../i18n';
 
 /**
@@ -190,6 +191,22 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
   const rowEditsByTable = useMappingEditsStore((s) => s.rowEdits[project.id]) as
     Record<string, Record<string, RowEdit>> | undefined;
 
+  // BE truth — mapping store 는 MappingPage 방문 시에만 hydrate 되므로, 새 세션에서
+  // Dashboard 먼저 열면 전부 unbound 로 보이는 stale 버그 (2026-06-03). server rules /
+  // bindings 를 직접 fetch 해 store 미존재 테이블의 fallback 으로 사용.
+  const serverRulesQuery = useQuery({
+    queryKey: ['mapping-rules', project.id],
+    queryFn: () => mappingImportApi.listRules(project.id),
+    staleTime: 10_000,
+  });
+  const serverBindingsQuery = useQuery({
+    queryKey: ['mapping-bindings', project.id],
+    queryFn: () => mappingImportApi.listBindings(project.id),
+    staleTime: 10_000,
+  });
+  const serverRules = serverRulesQuery.data;
+  const serverBindings = serverBindingsQuery.data;
+
   useEffect(() => {
     let alive = true;
     tobeDdlApi.get(project.id)
@@ -215,8 +232,12 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
     for (const b of Object.values(tableBindings ?? {})) {
       if (b?.sharedFromProjectId) ids.add(b.sharedFromProjectId);
     }
+    // store 미hydrate 세션 — server bindings 의 link 도 포함.
+    for (const b of serverBindings ?? []) {
+      if (b.sharedFromProjectId) ids.add(b.sharedFromProjectId);
+    }
     return [...ids].sort().join(',');
-  }, [tableBindings]);
+  }, [tableBindings, serverBindings]);
   const [masterRulesByProject, setMasterRulesByProject] = useState<Map<string, MappingRuleDto[]>>(new Map());
   useEffect(() => {
     if (!masterIdsKey) { setMasterRulesByProject(new Map()); return; }
@@ -235,15 +256,40 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
 
   const rows: DashboardRow[] = useMemo(() => {
     if (!tobeSchema) return [];
+
+    // server bindings 를 qualified ("schema.table") / short ("table") 두 색인으로 —
+    // SiteOverview 와 같은 qualified-first, short-fallback 해석.
+    const bindingByQualified = new Map<string, MappingTableBindingDto>();
+    const bindingByShort = new Map<string, MappingTableBindingDto>();
+    for (const b of serverBindings ?? []) {
+      const qualified = ((b.tobeSchema ? b.tobeSchema + '.' : '') + b.tobeTable).toLowerCase();
+      const short = b.tobeTable.toLowerCase();
+      bindingByQualified.set(qualified, b);
+      if (!bindingByShort.has(short)) bindingByShort.set(short, b);
+    }
+    // server rules → per-table mapped count (store 미hydrate fallback).
+    const serverMappedByKey = new Map<string, number>();
+    for (const r of serverRules ?? []) {
+      if (!isMappingRuleMapped(r)) continue;
+      const qualified = ((r.tobeSchema ? r.tobeSchema + '.' : '') + r.tobeTable).toLowerCase();
+      serverMappedByKey.set(qualified, (serverMappedByKey.get(qualified) ?? 0) + 1);
+    }
+
     return tobeSchema.tables.map((tw) => {
       const total = tw.columns.length;
+      const qualified = ((tw.table.schemaName ? tw.table.schemaName + '.' : '') + tw.table.physicalName).toLowerCase();
+      const short = tw.table.physicalName.toLowerCase();
       const binding = tableBindings?.[tw.table.id];
-      const sourceTables = binding ? uniqueSourceTables(binding) : [];
+      const serverBinding = bindingByQualified.get(qualified) ?? bindingByShort.get(short);
+      const sourceTables = binding
+        ? uniqueSourceTables(binding)
+        : [...new Set((serverBinding?.sources ?? []).map((s) => s.asisTable.trim()).filter(Boolean))];
       // 자식 link 테이블 — master 의 server-side rules 로 mapped 카운트.
-      // 자체 정의 — 기존대로 store 의 rowEdits 로 즉시 반응.
+      // 자체 정의 — store hydrate 済이면 rowEdits 로 즉시 반응, 아니면 server rules fallback.
+      const sharedFrom = binding?.sharedFromProjectId ?? serverBinding?.sharedFromProjectId ?? null;
       let mapped: number;
-      if (binding?.sharedFromProjectId) {
-        const masterRules = masterRulesByProject.get(binding.sharedFromProjectId) ?? [];
+      if (sharedFrom) {
+        const masterRules = masterRulesByProject.get(sharedFrom) ?? [];
         const tobeTable = tw.table.physicalName.toLowerCase();
         const tobeSchemaLc = (tw.table.schemaName ?? '').toLowerCase();
         mapped = masterRules.filter((r) =>
@@ -252,7 +298,12 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
           && isMappingRuleMapped(r),
         ).length;
       } else {
-        mapped = countMapped(rowEditsByTable?.[tw.table.id]);
+        const storeEdits = rowEditsByTable?.[tw.table.id];
+        mapped = storeEdits && Object.keys(storeEdits).length > 0
+          ? countMapped(storeEdits)
+          : (serverMappedByKey.get(qualified)
+              ?? serverMappedByKey.get(((serverBinding?.tobeSchema ? serverBinding.tobeSchema + '.' : '') + short).toLowerCase())
+              ?? 0);
       }
       let readiness: DashboardRow['readiness'];
       if (mapped === 0) readiness = 'unbound';
@@ -269,7 +320,7 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
         sourceTables,
       };
     });
-  }, [tobeSchema, rowEditsByTable, tableBindings, masterRulesByProject]);
+  }, [tobeSchema, rowEditsByTable, tableBindings, masterRulesByProject, serverRules, serverBindings]);
 
   const counts = useMemo(() => ({
     total: rows.length,
@@ -603,6 +654,16 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
     return ids;
   }, [allSnapshots]);
 
+  // 'Rows' KPI — AS-IS CSV 전체 data row 수 합 (2026-06-03: TO-BE 컬럼 기준 → AS-IS 기준).
+  // 첫 호출은 전체 CSV scan 이라 느릴 수 있어 도착 전엔 '—' 표시. BE 가 mtime+size 캐시 보유.
+  const { data: asisRowTotal } = useQuery({
+    queryKey: ['site-csv-row-total', activeSiteId],
+    enabled: !!activeSiteId,
+    queryFn: () => csvPreviewApi.siteRowTotal(activeSiteId!),
+    staleTime: 60_000,
+    retry: false,
+  });
+
   // 담당자 변경 draft — Save 누르기 전까지는 backend / store 에 반영 안 됨.
   const [assigneeDraft, setAssigneeDraft] = useState<Record<string, string>>({});
   const [savingAssignees, setSavingAssignees] = useState(false);
@@ -748,7 +809,7 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
           <div style={styles.kpiRow}>
             <KpiTile label={t('siteOverview.kpi.projects')} value={`${doneProjects} / ${projects.length}`} tone="info" />
             <KpiTile label={t('siteOverview.kpi.tables')}   value={`${mappedTables} / ${totalTables}`} />
-            <KpiTile label={t('siteOverview.kpi.rows')}     value={`${mappedColumns.toLocaleString()} / ${totalColumns.toLocaleString()}`} />
+            <KpiTile label={t('siteOverview.kpi.rows')}     value={asisRowTotal ? asisRowTotal.totalRows.toLocaleString() : '—'} />
           </div>
 
           {/* Overall mapping progress — Execution overview 와 같은 크기 */}
@@ -849,7 +910,8 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
                         <td style={styles.td}>
                           <span style={styles.projectNameCell}>
                             <span style={{ fontWeight: 500 }}>{p.name}</span>
-                            {pendingProjectIds.has(p.id) && p.phase === 'test' && p.runStatus === 'completed' && (
+                            {/* pending snapshot 모래시계 — AppShell 사이드바와 동일 기준 (pending 만으로 표시). */}
+                            {pendingProjectIds.has(p.id) && (
                               <span
                                 style={styles.pendingSnapshotIcon}
                                 title={t('siteOverview.pendingSnapshotIcon.title')}

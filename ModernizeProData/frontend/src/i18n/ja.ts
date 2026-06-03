@@ -453,6 +453,7 @@ export const ja: Record<TranslationKey, string> = {
   'versions.pin.toggleTitlePin':     'Click to pin to top',
   'versions.pin.toggleTitleUnpin':   'Click to unpin',
   'versions.pin.toggleTitleIneligible': '現在の phase ではピン留め不可',
+  'versions.pin.toggleTitleReadOnly': '読み取り専用 — ピン変更不可',
   'versions.pin.iconAria':           'Pinned to top',
 
   'versions.preflight.blocked':           'Execution 画面でこのスナップショットを pin して preflight を全 pass させると Request Review が有効になります',
@@ -575,6 +576,7 @@ export const ja: Record<TranslationKey, string> = {
   'execution.run.retry':              'Resume from failure',
   'execution.run.stop':               'Stop',
   'execution.run.abortReason':        'ユーザーによる中断',
+  'execution.run.waitingForWorker':   '実行は開始されましたが、まだ stage 進行データがありません。Worker の応答待ちです — 長く続く場合は Worker の状態を確認してください。',
   'execution.run.tablesSummary':      '{n} tables',
   'execution.run.errorBanner':        'Stage {stage} ({name}) 失敗 — {reason}',
   'execution.run.errorBannerNoStage': '実行失敗 — {reason}',
@@ -1267,6 +1269,7 @@ export const ja: Record<TranslationKey, string> = {
   'executionOverview.btn.savingAssignees': 'Saving',
   'executionOverview.btn.discardAssignees':'Discard',
   'executionOverview.runDisabled':  '実行するプロジェクトを 1 つ以上選択してください。',
+  'executionOverview.unassignedSelectedHint': '担当者が未割当のプロジェクトが選択されています。',
   'executionOverview.abortDisabled':'中断する実行中プロジェクトを選択してください。',
   'executionOverview.col.checkbox': '',
   'executionOverview.col.project':  'Project',
