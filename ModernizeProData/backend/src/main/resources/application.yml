@@ -23,7 +23,9 @@ spring:
       # Coord 1 + Worker 3 동시 polling (lightSync 5s / heavySync 10s / 각 화면별
       # 5s polling) + LoadStage / Quartz 까지 = 25+ slot 필요. HIKARI_POOL_MAX
       # 로 site 별 override.
-      maximum-pool-size: ${HIKARI_POOL_MAX:30}
+      # 5 user × master setBaseline 같은 burst 시 pool exhaust 방지로 30→50.
+      # prod PG `max_connections` 와 균형 확인 필요 (현재 dev/test PG default 100).
+      maximum-pool-size: ${HIKARI_POOL_MAX:50}
       connection-timeout: 5000
       # 5분 idle 이후 회수. 작업 burst 후 connection slot 빠르게 반환.
       idle-timeout: 300000
@@ -120,6 +122,13 @@ modernize:
   output:
     base-path: ${MPD_OUTPUT_BASE_PATH:C:/modernize/output}
 
+  # ── perf 측정 인프라 (dev 진단 한정) ─────────────────────────────────
+  # true 일 때만 DuckDB lock 계측 + Hibernate generate_statistics 주기 dump +
+  # /actuator/metrics 노출. application-dev.yml 에서 override.
+  # prod default false → 측정 코드는 if (perfEnabled) 분기 한 줄만 진입, 오버헤드 사실상 0.
+  perf:
+    enabled: ${MPD_PERF:false}
+
   # Run 실행 튜닝 — LoadStage 의 binding 단위 병렬도. 1 = 순차 (옛 default).
   # HikariCP pool size 10 + Hikari connection-timeout 5s 라 worker 노드 안에서
   # 4 thread 까지 안전. 대용량 BANKSYS 데모에선 thread overhead < I/O wait 이라
@@ -142,4 +151,6 @@ logging:
     org.hibernate.SQL: ${LOG_SQL_LEVEL:WARN}
     org.hibernate.orm.jdbc.bind: ${LOG_SQL_LEVEL:WARN}
   pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+    # traceId — TraceIdFilter 가 모든 /api/** request 에 MDC put. 다중 사용자
+    # 측정 시 한 사용자 흐름을 grep 으로 묶기 위해. perf 미사용 시에는 비어있음.
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] [%X{traceId:-}] %logger{36} - %msg%n"
