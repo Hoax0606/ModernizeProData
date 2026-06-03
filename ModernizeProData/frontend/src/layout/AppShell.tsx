@@ -626,6 +626,12 @@ export function AppShell() {
                         );
                       })()}
                       <span style={styles.projectMetaDim}>{p.tableCount} tables</span>
+                      {/* assignee 표시 (2026-06-03) — unassigned 면 아무것도 안 보여줌. */}
+                      {(p.assignee ?? '').trim() !== '' && (
+                        <span style={styles.projectMetaAssignee} title={p.assignee!}>
+                          {p.assignee}
+                        </span>
+                      )}
                     </div>
                   </div>
                 );
@@ -1426,6 +1432,17 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 2,
   },
   projectMetaDim: { fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
+  /* 사이드바 project row 의 assignee — 길면 ellipsis, unassigned 는 렌더 자체 안 함. */
+  projectMetaAssignee: {
+    fontSize: 10,
+    color: 'var(--text-3)',
+    fontFamily: 'var(--mono)',
+    marginLeft: 'auto',
+    maxWidth: 72,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
   phaseBadge: {
     display: 'inline-flex',
     alignItems: 'center',

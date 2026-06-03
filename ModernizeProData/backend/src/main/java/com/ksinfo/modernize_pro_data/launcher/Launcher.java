@@ -454,7 +454,10 @@ public class Launcher {
             brand.setTextAlignment(javafx.scene.text.TextAlignment.CENTER);
             brandBlock.getChildren().add(brand);
 
-            Label footer = new Label("© KS Info System Co., Ltd.   v0.1.0-dev");
+            // 버전 단일 소스 — jpackage 가 --java-options 로 박은 modernize.version
+            // (build.ps1 auto-bump). dev 콘솔 실행 등 미설정 시 "dev".
+            Label footer = new Label("© KS Info System Co., Ltd.   v"
+                    + System.getProperty("modernize.version", "dev"));
             footer.setStyle("-fx-font-size: 12px; -fx-text-fill: " + C_MUTED + ";");
 
             VBox column = new VBox(22, brandBlock, card, footer);
