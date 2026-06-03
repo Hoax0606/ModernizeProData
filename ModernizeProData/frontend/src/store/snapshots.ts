@@ -230,7 +230,9 @@ export const useSnapshotsStore = create<SnapshotsState>()(
         set((st) => ({
           snapshots: [
             ...st.snapshots.filter((s) => s.projectId !== projectId),
-            ...list,
+            // list 는 snapshot_data 제외 projection — 이미 lazy fetch 한 snapshotData
+            // 가 list refetch 로 사라지지 않게 기존 cache 보존.
+            ...mergeSnapshotData(list, st.snapshots),
           ],
         }));
         syncPinnedFromList(list);
@@ -245,7 +247,7 @@ export const useSnapshotsStore = create<SnapshotsState>()(
         set((st) => ({
           snapshots: [
             ...st.snapshots.filter((s) => !projectIds.has(s.projectId)),
-            ...list,
+            ...mergeSnapshotData(list, st.snapshots),
           ],
         }));
         syncPinnedFromList(list);
@@ -329,6 +331,14 @@ function projectIdOf(id: string): string | undefined {
   return useSnapshotsStore.getState().snapshots.find((s) => s.id === id)?.projectId;
 }
 
+/**
+ * setBaseline inflight guard — 같은 project 의 baseline 요청이 진행 중이면 중복 발사
+ * 차단. 더블클릭 / 다중 탭 race 가 backend 의 ObjectOptimisticLockingFailureException
+ * (restoreMapping 의 cascade DELETE 동시 수정) 을 유발하는 것을 FE 단에서 1차 방어.
+ * key = projectId (같은 project 의 baseline 은 단일 직렬). module-scope — persist 대상 X.
+ */
+const baselineInflight = new Set<string>();
+
 export const usePinnedSnapshotsStore = create<PinnedSnapshotsState>()(
   persist(
     (set, get) => ({
@@ -348,6 +358,10 @@ export const usePinnedSnapshotsStore = create<PinnedSnapshotsState>()(
           snapshotApi.clearBaseline(id).catch(() => {});
           return;
         }
+        // inflight guard — 같은 project baseline 진행 중이면 무시 (더블클릭/다중탭).
+        const guardKey = projectId ?? id;
+        if (baselineInflight.has(guardKey)) return;
+        baselineInflight.add(guardKey);
         snapshotApi.setBaseline(id).then(() => {
           set((st) => {
             const others = projectId
@@ -358,12 +372,16 @@ export const usePinnedSnapshotsStore = create<PinnedSnapshotsState>()(
           if (projectId) {
             useSnapshotsStore.getState().fetchByProject(projectId).catch(() => {});
           }
-        }).catch(() => { /* 실패 시 다음 fetch 가 백엔드 truth 로 정정 */ });
+        }).catch(() => { /* 실패 시 다음 fetch 가 백엔드 truth 로 정정 */ })
+          .finally(() => { baselineInflight.delete(guardKey); });
       },
       // approve 직후 자동 pin — 같은 프로젝트의 기존 pin 만 교체됨.
       // togglePin 의 set 케이스와 동일 패턴 (Restore 모델 race 회피).
       setPin: (id) => {
         const projectId = projectIdOf(id);
+        const guardKey = projectId ?? id;
+        if (baselineInflight.has(guardKey)) return;
+        baselineInflight.add(guardKey);
         snapshotApi.setBaseline(id).then(() => {
           set((st) => {
             const others = projectId
@@ -374,7 +392,8 @@ export const usePinnedSnapshotsStore = create<PinnedSnapshotsState>()(
           if (projectId) {
             useSnapshotsStore.getState().fetchByProject(projectId).catch(() => {});
           }
-        }).catch(() => {});
+        }).catch(() => {})
+          .finally(() => { baselineInflight.delete(guardKey); });
       },
       // 인자 없으면 모든 핀 해제, id 주면 그 핀만 해제.
       clearPin: (id) => {
@@ -392,6 +411,20 @@ export const usePinnedSnapshotsStore = create<PinnedSnapshotsState>()(
     { name: 'modernize-pinned-snapshots' },
   ),
 );
+
+/**
+ * list 응답 (snapshot_data 제외 projection) 에 기존 store 의 lazy-cached
+ * snapshotData 를 다시 붙인다. list refetch (polling) 가 fetchMapping 으로
+ * 가져온 snapshotData cache 를 날리지 않게.
+ */
+function mergeSnapshotData(list: MappingSnapshot[], prev: MappingSnapshot[]): MappingSnapshot[] {
+  const prevById = new Map(prev.map((s) => [s.id, s]));
+  return list.map((ns) => {
+    if (ns.snapshotData) return ns;
+    const old = prevById.get(ns.id);
+    return old?.snapshotData ? { ...ns, snapshotData: old.snapshotData } : ns;
+  });
+}
 
 /**
  * snapshot list 응답으로부터 pinnedIds 갱신.

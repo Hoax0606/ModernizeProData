@@ -199,7 +199,9 @@ public class RunController {
      * 意図せず別 site の project まで発火しないよう、必ず明示する.
      */
     public record StartAllRequest(
-            @NotBlank String siteId
+            @NotBlank String siteId,
+            /** 선택 일괄 실행 — 지정 시 이 project 들만 (siteId 소속만), null/empty 면 site 전체. */
+            List<String> projectIds
     ) {}
 
     /**
@@ -224,10 +226,13 @@ public class RunController {
     @PreAuthorize("hasAnyRole('API_CLIENT', 'MASTER', 'ADMIN')")
     public ApiResponse<BulkRunResultDto> startAll(@Valid @RequestBody StartAllRequest req,
                                                   Authentication auth) {
-        // External 모드 비활성 시 host 종류 (api_token / JWT 모두) 에 관계없이 503.
-        // /runs/all 은 외부 trigger pattern 의 entry 이므로, master/admin UI 가 호출해도
-        // external_enabled = false 면 끄는 일관 정책.
-        if (!solutionSettingsRepo.get().isExternalEnabled()) {
+        boolean isApiClient = auth.getAuthorities().stream()
+                .anyMatch(a -> "ROLE_API_CLIENT".equals(a.getAuthority()));
+
+        // External gate 는 외부 자동 trigger (api_client) 에만 적용. master/admin 이
+        // Execution Overview UI 에서 수동 일괄 실행 (rehearsal/cutover) 하는 건 external
+        // integrations 설정과 무관하게 항상 허용.
+        if (isApiClient && !solutionSettingsRepo.get().isExternalEnabled()) {
             throw new ApiException("EXTERNAL_DISABLED",
                     "External integrations is OFF — enable in Solution Settings",
                     HttpStatus.SERVICE_UNAVAILABLE);
@@ -240,13 +245,20 @@ public class RunController {
                     "site not found: " + req.siteId(), HttpStatus.NOT_FOUND);
         }
 
-        boolean isApiClient = auth.getAuthorities().stream()
-                .anyMatch(a -> "ROLE_API_CLIENT".equals(a.getAuthority()));
         TriggerSource source = isApiClient ? TriggerSource.external : TriggerSource.manual;
         String credentialId = isApiClient ? auth.getName() : null;
         String requestedBy = resolveRequestedBy(isApiClient, auth);
 
-        List<Project> targets = projectRepo.findBySiteId(req.siteId());
+        // 선택 일괄: projectIds 지정 시 그 project 만 (siteId 소속 검증), 없으면 site 전체.
+        List<Project> targets;
+        if (req.projectIds() != null && !req.projectIds().isEmpty()) {
+            var selected = new java.util.HashSet<>(req.projectIds());
+            targets = projectRepo.findBySiteId(req.siteId()).stream()
+                    .filter(p -> selected.contains(p.getId()))
+                    .toList();
+        } else {
+            targets = projectRepo.findBySiteId(req.siteId());
+        }
         List<RunResultDto> results = new ArrayList<>();
         int started = 0, rejected = 0, locked = 0;
         for (Project p : targets) {

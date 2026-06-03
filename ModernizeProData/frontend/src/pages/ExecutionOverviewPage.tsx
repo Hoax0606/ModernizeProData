@@ -276,36 +276,35 @@ export function ExecutionOverviewPage() {
 
   const handleRefresh = () => { loadMetrics(); loadWorkers(); };
   const handleRun = async () => {
-    if (!isMaster) return;
+    if (!isMaster || !activeSiteId) return;
     const ids = [...selected];
-    const results = await Promise.allSettled(ids.map((id) => runsApi.start(id)));
-    // backend 가 worker offline / 미할당 인 경우 RunResultDto.status='REJECTED' 로 반환.
-    // 성공 응답인데 REJECTED 인 경우 + Promise reject (네트워크 / 권한) 둘 다 모아 안내.
-    const rejected: string[] = [];
+    if (ids.length === 0) return;
+    // 선택 project 일괄 실행 — /runs/all (startAll) 로 호출해 각 run 에 bulk marker 가
+    // 박힌다. 이것이 (1) 개별 ExecutionPage 의 site-level lock 감지 (2) abort 권한
+    // master 한정 분기의 근거. 개별 start 반복은 bulk marker 가 안 붙어 둘 다 안 됨.
     const setActive = useExecutionPreflightStore.getState().setActiveRunId;
-    results.forEach((r, idx) => {
-      const projectName = siteProjects.find((p) => p.id === ids[idx])?.name ?? ids[idx];
-      if (r.status === 'fulfilled' && r.value.status === 'REJECTED') {
-        rejected.push(`${projectName}: ${r.value.reason ?? 'rejected'}`);
-      } else if (r.status === 'rejected') {
-        rejected.push(`${projectName}: ${(r.reason as Error)?.message ?? 'request failed'}`);
-      } else if (r.status === 'fulfilled' && r.value.status === 'STARTED' && r.value.runId) {
-        // 같은 site 안 ExecutionPage 들어가면 즉시 progress polling/STOMP 시작.
-        setActive(ids[idx], r.value.runId);
-      }
-    });
+    const rejected: string[] = [];
+    try {
+      const res = await runsApi.startAll(activeSiteId, ids);
+      res.results.forEach((r) => {
+        const projectName = r.projectName ?? r.projectId ?? '?';
+        if (r.status === 'REJECTED' || r.status === 'LOCKED') {
+          rejected.push(`${projectName}: ${r.reason ?? r.status.toLowerCase()}`);
+        } else if (r.status === 'STARTED' && r.runId && r.projectId) {
+          setActive(r.projectId, r.runId);
+        }
+      });
+    } catch (e) {
+      rejected.push((e as Error)?.message ?? 'bulk run failed');
+    }
     if (rejected.length > 0) {
-      // 브라우저 alert 정책상 제거 대상이지만, 현재 toast 컴포넌트가 페이지에 없어
-      // 일단 console 에 모아두고 즉시 사용자 인지될 수 있도록 첫 줄을 alert 으로 안내.
       console.warn('[ExecutionOverview] run rejected', rejected);
-      // TODO(toast): 페이지에 inline 토스트 도입 후 alert 제거.
       window.alert(rejected.join('\n'));
     }
     // 선택 유지 — Run 직후 Abort 활성화를 위해 selectedRunningCount 가 살아 있어야 함.
-    // 사용자가 명시적으로 체크 해제하기 전까지는 그대로.
     loadMetrics();
     // Run 起動と同時に backend が phase advance (sign-off→rehearsal, ready→cutover) +
-    // run_status='running' に変えるので、projects も refetch して chip / 行状態を即反映.
+    // run_status='running' に変えるので、projects も refetch して chip / 行状態을 即反映.
     if (activeSiteId) fetchProjects(activeSiteId);
   };
   const handleAbort = async () => {

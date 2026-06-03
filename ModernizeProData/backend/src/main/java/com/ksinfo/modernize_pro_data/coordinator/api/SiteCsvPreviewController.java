@@ -48,6 +48,16 @@ public class SiteCsvPreviewController {
     private final SiteRepository siteRepository;
     private final DuckDbService duckDbService;
 
+    /**
+     * csv-row-count caching — 10M+ CSV 의 full line scan (~10-15s) 이 매 호출
+     * 발생하면 HikariCP connection + thread 를 오래 점유해 다중 사용자 시 pool
+     * exhaust 의 주범. file mtime+size 가 동일하면 캐시값 반환 — CSV 가 야간
+     * 추출로 바뀌면 mtime 달라져 자동 invalidate. key = 절대경로.
+     */
+    private record RowCountCacheEntry(long mtime, long size, long rowCount) {}
+    private static final java.util.Map<String, RowCountCacheEntry> ROW_COUNT_CACHE =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     public record CsvPreview(
             String table,
             String resolvedPath,
@@ -143,6 +153,19 @@ public class SiteCsvPreviewController {
         if (csvFile == null) {
             throw new ApiException("CSV_FILE_NOT_FOUND", "CSV 파일을 찾을 수 없음: " + tableName + ".csv", HttpStatus.NOT_FOUND);
         }
+        // cache lookup — file mtime+size 동일하면 재scan 안 함.
+        String cacheKey = csvFile.toString();
+        long fMtime, fSize;
+        try {
+            fMtime = Files.getLastModifiedTime(csvFile).toMillis();
+            fSize  = Files.size(csvFile);
+        } catch (IOException e) {
+            throw new ApiException("CSV_READ_FAILED", "CSV stat 실패: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+        RowCountCacheEntry cached = ROW_COUNT_CACHE.get(cacheKey);
+        if (cached != null && cached.mtime() == fMtime && cached.size() == fSize) {
+            return ApiResponse.ok(new CsvRowCount(tableName, cached.rowCount()));
+        }
         // raw line count (header 제외). 1.4GB 도 byte-stream 으로 ~10-15초.
         long lines = 0;
         try (Stream<String> stream = Files.lines(csvFile, java.nio.charset.StandardCharsets.UTF_8)) {
@@ -161,6 +184,7 @@ public class SiteCsvPreviewController {
             }
         }
         long rowCount = Math.max(0, lines - 1);  // header 제외
+        ROW_COUNT_CACHE.put(cacheKey, new RowCountCacheEntry(fMtime, fSize, rowCount));
         return ApiResponse.ok(new CsvRowCount(tableName, rowCount));
     }
 

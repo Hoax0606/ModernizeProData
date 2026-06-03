@@ -27,6 +27,7 @@ import {
   type QuarantineSeverity,
 } from './quarantineMock';
 import { Modal } from '../components/Modal';
+import { useActiveProjectReadOnly } from '../store/readOnly';
 
 /**
  * Log viewer — 프로젝트 실행 로그 조회.
@@ -41,6 +42,8 @@ const LOG_FETCH_LIMIT = 1000;
 export function LogViewerPage() {
   const t = useT();
   const navigate = useNavigate();
+  // read-only project = quarantine acknowledge / re-review 차단. 보기/필터는 허용.
+  const readOnly = useActiveProjectReadOnly();
   const projects = useWorkspaceStore((s) => s.projects);
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const project = useMemo(
@@ -254,6 +257,7 @@ export function LogViewerPage() {
 
   const handleAckSave = useCallback(async () => {
     const g = ackTarget;
+    if (readOnly) return;
     if (!g || !project || !runPhase || !g.bindingId) return;
     setAckBusy(true);
     setAckError(null);
@@ -285,7 +289,7 @@ export function LogViewerPage() {
     } finally {
       setAckBusy(false);
     }
-  }, [ackTarget, project, runPhase, ackNote, refetchQuarantine, refetchAckGroups, t]);
+  }, [ackTarget, project, runPhase, ackNote, refetchQuarantine, refetchAckGroups, t, readOnly]);
   /* ack 된 group 도 dim+meta 로 표시 (사용자 결정 — hide 가 아닌 dim). QuarantineCard 가 g.ack 로 처리. */
   const allGroups: QuarantineGroup[] = allGroupsData ?? [];
   const groupStats = useMemo(() => {
@@ -814,10 +818,10 @@ export function LogViewerPage() {
                     t={t}
                     open={openGroupId === g.id}
                     runId={runId}
-                    onAcknowledge={g.severity === 'warning' && g.bindingId && runPhase && !g.ack
+                    onAcknowledge={!readOnly && g.severity === 'warning' && g.bindingId && runPhase && !g.ack
                       ? () => openAckModal(g)
                       : null}
-                    onRereview={g.severity === 'warning' && g.bindingId && runPhase && g.ack
+                    onRereview={!readOnly && g.severity === 'warning' && g.bindingId && runPhase && g.ack
                       ? () => void openRereviewModal(g)
                       : null}
                     ackInfo={g.ack ?? null}

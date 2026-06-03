@@ -205,8 +205,9 @@ export const runsApi = {
    * 指定 site の全 project 一斉起動. siteId 必須 (2026-05-29 仕様変更で必須化).
    * 旧仕様の「全 site 横断 findAll」は誤発火事故防止のため廃止.
    */
-  startAll: (siteId: string) =>
-    unwrap(api.post<ApiResponse<BulkRunResultDto>>('/api/v1/runs/all', { siteId })),
+  /** projectIds 지정 시 그 project 만 일괄, 생략 시 site 전체. */
+  startAll: (siteId: string, projectIds?: string[]) =>
+    unwrap(api.post<ApiResponse<BulkRunResultDto>>('/api/v1/runs/all', { siteId, projectIds })),
 
   get: (runId: string) =>
     unwrap(api.get<ApiResponse<RunHistoryDto>>(`/api/v1/runs/${runId}`)),

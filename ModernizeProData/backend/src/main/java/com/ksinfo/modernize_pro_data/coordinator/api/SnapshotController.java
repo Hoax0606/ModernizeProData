@@ -69,6 +69,9 @@ public class SnapshotController {
     private final SnapshotDiffService snapshotDiffService;
     private final RunHistoryRepository runHistoryRepository;
     private final com.ksinfo.modernize_pro_data.coordinator.site.SnapshotMappingRestoreService snapshotMappingRestoreService;
+    /** self proxy — setBaseline retry loop 가 transaction 경계를 넘어 재호출하기 위함.
+     *  ObjectProvider 로 지연 주입 (생성자 순환 회피). */
+    private final org.springframework.beans.factory.ObjectProvider<SnapshotController> selfProvider;
 
     /* ── DTOs ──────────────────────────────────── */
 
@@ -83,15 +86,16 @@ public class SnapshotController {
     /* ── Endpoints ─────────────────────────────── */
 
     @GetMapping("/api/v1/projects/{projectId}/snapshots")
-    public ApiResponse<List<Snapshot>> listByProject(@PathVariable String projectId) {
-        return ApiResponse.ok(snapshotRepository.findByProjectId(projectId));
+    public ApiResponse<List<com.ksinfo.modernize_pro_data.coordinator.site.SnapshotSummaryView>> listByProject(@PathVariable String projectId) {
+        // snapshot_data 제외 projection — list 응답에 frozen mapping payload 불필요.
+        return ApiResponse.ok(snapshotRepository.findSummaryByProjectId(projectId));
     }
 
     @GetMapping("/api/v1/sites/{siteId}/snapshots")
-    public ApiResponse<List<Snapshot>> listBySite(@PathVariable String siteId) {
+    public ApiResponse<List<com.ksinfo.modernize_pro_data.coordinator.site.SnapshotSummaryView>> listBySite(@PathVariable String siteId) {
         var projectIds = projectRepository.findBySiteId(siteId).stream().map(p -> p.getId()).toList();
         if (projectIds.isEmpty()) return ApiResponse.ok(List.of());
-        return ApiResponse.ok(snapshotRepository.findByProjectIdIn(projectIds));
+        return ApiResponse.ok(snapshotRepository.findSummaryByProjectIdIn(projectIds));
     }
 
     /** 현재 라이브 mapping working set 을 SnapshotData (rules + codeMaps + bindings) 로 freeze.
@@ -309,9 +313,33 @@ public class SnapshotController {
      * 단일 트랜잭션 안에서 기존 baseline 을 false 로 내리고 본인을 true 로 올린다 +
      * mapping_* 데이터를 restore. partial unique index 가 동시성 race 도 안전망으로 잡아준다.
      */
+    /**
+     * Baseline 설정 — multi-user 동시 setBaseline 시 restoreMapping 의 cascade
+     * DELETE 가 같은 row 를 동시 수정하면 ObjectOptimisticLockingFailureException
+     * 발생. 최대 3회 재시도 (self proxy 통해 매 시도 새 transaction). FE 의
+     * inflight guard 가 1차 방어, 이 retry 가 다른 PC 동시 요청의 2차 방어.
+     */
     @PostMapping("/api/v1/snapshots/{id}/baseline")
-    @Transactional
     public ApiResponse<Snapshot> setBaseline(@PathVariable String id, Authentication auth) {
+        String actor = auth.getName();
+        int maxAttempts = 3;
+        for (int attempt = 1; ; attempt++) {
+            try {
+                return selfProvider.getObject().setBaselineTx(id, actor);
+            } catch (org.springframework.dao.OptimisticLockingFailureException e) {
+                if (attempt >= maxAttempts) {
+                    log.warn("setBaseline failed after {} attempts (optimistic lock): {}", attempt, id);
+                    throw e;
+                }
+                log.info("setBaseline retry {}/{} (optimistic lock): {}", attempt, maxAttempts, id);
+            }
+        }
+    }
+
+    /** setBaseline 의 transaction 본체 — retry loop 가 매 시도 새 transaction 으로 호출.
+     *  public 필수 (self proxy 가 AOP transaction advice 적용하려면). */
+    @Transactional
+    public ApiResponse<Snapshot> setBaselineTx(String id, String actor) {
         Snapshot s = findOrThrow(id);
         if (s.isBaseline()) {
             return ApiResponse.ok(s);
@@ -325,12 +353,12 @@ public class SnapshotController {
         snapshotRepository.save(s);
 
         // mapping_* 를 snapshot 시점으로 restore.
-        restoreMappingFromSnapshot(s, auth.getName());
+        restoreMappingFromSnapshot(s, actor);
 
-        log.info("Snapshot baseline set + mapping restored: {} ({}) by {}", s.getName(), s.getId(), auth.getName());
+        log.info("Snapshot baseline set + mapping restored: {} ({}) by {}", s.getName(), s.getId(), actor);
 
         projectRepository.findById(s.getProjectId()).ifPresent(p ->
-                auditLogService.record(p, auth.getName(), "baseline set (mapping restored)")
+                auditLogService.record(p, actor, "baseline set (mapping restored)")
                         .snapshot(s.getId(), s.getName())
                         .save());
         return ApiResponse.ok(s);
