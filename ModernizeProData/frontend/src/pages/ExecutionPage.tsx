@@ -198,6 +198,17 @@ export function ExecutionPage() {
     }
   }, [projectIdForReset]);
 
+  /* elapsed 1초 tick — AppShell lightSync 가 5초 (BE 부담 회피) 라 elapsed 가 5초씩
+     점프하던 문제 해결. running 중에만 활성, terminal 시 정지. 로컬 setState 만 trigger
+     하므로 BE 호출 X. RunHeader 의 elapsedMs / PipelineStages 의 stage 별 elapsedMs
+     모두 매 render Date.now() 로 재계산되므로 이 re-render 로 같이 갱신됨. */
+  const [, setElapsedTick] = useState(0);
+  useEffect(() => {
+    if (!run || isTerminal(run.status)) return;
+    const id = setInterval(() => setElapsedTick((v) => v + 1), 1_000);
+    return () => clearInterval(id);
+  }, [run?.id, run?.status]);
+
   /* === Hooks: 必ず early return より前 ===
      project/site が未確定でも hook 数を一定に保つため、ここに集約する.
      使用は早期 return 後に分岐. */
