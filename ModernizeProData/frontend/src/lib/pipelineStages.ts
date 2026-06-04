@@ -35,6 +35,17 @@ export interface Stage {
   rate: string;
   eta: string;
   shortName?: string;
+  /** Progress bar 의 success/failed 분할 표시용 (ExecutionPage ProgressBar). 없으면 fallback = pct 단색. */
+  tablesSuccess?: number;
+  tablesFailed?: number;
+  tablesTotal?: number;
+  /**
+   * Stage 별 wall-clock 시간 (ms). C4 — ExecutionPage 의 stage tile 의 "eta" 영역에 표시.
+   * - 완료/실패 stage = durationMs (BE 기록)
+   * - 진행 중 stage = now() - startedAt (실시간 elapsed)
+   * - 대기 중 stage = null
+   */
+  elapsedMs?: number | null;
 }
 
 /** 8-stage 메타데이터 (validation 추가 2026-05-30). 실 진행률은 BE polling(StageView)
@@ -115,6 +126,23 @@ export function buildStagesFromStageViews(stageViews: StageProgressInput[]): Sta
         eta = `00:${String(Math.min(remSec, 99)).padStart(2, '0')}`;
       }
     }
-    return { ...base, pct, tone, rate, eta };
+    /* elapsedMs — stage 별 wall-clock.
+       완료/실패 = durationMs (BE 기록), 진행 중 = now - startedAt (실시간), 대기 = null. */
+    let elapsedMs: number | null = null;
+    if (sv.durationMs != null && sv.durationMs >= 0) {
+      elapsedMs = sv.durationMs;
+    } else if (sv.status === 'running' && sv.startedAt) {
+      const startMs = new Date(sv.startedAt).getTime();
+      if (!Number.isNaN(startMs) && startMs > 0) {
+        elapsedMs = Math.max(0, Date.now() - startMs);
+      }
+    }
+    return {
+      ...base, pct, tone, rate, eta,
+      tablesSuccess: sv.tablesSuccess ?? 0,
+      tablesFailed: sv.tablesFailed ?? 0,
+      tablesTotal: sv.tablesTotal ?? 0,
+      elapsedMs,
+    };
   });
 }
