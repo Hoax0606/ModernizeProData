@@ -47,10 +47,20 @@ export interface TableResultView {
   status: 'running' | 'success' | 'failed';
   rowCount?: number;
   durationMs?: number;
-  errorDetail?: string;
+  /** BE は Map<String,Object> (例: { message: "..." }) を直列化する — string ではない.
+   *  表示は errorDetailText() で message を抽出 (object を JSX に直接渡すと React #31). */
+  errorDetail?: Record<string, unknown> | string | null;
   /** TransformStage 가 박제한 CREATE OR REPLACE TABLE ... AS SELECT ... 텍스트.
    *  transform 외 stage 는 null. ArtifactsPage 의 MIGRATION SQL 카테고리에서 표시. */
   compiledSql?: string;
+}
+
+/** errorDetail (string | Map 形) から表示用テキストを取り出す. 無ければ undefined. */
+export function errorDetailText(d: TableResultView['errorDetail']): string | undefined {
+  if (d == null) return undefined;
+  if (typeof d === 'string') return d || undefined;
+  const msg = d.message;
+  return typeof msg === 'string' && msg ? msg : undefined;
 }
 
 /** 1 run の 1 stage の進捗 (BE: StageView, GET /api/v1/runs/{id}/stages の戻り値要素). */

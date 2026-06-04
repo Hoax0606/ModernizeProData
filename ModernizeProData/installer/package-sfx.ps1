@@ -21,15 +21,12 @@ $dist = (Resolve-Path 'dist').Path
 $launcher = Join-Path $dist 'Launcher.exe'
 if (-not (Test-Path $launcher)) { throw "Missing: $launcher. Run build-launcher.ps1." }
 # Bundle whatever MSI subset build.ps1 produced (Combo can omit some locales).
-# Coordinator+Worker × ko/ja/en candidates; payload includes only the existing ones.
-$msiCandidates = @(
-    'ModernizeProData-en-1.0.0.msi',
-    'ModernizeProData-ko-1.0.0.msi',
-    'ModernizeProData-ja-1.0.0.msi',
-    'ModernizeProData-Worker-en-1.0.0.msi',
-    'ModernizeProData-Worker-ko-1.0.0.msi',
-    'ModernizeProData-Worker-ja-1.0.0.msi'
-) | ForEach-Object { Join-Path $dist $_ } | Where-Object { Test-Path $_ }
+# ProductVersion 은 build.ps1 의 .build-counter 로 매 빌드 auto-bump (1.0.<N>) 되므로
+# 파일명 hardcode 불가 — wildcard 매칭 후 (role, lang) 별 최신 mtime 1개씩 채택 (2026-06-03).
+$msiCandidates = Get-ChildItem $dist -Filter 'ModernizeProData-*.msi' |
+    Where-Object { $_.Name -match '^ModernizeProData-(Worker-)?(en|ko|ja)-\d+\.\d+\.\d+\.msi$' } |
+    Group-Object { $_.Name -replace '-\d+\.\d+\.\d+\.msi$', '' } |
+    ForEach-Object { ($_.Group | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName }
 if ($msiCandidates.Count -eq 0) { throw "No MSI in $dist. Run build.ps1 first." }
 $payload = @($launcher) + $msiCandidates
 Write-Host "Bundling Launcher + $($msiCandidates.Count) MSI:" -ForegroundColor Cyan
@@ -62,7 +59,9 @@ ExecuteFile="Launcher.exe"
 # works when the config really is UTF-8 BOM).
 [System.IO.File]::WriteAllText($config, $configContent, [System.Text.UTF8Encoding]::new($true))
 
-$out = Join-Path $dist 'ModernizeProData-1.0.0-setup.exe'
+# MSI 파일명의 auto-bump 버전 (1.0.<N>) 을 setup.exe 이름에도 반영.
+$ver = if ((Split-Path $msiCandidates[0] -Leaf) -match '(\d+\.\d+\.\d+)\.msi$') { $Matches[1] } else { '1.0.0' }
+$out = Join-Path $dist "ModernizeProData-$ver-setup.exe"
 if (Test-Path $out) { Remove-Item -Force $out }
 
 Write-Host "Concatenating SFX module + config + archive..." -ForegroundColor Cyan

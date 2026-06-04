@@ -5,6 +5,7 @@ import { licenseApi } from '../api/license';
 import { BrandName } from '../components/BrandName';
 import { useT } from '../i18n';
 import { useAuthStore } from '../store/auth';
+import { APP_VERSION } from '../lib/appVersion';
 
 /**
  * First-boot license setup screen.
@@ -89,7 +90,7 @@ export function LicenseSetupPage() {
             <div style={styles.cardHint}>{t('licenseSetup.workerBlocked')}</div>
           </div>
           <div style={styles.footer}>
-            © KS Info System Co., Ltd. <span style={styles.footerVersion}>v1.0.0</span>
+            © KS Info System Co., Ltd. <span style={styles.footerVersion}>v{APP_VERSION}</span>
           </div>
         </div>
       </div>
@@ -148,7 +149,7 @@ export function LicenseSetupPage() {
         </form>
 
         <div style={styles.footer}>
-          © KS Info System Co., Ltd. <span style={styles.footerVersion}>v1.0.0</span>
+          © KS Info System Co., Ltd. <span style={styles.footerVersion}>v{APP_VERSION}</span>
         </div>
       </div>
     </div>

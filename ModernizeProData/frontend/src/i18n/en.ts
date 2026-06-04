@@ -447,6 +447,7 @@ export const en: Record<TranslationKey, string> = {
   'versions.pin.toggleTitlePin':     'Click to pin to top',
   'versions.pin.toggleTitleUnpin':   'Click to unpin',
   'versions.pin.toggleTitleIneligible': 'Cannot pin in the current phase',
+  'versions.pin.toggleTitleReadOnly': 'Read-only — cannot change pin',
   'versions.pin.iconAria':           'Pinned to top',
 
   'versions.preflight.blocked':           'Pin this snapshot on the Execution page and pass preflight to enable Request Review',
@@ -569,6 +570,7 @@ export const en: Record<TranslationKey, string> = {
   'execution.run.retry':              'Resume from failure',
   'execution.run.stop':               'Stop',
   'execution.run.abortReason':        'Aborted by user',
+  'execution.run.waitingForWorker':   'Run started but no stage progress yet. Waiting for worker response — if this persists, check the worker status.',
   'execution.run.tablesSummary':      '{n} tables',
   'execution.run.errorBanner':        'Stage {stage} ({name}) failed — {reason}',
   'execution.run.errorBannerNoStage': 'Run failed — {reason}',
@@ -1261,6 +1263,7 @@ export const en: Record<TranslationKey, string> = {
   'executionOverview.btn.savingAssignees': 'Saving',
   'executionOverview.btn.discardAssignees':'Discard',
   'executionOverview.runDisabled':  'Select at least one project to run',
+  'executionOverview.unassignedSelectedHint': 'Some selected projects have no assigned user.',
   'executionOverview.abortDisabled':'Select at least one running project to abort',
   'executionOverview.col.checkbox': '',
   'executionOverview.col.project':  'Project',

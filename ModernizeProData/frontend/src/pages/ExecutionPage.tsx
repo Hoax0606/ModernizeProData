@@ -16,7 +16,7 @@ import { runPreflight, isAllPass, type TableCheckResult } from '../lib/preflight
 import { tobeDbApi } from '../api/tobeDb';
 import { csvPreviewApi } from '../api/csvPreview';
 import { mappingImportApi } from '../api/mappingImport';
-import { runsApi, type RunHistoryDto, type StageView } from '../api/runs';
+import { runsApi, errorDetailText, type RunHistoryDto, type StageView } from '../api/runs';
 import { quarantineApi } from '../api/quarantine';
 import type { QuarantineGroup } from './quarantineMock';
 import { quarantineAckApi, type CutoverReviewRequest } from '../api/quarantineAck';
@@ -263,13 +263,16 @@ export function ExecutionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinnedSnapshot?.id, project?.id]);
 
-  /* 実行履歴: real は BE fetch、demo は既存 mock. project が未確定なら disabled. */
+  /* 実行履歴: real は BE fetch、demo は既存 mock. project が未確定なら disabled.
+     polling 은 activeRunId 와 무관하게 항상 — 다른 사용자가 시작한 run 을 감지해야
+     하므로 (아래 adopt-running effect). 이전엔 activeRunId 없으면 polling 정지 →
+     타인 run 이 영영 안 보였음 (2026-06-03). */
   const runHistoryQuery = useQuery<RunHistoryDto[]>({
     queryKey: ['run-history', projectIdForReset],
     enabled: !!projectIdForReset,
     queryFn: () => runsApi.listByProject(projectIdForReset!),
     staleTime: 5_000,
-    refetchInterval: activeRunId ? 5_000 : false,
+    refetchInterval: 5_000,
   });
   const runHistoryData = runHistoryQuery.data;
 
@@ -315,6 +318,30 @@ export function ExecutionPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinnedSnapshot?.id, project?.id, discardedSnapshotId, runHistoryData]);
+
+  /* 他ユーザー/他 PC が開始した run の可視化 (2026-06-03) — activeRunId 는 localStorage
+     (zustand persist) 기반이라 run 을 시작한 브라우저에만 존재. 타인은 pin 의 frozen
+     context 만 보게 돼 run id / 시작 시간 / 경과 시간이 안 보였다. run history polling
+     에서 non-terminal run 을 발견하면 채택 — 모두가 같은 ACTIVE RUN 을 본다.
+     pin-sync effect 보다 뒤에 선언 (같은 commit 내에서 이쪽이 이긴다). */
+  useEffect(() => {
+    if (!project || !runHistoryData) return;
+    const running = runHistoryData.find((r) => !isTerminal(r.status));
+    if (running && activeRunId !== running.id) {
+      setActiveRunId(running.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runHistoryData, project?.id]);
+
+  /* Cutover review state (정책 4·8 — 2026-06-01).
+     Cutover Start 버튼 클릭 직후 rehearsal phase 의 ack 된 group 목록을 review modal 에 표시.
+     운영자가 group 별 confirm/reject 후 [Confirm & Start cutover] → startrun + confirmCutoverReview.
+     ※ 반드시 아래 early return 보다 위에 — 옛 위치 (early return 아래) 에서는 All projects
+       클릭 (project → null) 시 hook 개수가 줄어 React #300 → #520 → window error 화면
+       (2026-06-03 fix). */
+  const [cutoverReviewOpen, setCutoverReviewOpen] = useState(false);
+  const [cutoverReviewItems, setCutoverReviewItems] = useState<CutoverReviewItem[]>([]);
+  const [cutoverReviewTables, setCutoverReviewTables] = useState<string[]>([]);
 
   if (!project || !site) {
     return (
@@ -547,13 +574,6 @@ export function ExecutionPage() {
     }
   };
 
-  /* Cutover review state (정책 4·8 — 2026-06-01).
-     Cutover Start 버튼 클릭 직후 rehearsal phase 의 ack 된 group 목록을 review modal 에 표시.
-     운영자가 group 별 confirm/reject 후 [Confirm & Start cutover] → startrun + confirmCutoverReview. */
-  const [cutoverReviewOpen, setCutoverReviewOpen] = useState(false);
-  const [cutoverReviewItems, setCutoverReviewItems] = useState<CutoverReviewItem[]>([]);
-  const [cutoverReviewTables, setCutoverReviewTables] = useState<string[]>([]);
-
   const closeCutoverReview = () => {
     setCutoverReviewOpen(false);
     setCutoverReviewItems([]);
@@ -722,6 +742,18 @@ export function ExecutionPage() {
         />
       </DisabledOverlay>
       <OverallProgress t={t} stages={stages} />
+      {/* run 은 running 인데 stage 데이터가 전혀 없으면 — Worker 미응답/큐 대기 상태를
+          사용자가 구분 못 하던 문제 (2026-06-03). 대기 hint 를 명시 표시. */}
+      {run && !isTerminal(run.status) && (!stageViews || stageViews.length === 0) && (
+        <div style={{
+          padding: '8px 14px', margin: '8px 0', borderRadius: 4,
+          background: 'var(--amber-50)', border: '1px solid var(--amber)',
+          fontSize: 12, color: 'var(--text-2)', display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <span>⏳</span>
+          <span>{t('execution.run.waitingForWorker')}</span>
+        </div>
+      )}
       <PipelineStages t={t} stages={stages} stageViews={stageViews ?? undefined} quarantineByTable={quarantineByTable} />
       {/* Cutover review modal (정책 4·8 — 2026-06-01). cutover Start 시 rehearsal ack
           목록을 운영자가 confirm/reject 후 [Confirm & Start] → startrun + review 전송. */}
@@ -1319,7 +1351,7 @@ function PipelineStages({ t, stages, stageViews, quarantineByTable }: {
                       </div>
                       {groups.length === 0 ? (
                         <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2, fontStyle: 'italic' }}>
-                          {tr.errorDetail ?? t('execution.stages.noErrorDetail') ?? 'No error detail recorded.'}
+                          {errorDetailText(tr.errorDetail) ?? t('execution.stages.noErrorDetail') ?? 'No error detail recorded.'}
                         </div>
                       ) : groups.map((g) => (
                         <div key={g.id} style={{ marginTop: 4, paddingLeft: 8, borderLeft: '2px solid var(--red)' }}>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useWorkspaceStore, type Project } from '../store/workspace';
 import { useUsersStore } from '../store/users';
 import { useAuthStore } from '../store/auth';
@@ -135,24 +135,29 @@ export function ExecutionOverviewPage() {
   }, [activeSiteId, loadMetrics, fetchProjects]);
 
   // Run 종료 시 그 행만 selected 에서 자동 해제 — 사용자가 매번 직접 체크 해제할 필요 없게.
-  // running / paused / pending / null (run 시작 전) 은 유지 — Abort 활성화를 위해.
-  // success / failed / aborted / timed_out 으로 떨어지면 자동 해제.
+  // 2026-06-03 수정: 이전엔 「최신 run 이 terminal」 이기만 하면 해제해서, 과거에 끝난 run 이
+  // 있는 프로젝트는 체크해도 다음 polling (5s) 에 저절로 풀리는 버그.
+  // 이제 running → terminal 「전이」가 관측된 행만 해제 (= 이번에 돌리고 끝난 run 만).
+  const prevRunStatusRef = useRef<Record<string, string | null>>({});
   useEffect(() => {
-    setSelected((prev) => {
-      if (prev.size === 0) return prev;
-      const next = new Set(prev);
+    const prev = prevRunStatusRef.current;
+    setSelected((cur) => {
+      if (cur.size === 0) return cur;
+      const next = new Set(cur);
       let changed = false;
-      for (const id of prev) {
-        const m = apiMetrics[id];
-        if (!m) continue;
-        const s = m.runStatus;
-        if (s === 'success' || s === 'failed' || s === 'aborted' || s === 'timed_out') {
+      for (const id of cur) {
+        const s = apiMetrics[id]?.runStatus;
+        const wasRunning = prev[id] === 'running';
+        if (wasRunning && (s === 'success' || s === 'failed' || s === 'aborted' || s === 'timed_out')) {
           next.delete(id);
           changed = true;
         }
       }
-      return changed ? next : prev;
+      return changed ? next : cur;
     });
+    const snapshot: Record<string, string | null> = {};
+    for (const [id, m] of Object.entries(apiMetrics)) snapshot[id] = m.runStatus ?? null;
+    prevRunStatusRef.current = snapshot;
   }, [apiMetrics]);
 
   // worker_nodes — master 만 fetch (endpoint 가 master only). assignee 별 online dot 용.
@@ -451,6 +456,15 @@ export function ExecutionOverviewPage() {
         <button onClick={handleRefresh} style={styles.btnGhost}>
           {t('executionOverview.btn.refresh')}
         </button>
+        {/* Unassigned 선택 시 — 체크는 유지하고 Run 만 비활성 + 이유를 명시 (2026-06-03). */}
+        {runCount > 0 && hasUnassignedSelected && (
+          <span style={{
+            fontSize: 11.5, color: 'var(--amber)', fontWeight: 600,
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+          }}>
+            ⚠ {t('executionOverview.unassignedSelectedHint')}
+          </span>
+        )}
         <button
           onClick={handleRun}
           disabled={!canRun || !isMaster}

@@ -157,7 +157,15 @@ try {
     }
     # vite build only (npm run build is tsc -b && vite build; the tsc gate is
     # shared with other feature branches and may have unrelated errors).
-    Invoke-Native { & npx vite build }
+    # VITE_APP_VERSION — auto-bump 버전을 FE 의 단일 소스 (src/lib/appVersion.ts) 로
+    # 주입. AboutModal / LoginPage / LicenseSetupPage footer 가 MSI 버전과 일치.
+    $prevViteVer = $env:VITE_APP_VERSION
+    $env:VITE_APP_VERSION = $Version
+    try {
+        Invoke-Native { & npx vite build }
+    } finally {
+        $env:VITE_APP_VERSION = $prevViteVer
+    }
     if ($LASTEXITCODE -ne 0) { throw "vite build failed (exit $LASTEXITCODE)" }
 } finally {
     Pop-Location
@@ -490,6 +498,9 @@ function Invoke-JpackageForLang {
         '--java-options', '-Dmpd.gui.enabled=true'
         '--java-options', "-DMPD_MODE=$mpdMode"
         '--java-options', "-Dmpd.default-lang=$Lang"
+        # auto-bump 버전을 Spring (modernize.version — system property 가 yml 보다
+        # 우선) + Launcher wizard footer 가 동일하게 보도록 주입.
+        '--java-options', "-Dmodernize.version=$Version"
         # 부팅 시간 단축 — JIT 를 C1 (tier 1) 까지만 컴파일. 부팅 -1~2s. desktop 단일
         # 사용자 환경에서 runtime perf 영향 미미.
         '--java-options', '-XX:TieredStopAtLevel=1'

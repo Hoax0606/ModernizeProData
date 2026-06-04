@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { IMessage } from '@stomp/stompjs';
-import { runsApi, type RunHistoryDto, type RunStatusStr, type StageView } from '../api/runs';
+import { runsApi, errorDetailText, type RunHistoryDto, type RunStatusStr, type StageView } from '../api/runs';
 import { createWebSocket, subscribe } from '../api/ws';
 import type { SnapshotExecutionContext } from '../store/snapshots';
 
@@ -162,7 +162,7 @@ function snapshotFallbackStages(ctx: SnapshotExecutionContext): StageView[] {
       status: (t.status ?? 'running') as 'running' | 'success' | 'failed',
       rowCount: t.rowCount ?? undefined,
       durationMs: t.durationMs ?? undefined,
-      errorDetail: typeof t.errorDetail === 'string' ? t.errorDetail : undefined,
+      errorDetail: errorDetailText(t.errorDetail),
       compiledSql: t.compiledSql ?? undefined,
     })),
   }));

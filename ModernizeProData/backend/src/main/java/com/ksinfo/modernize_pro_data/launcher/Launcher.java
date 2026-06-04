@@ -199,7 +199,9 @@ public class Launcher {
                         java.util.Map.entry("creds.tokenMissing","Login response missing token."),
                         java.util.Map.entry("creds.refused",     "Account refused (license / role)."),
                         java.util.Map.entry("creds.connectFailed","Connect failed: {reason}"),
-                        java.util.Map.entry("worker.loadFailed",  "Failed to load Coordinator UI: {reason}")
+                        java.util.Map.entry("worker.loadFailed",  "Failed to load Coordinator UI: {reason}"),
+                        java.util.Map.entry("instance.alreadyTitle", "Already running"),
+                        java.util.Map.entry("instance.alreadyBody",  "Another ModernizeProData Worker instance is already running on this PC. Close it first (check Task Manager for java.exe if no window is visible), then launch again.")
                 ),
                 "ko", java.util.Map.ofEntries(
                         java.util.Map.entry("url.title",       "Coordinator 에 연결"),
@@ -236,7 +238,9 @@ public class Launcher {
                         java.util.Map.entry("creds.tokenMissing","로그인 응답에 토큰이 없습니다."),
                         java.util.Map.entry("creds.refused",     "계정이 거부됐습니다 (라이선스 / 권한)."),
                         java.util.Map.entry("creds.connectFailed","연결 실패: {reason}"),
-                        java.util.Map.entry("worker.loadFailed",  "Coordinator UI 로드 실패: {reason}")
+                        java.util.Map.entry("worker.loadFailed",  "Coordinator UI 로드 실패: {reason}"),
+                        java.util.Map.entry("instance.alreadyTitle", "이미 실행 중"),
+                        java.util.Map.entry("instance.alreadyBody",  "이 PC 에서 ModernizeProData Worker 가 이미 실행 중입니다. 먼저 종료한 뒤 다시 실행하세요 (창이 안 보이면 작업관리자에서 java.exe 확인).")
                 ),
                 "ja", java.util.Map.ofEntries(
                         java.util.Map.entry("url.title",       "Coordinator に接続"),
@@ -273,7 +277,9 @@ public class Launcher {
                         java.util.Map.entry("creds.tokenMissing","ログイン応答にトークンがありません。"),
                         java.util.Map.entry("creds.refused",     "アカウントが拒否されました (ライセンス / 権限)。"),
                         java.util.Map.entry("creds.connectFailed","接続失敗: {reason}"),
-                        java.util.Map.entry("worker.loadFailed",  "Coordinator UI の読み込みに失敗: {reason}")
+                        java.util.Map.entry("worker.loadFailed",  "Coordinator UI の読み込みに失敗: {reason}"),
+                        java.util.Map.entry("instance.alreadyTitle", "すでに実行中"),
+                        java.util.Map.entry("instance.alreadyBody",  "この PC では ModernizeProData Worker がすでに実行中です。先に終了してから再起動してください (ウィンドウが見えない場合はタスクマネージャーで java.exe を確認)。")
                 )
         );
 
@@ -335,8 +341,53 @@ public class Launcher {
             Application.launch(WorkerApp.class, args);
         }
 
+        /** 다중 실행 차단 — Worker 프로세스 단일 인스턴스 보장 (2026-06-03).
+         *  %LOCALAPPDATA%\ModernizeProData\worker.lock 에 OS file lock 을 잡고
+         *  프로세스 수명 동안 유지 (static 참조로 GC 방지, 프로세스 종료 시 OS 가
+         *  자동 해제 — 좀비/크래시에도 stale lock 안 남음). 두 번째 인스턴스는
+         *  tryLock 실패 → 안내 후 즉시 종료. port 8081 충돌의 2차 방어선. */
+        private static java.nio.channels.FileChannel instanceLockChannel;
+        private static java.nio.channels.FileLock instanceLock;
+
+        private static boolean acquireSingleInstanceLock() {
+            try {
+                String localAppData = System.getenv("LOCALAPPDATA");
+                File dir = new File(
+                        (localAppData == null || localAppData.isBlank())
+                                ? System.getProperty("java.io.tmpdir") : localAppData,
+                        "ModernizeProData");
+                if (!dir.exists() && !dir.mkdirs()) return true; // lock 불가 환경 — 차단하지 않음
+                File lockFile = new File(dir, "worker.lock");
+                instanceLockChannel = java.nio.channels.FileChannel.open(
+                        lockFile.toPath(),
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.WRITE);
+                instanceLock = instanceLockChannel.tryLock();
+                if (instanceLock == null) {
+                    System.out.println("worker single-instance lock held by another process — exiting");
+                    return false;
+                }
+                return true;
+            } catch (Exception e) {
+                // lock 메커니즘 자체 실패 (권한 등) 는 실행 차단 사유가 아님.
+                System.out.println("worker instance lock skipped: " + e.getMessage());
+                return true;
+            }
+        }
+
         @Override
         public void start(Stage stage) {
+            if (!acquireSingleInstanceLock()) {
+                javafx.scene.control.Alert a =
+                        new javafx.scene.control.Alert(javafx.scene.control.Alert.AlertType.WARNING);
+                a.setTitle("ModernizeProData");
+                a.setHeaderText(WorkerI18n.t("instance.alreadyTitle"));
+                a.setContentText(WorkerI18n.t("instance.alreadyBody"));
+                a.showAndWait();
+                Platform.exit();
+                System.exit(0);
+                return;
+            }
             this.stage = stage;
             root = new BorderPane();
             // Match the React app's brand font. If Hoax Mono JP isn't installed
@@ -403,7 +454,10 @@ public class Launcher {
             brand.setTextAlignment(javafx.scene.text.TextAlignment.CENTER);
             brandBlock.getChildren().add(brand);
 
-            Label footer = new Label("© KS Info System Co., Ltd.   v0.1.0-dev");
+            // 버전 단일 소스 — jpackage 가 --java-options 로 박은 modernize.version
+            // (build.ps1 auto-bump). dev 콘솔 실행 등 미설정 시 "dev".
+            Label footer = new Label("© KS Info System Co., Ltd.   v"
+                    + System.getProperty("modernize.version", "dev"));
             footer.setStyle("-fx-font-size: 12px; -fx-text-fill: " + C_MUTED + ";");
 
             VBox column = new VBox(22, brandBlock, card, footer);
@@ -799,15 +853,21 @@ public class Launcher {
                 new Thread(() -> {
                     try {
                         edgeProc.waitFor();
-                        System.out.println("Worker Edge process exited, shutting down");
-                        Platform.runLater(() -> {
-                            serverLogout();
-                            Platform.exit();
-                            System.exit(0);
-                        });
                     } catch (InterruptedException ignored) {
                         Thread.currentThread().interrupt();
+                        return;
                     }
+                    System.out.println("Worker Edge process exited, shutting down");
+                    // 2026-06-03 — Platform.runLater() 의존 제거. stage.hide() 후 JavaFX 가
+                    // implicitExit 으로 toolkit 을 내려버리면 runLater 콜백이 영영 실행되지
+                    // 않아 System.exit 미도달 → Spring JVM 좀비가 port 8081 을 계속 점유
+                    // (재실행 시 PortInUseException 무한 루프의 원인). serverLogout 은 plain
+                    // HTTP 라 FX thread 불요 — watcher thread 에서 직접 호출 후 즉시 exit.
+                    // System.exit 은 Spring Boot 의 shutdown hook 을 발동시켜 context 도
+                    // 깨끗이 닫힌다 (Undertow stop + HikariCP shutdown).
+                    serverLogout();
+                    try { Platform.exit(); } catch (Throwable ignored) { /* toolkit 이미 종료 가능 */ }
+                    System.exit(0);
                 }, "worker-edge-watcher").start();
             } else {
                 // Edge/Chrome 미발견 + default browser fallback. Stage 유지 (Stop 용).
