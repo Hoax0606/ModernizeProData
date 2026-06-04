@@ -79,6 +79,7 @@ public class LoadStage implements StageRunner {
     private final QuarantineService quarantineService;
     private final RunLogIngestService runLogIngest;
     private final StageProgressBroadcaster broadcaster;
+    private final com.ksinfo.modernize_pro_data.coordinator.run.RunControlRegistry runControlRegistry;
 
     @Override
     public String stageKey() {
@@ -129,7 +130,11 @@ public class LoadStage implements StageRunner {
         if (parallelism <= 1 || bindings.size() <= 1) {
             // 순차 (기본)
             for (MappingTableBinding b : bindings) {
-                ctx.throwIfCancelled();   // abort/timeout 신호 시 RunCancelledException → LocalWorkerExecutor 가 stage failed 마킹.
+                // Stop 반응 — 남은 테이블 적재 시작 전 cancel 확인 (다중 테이블 빠른 중단).
+                if (runControlRegistry.isCancelled(runId)) {
+                    log.warn("Load cancelled — skipping remaining tables runId={}", runId);
+                    break;
+                }
                 if (loadBinding(ctx, stage, b, dbConfig, tempDir, columnsByTable)) success.incrementAndGet();
                 else failed.incrementAndGet();
                 stage.setTablesSuccess(success.get());
@@ -145,8 +150,9 @@ public class LoadStage implements StageRunner {
             try {
                 List<Future<?>> futures = new ArrayList<>();
                 for (MappingTableBinding b : bindings) {
-                    ctx.throwIfCancelled();   // submit 직전 — 이미 cancel 됐으면 새 task 안 띄우고 main thread 에서 RunCancelledException.
                     futures.add(pool.submit(() -> {
+                        // 병렬 task 도 시작 시 cancel 확인 — 이미 취소면 적재 skip.
+                        if (runControlRegistry.isCancelled(runId)) { failed.incrementAndGet(); return; }
                         if (loadBinding(ctx, stage, b, dbConfig, tempDir, columnsByTable)) success.incrementAndGet();
                         else failed.incrementAndGet();
                         // stage entity save 경합 회피용 동기화 — Load 끝 broadcast.
@@ -259,16 +265,17 @@ public class LoadStage implements StageRunner {
             String pgQualified = pgTableName(tobeSchema, tobeTable);
             long rows;
             try (Connection conn = pgCopyManager.openConnection(dbConfig)) {
-                ctx.throwIfCancelled();   // (D) sub-step — PG connection 후 본 적재 직전 cancel 체크.
                 ensurePgTable(ctx, conn, tobeSchema, tobeTable, columnsByTable);
                 boolean fkDisabled = pgCopyManager.tryDisableConstraints(conn);
                 try {
                     pgCopyManager.truncate(conn, pgQualified);
-                    ctx.throwIfCancelled();   // (D) sub-step — PG COPY (대용량 적재) 직전 cancel 체크.
+                    String runIdForCancel = ctx.getRunHistory().getId();
                     try (Connection duck = duckDbService.duplicateConnection();
                          Statement duckSt = duck.createStatement();
                          ResultSet rs = duckSt.executeQuery("SELECT * FROM " + fqTobeDuck)) {
-                        rows = pgCopyManager.copyInFromResultSet(conn, pgQualified, tobeColumns, rs);
+                        // cancel supplier — COPY 도중 Stop 누르면 행 루프가 중단 throw → conn close → COPY abort.
+                        rows = pgCopyManager.copyInFromResultSet(conn, pgQualified, tobeColumns, rs,
+                                () -> runControlRegistry.isCancelled(runIdForCancel));
                     }
                 } finally {
                     if (fkDisabled) pgCopyManager.restoreConstraints(conn);
@@ -285,6 +292,17 @@ public class LoadStage implements StageRunner {
             stageTableResultRepo.save(result);
             ingest(ctx, "Loaded " + tobeTable + ": " + rows + " rows", true);
             return true;
+        } catch (java.util.concurrent.CancellationException ce) {
+            // 사용자 Stop 으로 인한 중단 — 실패(quarantine)가 아니라 의도된 취소.
+            result.setStatus(StageTableStatus.failed);
+            Map<String, Object> detail = new HashMap<>();
+            detail.put("message", "load aborted by user (Stop)");
+            result.setErrorDetail(detail);
+            finish(result, tableStart);
+            stageTableResultRepo.save(result);
+            log.warn("LoadStage aborted for {} — {}", tobeTable, ce.getMessage());
+            ingest(ctx, "Load aborted for " + tableLabel + " (Stop)", false);
+            return false;
         } catch (Exception e) {
             result.setStatus(StageTableStatus.failed);
             Map<String, Object> detail = new HashMap<>();

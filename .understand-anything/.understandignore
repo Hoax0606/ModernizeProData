@@ -1,0 +1,105 @@
+# .understandignore — patterns for files/dirs to exclude from analysis
+# Syntax: same as .gitignore
+#
+# --- From .gitignore (uncomment to exclude) ---
+
+# .claude/settings.local.json
+# .claude/projects/
+# .claude/trace/
+# docs/*.docx
+# docs/*.pdf
+# docs/*.pptx
+# docs/build-*.ps1
+# docs/make-*.py
+# docs/*.css
+# **/memory/
+# .DS_Store
+# Thumbs.db
+# desktop.ini
+# ~$*
+# *.tmp
+# *.bak
+# *~
+# .parcel-cache/
+# *.class
+# *.jar
+# *.war
+# *.ear
+# .mvn/wrapper/maven-wrapper.jar
+# .factorypath
+# HELP.md
+# spring-shell.log
+# application-local.properties
+# application-local.yml
+# ModernizeProData/backend/data/
+# ModernizeProData/**/data/
+# *.db
+# *.db.lock
+# *.db.mv.db
+# *.trace.db
+# *.iml
+# *.swp
+# *.swo
+# .history/
+# .env
+# .env.*
+# !infra/.env.example
+# *.local
+# *.pem
+# *.key
+# *.p12
+# *.jks
+# *.crt
+# *.p8
+# secrets/
+# credentials/
+# !ModernizeProData/backend/src/main/resources/license/public.pem
+# !ModernizeProData/backend/src/main/resources/license/mpd-update-public.pem
+# npm-debug.log*
+# yarn-debug.log*
+# yarn-error.log*
+# .vite/
+# vite.config.ts.timestamp-*
+# vite.config.js.timestamp-*
+# hs_err_pid*.log
+# replay_pid*.log
+# *.hprof
+# *.pyc
+# *.orig
+# *.rej
+# ModernizeProData/installer/staging/
+# ModernizeProData/installer/dist/
+# ModernizeProData/installer/cache/
+# ModernizeProData/installer/assets/mpd.ico
+# ModernizeProData/backend/src/main/resources/static/
+# ModernizeProData/installer/webview-host/bin/
+# ModernizeProData/installer/webview-host/obj/
+# ModernizeProData/installer/webview-host/dist/
+# compose.override.yaml
+# compose.override.yml
+# docker-compose.override.yaml
+# docker-compose.override.yml
+# /db/
+# ModernizeProData/installer/.build-counter
+
+# --- Project-specific (pre-activated) ---
+
+Prototype/
+docs/
+db/
+infra/
+scripts/
+ModernizeProData/installer/cache/
+ModernizeProData/installer/dist/
+ModernizeProData/installer/staging/
+ModernizeProData/backend/target/
+ModernizeProData/frontend/dist/
+*.csv
+*.docx
+*.wxl
+*.wxi
+
+# --- Test file patterns ---
+
+# *.test.*
+# *.spec.*

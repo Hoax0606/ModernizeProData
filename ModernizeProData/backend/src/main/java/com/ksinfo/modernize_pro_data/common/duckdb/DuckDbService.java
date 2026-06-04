@@ -48,34 +48,56 @@ public class DuckDbService {
     @Value("${modernize.duckdb.temp-directory:./data/duckdb-tmp}")
     private String tempDirectory;
 
+    /**
+     * perf flag — false 면 lock 계측 자체 진입 없음 (분기 false 한 줄). true 면
+     * waitMs (lock 대기) / holdMs (lock 점유) 측정. application-dev.yml 만 true.
+     */
+    @Value("${modernize.perf.enabled:false}")
+    private boolean perfEnabled;
+
     private Connection connection;
 
-    public synchronized Connection getConnection() throws SQLException {
-        if (connection == null || connection.isClosed()) {
-            // 파일 모드면 부모 디렉토리 보장 — DuckDB 가 자체 생성 안 함.
-            // jpackage 첫 설치 환경처럼 cwd 아래 data/ 가 없으면 IO Error 로 startup fail.
-            if (!memoryMode) {
-                try {
-                    Path parent = Path.of(filePath).toAbsolutePath().getParent();
-                    if (parent != null) Files.createDirectories(parent);
-                } catch (Exception e) {
-                    log.warn("DuckDB file-path 부모 디렉토리 생성 실패 {} : {}", filePath, e.getMessage());
+    public Connection getConnection() throws SQLException {
+        long t0 = perfEnabled ? System.nanoTime() : 0L;
+        final Connection c;
+        synchronized (this) {
+            long t1 = perfEnabled ? System.nanoTime() : 0L;
+            if (connection == null || connection.isClosed()) {
+                // 파일 모드면 부모 디렉토리 보장 — DuckDB 가 자체 생성 안 함.
+                // jpackage 첫 설치 환경처럼 cwd 아래 data/ 가 없으면 IO Error 로 startup fail.
+                if (!memoryMode) {
+                    try {
+                        Path parent = Path.of(filePath).toAbsolutePath().getParent();
+                        if (parent != null) Files.createDirectories(parent);
+                    } catch (Exception e) {
+                        log.warn("DuckDB file-path 부모 디렉토리 생성 실패 {} : {}", filePath, e.getMessage());
+                    }
+                }
+                String url = memoryMode ? "jdbc:duckdb:" : "jdbc:duckdb:" + filePath;
+                connection = DriverManager.getConnection(url);
+                log.info("DuckDB connection opened: {}", url);
+                // DuckDB 의 UDF 는 connection 별로 등록 — 새 connection 마다 일괄 register.
+                UdfRegistry.registerAll(connection);
+                // encodings 확장 — Shift-JIS/EUC-JP 등 비 UTF-8 CSV 적재용 (ExtractStage encoding=).
+                loadEncodingsExtension(connection);
+                // icu 확장 — '+09:00' 같은 timezone offset 인식 (TransformStage 의 TIMESTAMPTZ CAST / STRPTIME).
+                // 없으면 DuckDB 가 'Unknown TimeZone "+09:00"' 로 reject → Transform / Audit / Load / Verify cascade ERROR.
+                loadIcuExtension(connection);
+                // 대용량 spill — operator(JOIN/sort/aggregation) + 파일모드 테이블 RAM 초과분 디스크로.
+                configureSpill(connection);
+            }
+            c = connection;
+            if (perfEnabled) {
+                long t2 = System.nanoTime();
+                long waitMs = (t1 - t0) / 1_000_000;
+                long holdMs = (t2 - t1) / 1_000_000;
+                // noise floor — 일상적 cached connection 반환 (수십 μs) 은 무시.
+                if (waitMs > 5 || holdMs > 100) {
+                    log.info("[perf] duckdb.lock waitMs={} holdMs={}", waitMs, holdMs);
                 }
             }
-            String url = memoryMode ? "jdbc:duckdb:" : "jdbc:duckdb:" + filePath;
-            connection = DriverManager.getConnection(url);
-            log.info("DuckDB connection opened: {}", url);
-            // DuckDB 의 UDF 는 connection 별로 등록 — 새 connection 마다 일괄 register.
-            UdfRegistry.registerAll(connection);
-            // encodings 확장 — Shift-JIS/EUC-JP 등 비 UTF-8 CSV 적재용 (ExtractStage encoding=).
-            loadEncodingsExtension(connection);
-            // icu 확장 — '+09:00' 같은 timezone offset 인식 (TransformStage 의 TIMESTAMPTZ CAST / STRPTIME).
-            // 없으면 DuckDB 가 'Unknown TimeZone "+09:00"' 로 reject → Transform / Audit / Load / Verify cascade ERROR.
-            loadIcuExtension(connection);
-            // 대용량 spill — operator(JOIN/sort/aggregation) + 파일모드 테이블 RAM 초과분 디스크로.
-            configureSpill(connection);
         }
-        return connection;
+        return c;
     }
 
     /**
@@ -104,6 +126,7 @@ public class DuckDbService {
      * 지우는 건 DuckDB 내부 임시 작업 테이블뿐 — 메타DB·TO-BE DB·Parquet 산출물 무관.
      */
     public synchronized void sweepRunSchemas(Set<String> keepSchemas) {
+        long t0 = perfEnabled ? System.nanoTime() : 0L;
         List<String> toDrop = new ArrayList<>();
         try (Statement st = statement();
              ResultSet rs = st.executeQuery(
@@ -127,6 +150,11 @@ public class DuckDbService {
         if (!toDrop.isEmpty()) {
             log.info("DuckDB run schema swept — {} dropped, {} kept (active)",
                     toDrop.size(), keepSchemas == null ? 0 : keepSchemas.size());
+        }
+        if (perfEnabled) {
+            long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+            log.info("[perf] duckdb.sweep elapsedMs={} dropped={} kept={}",
+                    elapsedMs, toDrop.size(), keepSchemas == null ? 0 : keepSchemas.size());
         }
     }
 
@@ -195,8 +223,41 @@ public class DuckDbService {
      * DuckDBConnection.duplicate() 는 같은 in-memory/file db 를 바라보는 새 connection.
      * caller 가 close() 책임. (UDF 는 미등록 — Load 의 read-only COPY 엔 불필요.)
      */
-    public synchronized Connection duplicateConnection() throws SQLException {
-        return ((org.duckdb.DuckDBConnection) getConnection()).duplicate();
+    public Connection duplicateConnection() throws SQLException {
+        long t0 = perfEnabled ? System.nanoTime() : 0L;
+        final Connection dup;
+        synchronized (this) {
+            long t1 = perfEnabled ? System.nanoTime() : 0L;
+            dup = ((org.duckdb.DuckDBConnection) getConnection()).duplicate();
+            if (perfEnabled) {
+                long t2 = System.nanoTime();
+                long waitMs = (t1 - t0) / 1_000_000;
+                long holdMs = (t2 - t1) / 1_000_000;
+                if (waitMs > 5 || holdMs > 100) {
+                    log.info("[perf] duckdb.duplicate waitMs={} holdMs={}", waitMs, holdMs);
+                }
+            }
+        }
+        return dup;
+    }
+
+    /**
+     * 사용자 요청 (Mapping Report / Trial / CSV preview) 용 요청별 격리 connection.
+     *
+     * 공유 connection 은 한 쿼리의 ResultSet 을 읽는 중 다른 스레드가 쿼리를 실행하면
+     * pending result 가 무효화돼 "Attempting to execute an unsuccessful or closed
+     * pending query result" 가 난다 (2026-06-04 — 다중 사용자 Report 동시 실행에서 발생).
+     * duplicate() + UDF 등록으로 요청마다 독립 세션을 쓴다. caller 가 close() 책임.
+     */
+    public synchronized Connection requestConnection() throws SQLException {
+        Connection dup = ((org.duckdb.DuckDBConnection) getConnection()).duplicate();
+        try {
+            UdfRegistry.registerAll(dup);
+        } catch (Exception e) {
+            // UDF 등록 실패 시에도 connection 자체는 사용 가능 — UDF 없는 쿼리는 정상.
+            log.warn("DuckDB UDF 등록 실패 (request connection): {}", e.getMessage());
+        }
+        return dup;
     }
 
     /**

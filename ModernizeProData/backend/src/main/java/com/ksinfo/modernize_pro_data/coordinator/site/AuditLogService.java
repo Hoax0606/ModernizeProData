@@ -2,8 +2,13 @@ package com.ksinfo.modernize_pro_data.coordinator.site;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+import java.util.Map;
 
 /**
  * Audit log 기록 helper.
@@ -21,6 +26,10 @@ import org.springframework.transaction.annotation.Transactional;
 public class AuditLogService {
 
     private final AuditLogRepository repo;
+    /** 알림 즉시 전달용 — audit_log 는 FE 의 알림 source 인데 기존엔 30초 폴링으로만
+     *  반영돼 Start 등 알림이 늦게 떴다. commit 後 /topic/notifications 로 push 해
+     *  FE 가 즉시 audit 를 refetch (2026-06-04). */
+    private final SimpMessagingTemplate stomp;
 
     public Builder record(String siteId, String projectId, String username, String action) {
         return new Builder(siteId, projectId, username, action);
@@ -34,7 +43,9 @@ public class AuditLogService {
     @Transactional
     public AuditLog save(AuditLog entry) {
         try {
-            return repo.save(entry);
+            AuditLog saved = repo.save(entry);
+            notifyAfterCommit(saved.getSiteId());
+            return saved;
         } catch (Exception e) {
             // audit 실패가 메인 트랜잭션을 깨면 안 됨 — 로깅만 하고 swallow
             log.warn("Failed to save audit log: {}", e.getMessage());
@@ -49,10 +60,36 @@ public class AuditLogService {
     public java.util.List<AuditLog> saveAll(java.util.List<AuditLog> entries) {
         if (entries == null || entries.isEmpty()) return java.util.List.of();
         try {
-            return repo.saveAll(entries);
+            java.util.List<AuditLog> saved = repo.saveAll(entries);
+            notifyAfterCommit(saved.isEmpty() ? null : saved.get(0).getSiteId());
+            return saved;
         } catch (Exception e) {
             log.warn("Failed to save audit log batch ({}): {}", entries.size(), e.getMessage());
             return entries;
+        }
+    }
+
+    /**
+     * audit row commit 後 /topic/notifications 로 가벼운 신호 push → FE 가 그 site 의
+     * audit 를 즉시 refetch. 트랜잭션 안이면 afterCommit 까지 미뤄 FE refetch 가 commit 된
+     * row 를 보게 한다 (commit 前 push 면 FE 가 못 본 채 refetch 하는 race). 트랜잭션
+     * 밖이면 즉시. 실패는 무시 (알림은 best-effort, polling 이 fallback).
+     */
+    private void notifyAfterCommit(String siteId) {
+        Runnable push = () -> {
+            try {
+                stomp.convertAndSend("/topic/notifications",
+                        Map.of("type", "audit", "siteId", siteId == null ? "" : siteId));
+            } catch (Exception e) {
+                log.debug("notification push failed: {}", e.getMessage());
+            }
+        };
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override public void afterCommit() { push.run(); }
+            });
+        } else {
+            push.run();
         }
     }
 
