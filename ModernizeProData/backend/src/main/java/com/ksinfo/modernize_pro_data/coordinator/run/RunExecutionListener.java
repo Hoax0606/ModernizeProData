@@ -149,6 +149,7 @@ public class RunExecutionListener {
                     .stages(stages)
                     .outputDir(outputDir)
                     .duckdbSchema(duckdbSchema)
+                    .runControlRegistry(runControlRegistry)
                     .build();
         } catch (Exception e) {
             log.error("Run setup failed runId={}", runId, e);

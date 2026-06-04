@@ -143,6 +143,8 @@ export interface RunTableSummary {
   success: number;
   failed: number;
   running: number;
+  /** 処理された stage 까진 success だが後続 stage 未実行 (abort 등). Pipeline の idle 相当. */
+  pending: number;
 }
 
 /**
@@ -160,7 +162,8 @@ export interface RunTableSummary {
 export interface RunTableResult {
   tobeSchema: string;
   tobeTable: string;
-  status: 'success' | 'failed' | 'running';
+  /** pending = 일부 stage 만 처리됨 (abort 등). Pipeline 의 idle 과 동등. */
+  status: 'success' | 'failed' | 'running' | 'pending';
   rows: number;
   startedAt: string | null;
   finishedAt: string | null;

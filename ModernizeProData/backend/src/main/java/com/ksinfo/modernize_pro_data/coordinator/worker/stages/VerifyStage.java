@@ -101,6 +101,7 @@ public class VerifyStage implements StageRunner {
         int failedCount = 0;
 
         for (MappingTableBinding binding : ctx.getBindings()) {
+            ctx.throwIfCancelled();   // abort/timeout 신호 시 RunCancelledException → LocalWorkerExecutor 가 stage failed 마킹.
             OffsetDateTime tableStart = OffsetDateTime.now();
             String tobeSchema = binding.getTobeSchema() == null ? "" : binding.getTobeSchema();
             String tobeTable  = binding.getTobeTable();
@@ -160,6 +161,7 @@ public class VerifyStage implements StageRunner {
                     ingest(ctx, "Verify mismatch " + tableLabel + ": DuckDB=" + duckCount + " vs PG=" + pgCount, false);
                     failedCount++;
                 } else {
+                    ctx.throwIfCancelled();   // (D) sub-step — PK 정렬 전수 비교 (가장 시간 큰 부분) 직전 cancel 체크.
                     // row count 일치 → PK 정렬 전수 비교 (행 정체성·누락 검출)
                     List<String> pkCols = pkColumns(columnsByTable.get(tobeTable));
                     String pkMismatch = compareAllPkRows(fqDuck, pgQualified, pkCols, dbConfig);

@@ -10,5 +10,7 @@ public interface StageTableResultRepository extends JpaRepository<StageTableResu
 
     List<StageTableResult> findByStageInstanceIdIn(Collection<String> stageInstanceIds);
 
+    List<StageTableResult> findByStageInstanceId(String stageInstanceId);
+
     Optional<StageTableResult> findByStageInstanceIdAndBindingId(String stageInstanceId, String bindingId);
 }
