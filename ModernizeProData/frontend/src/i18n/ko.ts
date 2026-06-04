@@ -451,6 +451,7 @@ export const ko = {
   'versions.pin.toggleTitlePin':     'Click to pin to top',
   'versions.pin.toggleTitleUnpin':   'Click to unpin',
   'versions.pin.toggleTitleIneligible': '현재 phase 에서는 pin 불가',
+  'versions.pin.toggleTitleReadOnly': '읽기 전용 — pin 변경 불가',
   'versions.pin.iconAria':           'Pinned to top',
 
   'versions.preflight.blocked':           'Execution 화면에서 이 스냅샷을 pin 하고 preflight 를 모두 pass 시켜야 Request Review 가 가능합니다',
@@ -573,6 +574,7 @@ export const ko = {
   'execution.run.retry':              'Resume from failure',
   'execution.run.stop':               'Stop',
   'execution.run.abortReason':        '사용자가 중단함',
+  'execution.run.waitingForWorker':   '실행이 시작되었지만 아직 stage 진행 데이터가 없습니다. Worker 응답 대기 중 — 오래 지속되면 Worker 상태를 확인하세요.',
   'execution.run.tablesSummary':      '{n} tables',
   'execution.run.errorBanner':        '{stage}단계 ({name}) 실패 — {reason}',
   'execution.run.errorBannerNoStage': '실행 실패 — {reason}',
@@ -1265,6 +1267,7 @@ export const ko = {
   'executionOverview.btn.savingAssignees': 'Saving',
   'executionOverview.btn.discardAssignees':'Discard',
   'executionOverview.runDisabled':  '실행할 프로젝트를 한 개 이상 선택하세요.',
+  'executionOverview.unassignedSelectedHint': '담당자가 지정되지 않은 프로젝트가 선택되어 있습니다.',
   'executionOverview.abortDisabled':'중단할 실행 중 프로젝트를 선택하세요.',
   'executionOverview.col.checkbox': '',
   'executionOverview.col.project':  'Project',

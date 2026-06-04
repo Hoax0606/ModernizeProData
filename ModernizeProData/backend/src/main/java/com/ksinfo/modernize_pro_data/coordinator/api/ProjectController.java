@@ -90,7 +90,12 @@ public class ProjectController {
         if (req.phase() != null)    p.setPhase(req.phase());
         p.setTableCount(req.tableCount());
         if (req.ddlFiles() != null) p.setDdlFiles(req.ddlFiles());
-        if (req.assignee() != null) p.setAssignee(req.assignee());
+        // 프로젝트를 만든 멤버가 즉시 담당자(assignee) 권한을 가진 채 시작 — assignee 가
+        // mapping + execution 등 모든 작업 권한 게이트. 명시 assignee 가 오면 그것 우선.
+        // executionAssignee 는 Execution Overview 일괄 실행 시 "누구 자리" 지정용이라
+        // 생성 시점엔 비워둠.
+        String creator = auth.getName();
+        p.setAssignee(req.assignee() != null && !req.assignee().isEmpty() ? req.assignee() : creator);
         projectRepository.save(p);
         log.info("Project created: {} in site {}", p.getName(), siteId);
         auditLogService.record(p, auth.getName(), "project created")

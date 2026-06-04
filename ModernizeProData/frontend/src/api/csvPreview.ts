@@ -27,4 +27,12 @@ export const csvPreviewApi = {
       `/api/v1/sites/${encodeURIComponent(siteId)}/csv-row-count/${encodeURIComponent(tableName)}`,
       { timeout: 120_000 },
     )),
+
+  /** Site Overview 'Rows' KPI — csvPath 내 모든 CSV 의 data row 수 합 (AS-IS 기준).
+   *  첫 호출은 전체 CSV scan 이라 느릴 수 있음 (BE 가 mtime+size 캐시 보유). */
+  siteRowTotal: (siteId: string): Promise<{ totalRows: number; fileCount: number }> =>
+    unwrap(api.get<ApiResponse<{ totalRows: number; fileCount: number }>>(
+      `/api/v1/sites/${encodeURIComponent(siteId)}/csv-row-count`,
+      { timeout: 300_000 },
+    )),
 };

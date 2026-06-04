@@ -3494,6 +3494,9 @@ function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, 
     setSavedSrcType(src ? src.map((s) => resolveSrcType(s, sources)) : null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.tgt]);
+  /* hooks 는 반드시 early return 위에 — active 가 null 로 바뀌는 렌더에서 hook 개수가
+     줄어 React #300 (Rendered fewer hooks) 발생 (2026-06-03 fix). */
+  const prevAutoCastRef = useRef('');
   if (!active) return null;
   const initSrc: string[] = active.src === '—' ? [] : [active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src];
   const resolveType = (s: string) => resolveSrcType(s, sources);
@@ -3504,7 +3507,6 @@ function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, 
     ...sources.map((s) => s.alias),
     ...parseExpandAliases(expandExpr).map((e) => e.alias),
   ]);
-  const prevAutoCastRef = useRef('');
 
   // 슬롯 i 의 source 값을 새 값으로 바꾸고, 첫 번째 슬롯이면 CAST 자동 입력 갱신.
   // editValue 가 비어있거나 이전 자동 CAST 와 같을 때만 덮어써서 사용자 수동 입력은 보존.

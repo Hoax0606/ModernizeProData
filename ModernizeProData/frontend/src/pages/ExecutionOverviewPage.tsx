@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useWorkspaceStore, type Project } from '../store/workspace';
 import { useUsersStore } from '../store/users';
 import { useAuthStore } from '../store/auth';
@@ -135,24 +135,29 @@ export function ExecutionOverviewPage() {
   }, [activeSiteId, loadMetrics, fetchProjects]);
 
   // Run 종료 시 그 행만 selected 에서 자동 해제 — 사용자가 매번 직접 체크 해제할 필요 없게.
-  // running / paused / pending / null (run 시작 전) 은 유지 — Abort 활성화를 위해.
-  // success / failed / aborted / timed_out 으로 떨어지면 자동 해제.
+  // 2026-06-03 수정: 이전엔 「최신 run 이 terminal」 이기만 하면 해제해서, 과거에 끝난 run 이
+  // 있는 프로젝트는 체크해도 다음 polling (5s) 에 저절로 풀리는 버그.
+  // 이제 running → terminal 「전이」가 관측된 행만 해제 (= 이번에 돌리고 끝난 run 만).
+  const prevRunStatusRef = useRef<Record<string, string | null>>({});
   useEffect(() => {
-    setSelected((prev) => {
-      if (prev.size === 0) return prev;
-      const next = new Set(prev);
+    const prev = prevRunStatusRef.current;
+    setSelected((cur) => {
+      if (cur.size === 0) return cur;
+      const next = new Set(cur);
       let changed = false;
-      for (const id of prev) {
-        const m = apiMetrics[id];
-        if (!m) continue;
-        const s = m.runStatus;
-        if (s === 'success' || s === 'failed' || s === 'aborted' || s === 'timed_out') {
+      for (const id of cur) {
+        const s = apiMetrics[id]?.runStatus;
+        const wasRunning = prev[id] === 'running';
+        if (wasRunning && (s === 'success' || s === 'failed' || s === 'aborted' || s === 'timed_out')) {
           next.delete(id);
           changed = true;
         }
       }
-      return changed ? next : prev;
+      return changed ? next : cur;
     });
+    const snapshot: Record<string, string | null> = {};
+    for (const [id, m] of Object.entries(apiMetrics)) snapshot[id] = m.runStatus ?? null;
+    prevRunStatusRef.current = snapshot;
   }, [apiMetrics]);
 
   // worker_nodes — master 만 fetch (endpoint 가 master only). assignee 별 online dot 용.
@@ -276,36 +281,35 @@ export function ExecutionOverviewPage() {
 
   const handleRefresh = () => { loadMetrics(); loadWorkers(); };
   const handleRun = async () => {
-    if (!isMaster) return;
+    if (!isMaster || !activeSiteId) return;
     const ids = [...selected];
-    const results = await Promise.allSettled(ids.map((id) => runsApi.start(id)));
-    // backend 가 worker offline / 미할당 인 경우 RunResultDto.status='REJECTED' 로 반환.
-    // 성공 응답인데 REJECTED 인 경우 + Promise reject (네트워크 / 권한) 둘 다 모아 안내.
-    const rejected: string[] = [];
+    if (ids.length === 0) return;
+    // 선택 project 일괄 실행 — /runs/all (startAll) 로 호출해 각 run 에 bulk marker 가
+    // 박힌다. 이것이 (1) 개별 ExecutionPage 의 site-level lock 감지 (2) abort 권한
+    // master 한정 분기의 근거. 개별 start 반복은 bulk marker 가 안 붙어 둘 다 안 됨.
     const setActive = useExecutionPreflightStore.getState().setActiveRunId;
-    results.forEach((r, idx) => {
-      const projectName = siteProjects.find((p) => p.id === ids[idx])?.name ?? ids[idx];
-      if (r.status === 'fulfilled' && r.value.status === 'REJECTED') {
-        rejected.push(`${projectName}: ${r.value.reason ?? 'rejected'}`);
-      } else if (r.status === 'rejected') {
-        rejected.push(`${projectName}: ${(r.reason as Error)?.message ?? 'request failed'}`);
-      } else if (r.status === 'fulfilled' && r.value.status === 'STARTED' && r.value.runId) {
-        // 같은 site 안 ExecutionPage 들어가면 즉시 progress polling/STOMP 시작.
-        setActive(ids[idx], r.value.runId);
-      }
-    });
+    const rejected: string[] = [];
+    try {
+      const res = await runsApi.startAll(activeSiteId, ids);
+      res.results.forEach((r) => {
+        const projectName = r.projectName ?? r.projectId ?? '?';
+        if (r.status === 'REJECTED' || r.status === 'LOCKED') {
+          rejected.push(`${projectName}: ${r.reason ?? r.status.toLowerCase()}`);
+        } else if (r.status === 'STARTED' && r.runId && r.projectId) {
+          setActive(r.projectId, r.runId);
+        }
+      });
+    } catch (e) {
+      rejected.push((e as Error)?.message ?? 'bulk run failed');
+    }
     if (rejected.length > 0) {
-      // 브라우저 alert 정책상 제거 대상이지만, 현재 toast 컴포넌트가 페이지에 없어
-      // 일단 console 에 모아두고 즉시 사용자 인지될 수 있도록 첫 줄을 alert 으로 안내.
       console.warn('[ExecutionOverview] run rejected', rejected);
-      // TODO(toast): 페이지에 inline 토스트 도입 후 alert 제거.
       window.alert(rejected.join('\n'));
     }
     // 선택 유지 — Run 직후 Abort 활성화를 위해 selectedRunningCount 가 살아 있어야 함.
-    // 사용자가 명시적으로 체크 해제하기 전까지는 그대로.
     loadMetrics();
     // Run 起動と同時に backend が phase advance (sign-off→rehearsal, ready→cutover) +
-    // run_status='running' に変えるので、projects も refetch して chip / 行状態を即反映.
+    // run_status='running' に変えるので、projects も refetch して chip / 行状態을 即反映.
     if (activeSiteId) fetchProjects(activeSiteId);
   };
   const handleAbort = async () => {
@@ -452,6 +456,15 @@ export function ExecutionOverviewPage() {
         <button onClick={handleRefresh} style={styles.btnGhost}>
           {t('executionOverview.btn.refresh')}
         </button>
+        {/* Unassigned 선택 시 — 체크는 유지하고 Run 만 비활성 + 이유를 명시 (2026-06-03). */}
+        {runCount > 0 && hasUnassignedSelected && (
+          <span style={{
+            fontSize: 11.5, color: 'var(--amber)', fontWeight: 600,
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+          }}>
+            ⚠ {t('executionOverview.unassignedSelectedHint')}
+          </span>
+        )}
         <button
           onClick={handleRun}
           disabled={!canRun || !isMaster}

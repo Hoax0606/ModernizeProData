@@ -9,6 +9,12 @@ import java.util.Optional;
 public interface SnapshotRepository extends JpaRepository<Snapshot, String> {
     List<Snapshot> findByProjectId(String projectId);
     List<Snapshot> findByProjectIdIn(List<String> projectIds);
+
+    /** list 응답용 projection — snapshot_data 제외 (SnapshotSummaryView 참조).
+     *  closed projection 이라 Hibernate 가 SELECT 에서 snapshot_data 컬럼을 뺀다.
+     *  listByProject / listBySite 의 JSONB 직렬화 부하 제거. */
+    List<SnapshotSummaryView> findSummaryByProjectId(String projectId);
+    List<SnapshotSummaryView> findSummaryByProjectIdIn(List<String> projectIds);
     
     @Query("SELECT s FROM Snapshot s WHERE s.projectId = ?1 ORDER BY s.createdAt DESC LIMIT 1")
     Optional<Snapshot> findLatestByProjectId(String projectId);

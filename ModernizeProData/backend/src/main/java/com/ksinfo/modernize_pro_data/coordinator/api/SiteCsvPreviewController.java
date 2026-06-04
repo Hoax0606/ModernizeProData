@@ -48,6 +48,16 @@ public class SiteCsvPreviewController {
     private final SiteRepository siteRepository;
     private final DuckDbService duckDbService;
 
+    /**
+     * csv-row-count caching — 10M+ CSV 의 full line scan (~10-15s) 이 매 호출
+     * 발생하면 HikariCP connection + thread 를 오래 점유해 다중 사용자 시 pool
+     * exhaust 의 주범. file mtime+size 가 동일하면 캐시값 반환 — CSV 가 야간
+     * 추출로 바뀌면 mtime 달라져 자동 invalidate. key = 절대경로.
+     */
+    private record RowCountCacheEntry(long mtime, long size, long rowCount) {}
+    private static final java.util.Map<String, RowCountCacheEntry> ROW_COUNT_CACHE =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     public record CsvPreview(
             String table,
             String resolvedPath,
@@ -143,12 +153,68 @@ public class SiteCsvPreviewController {
         if (csvFile == null) {
             throw new ApiException("CSV_FILE_NOT_FOUND", "CSV 파일을 찾을 수 없음: " + tableName + ".csv", HttpStatus.NOT_FOUND);
         }
-        // raw line count (header 제외). 1.4GB 도 byte-stream 으로 ~10-15초.
+        // mtime+size 캐시 공유 line count (header 제외). 1.4GB 도 byte-stream 으로 ~10-15초.
+        return ApiResponse.ok(new CsvRowCount(tableName, countDataRowsCached(csvFile)));
+    }
+
+    /** Site Overview 'Rows' KPI 용 — csvPath 내 모든 CSV 의 data row 수 합 (AS-IS 기준). */
+    public record SiteCsvRowTotal(long totalRows, int fileCount) {}
+
+    @GetMapping("/{siteId}/csv-row-count")
+    public ApiResponse<SiteCsvRowTotal> rowCountTotal(@PathVariable String siteId) {
+        Site site = siteRepository.findById(siteId)
+                .orElseThrow(() -> new ApiException(
+                        "SITE_NOT_FOUND", "사이트를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
+        String csvPath = site.getCsvPath();
+        if (csvPath == null || csvPath.isBlank()) {
+            // CSV 경로 미설정 site 는 0 으로 — Site Overview 가 에러 없이 표시되도록.
+            return ApiResponse.ok(new SiteCsvRowTotal(0, 0));
+        }
+        Path baseDir;
+        try {
+            baseDir = Paths.get(csvPath).toAbsolutePath().normalize();
+        } catch (Exception e) {
+            return ApiResponse.ok(new SiteCsvRowTotal(0, 0));
+        }
+        if (!Files.isDirectory(baseDir)) {
+            return ApiResponse.ok(new SiteCsvRowTotal(0, 0));
+        }
+        long total = 0;
+        int files = 0;
+        try (Stream<Path> stream = Files.list(baseDir)) {
+            List<Path> csvFiles = stream
+                    .filter(Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().toLowerCase().endsWith(".csv"))
+                    .toList();
+            for (Path f : csvFiles) {
+                total += countDataRowsCached(f);
+                files++;
+            }
+        } catch (IOException e) {
+            throw new ApiException("CSV_READ_FAILED", "CSV 목록 조회 실패: " + e.getMessage(),
+                    HttpStatus.INTERNAL_SERVER_ERROR);
+        }
+        return ApiResponse.ok(new SiteCsvRowTotal(total, files));
+    }
+
+    /** per-table rowCount endpoint 와 동일한 mtime+size 캐시를 공유하는 line count. */
+    private long countDataRowsCached(Path csvFile) {
+        String cacheKey = csvFile.toString();
+        long fMtime, fSize;
+        try {
+            fMtime = Files.getLastModifiedTime(csvFile).toMillis();
+            fSize  = Files.size(csvFile);
+        } catch (IOException e) {
+            return 0;
+        }
+        RowCountCacheEntry cached = ROW_COUNT_CACHE.get(cacheKey);
+        if (cached != null && cached.mtime() == fMtime && cached.size() == fSize) {
+            return cached.rowCount();
+        }
         long lines = 0;
         try (Stream<String> stream = Files.lines(csvFile, java.nio.charset.StandardCharsets.UTF_8)) {
             lines = stream.count();
         } catch (IOException | java.io.UncheckedIOException e) {
-            // UTF-8 디코딩 실패 시 byte 단위 newline count fallback (인코딩 무관).
             try (java.io.InputStream is = Files.newInputStream(csvFile);
                  java.io.BufferedInputStream bis = new java.io.BufferedInputStream(is, 1 << 20)) {
                 byte[] buf = new byte[1 << 16];
@@ -157,11 +223,13 @@ public class SiteCsvPreviewController {
                     for (int i = 0; i < n; i++) if (buf[i] == '\n') lines++;
                 }
             } catch (IOException ex) {
-                throw new ApiException("CSV_READ_FAILED", "CSV row count 실패: " + ex.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+                log.warn("CSV row count failed: {}", csvFile, ex);
+                return 0;
             }
         }
-        long rowCount = Math.max(0, lines - 1);  // header 제외
-        return ApiResponse.ok(new CsvRowCount(tableName, rowCount));
+        long rowCount = Math.max(0, lines - 1);
+        ROW_COUNT_CACHE.put(cacheKey, new RowCountCacheEntry(fMtime, fSize, rowCount));
+        return rowCount;
     }
 
     /**

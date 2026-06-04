@@ -9,6 +9,7 @@ import { mappingImportApi } from '../api/mappingImport';
 import { validationApi, type ValidationReportDto } from '../api/validation';
 import { ValidationDiffModal } from '../components/ValidationDiffModal';
 import { useT, type TranslationKey } from '../i18n';
+import { useActiveProjectReadOnly } from '../store/readOnly';
 
 /**
  * Artifacts tab — 매핑 스냅샷·DDL·검증 리포트 등의 산출물 미리보기·다운로드.
@@ -1390,6 +1391,8 @@ function substitute(template: string, ctx: FormulaContext): string {
 
 export function ArtifactsPage() {
   const t = useT();
+  // read-only project = 산출물 download/copy 차단 (보기/미리보기는 허용).
+  const readOnly = useActiveProjectReadOnly();
   const projects = useWorkspaceStore((s) => s.projects);
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const project = useMemo(
@@ -1683,10 +1686,10 @@ export function ArtifactsPage() {
         </div>
         <div style={styles.cta}>
           <button
-            onClick={() => void handleDownloadBundle()}
-            disabled={bundleBusy}
-            title={bundleBusy ? '' : t('siteExport.btn.download')}
-            style={bundleBusy
+            onClick={() => { if (!readOnly) void handleDownloadBundle(); }}
+            disabled={bundleBusy || readOnly}
+            title={readOnly ? t('artifacts.workbook.readOnly') : (bundleBusy ? '' : t('siteExport.btn.download'))}
+            style={(bundleBusy || readOnly)
               ? { ...styles.btnPrimary, ...styles.btnPrimaryDisabled }
               : styles.btnPrimary}
           >
@@ -1843,6 +1846,7 @@ function ExcelWorkbook({
   validationByTable,
 }: ExcelWorkbookProps) {
   const t = useT();
+  const readOnly = useActiveProjectReadOnly();
   /* Copy 버튼 직후 짧은 "Copied" 토스트를 띄우기 위한 상태.
      true 로 세팅 후 ~1.6 초 뒤 자동으로 false. */
   const [copied, setCopied] = useState(false);
@@ -1903,12 +1907,14 @@ function ExcelWorkbook({
   const dashFx = category.key === 'dashboard' ? dashboard : undefined;
 
   const handleCopy = () => {
+    if (readOnly) return;
     void copyToClipboard(sqlText).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1600);
     });
   };
   const handleDownload = () => {
+    if (readOnly) return;
     /* 다운로드 파일명:
          DDL          : <table>.<sheet>.sql — 예: acct_master.AS-IS.ddl.sql
          MIGRATION SQL: <table>.migrate.sql — 시트 한 장이라 sheet 이름 생략. */
@@ -1918,6 +1924,7 @@ function ExcelWorkbook({
     downloadText(dlName, sqlText, 'application/sql');
   };
   const handleDownloadXlsx = () => {
+    if (readOnly) return;
     /* 워크북 전체(현재 카테고리의 모든 시트)를 실제 xlsx 로 저장. */
     const dlName = `${baseName}${category.suffix}`;
     /* 각 시트별 데이터 lookup — 다 실데이터. validation 은 prefetch 한 DTO 를 시트별 Cell[][]
@@ -1998,8 +2005,8 @@ function ExcelWorkbook({
           })}
           <div style={{ flex: 1 }} />
           <div style={styles.vscodeTabActions}>
-            <button onClick={handleCopy} style={styles.vscodeActionBtn}>Copy</button>
-            <button onClick={handleDownload} style={styles.vscodeActionBtn}>Download</button>
+            <button onClick={handleCopy} disabled={readOnly} style={readOnly ? { ...styles.vscodeActionBtn, opacity: 0.4, cursor: 'not-allowed' } : styles.vscodeActionBtn}>Copy</button>
+            <button onClick={handleDownload} disabled={readOnly} style={readOnly ? { ...styles.vscodeActionBtn, opacity: 0.4, cursor: 'not-allowed' } : styles.vscodeActionBtn}>Download</button>
           </div>
         </div>
 
@@ -2061,7 +2068,7 @@ function ExcelWorkbook({
             </button>
           )}
           {category.downloadType === 'xlsx' ? (
-            <button onClick={handleDownloadXlsx} style={styles.titleBarActionBtn}>
+            <button onClick={handleDownloadXlsx} disabled={readOnly} style={readOnly ? { ...styles.titleBarActionBtn, opacity: 0.4, cursor: 'not-allowed' } : styles.titleBarActionBtn}>
               Download .xlsx
             </button>
           ) : (

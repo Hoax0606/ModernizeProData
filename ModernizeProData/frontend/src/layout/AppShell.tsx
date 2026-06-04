@@ -175,7 +175,9 @@ export function AppShell() {
       }
     };
     void heavySync();
-    const id = setInterval(() => void heavySync(), 10_000);
+    // 30s 주기 — sites/snapshots/audit 는 payload 가 커서 5 user 동시 시 부하 비중 큼.
+    // 60s 는 phase/snapshot 반영 지연이 동시 작업 confusion 유발해 30s 절충.
+    const id = setInterval(() => void heavySync(), 30_000);
     return () => clearInterval(id);
   }, [fetchSites, fetchSnapshots]);
 
@@ -597,7 +599,9 @@ export function AppShell() {
                   >
                     <div style={styles.projectNameRow}>
                       <span style={styles.projectName}>{p.name}</span>
-                      {pendingProjectIds.has(p.id) && p.phase === 'test' && p.runStatus === 'completed' && (
+                      {/* pending snapshot 모래시계 — phase/runStatus 조건은 제거 (2026-06-03).
+                          Request Review 後 runStatus 가 completed 가 아닌 경우에도 pending 표시 필요. */}
+                      {pendingProjectIds.has(p.id) && (
                         <span
                           style={styles.projectPendingIcon}
                           title={t('siteOverview.pendingSnapshotIcon.title')}
@@ -622,6 +626,12 @@ export function AppShell() {
                         );
                       })()}
                       <span style={styles.projectMetaDim}>{p.tableCount} tables</span>
+                      {/* assignee 표시 (2026-06-03) — unassigned 면 아무것도 안 보여줌. */}
+                      {(p.assignee ?? '').trim() !== '' && (
+                        <span style={styles.projectMetaAssignee} title={p.assignee!}>
+                          {p.assignee}
+                        </span>
+                      )}
                     </div>
                   </div>
                 );
@@ -1422,6 +1432,17 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 2,
   },
   projectMetaDim: { fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
+  /* 사이드바 project row 의 assignee — 길면 ellipsis, unassigned 는 렌더 자체 안 함. */
+  projectMetaAssignee: {
+    fontSize: 10,
+    color: 'var(--text-3)',
+    fontFamily: 'var(--mono)',
+    marginLeft: 'auto',
+    maxWidth: 72,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
   phaseBadge: {
     display: 'inline-flex',
     alignItems: 'center',

@@ -6,6 +6,7 @@ import { useAuthStore } from '../store/auth';
 import { useSettingsStore, type Language } from '../store/settings';
 import { BrandName } from '../components/BrandName';
 import { useT, LANGUAGE_LABELS } from '../i18n';
+import { APP_VERSION } from '../lib/appVersion';
 
 export function LoginPage() {
   const t = useT();
@@ -226,7 +227,7 @@ export function LoginPage() {
 
         {/* 푸터 */}
         <div style={styles.footer}>
-          © KS Info System Co., Ltd. <span style={styles.footerVersion}>v1.0.0</span>
+          © KS Info System Co., Ltd. <span style={styles.footerVersion}>v{APP_VERSION}</span>
         </div>
       </div>
     </div>

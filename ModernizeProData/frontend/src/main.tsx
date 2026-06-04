@@ -62,7 +62,15 @@ window.addEventListener('contextmenu', (e) => {
 // --disable-features 로 처리 (EdgeAppLauncher 의 flags).
 
 try {
-  createRoot(document.getElementById('root')!).render(
+  createRoot(document.getElementById('root')!, {
+    // Recoverable error (예: React #520 — concurrent render 중 에러났지만 sync 재렌더로
+    // 복구 성공) 는 기본적으로 reportError() → window 'error' 이벤트로 올라와 위의
+    // showErr 가 멀쩡한 앱 화면을 에러 화면으로 덮어버렸다 (2026-06-03, All projects 보고).
+    // 복구된 에러는 콘솔 경고만 — DOM 은 건드리지 않는다.
+    onRecoverableError: (err: unknown) => {
+      console.warn('[react] recovered from render error:', err);
+    },
+  }).render(
     <StrictMode>
       <App />
     </StrictMode>,

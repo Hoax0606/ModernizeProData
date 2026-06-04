@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useWorkspaceStore } from '../store/workspace';
 import type { Project, ProjectPhase, ProjectEnvironment, Site } from '../store/workspace';
@@ -16,8 +16,9 @@ import { runPreflight, isAllPass, type TableCheckResult } from '../lib/preflight
 import { tobeDbApi } from '../api/tobeDb';
 import { csvPreviewApi } from '../api/csvPreview';
 import { mappingImportApi } from '../api/mappingImport';
-import { runsApi, type RunHistoryDto, type StageView } from '../api/runs';
+import { runsApi, errorDetailText, type RunHistoryDto, type StageView } from '../api/runs';
 import { quarantineApi } from '../api/quarantine';
+import type { QuarantineGroup } from './quarantineMock';
 import { quarantineAckApi, type CutoverReviewRequest } from '../api/quarantineAck';
 import { CutoverReviewModal, buildReviewItems, type CutoverReviewItem } from '../components/CutoverReviewModal';
 import { usePipelineProgress, isTerminal } from '../hooks/usePipelineProgress';
@@ -148,6 +149,27 @@ export function ExecutionPage() {
     effectiveFallback?.executionContext ?? null,
   );
 
+  /* failed table drill-down — 그 이행(run)의 quarantine 상세 (검증 위반 + stage 실행
+     실패 둘 다 quarantine 카드로 적재됨). live run 은 activeRunId, snapshot view 는
+     pin 의 executionContext.runId 로 조회. table 별 group 으로 묶어 PipelineStages 의
+     failed table 클릭 시 inline 표시. */
+  const effectiveRunId = activeRunId ?? effectiveFallback?.executionContext?.runId ?? null;
+  const { data: execQuarantine } = useQuery({
+    queryKey: ['exec-quarantine', effectiveRunId],
+    enabled: !!effectiveRunId,
+    queryFn: () => quarantineApi.byRun(effectiveRunId!),
+    refetchInterval: activeRunId ? 5_000 : false,
+  });
+  const quarantineByTable = useMemo(() => {
+    const m = new Map<string, QuarantineGroup[]>();
+    for (const g of execQuarantine ?? []) {
+      const k = (g.table ?? '').toLowerCase();
+      if (!m.has(k)) m.set(k, []);
+      m.get(k)!.push(g);
+    }
+    return m;
+  }, [execQuarantine]);
+
   const entrySelected = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.selectedTables : undefined);
   const entryPhase    = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.preflightPhase : undefined);
   const entryStale    = useExecutionPreflightStore((s) => project ? s.byProject[project.id]?.isStale : undefined);
@@ -241,13 +263,16 @@ export function ExecutionPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinnedSnapshot?.id, project?.id]);
 
-  /* 実行履歴: real は BE fetch、demo は既存 mock. project が未確定なら disabled. */
+  /* 実行履歴: real は BE fetch、demo は既存 mock. project が未確定なら disabled.
+     polling 은 activeRunId 와 무관하게 항상 — 다른 사용자가 시작한 run 을 감지해야
+     하므로 (아래 adopt-running effect). 이전엔 activeRunId 없으면 polling 정지 →
+     타인 run 이 영영 안 보였음 (2026-06-03). */
   const runHistoryQuery = useQuery<RunHistoryDto[]>({
     queryKey: ['run-history', projectIdForReset],
     enabled: !!projectIdForReset,
     queryFn: () => runsApi.listByProject(projectIdForReset!),
     staleTime: 5_000,
-    refetchInterval: activeRunId ? 5_000 : false,
+    refetchInterval: 5_000,
   });
   const runHistoryData = runHistoryQuery.data;
 
@@ -293,6 +318,30 @@ export function ExecutionPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinnedSnapshot?.id, project?.id, discardedSnapshotId, runHistoryData]);
+
+  /* 他ユーザー/他 PC が開始した run の可視化 (2026-06-03) — activeRunId 는 localStorage
+     (zustand persist) 기반이라 run 을 시작한 브라우저에만 존재. 타인은 pin 의 frozen
+     context 만 보게 돼 run id / 시작 시간 / 경과 시간이 안 보였다. run history polling
+     에서 non-terminal run 을 발견하면 채택 — 모두가 같은 ACTIVE RUN 을 본다.
+     pin-sync effect 보다 뒤에 선언 (같은 commit 내에서 이쪽이 이긴다). */
+  useEffect(() => {
+    if (!project || !runHistoryData) return;
+    const running = runHistoryData.find((r) => !isTerminal(r.status));
+    if (running && activeRunId !== running.id) {
+      setActiveRunId(running.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runHistoryData, project?.id]);
+
+  /* Cutover review state (정책 4·8 — 2026-06-01).
+     Cutover Start 버튼 클릭 직후 rehearsal phase 의 ack 된 group 목록을 review modal 에 표시.
+     운영자가 group 별 confirm/reject 후 [Confirm & Start cutover] → startrun + confirmCutoverReview.
+     ※ 반드시 아래 early return 보다 위에 — 옛 위치 (early return 아래) 에서는 All projects
+       클릭 (project → null) 시 hook 개수가 줄어 React #300 → #520 → window error 화면
+       (2026-06-03 fix). */
+  const [cutoverReviewOpen, setCutoverReviewOpen] = useState(false);
+  const [cutoverReviewItems, setCutoverReviewItems] = useState<CutoverReviewItem[]>([]);
+  const [cutoverReviewTables, setCutoverReviewTables] = useState<string[]>([]);
 
   if (!project || !site) {
     return (
@@ -489,9 +538,12 @@ export function ExecutionPage() {
   const runs = (runHistoryData ?? []).map(beRunToRunCard);
 
   /* Execution 페이지 전체 컨트롤 (table 선택 / preflight / Start) 권한.
-     master 또는 project executionAssignee 본인만. 비권한자는 DisabledOverlay
-     로 UI 잠그고 RunHeader 의 canStart 도 false 로. */
-  const isMyProject = !!user?.username && project?.executionAssignee === user.username;
+     master 또는 project assignee 본인만 — Execution 도 mapping 과 동일한 assignee
+     (Site Overview 에서 지정한 그 project 의 담당자) 기준. 비권한자는 DisabledOverlay
+     로 UI 잠그고 RunHeader 의 canStart 도 false 로.
+     (executionAssignee 는 Execution Overview 의 일괄 실행 시 "누구 자리에서 run 할지"
+      만 정하는 별개 필드 — 평소 Execution 권한과 무관.) */
+  const isMyProject = !!user?.username && project?.assignee === user.username;
   const canControl = isMaster || isMyProject;
 
   /* Discard が「テーブル選択アンロック + 履歴片付け」を兼ねる役割なので, activeRun 表示中は
@@ -521,13 +573,6 @@ export function ExecutionPage() {
       alert(`Start failed: ${e instanceof Error ? e.message : 'unknown error'}`);
     }
   };
-
-  /* Cutover review state (정책 4·8 — 2026-06-01).
-     Cutover Start 버튼 클릭 직후 rehearsal phase 의 ack 된 group 목록을 review modal 에 표시.
-     운영자가 group 별 confirm/reject 후 [Confirm & Start cutover] → startrun + confirmCutoverReview. */
-  const [cutoverReviewOpen, setCutoverReviewOpen] = useState(false);
-  const [cutoverReviewItems, setCutoverReviewItems] = useState<CutoverReviewItem[]>([]);
-  const [cutoverReviewTables, setCutoverReviewTables] = useState<string[]>([]);
 
   const closeCutoverReview = () => {
     setCutoverReviewOpen(false);
@@ -697,7 +742,19 @@ export function ExecutionPage() {
         />
       </DisabledOverlay>
       <OverallProgress t={t} stages={stages} />
-      <PipelineStages t={t} stages={stages} />
+      {/* run 은 running 인데 stage 데이터가 전혀 없으면 — Worker 미응답/큐 대기 상태를
+          사용자가 구분 못 하던 문제 (2026-06-03). 대기 hint 를 명시 표시. */}
+      {run && !isTerminal(run.status) && (!stageViews || stageViews.length === 0) && (
+        <div style={{
+          padding: '8px 14px', margin: '8px 0', borderRadius: 4,
+          background: 'var(--amber-50)', border: '1px solid var(--amber)',
+          fontSize: 12, color: 'var(--text-2)', display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <span>⏳</span>
+          <span>{t('execution.run.waitingForWorker')}</span>
+        </div>
+      )}
+      <PipelineStages t={t} stages={stages} stageViews={stageViews ?? undefined} quarantineByTable={quarantineByTable} />
       {/* Cutover review modal (정책 4·8 — 2026-06-01). cutover Start 시 rehearsal ack
           목록을 운영자가 confirm/reject 후 [Confirm & Start] → startrun + review 전송. */}
       <CutoverReviewModal
@@ -1210,20 +1267,40 @@ transition: 'none',
 
 /* ───────────────────────── Pipeline stages ─────────────────────── */
 
-function PipelineStages({ t, stages }: { t: T; stages: Stage[] }) {
+function PipelineStages({ t, stages, stageViews, quarantineByTable }: {
+  t: T; stages: Stage[];
+  stageViews?: StageView[];
+  quarantineByTable?: Map<string, QuarantineGroup[]>;
+}) {
+  /* 펼친 stage id. failed table 이 있는 stage 만 펼침 가능 — 클릭 시 그 stage 의
+     table 목록 + failed table 의 에러 상세 (quarantine) 를 inline 표시. */
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const viewByKey = useMemo(() => {
+    const m = new Map<string, StageView>();
+    for (const sv of stageViews ?? []) m.set(sv.stageKey, sv);
+    return m;
+  }, [stageViews]);
+
   return (
     <div style={{ ...styles.section, background: 'var(--panel)' }}>
       <div style={{ padding: '14px 18px' }}>
         <div style={{ ...styles.sectionLabel, marginBottom: 8 }}>{t('execution.stages.title')}</div>
         <div style={{ border: '1px solid var(--border)', borderRadius: 4, overflow: 'hidden', background: 'var(--panel)' }}>
-          {stages.map((st, i) => (
+          {stages.map((st, i) => {
+            const sv = viewByKey.get(st.id);
+            const failedCount = sv?.tablesFailed ?? 0;
+            const hasFailed = failedCount > 0 && !!sv?.tables?.length;
+            const isOpen = expanded === st.id;
+            return (
+            <Fragment key={st.id}>
             <div
-              key={st.id}
+              onClick={hasFailed ? () => setExpanded(isOpen ? null : st.id) : undefined}
               style={{
                 display: 'grid',
                 gridTemplateColumns: '24px 170px 1fr 80px 90px 80px',
                 gap: 14, alignItems: 'center',
                 padding: '10px 14px',
+                cursor: hasFailed ? 'pointer' : 'default',
                 borderBottom: i < stages.length - 1 ? '1px solid var(--border)' : 'none',
                 background:
                   st.tone === 'running' ? 'var(--green-50)'
@@ -1235,7 +1312,14 @@ function PipelineStages({ t, stages }: { t: T; stages: Stage[] }) {
             >
               <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-4)' }}>{String(i + 1).padStart(2, '0')}</div>
               <div>
-                <div style={{ fontWeight: 500, fontSize: 13 }}>{st.name}</div>
+                <div style={{ fontWeight: 500, fontSize: 13 }}>
+                  {st.name}
+                  {hasFailed && (
+                    <span style={{ marginLeft: 6, fontSize: 10, color: 'var(--red)', fontFamily: 'var(--mono)' }}>
+                      {isOpen ? '▾' : '▸'} {failedCount} failed
+                    </span>
+                  )}
+                </div>
                 <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-3)' }}>{st.sub}</div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -1252,7 +1336,40 @@ function PipelineStages({ t, stages }: { t: T; stages: Stage[] }) {
                 {st.tone === 'idle' && <StatusBadge tone="running">{t('execution.stages.status.queued')}</StatusBadge>}
               </div>
             </div>
-          ))}
+            {isOpen && sv && (
+              <div style={{
+                padding: '4px 14px 12px 62px',
+                background: 'var(--red-50)',
+                borderBottom: i < stages.length - 1 ? '1px solid var(--border)' : 'none',
+              }}>
+                {sv.tables.filter((tr) => tr.status === 'failed').map((tr) => {
+                  const groups = quarantineByTable?.get((tr.tobeTable ?? '').toLowerCase()) ?? [];
+                  return (
+                    <div key={tr.tobeTable} style={{ marginTop: 8 }}>
+                      <div style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 600, color: 'var(--red)' }}>
+                        ✗ {tr.tobeSchema ? `${tr.tobeSchema}.` : ''}{tr.tobeTable}
+                      </div>
+                      {groups.length === 0 ? (
+                        <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2, fontStyle: 'italic' }}>
+                          {errorDetailText(tr.errorDetail) ?? t('execution.stages.noErrorDetail') ?? 'No error detail recorded.'}
+                        </div>
+                      ) : groups.map((g) => (
+                        <div key={g.id} style={{ marginTop: 4, paddingLeft: 8, borderLeft: '2px solid var(--red)' }}>
+                          <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text)' }}>{g.reason}</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-2)', fontFamily: 'var(--mono)' }}>{g.detail}</div>
+                          <div style={{ fontSize: 10.5, color: 'var(--text-3)', marginTop: 1 }}>
+                            {g.stage} · {g.severity} · {g.sampleRows?.length ?? 0} sample{(g.sampleRows?.length ?? 0) === 1 ? '' : 's'}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            </Fragment>
+            );
+          })}
         </div>
       </div>
     </div>

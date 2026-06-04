@@ -69,6 +69,12 @@ public class SnapshotController {
     private final SnapshotDiffService snapshotDiffService;
     private final RunHistoryRepository runHistoryRepository;
     private final com.ksinfo.modernize_pro_data.coordinator.site.SnapshotMappingRestoreService snapshotMappingRestoreService;
+    /** self proxy — setBaseline retry loop 가 transaction 경계를 넘어 재호출하기 위함.
+     *  ObjectProvider 로 지연 주입 (생성자 순환 회피). */
+    private final org.springframework.beans.factory.ObjectProvider<SnapshotController> selfProvider;
+    /** setBaseline 의 project 단위 advisory lock 용. */
+    @jakarta.persistence.PersistenceContext
+    private jakarta.persistence.EntityManager entityManager;
 
     /* ── DTOs ──────────────────────────────────── */
 
@@ -83,15 +89,16 @@ public class SnapshotController {
     /* ── Endpoints ─────────────────────────────── */
 
     @GetMapping("/api/v1/projects/{projectId}/snapshots")
-    public ApiResponse<List<Snapshot>> listByProject(@PathVariable String projectId) {
-        return ApiResponse.ok(snapshotRepository.findByProjectId(projectId));
+    public ApiResponse<List<com.ksinfo.modernize_pro_data.coordinator.site.SnapshotSummaryView>> listByProject(@PathVariable String projectId) {
+        // snapshot_data 제외 projection — list 응답에 frozen mapping payload 불필요.
+        return ApiResponse.ok(snapshotRepository.findSummaryByProjectId(projectId));
     }
 
     @GetMapping("/api/v1/sites/{siteId}/snapshots")
-    public ApiResponse<List<Snapshot>> listBySite(@PathVariable String siteId) {
+    public ApiResponse<List<com.ksinfo.modernize_pro_data.coordinator.site.SnapshotSummaryView>> listBySite(@PathVariable String siteId) {
         var projectIds = projectRepository.findBySiteId(siteId).stream().map(p -> p.getId()).toList();
         if (projectIds.isEmpty()) return ApiResponse.ok(List.of());
-        return ApiResponse.ok(snapshotRepository.findByProjectIdIn(projectIds));
+        return ApiResponse.ok(snapshotRepository.findSummaryByProjectIdIn(projectIds));
     }
 
     /** 현재 라이브 mapping working set 을 SnapshotData (rules + codeMaps + bindings) 로 freeze.
@@ -309,9 +316,45 @@ public class SnapshotController {
      * 단일 트랜잭션 안에서 기존 baseline 을 false 로 내리고 본인을 true 로 올린다 +
      * mapping_* 데이터를 restore. partial unique index 가 동시성 race 도 안전망으로 잡아준다.
      */
+    /**
+     * Baseline 설정 — multi-user 동시 setBaseline 시 restoreMapping 의 cascade
+     * DELETE 가 같은 row 를 동시 수정하면 ObjectOptimisticLockingFailureException
+     * 발생. 최대 3회 재시도 (self proxy 통해 매 시도 새 transaction). FE 의
+     * inflight guard 가 1차 방어, 이 retry 가 다른 PC 동시 요청의 2차 방어.
+     */
     @PostMapping("/api/v1/snapshots/{id}/baseline")
-    @Transactional
     public ApiResponse<Snapshot> setBaseline(@PathVariable String id, Authentication auth) {
+        String actor = auth.getName();
+        requireProjectWriteAccess(findOrThrow(id).getProjectId(), auth);
+        int maxAttempts = 3;
+        for (int attempt = 1; ; attempt++) {
+            try {
+                return selfProvider.getObject().setBaselineTx(id, actor);
+            } catch (org.springframework.dao.OptimisticLockingFailureException e) {
+                if (attempt >= maxAttempts) {
+                    log.warn("setBaseline failed after {} attempts (optimistic lock): {}", attempt, id);
+                    throw e;
+                }
+                log.info("setBaseline retry {}/{} (optimistic lock): {}", attempt, maxAttempts, id);
+            }
+        }
+    }
+
+    /** setBaseline 의 transaction 본체 — retry loop 가 매 시도 새 transaction 으로 호출.
+     *  public 필수 (self proxy 가 AOP transaction advice 적용하려면). */
+    @Transactional
+    public ApiResponse<Snapshot> setBaselineTx(String id, String actor) {
+        Snapshot probe = findOrThrow(id);
+        // 같은 project 의 baseline 변경을 직렬화 — PG advisory xact lock (transaction
+        // 종료 시 자동 해제). 동시 setBaseline 이 partial unique index
+        // (uq_snapshot_baseline_per_project) 를 동시에 건드려 DataIntegrityViolation
+        // (500) 나거나 restoreMapping cascade DELETE 가 OptimisticLock race 나는 것을
+        // 원천 차단. 다른 project 는 다른 lock key 라 병렬 유지.
+        entityManager.createNativeQuery("SELECT pg_advisory_xact_lock(hashtext(?1))")
+                .setParameter(1, probe.getProjectId())
+                .getSingleResult();
+        // lock 획득 후 fresh 재조회 (대기 중 다른 tx 가 이미 set 했을 수 있음). 이후
+        // 작업 대상은 s — 재할당 없이 한 번만 할당해 lambda 캡처 안전.
         Snapshot s = findOrThrow(id);
         if (s.isBaseline()) {
             return ApiResponse.ok(s);
@@ -325,12 +368,12 @@ public class SnapshotController {
         snapshotRepository.save(s);
 
         // mapping_* 를 snapshot 시점으로 restore.
-        restoreMappingFromSnapshot(s, auth.getName());
+        restoreMappingFromSnapshot(s, actor);
 
-        log.info("Snapshot baseline set + mapping restored: {} ({}) by {}", s.getName(), s.getId(), auth.getName());
+        log.info("Snapshot baseline set + mapping restored: {} ({}) by {}", s.getName(), s.getId(), actor);
 
         projectRepository.findById(s.getProjectId()).ifPresent(p ->
-                auditLogService.record(p, auth.getName(), "baseline set (mapping restored)")
+                auditLogService.record(p, actor, "baseline set (mapping restored)")
                         .snapshot(s.getId(), s.getName())
                         .save());
         return ApiResponse.ok(s);
@@ -484,11 +527,30 @@ public class SnapshotController {
         }
     }
 
+    /**
+     * Read-only 사용자 (master 도 아니고 project assignee 도 아닌 경우) 의 baseline
+     * pin 변경 차단 (2026-06-03). setBaseline 은 mapping_* 을 wipe+replace 하는
+     * 쓰기 작업 — FE 가드 (VersionsPage readOnly disable) 의 서버측 짝.
+     */
+    private void requireProjectWriteAccess(String projectId, Authentication auth) {
+        boolean isMaster = auth.getAuthorities().stream()
+                .anyMatch(a -> "ROLE_MASTER".equals(a.getAuthority()));
+        if (isMaster) return;
+        String assignee = projectRepository.findById(projectId)
+                .map(Project::getAssignee).orElse(null);
+        if (assignee == null || !assignee.equals(auth.getName())) {
+            throw new ApiException("PROJECT_READ_ONLY",
+                    "프로젝트 읽기 전용 — 담당자 또는 master 만 변경할 수 있습니다",
+                    HttpStatus.FORBIDDEN);
+        }
+    }
+
     /** baseline 해제 — 현재 baseline 이 아니더라도 idempotent. */
     @DeleteMapping("/api/v1/snapshots/{id}/baseline")
     @Transactional
     public ApiResponse<Snapshot> clearBaseline(@PathVariable String id, Authentication auth) {
         Snapshot s = findOrThrow(id);
+        requireProjectWriteAccess(s.getProjectId(), auth);
         if (!s.isBaseline()) {
             return ApiResponse.ok(s);
         }
