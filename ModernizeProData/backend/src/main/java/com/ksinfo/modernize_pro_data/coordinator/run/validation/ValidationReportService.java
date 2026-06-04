@@ -116,6 +116,7 @@ public class ValidationReportService implements StageRunner {
         int pendingWarningsCount = 0;
 
         for (MappingTableBinding binding : ctx.getBindings()) {
+            ctx.throwIfCancelled();   // abort/timeout 신호 시 RunCancelledException → LocalWorkerExecutor 가 stage failed 마킹.
             OffsetDateTime tableStart = OffsetDateTime.now();
             String tobeSchema = binding.getTobeSchema() == null ? "" : binding.getTobeSchema();
             String tobeTable  = binding.getTobeTable();
@@ -131,6 +132,7 @@ public class ValidationReportService implements StageRunner {
                     .orElseGet(() -> ValidationReport.create(runId, binding.getId(), tobeSchema, tobeTable));
 
             try {
+                ctx.throwIfCancelled();   // (D) sub-step — 6 검증 실행 직전 cancel 체크 (checksum/sumRecon/nullParity/typeValid/rowCount/min_max).
                 Map<String, Object> data = computeOne(ctx, stage, binding, tableLabel,
                         schema, tobeSchema, tobeTable, cols, dbConfig);
                 report.setReportData(data);
