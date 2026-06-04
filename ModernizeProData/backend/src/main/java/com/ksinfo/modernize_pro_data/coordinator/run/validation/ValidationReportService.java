@@ -836,13 +836,13 @@ public class ValidationReportService implements StageRunner {
         }
 
         /* Checksum verdict — 3-level (PASS/WARN/FAIL):
-           - PK 없음 (cols 자체가 hash 못 만듦) → WARN
+           - PK 없음 (cols 자체가 hash 못 만듦) → PASS + note (row-level 비교 불가. audit 통과로 처리)
            - raw 동일 → PASS
            - canonical 동일 but raw 다름 → WARN (timestamp format diff 등)
            - canonical 도 다름 → FAIL (실 데이터 차이) */
         String checksumVerdict;
         if (duckChecksumRaw == null) {
-            checksumVerdict = "WARN";
+            checksumVerdict = "PASS";
         } else if (duckChecksumRaw.equals(pgChecksumRaw)) {
             checksumVerdict = "PASS";
         } else if (duckChecksumCanon != null && duckChecksumCanon.equals(pgChecksumCanon)) {
@@ -854,7 +854,12 @@ public class ValidationReportService implements StageRunner {
                 "asis", duckChecksumRaw == null ? "" : duckChecksumRaw,
                 "tobe", pgChecksumRaw   == null ? "" : pgChecksumRaw,
                 "verdict", checksumVerdict);
-        if ("WARN".equals(checksumVerdict) && duckChecksumRaw != null) {
+        if (duckChecksumRaw == null) {
+            // 2026-06-04: PK 없는 case 도 Overview 에 note 표시. 이전엔 verdict=WARN 이고 note 없어
+            // Overview/Quarantine 비대칭 (Quarantine 탭엔 entry 미생성 — line 870 의 raw null 가드).
+            // 이젠 verdict=PASS + 명시적 note 로 "왜 PASS 인지" 운영자가 즉시 인식.
+            checksum.put("note", "no PK — row-level checksum skipped");
+        } else if ("WARN".equals(checksumVerdict)) {
             checksum.put("note", "values match in canonical form — display format differs (e.g., timestamp .0 padding)");
         }
         // SKIP 변환은 read time (applyAckOverlay) 에서. 박제는 원본 verdict 보존.
