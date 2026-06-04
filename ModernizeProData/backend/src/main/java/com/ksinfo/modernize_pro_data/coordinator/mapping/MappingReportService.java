@@ -139,7 +139,10 @@ public class MappingReportService {
         List<String> headers = new ArrayList<>();
         List<List<String>> outRows = new ArrayList<>();
         boolean truncated = false;
-        try (Statement st = duckDbService.statement();
+        // 요청별 격리 connection — 공유 connection 동시 사용 시 pending result 무효화
+        // ("Attempting to execute an unsuccessful or closed pending query result") 회피.
+        try (java.sql.Connection conn = duckDbService.requestConnection();
+             Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(sql)) {
             ResultSetMetaData md = rs.getMetaData();
             int colCount = md.getColumnCount();
@@ -187,41 +190,46 @@ public class MappingReportService {
             return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType, origHint,
                     "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
         }
-        // 1. FROM 자체 검증
-        String fromProbe = "SELECT 1 " + fromClause + " LIMIT 0";
-        try (Statement st = duckDbService.statement();
-             ResultSet rs = st.executeQuery(fromProbe)) {
-            // OK — FROM 은 문제 없음
-        } catch (SQLException e) {
-            log.warn("Report FROM-clause probe failed: {}", e.getMessage());
-            String t = classifyDuckDbErrorCode(e.getMessage());
-            return errorResult(schema, tobeTable, headers, sql, "FROM_FAILED", null, null, t, extractHint(e.getMessage()),
-                    "AS-IS 데이터 로드 또는 JOIN/WHERE 절에서 오류가 발생했습니다.\n"
-                            + "오류 종류: " + classifyDuckDbErrorMessage(e.getMessage()));
-        }
-        // 2. expression 별 검증.
-        // LIMIT 0 은 parsing/binding 만 본다 — CAST/STRPTIME 같은 runtime conversion 실패는
-        // 데이터를 실제로 흘려야 잡힌다. PROBE_LIMIT rows 만큼 실제 변환을 시도하면
-        // "어느 컬럼" 까지 식별 가능. 컬럼 N 개 × PROBE_LIMIT rows 라 비용 미미.
-        final int PROBE_LIMIT = 20;
-        for (MappingRule r : rules) {
-            if ("skip".equals(r.getStrategy())) continue;
-            String expr = exprForRule(r);
-            if ("NULL".equals(expr)) continue;  // 상수 NULL 은 검증 의미 없음
-            String probe = "SELECT " + expr + " AS probe " + fromClause + " LIMIT " + PROBE_LIMIT;
-            try (Statement st = duckDbService.statement();
-                 ResultSet rs = st.executeQuery(probe)) {
-                // 데이터 실제로 끝까지 흘려서 row-level conversion 도 trigger.
-                while (rs.next()) { rs.getObject(1); }
+        // probe 들도 요청별 격리 connection — 한 connection 으로 전체 probe 수행.
+        try (java.sql.Connection probeConn = duckDbService.requestConnection()) {
+            // 1. FROM 자체 검증
+            String fromProbe = "SELECT 1 " + fromClause + " LIMIT 0";
+            try (Statement st = probeConn.createStatement();
+                 ResultSet rs = st.executeQuery(fromProbe)) {
+                // OK — FROM 은 문제 없음
             } catch (SQLException e) {
-                log.warn("Report expression probe failed for column {}: {}", r.getTobeColumn(), e.getMessage());
+                log.warn("Report FROM-clause probe failed: {}", e.getMessage());
                 String t = classifyDuckDbErrorCode(e.getMessage());
-                return errorResult(schema, tobeTable, headers, sql,
-                        "EXPRESSION_FAILED", r.getTobeColumn(), expr, t, extractHint(e.getMessage()),
-                        "컬럼 \"" + r.getTobeColumn() + "\" 의 변환식에서 오류가 발생했습니다.\n"
-                                + "표현식: " + expr + "\n"
+                return errorResult(schema, tobeTable, headers, sql, "FROM_FAILED", null, null, t, extractHint(e.getMessage()),
+                        "AS-IS 데이터 로드 또는 JOIN/WHERE 절에서 오류가 발생했습니다.\n"
                                 + "오류 종류: " + classifyDuckDbErrorMessage(e.getMessage()));
             }
+            // 2. expression 별 검증.
+            // LIMIT 0 은 parsing/binding 만 본다 — CAST/STRPTIME 같은 runtime conversion 실패는
+            // 데이터를 실제로 흘려야 잡힌다. PROBE_LIMIT rows 만큼 실제 변환을 시도하면
+            // "어느 컬럼" 까지 식별 가능. 컬럼 N 개 × PROBE_LIMIT rows 라 비용 미미.
+            final int PROBE_LIMIT = 20;
+            for (MappingRule r : rules) {
+                if ("skip".equals(r.getStrategy())) continue;
+                String expr = exprForRule(r);
+                if ("NULL".equals(expr)) continue;  // 상수 NULL 은 검증 의미 없음
+                String probe = "SELECT " + expr + " AS probe " + fromClause + " LIMIT " + PROBE_LIMIT;
+                try (Statement st = probeConn.createStatement();
+                     ResultSet rs = st.executeQuery(probe)) {
+                    // 데이터 실제로 끝까지 흘려서 row-level conversion 도 trigger.
+                    while (rs.next()) { rs.getObject(1); }
+                } catch (SQLException e) {
+                    log.warn("Report expression probe failed for column {}: {}", r.getTobeColumn(), e.getMessage());
+                    String t = classifyDuckDbErrorCode(e.getMessage());
+                    return errorResult(schema, tobeTable, headers, sql,
+                            "EXPRESSION_FAILED", r.getTobeColumn(), expr, t, extractHint(e.getMessage()),
+                            "컬럼 \"" + r.getTobeColumn() + "\" 의 변환식에서 오류가 발생했습니다.\n"
+                                    + "표현식: " + expr + "\n"
+                                    + "오류 종류: " + classifyDuckDbErrorMessage(e.getMessage()));
+                }
+            }
+        } catch (SQLException e) {
+            log.warn("Report probe connection failed: {}", e.getMessage());
         }
         // 식별 실패 — UNKNOWN
         return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType, origHint,

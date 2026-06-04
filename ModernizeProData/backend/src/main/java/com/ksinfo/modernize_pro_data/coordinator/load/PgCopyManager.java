@@ -131,6 +131,19 @@ public class PgCopyManager {
      */
     public long copyInFromResultSet(Connection conn, String schemaQualifiedTable,
                                     List<String> columns, ResultSet rs) throws Exception {
+        return copyInFromResultSet(conn, schemaQualifiedTable, columns, rs, () -> false);
+    }
+
+    /**
+     * cancel 가능 오버로드 (2026-06-04). {@code cancelled} 가 true 가 되면 row 루프를
+     * 4096행마다 검사해 {@link java.util.concurrent.CancellationException} 을 던진다.
+     * caller 의 try-with-resources 가 PG Connection 을 닫으면 서버가 진행 중 COPY 를
+     * abort → Stop 버튼이 stage 완료를 기다리지 않고 수 초 내 반응. (이전엔 cancel 이
+     * stage 경계에서만 검사돼 1M행 COPY 중엔 안 멈췄음.)
+     */
+    public long copyInFromResultSet(Connection conn, String schemaQualifiedTable,
+                                    List<String> columns, ResultSet rs,
+                                    java.util.function.BooleanSupplier cancelled) throws Exception {
         PGConnection pg = conn.unwrap(PGConnection.class);
         String colList = buildColumnList(columns);
         String sql = "COPY " + schemaQualifiedTable + colList + " FROM stdin (FORMAT csv, HEADER false)";
@@ -142,6 +155,12 @@ public class PgCopyManager {
         StringBuilder line = new StringBuilder(256);
         try (PGCopyOutputStream out = new PGCopyOutputStream(pg, sql, 65536)) {
             while (rs.next()) {
+                // 취소 검사 — 4096행마다 (검사 비용 무시 가능). 취소 시 throw → caller 가
+                // conn.close() → 서버가 in-flight COPY rollback.
+                if ((rows & 0xFFF) == 0 && cancelled.getAsBoolean()) {
+                    throw new java.util.concurrent.CancellationException(
+                            "load cancelled after " + rows + " rows into " + schemaQualifiedTable);
+                }
                 line.setLength(0);
                 for (int i = 1; i <= colCount; i++) {
                     if (i > 1) line.append(',');

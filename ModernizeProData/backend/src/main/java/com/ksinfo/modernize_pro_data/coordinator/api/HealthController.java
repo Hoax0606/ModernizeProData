@@ -34,6 +34,12 @@ public class HealthController {
     @Value("${modernize.mode}")
     private String mode;
 
+    /** Coordinator self user — 이 username 으로 배정된 run 은 Coordinator 프로세스 안에서
+     *  local 실행되며 Worker daemon 으로 등록/heartbeat 하지 않는다. FE 가 Execution Overview
+     *  의 online dot 을 그릴 때, 이 username 은 worker_node 가 없어도 항상 online 으로 표시. */
+    @Value("${modernize.coordinator.self-username:master}")
+    private String coordinatorSelfUsername;
+
     private final HardwareFingerprint hardwareFingerprint;
     private final WorkerBootstrap workerBootstrap;
     private final LicenseService licenseService;
@@ -52,6 +58,7 @@ public class HealthController {
         java.util.LinkedHashMap<String, Object> body = new java.util.LinkedHashMap<>();
         body.put("name", appName);
         body.put("mode", mode);
+        body.put("coordinatorSelfUsername", coordinatorSelfUsername);
         body.put("javaVersion", System.getProperty("java.version"));
         body.put("osName", System.getProperty("os.name"));
         body.put("defaultLanguage", defaultLang);

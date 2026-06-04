@@ -43,6 +43,15 @@ export interface MappingReportResult {
   errorHint: string | null;
 }
 
+/** BE MappingProgressService.ProjectMappingProgress 와 1:1. Site Overview 진행률 집계. */
+export interface SiteMappingProgress {
+  projectId: string;
+  totalTables: number;
+  totalColumns: number;
+  mappedColumns: number;
+  readyTables: number;
+}
+
 export interface MappingTableBindingSourceDto {
   id: string;
   ordinal: number;
@@ -209,6 +218,12 @@ export const mappingImportApi = {
   listBindings: (projectId: string): Promise<MappingTableBindingDto[]> =>
     unwrap(api.get<ApiResponse<MappingTableBindingDto[]>>(
       `/api/v1/projects/${encodeURIComponent(projectId)}/mapping/bindings`,
+    )),
+
+  /** Site Overview 진행률 — 프로젝트별 mapped/total 을 BE 가 한 번에 집계 (N×3 호출 대체). */
+  siteMappingProgress: (siteId: string): Promise<SiteMappingProgress[]> =>
+    unwrap(api.get<ApiResponse<SiteMappingProgress[]>>(
+      `/api/v1/sites/${encodeURIComponent(siteId)}/mapping-progress`,
     )),
 
   /** Rebuild all bindings from current mapping_rules (idempotent — safe to call any time). */

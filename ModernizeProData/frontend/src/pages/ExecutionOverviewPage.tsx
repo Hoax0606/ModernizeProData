@@ -15,6 +15,7 @@ import { overviewApi, type ProjectExecMetrics } from '../api/executionOverview';
 import { useExecutionPreflightStore } from '../store/executionPreflight';
 import { runsApi } from '../api/runs';
 import { workerApi, type WorkerSummaryDto } from '../api/worker';
+import { healthApi } from '../api/auth';
 
 const PHASES: Project['phase'][] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
 
@@ -174,6 +175,15 @@ export function ExecutionOverviewPage() {
     return () => window.clearInterval(id);
   }, [isMaster, loadWorkers]);
 
+  // Coordinator self username — 이 username 의 run 은 Coordinator 안에서 local 실행이라
+  // worker_node heartbeat 가 없다. online dot 을 worker heartbeat 로만 판정하면 항상
+  // 빨강 (거짓 음성). self username 은 Coordinator 가 살아있는 한 = 지금 이 응답을 주는
+  // 노드라 정의상 online → 별도로 green 처리 (2026-06-04). mount 1회 fetch.
+  const [selfUsername, setSelfUsername] = useState<string | null>(null);
+  useEffect(() => {
+    healthApi.info().then((i) => setSelfUsername(i.coordinatorSelfUsername ?? null)).catch(() => {});
+  }, []);
+
   // username -> 가장 최근 heartbeat 받은 worker. online 판정은 lastSeenAt 90s 기준.
   const workerByUsername = useMemo(() => {
     const map = new Map<string, WorkerSummaryDto>();
@@ -187,6 +197,8 @@ export function ExecutionOverviewPage() {
   const ONLINE_TIMEOUT_MS = 90_000;
   const isWorkerOnline = (username: string | null | undefined): boolean => {
     if (!username) return false;
+    // Coordinator self user 는 worker_node 없이도 항상 online (이 화면을 주는 노드 그 자체).
+    if (selfUsername && username === selfUsername) return true;
     const w = workerByUsername.get(username);
     if (!w || w.status !== 'REGISTERED' || !w.lastSeenAt) return false;
     return Date.now() - new Date(w.lastSeenAt).getTime() <= ONLINE_TIMEOUT_MS;

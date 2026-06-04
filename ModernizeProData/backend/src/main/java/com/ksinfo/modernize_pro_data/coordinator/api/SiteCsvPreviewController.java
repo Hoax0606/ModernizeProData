@@ -292,7 +292,9 @@ public class SiteCsvPreviewController {
         List<List<String>> rows = new ArrayList<>();
         boolean truncated = false;
 
-        try (Statement st = duckDbService.statement();
+        // 요청별 격리 connection — 공유 connection 동시 사용 시 pending result 무효화 회피.
+        try (java.sql.Connection conn = duckDbService.requestConnection();
+             Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(sql)) {
             ResultSetMetaData md = rs.getMetaData();
             int colCount = md.getColumnCount();

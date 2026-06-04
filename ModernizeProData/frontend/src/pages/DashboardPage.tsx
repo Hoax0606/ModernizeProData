@@ -194,15 +194,20 @@ function ProjectDashboard({ project }: { project: import('../store/workspace').P
   // BE truth — mapping store 는 MappingPage 방문 시에만 hydrate 되므로, 새 세션에서
   // Dashboard 먼저 열면 전부 unbound 로 보이는 stale 버그 (2026-06-03). server rules /
   // bindings 를 직접 fetch 해 store 미존재 테이블의 fallback 으로 사용.
+  // refetchOnMount:'always' — Mapping 편집 후 Dashboard 로 돌아올 때마다(route remount)
+  // 무조건 최신 rules/bindings 재조회 → 매핑 진행률 거의 실시간 (편집은 항상 MappingPage
+  // 에서 일어나고 Dashboard 는 그 뒤에 열리므로). idle 폴링 0 (2026-06-04).
   const serverRulesQuery = useQuery({
     queryKey: ['mapping-rules', project.id],
     queryFn: () => mappingImportApi.listRules(project.id),
     staleTime: 10_000,
+    refetchOnMount: 'always',
   });
   const serverBindingsQuery = useQuery({
     queryKey: ['mapping-bindings', project.id],
     queryFn: () => mappingImportApi.listBindings(project.id),
     staleTime: 10_000,
+    refetchOnMount: 'always',
   });
   const serverRules = serverRulesQuery.data;
   const serverBindings = serverBindingsQuery.data;
@@ -691,80 +696,30 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
     setAssigneeDraft({});
   };
 
-  // Per-project mapping stats — TO-BE schema (total) と mapping_rules (mapped) を組み合わせ.
-  // Dashboard と同じ "mapped" 判定 (skip 除外 / null & default 既定 mapped / expression は src or rule あり).
-  const [mappingStats, setMappingStats] = useState<Record<string, ProjectMappingStats>>({});
-  const projectIdsKey = useMemo(() => projects.map((p) => p.id).sort().join(','), [projects]);
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      // 같은 site 의 모든 project 의 rules 를 미리 fetch — 자식 binding 의 master 룰 lookup 용.
-      const allRulesByProject = new Map<string, MappingRuleDto[]>();
-      await Promise.all(projects.map(async (p) => {
-        const rs = await mappingImportApi.listRules(p.id).catch(() => [] as MappingRuleDto[]);
-        allRulesByProject.set(p.id, rs);
-      }));
-
-      const entries = await Promise.all(projects.map(async (p) => {
-        const [schema, bindings] = await Promise.all([
-          tobeDdlApi.get(p.id).catch(() => ({ latestImport: null, tables: [] })),
-          mappingImportApi.listBindings(p.id).catch(() => []),
-        ]);
-        const ownRules = allRulesByProject.get(p.id) ?? [];
-        // 자식 binding 의 master 룰을 effective rules 에 합산 — 자식 mapping_rules 는 link 시
-        // wipe 되어 비어있으므로 master 룰만 카운트되며, dashboard 가 master 진행도 자동 반영.
-        const effectiveRules: MappingRuleDto[] = [...ownRules];
-        for (const b of bindings) {
-          if (!b.sharedFromProjectId) continue;
-          const masterRules = allRulesByProject.get(b.sharedFromProjectId) ?? [];
-          for (const mr of masterRules) {
-            if (mr.tobeTable.toLowerCase() === b.tobeTable.toLowerCase()
-                && (mr.tobeSchema ?? '').toLowerCase() === (b.tobeSchema ?? '').toLowerCase()) {
-              effectiveRules.push(mr);
-            }
-          }
-        }
-
-        // DDL 側を qualified ("schema.table") と short ("table") の 2 索引にしておき,
-        // rules → DDL を MappingPage と同じく qualified-first, short-fallback で解決.
-        // (rules.tobeSchema が null / DDL schemaName が空 のずれを吸収.)
-        const ddlByQualified = new Map<string, string>(); // → tableId
-        const ddlByShort = new Map<string, string>();
-        for (const tw of schema.tables) {
-          const qualified = ((tw.table.schemaName ? tw.table.schemaName + '.' : '') + tw.table.physicalName).toLowerCase();
-          const short = tw.table.physicalName.toLowerCase();
-          ddlByQualified.set(qualified, tw.table.id);
-          if (!ddlByShort.has(short)) ddlByShort.set(short, tw.table.id);
-        }
-        const mappedByTableId = new Map<string, number>();
-        for (const r of effectiveRules) {
-          if (!isMappingRuleMapped(r)) continue;
-          const qualified = ((r.tobeSchema ? r.tobeSchema + '.' : '') + r.tobeTable).toLowerCase();
-          const short = r.tobeTable.toLowerCase();
-          const tableId = ddlByQualified.get(qualified) ?? ddlByShort.get(short);
-          if (!tableId) continue; // DDL 側に居ない rule は無視 (古い import 残骸など)
-          mappedByTableId.set(tableId, (mappedByTableId.get(tableId) ?? 0) + 1);
-        }
-        let totalColumns = 0;
-        let mappedColumns = 0;
-        let readyTables = 0;
-        for (const tw of schema.tables) {
-          const total = tw.columns.length;
-          const m = Math.min(mappedByTableId.get(tw.table.id) ?? 0, total);
-          totalColumns += total;
-          mappedColumns += m;
-          if (total > 0 && m >= total) readyTables++;
-        }
-        return [p.id, { totalTables: schema.tables.length, totalColumns, mappedColumns, readyTables }] as const;
-      }));
-
-      if (!alive) return;
-      setMappingStats(Object.fromEntries(entries));
-    })();
-    return () => { alive = false; };
-    // projects 객체 reference 가 자주 바뀌므로 id key 만 dep 로.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectIdsKey]);
+  // Per-project mapping stats — BE 집계 endpoint 1 호출 (2026-06-04). 이전엔 프로젝트마다
+  // DDL+rules+bindings 3 API 를 client 에서 호출(N×3 라운드트립)해 진행률 막대가 늦게 떴다.
+  // mapped 판정은 BE MappingProgressService 가 isMappingRuleMapped 와 동치로 수행.
+  // refetchOnMount:'always' — 매핑 편집 후 이 화면 열 때마다 최신 (idle 폴링 0). MappingPage
+  // 의 invalidateQueries(['site-mapping-progress']) 로도 갱신.
+  const mappingProgressQuery = useQuery({
+    queryKey: ['site-mapping-progress', activeSiteId],
+    enabled: !!activeSiteId,
+    queryFn: () => mappingImportApi.siteMappingProgress(activeSiteId!),
+    staleTime: 10_000,
+    refetchOnMount: 'always',
+  });
+  const mappingStats: Record<string, ProjectMappingStats> = useMemo(() => {
+    const m: Record<string, ProjectMappingStats> = {};
+    for (const r of mappingProgressQuery.data ?? []) {
+      m[r.projectId] = {
+        totalTables: r.totalTables,
+        totalColumns: r.totalColumns,
+        mappedColumns: r.mappedColumns,
+        readyTables: r.readyTables,
+      };
+    }
+    return m;
+  }, [mappingProgressQuery.data]);
 
 
   // 필터 — 그리드 위에 표시. KPI · phase mix 는 전체 기준.

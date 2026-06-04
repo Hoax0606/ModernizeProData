@@ -45,6 +45,14 @@ spring:
         # query count/time 통계 — 측정 cycle 에만 HIBERNATE_STATS=true 로 켠다.
         # 항상 켜면 5-10% overhead (Heisenberg). default false.
         generate_statistics: ${HIBERNATE_STATS:false}
+        # JDBC batch — mapping import 의 saveAll(rules/codes/bindings) 이 행마다 개별
+        # INSERT 왕복하던 병목 해소 (2026-06-04). 엔티티 ID 가 앱-할당 String 이라
+        # (IDENTITY/SEQUENCE 아님) batch insert 가 그대로 적용된다. order_* 는 같은
+        # 테이블/문장끼리 묶어 batch 효율을 높인다.
+        jdbc:
+          batch_size: 500
+        order_inserts: true
+        order_updates: true
 
   # ── Flyway — 스키마 마이그레이션 단독 관리 ───────────────────────────
   flyway:

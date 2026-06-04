@@ -200,6 +200,25 @@ public class DuckDbService {
     }
 
     /**
+     * 사용자 요청 (Mapping Report / Trial / CSV preview) 용 요청별 격리 connection.
+     *
+     * 공유 connection 은 한 쿼리의 ResultSet 을 읽는 중 다른 스레드가 쿼리를 실행하면
+     * pending result 가 무효화돼 "Attempting to execute an unsuccessful or closed
+     * pending query result" 가 난다 (2026-06-04 — 다중 사용자 Report 동시 실행에서 발생).
+     * duplicate() + UDF 등록으로 요청마다 독립 세션을 쓴다. caller 가 close() 책임.
+     */
+    public synchronized Connection requestConnection() throws SQLException {
+        Connection dup = ((org.duckdb.DuckDBConnection) getConnection()).duplicate();
+        try {
+            UdfRegistry.registerAll(dup);
+        } catch (Exception e) {
+            // UDF 등록 실패 시에도 connection 자체는 사용 가능 — UDF 없는 쿼리는 정상.
+            log.warn("DuckDB UDF 등록 실패 (request connection): {}", e.getMessage());
+        }
+        return dup;
+    }
+
+    /**
      * 도구 기동 시점에 호출되는 smoke test.
      * DuckDB 가 정상적으로 임베디드 구동되는지 검증한다.
      */

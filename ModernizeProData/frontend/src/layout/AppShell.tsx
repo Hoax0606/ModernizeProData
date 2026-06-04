@@ -29,6 +29,7 @@ import { useSnapshotsStore } from '../store/snapshots';
 import { useAsisDdlStore } from '../store/asisDdl';
 import { useTobeDdlStore } from '../store/tobeDdl';
 import { useAuditLogStore } from '../store/auditLog';
+import { createWebSocket, subscribe } from '../api/ws';
 import { useNotificationStore } from '../store/notifications';
 import { useNotificationPrefsStore, isEventEnabled, actionToEventKey } from '../store/notificationPreferences';
 import { useSettingsStore, type ProjectSort } from '../store/settings';
@@ -180,6 +181,35 @@ export function AppShell() {
     const id = setInterval(() => void heavySync(), 30_000);
     return () => clearInterval(id);
   }, [fetchSites, fetchSnapshots]);
+
+  // 알림 즉시화 (2026-06-04) — BE 가 audit_log commit 後 /topic/notifications 로 push.
+  // 수신 시 그 site 의 audit 를 즉시 refetch → 토스트가 30초 폴링 안 기다리고 바로 뜸.
+  // WS 끊겨도 30초 heavySync 가 fallback. 350ms debounce 로 push 폭주 시 묶음.
+  useEffect(() => {
+    const client = createWebSocket();
+    let sub: { unsubscribe(): void } | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const refetch = () => {
+      const siteId = useWorkspaceStore.getState().activeSiteId;
+      if (siteId) void useAuditLogStore.getState().fetchBySite(siteId);
+    };
+    client.onConnect = () => {
+      try {
+        sub = subscribe(client, '/topic/notifications', () => {
+          if (timer != null) return;
+          timer = setTimeout(() => { timer = null; refetch(); }, 350);
+        });
+      } catch { /* polling fallback */ }
+    };
+    client.onStompError = () => { /* polling fallback */ };
+    client.onWebSocketError = () => { /* polling fallback */ };
+    client.activate();
+    return () => {
+      if (timer != null) clearTimeout(timer);
+      try { sub?.unsubscribe(); } catch { /* ignore */ }
+      try { void client.deactivate(); } catch { /* ignore */ }
+    };
+  }, []);
 
   useEffect(() => {
     const lightSync = async () => {

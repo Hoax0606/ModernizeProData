@@ -339,6 +339,13 @@ function PSNotify({ project }: { project: Project }) {
     { k: 'snapshot.pending', l: t('projectSettings.notify.event.snapPending.label'),     d: t('projectSettings.notify.event.snapPending.desc') },
     { k: 'snapshot.approved',l: t('projectSettings.notify.event.snapApproved.label'),    d: t('projectSettings.notify.event.snapApproved.desc') },
     { k: 'snapshot.rejected',l: t('projectSettings.notify.event.snapRejected.label'),    d: t('projectSettings.notify.event.snapRejected.desc') },
+    { k: 'snapshot.created', l: t('projectSettings.notify.event.snapCreated.label'),     d: t('projectSettings.notify.event.snapCreated.desc') },
+    { k: 'snapshot.deleted', l: t('projectSettings.notify.event.snapDeleted.label'),     d: t('projectSettings.notify.event.snapDeleted.desc') },
+    { k: 'snapshot.baseline',l: t('projectSettings.notify.event.snapBaseline.label'),    d: t('projectSettings.notify.event.snapBaseline.desc') },
+    { k: 'ddl.imported',     l: t('projectSettings.notify.event.ddlImported.label'),     d: t('projectSettings.notify.event.ddlImported.desc') },
+    { k: 'project.created',  l: t('projectSettings.notify.event.projectCreated.label'),  d: t('projectSettings.notify.event.projectCreated.desc') },
+    { k: 'project.phase',    l: t('projectSettings.notify.event.phaseChanged.label'),    d: t('projectSettings.notify.event.phaseChanged.desc') },
+    { k: 'project.assignee', l: t('projectSettings.notify.event.assigneeChanged.label'), d: t('projectSettings.notify.event.assigneeChanged.desc') },
   ];
 
   const subsMap          = useNotificationPrefsStore((s) => s.subs);

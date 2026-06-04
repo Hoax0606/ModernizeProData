@@ -68,6 +68,13 @@ public class MappingImportService {
     private final MappingCodeMapRepository codeRepo;
     private final MappingTableBindingRepository bindingRepo;
     private final com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository ddlTableRepo;
+    /** self proxy — CSV 파싱(트랜잭션 밖) 후 persistImport(@Transactional) 를 프록시 경유로
+     *  호출해 트랜잭션 advice 가 적용되게 한다. 직접 this.persistImport 호출은 self-invocation
+     *  이라 @Transactional 이 무시됨. ObjectProvider = lazy → 순환참조 없음. */
+    private final org.springframework.beans.factory.ObjectProvider<MappingImportService> selfProvider;
+    /** persistImport 의 project 단위 advisory lock 용 (동시 import / setBaseline 직렬화). */
+    @jakarta.persistence.PersistenceContext
+    private jakarta.persistence.EntityManager entityManager;
 
     /**
      * @param columnCsv    column_mapping.csv 의 원본 바이트
@@ -92,7 +99,6 @@ public class MappingImportService {
      * rule/binding 만 갱신하고(다른 테이블·수동 수정 보존), code 는 그 테이블이 참조하는
      * domain 만 갱신한다.
      */
-    @Transactional
     public MappingImport importFromCsv(
             String projectId,
             byte[] columnCsv,
@@ -112,6 +118,11 @@ public class MappingImportService {
         boolean hasColumn = columnCsv != null && columnCsv.length > 0;
         boolean hasCode   = codeCsv   != null && codeCsv.length   > 0;
 
+        // ── 파싱 단계 (2026-06-04: 트랜잭션 밖으로 분리) ──────────────────
+        // DuckDB CSV 파싱은 대형 매핑정의서에서 느린데, 이전엔 이게 @Transactional 안에서
+        // 돌아 메타 DB connection + 그 project 의 mapping 테이블 lock 을 파싱 내내 점유 →
+        // 다중 사용자 import 시 병목. 파싱(읽기 only)을 밖으로 빼고, DB 쓰기만 짧은
+        // 트랜잭션(persistImport)으로 격리한다.
         Path columnTmp = null;
         Path codeTmp = null;
         try {
@@ -152,6 +163,55 @@ public class MappingImportService {
                 codeTmp = writeTemp(codeCsv, "code_mapping");
                 codes = parseCodeCsv(codeTmp);
             }
+
+            // ── 영속 단계 (짧은 @Transactional) — self proxy 경유로 호출 ──
+            return selfProvider.getObject().persistImport(
+                    projectId, parsed, codes, columnCsv, codeCsv,
+                    columnFilename, codeFilename, userName, tobeTableFilter, hasColumn, hasCode);
+        } catch (ApiException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("Mapping import failed", e);
+            throw new ApiException(
+                    "MAPPING_IMPORT_FAILED",
+                    "임포트 실패: " + e.getMessage(),
+                    HttpStatus.INTERNAL_SERVER_ERROR);
+        } finally {
+            deleteQuiet(columnTmp);
+            deleteQuiet(codeTmp);
+        }
+    }
+
+    /**
+     * 영속 단계 — 파싱 결과(parsed/codes)를 메타 DB 에 기록. 파싱이 끝난 in-memory 데이터만
+     * 다루므로 트랜잭션이 짧다 (DuckDB 파싱은 호출자가 트랜잭션 밖에서 이미 수행).
+     * public + self proxy 호출이라 @Transactional advice 적용됨.
+     */
+    @Transactional
+    public MappingImport persistImport(
+            String projectId,
+            ParsedRules parsed,
+            ParsedCodes codes,
+            byte[] columnCsv,
+            byte[] codeCsv,
+            String columnFilename,
+            String codeFilename,
+            String userName,
+            String tobeTableFilter,
+            boolean hasColumn,
+            boolean hasCode
+    ) {
+        {
+            // project 단위 직렬화 — import 가 bindings/codes/rules 를 deleteAll + 재삽입하는데,
+            // 같은 project 에 동시 import (또는 setBaseline 의 restoreMapping) 가 겹치면 한쪽의
+            // cascade DELETE 가 다른 tx 가 이미 지운 MappingTableBindingSource 행을 건드려
+            // "Row was updated or deleted by another transaction" (StaleObjectStateException) → 500.
+            // SnapshotController.setBaselineTx 와 동일한 advisory xact lock 키(hashtext(projectId))를
+            // 잡아 같은 project 의 매핑 rewrite 를 직렬화 (다른 project 는 다른 키라 병렬 유지).
+            // transaction 종료 시 자동 해제. (2026-06-04)
+            entityManager.createNativeQuery("SELECT pg_advisory_xact_lock(hashtext(?1))")
+                    .setParameter(1, projectId)
+                    .getSingleResult();
 
             // 1) MappingImport 레코드 (업로드한 슬롯만 채움)
             MappingImport mi = new MappingImport();
@@ -345,17 +405,6 @@ public class MappingImportService {
             log.info("Mapping import done — project={} rules={} codeMaps={} (column={}, code={})",
                     projectId, parsed.rules.size(), codes.codes.size(), hasColumn, hasCode);
             return mi;
-        } catch (ApiException e) {
-            throw e;
-        } catch (Exception e) {
-            log.warn("Mapping import failed", e);
-            throw new ApiException(
-                    "MAPPING_IMPORT_FAILED",
-                    "임포트 실패: " + e.getMessage(),
-                    HttpStatus.INTERNAL_SERVER_ERROR);
-        } finally {
-            deleteQuiet(columnTmp);
-            deleteQuiet(codeTmp);
         }
     }
 
@@ -405,7 +454,9 @@ public class MappingImportService {
                 + "null_padding=true, strict_mode=false, ignore_errors=true, "
                 + "max_line_size=10000000)";
 
-        try (Statement st = duckDbService.statement();
+        // 요청별 격리 connection — 공유 connection 동시 사용 시 pending result 무효화 회피.
+        try (java.sql.Connection conn = duckDbService.requestConnection();
+             Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(sql)) {
             ResultSetMetaData md = rs.getMetaData();
             for (int i = 1; i <= md.getColumnCount(); i++) {
@@ -551,7 +602,9 @@ public class MappingImportService {
                 + "null_padding=true, strict_mode=false, ignore_errors=true, "
                 + "max_line_size=10000000)";
 
-        try (Statement st = duckDbService.statement();
+        // 요청별 격리 connection — 공유 connection 동시 사용 시 pending result 무효화 회피.
+        try (java.sql.Connection conn = duckDbService.requestConnection();
+             Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(sql)) {
             ResultSetMetaData md = rs.getMetaData();
             for (int i = 1; i <= md.getColumnCount(); i++) {
