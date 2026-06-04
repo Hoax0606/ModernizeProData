@@ -1500,6 +1500,12 @@ function HistoryTablesCell({ h, t }: { h: RunHistoryDto; t: (k: string, v?: Reco
           {s.running}
         </span>
       )}
+      {s.pending > 0 && (
+        /* Pipeline 의 idle stage 와 동일 톤 (회색) — 후속 stage 미실행 (abort 등). */
+        <span style={{ ...summaryBadgeStyle, color: 'var(--text-3)', background: 'var(--panel-2)', borderColor: 'var(--border-strong)' }}>
+          {s.pending}·
+        </span>
+      )}
     </span>
   );
 }
@@ -1544,16 +1550,21 @@ function HistoryRunDrilldown({ runId, t }: { runId: string; t: (k: string, v?: R
         <tbody>
           {data.map((r) => {
             const fullName = r.tobeSchema ? `${r.tobeSchema}.${r.tobeTable}` : r.tobeTable;
+            /* pending = 일부 stage 만 처리됨 (abort 등). Pipeline 의 idle tone 과 동일 (회색).
+               표시 라벨도 pipeline 의 queued 와 일치 — layer-specific terminology 규칙 따름. */
             const statusColor = r.status === 'success' ? '#166534'
               : r.status === 'failed' ? '#991b1b'
+              : r.status === 'pending' ? 'var(--text-3)'
               : '#92400e';
             const statusIcon = r.status === 'success' ? '✓'
               : r.status === 'failed' ? '✗'
+              : r.status === 'pending' ? '·'
               : '';
+            const statusLabel = r.status === 'pending' ? 'queued' : r.status;
             return (
               <tr key={fullName}>
                 <td style={{ ...drillStyles.td, color: statusColor, fontWeight: 700 }}>
-                  {statusIcon} {r.status}
+                  {statusIcon} {statusLabel}
                 </td>
                 <td style={drillStyles.td}>{fullName}</td>
                 <td style={{ ...drillStyles.td, textAlign: 'right' }}>{r.rows.toLocaleString()}</td>

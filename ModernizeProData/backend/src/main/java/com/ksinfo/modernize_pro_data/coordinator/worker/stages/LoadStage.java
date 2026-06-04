@@ -129,6 +129,7 @@ public class LoadStage implements StageRunner {
         if (parallelism <= 1 || bindings.size() <= 1) {
             // 순차 (기본)
             for (MappingTableBinding b : bindings) {
+                ctx.throwIfCancelled();   // abort/timeout 신호 시 RunCancelledException → LocalWorkerExecutor 가 stage failed 마킹.
                 if (loadBinding(ctx, stage, b, dbConfig, tempDir, columnsByTable)) success.incrementAndGet();
                 else failed.incrementAndGet();
                 stage.setTablesSuccess(success.get());
@@ -144,6 +145,7 @@ public class LoadStage implements StageRunner {
             try {
                 List<Future<?>> futures = new ArrayList<>();
                 for (MappingTableBinding b : bindings) {
+                    ctx.throwIfCancelled();   // submit 직전 — 이미 cancel 됐으면 새 task 안 띄우고 main thread 에서 RunCancelledException.
                     futures.add(pool.submit(() -> {
                         if (loadBinding(ctx, stage, b, dbConfig, tempDir, columnsByTable)) success.incrementAndGet();
                         else failed.incrementAndGet();
@@ -257,10 +259,12 @@ public class LoadStage implements StageRunner {
             String pgQualified = pgTableName(tobeSchema, tobeTable);
             long rows;
             try (Connection conn = pgCopyManager.openConnection(dbConfig)) {
+                ctx.throwIfCancelled();   // (D) sub-step — PG connection 후 본 적재 직전 cancel 체크.
                 ensurePgTable(ctx, conn, tobeSchema, tobeTable, columnsByTable);
                 boolean fkDisabled = pgCopyManager.tryDisableConstraints(conn);
                 try {
                     pgCopyManager.truncate(conn, pgQualified);
+                    ctx.throwIfCancelled();   // (D) sub-step — PG COPY (대용량 적재) 직전 cancel 체크.
                     try (Connection duck = duckDbService.duplicateConnection();
                          Statement duckSt = duck.createStatement();
                          ResultSet rs = duckSt.executeQuery("SELECT * FROM " + fqTobeDuck)) {

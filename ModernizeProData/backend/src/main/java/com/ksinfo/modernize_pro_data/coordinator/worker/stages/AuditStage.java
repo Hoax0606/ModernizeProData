@@ -116,6 +116,7 @@ public class AuditStage implements StageRunner {
         boolean separateViolations = true;
 
         for (MappingTableBinding binding : ctx.getBindings()) {
+            ctx.throwIfCancelled();   // abort/timeout 신호 시 RunCancelledException → LocalWorkerExecutor 가 stage failed 마킹.
             OffsetDateTime tableStart = OffsetDateTime.now();
             String tobeSchema = binding.getTobeSchema() == null ? "" : binding.getTobeSchema();
             String tobeTable  = binding.getTobeTable();
@@ -152,6 +153,7 @@ public class AuditStage implements StageRunner {
                     allChecks.addAll(buildColumnChecks(col));
                 }
                 if (!allChecks.isEmpty()) {
+                    ctx.throwIfCancelled();   // (D) sub-step — column×4 check 풀스캔 통합 직전 cancel 체크.
                     long[] counts = runAggregatedChecks(fqTobe, allChecks);
                     for (int i = 0; i < allChecks.size(); i++) {
                         if (counts[i] > 0) {
