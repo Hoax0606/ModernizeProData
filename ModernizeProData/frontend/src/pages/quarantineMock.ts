@@ -60,6 +60,11 @@ export interface QuarantineHistoryEntry {
   acked: boolean;
   ackedBy?: string;
   ackedPhase?: 'test' | 'rehearsal' | 'cutover';
+  /** archive expand 시 그 옛 entry 의 진짜 sample 표시. BE 가 sample_data 에서 unwrap. */
+  columns?: string[];
+  columnRoles?: QuarantineColumnRole[];
+  sampleRows?: QuarantineCell[][];
+  toBeValues?: QuarantineCell[];
 }
 
 export interface QuarantineGroup {

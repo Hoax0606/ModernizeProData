@@ -151,7 +151,8 @@ public class QuarantineController {
                         g.firstSeenAt(), g.table(),
                         g.columns(), g.columnRoles(), g.sampleRows(), g.toBeValues(),
                         g.rowCount(),
-                        p.getId(), p.getName()));
+                        p.getId(), p.getName(),
+                        g.history()));
             }
         }
         return ApiResponse.ok(result);
@@ -211,6 +212,41 @@ public class QuarantineController {
         String stageLabel = s.get("stageLabel") instanceof String sl ? sl : stageKeyFallback;
         Long csvMtimeMs = s.get("csvMtimeMs") instanceof Number n  ? n.longValue()  : null;
         Long csvSize    = s.get("csvSize")    instanceof Number n2 ? n2.longValue() : null;
+        /* History — 같은 (binding, rule_name) 의 옛 run entry. 현재 run 제외, 최신순.
+           각 entry 의 acked 상태는 그 run 의 explicit ack 가 있는지로 단순 판정 (carry-over 무관).
+           N+1 회피: 한 entry 당 1 회 query. group 수 적으면 OK. group 수 많을 때 batch 화 향후. */
+        List<HistoryEntryView> history = quarantineRepo
+                .findByBindingIdAndRuleNameAndCreatedAtLessThanAndRunIdNotOrderByCreatedAtDesc(
+                        e.getBindingId(), e.getRuleName(), e.getCreatedAt(), e.getRunId())
+                .stream()
+                .map(h -> {
+                    Map<String, Object> hs = h.getSampleData() == null ? Map.of() : h.getSampleData();
+                    String hReason = (String) hs.getOrDefault("reason", h.getRuleName());
+                    /* 옛 run 의 runType 을 phase 로 사용 → findExplicitAck 의 정책 7 phase 매칭. */
+                    RunHistory hRun = runRepo.findById(h.getRunId()).orElse(null);
+                    Optional<QuarantineAcknowledgment> hAck = (hRun == null || hRun.getRunType() == null)
+                            ? Optional.empty()
+                            : ackService.findExplicitAck(hRun.getProjectId(), h.getBindingId(),
+                                                         h.getRuleName(), hReason, hRun.getRunType());
+                    @SuppressWarnings("unchecked")
+                    List<String> hCols = (List<String>) hs.getOrDefault("columns", List.of());
+                    @SuppressWarnings("unchecked")
+                    List<String> hRoles = (List<String>) hs.getOrDefault("columnRoles", List.of());
+                    @SuppressWarnings("unchecked")
+                    List<List<Object>> hSample = (List<List<Object>>) hs.getOrDefault("sampleRows", List.of());
+                    @SuppressWarnings("unchecked")
+                    List<Object> hToBe = (List<Object>) hs.get("toBeValues");
+                    return new HistoryEntryView(
+                            h.getRunId(),
+                            h.getCreatedAt(),
+                            h.getRowCount() == null ? 0L : h.getRowCount(),
+                            hAck.isPresent(),
+                            hAck.map(QuarantineAcknowledgment::getAcknowledgedBy).orElse(null),
+                            hAck.map(QuarantineAcknowledgment::getPhase).orElse(null),
+                            hCols, hRoles, hSample, hToBe
+                    );
+                })
+                .toList();
         return new QuarantineGroupView(
                 e.getId(),
                 e.getBindingId(),
@@ -225,7 +261,7 @@ public class QuarantineController {
                 (List<List<Object>>) s.getOrDefault("sampleRows", List.of()),
                 (List<Object>) s.get("toBeValues"),
                 e.getRowCount() == null ? 0L : e.getRowCount(),
-                csvMtimeMs, csvSize, ack, priorAckCount
+                csvMtimeMs, csvSize, ack, priorAckCount, history
         );
     }
 
@@ -248,7 +284,8 @@ public class QuarantineController {
             Long csvMtimeMs,                  // AS-IS CSV fingerprint — FE 가 ack 시 그대로 전송 (carry-over)
             Long csvSize,
             AckInfoView ack,                  // null = ack 없음. 같은 (binding, rule, reason) 의 carry-over ack
-            int priorAckCount                 // fingerprint 무관 같은 group 의 explicit ack 총 개수. ack==null + priorAckCount>0 = 다른 CSV 의 ack 만 있음 → FE 가 hint 표시
+            int priorAckCount,                // fingerprint 무관 같은 group 의 explicit ack 총 개수. ack==null + priorAckCount>0 = 다른 CSV 의 ack 만 있음 → FE 가 hint 표시
+            List<HistoryEntryView> history    // 같은 (binding, rule_name) 의 옛 run entry. FE archive panel 용
     ) {}
 
     /** Group ack 메타 — entry 가 속한 group 의 명시 ack 정보. FE 가 표시 + 버튼 disable 용. */
@@ -257,6 +294,21 @@ public class QuarantineController {
             String acknowledgedBy,
             OffsetDateTime acknowledgedAt,
             String phase                      // test / rehearsal / cutover
+    ) {}
+
+    /** 옛 run 의 quarantine entry summary — archive panel 용. FE QuarantineHistoryEntry 와 매칭.
+     *  archive expand 시 그 옛 run 시점 의 진짜 sample 보여주기 위해 sample_data 도 unwrap. */
+    public record HistoryEntryView(
+            String runId,
+            OffsetDateTime createdAt,
+            long rowCount,
+            boolean acked,                    // 같은 group key 의 explicit ack 있으면 true (단순화 — phase 별 정확 lookup 은 향후)
+            String ackedBy,                   // ack 한 운영자. null 가능
+            String ackedPhase,                // test / rehearsal / cutover. null 가능
+            List<String> columns,             // 그 옛 entry 의 sample 표 헤더
+            List<String> columnRoles,
+            List<List<Object>> sampleRows,    // 그 옛 entry 의 sample rows (archive expand 표시)
+            List<Object> toBeValues
     ) {}
 
     public record SiteQuarantineGroupView(
@@ -274,6 +326,7 @@ public class QuarantineController {
             List<Object> toBeValues,
             long rowCount,
             String projectId,
-            String projectName
+            String projectName,
+            List<HistoryEntryView> history    // 같은 (binding, rule_name) 의 옛 run entry. FE archive panel 용
     ) {}
 }

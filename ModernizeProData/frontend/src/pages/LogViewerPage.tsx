@@ -80,12 +80,10 @@ export function LogViewerPage() {
       ?? [...projectMapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
     return active?.executionContext?.runId ?? '';
   }, [snapshots, activeProjectId, pinnedIds]);
-  /* 활성 snapshot 의 박제된 runId 가 있으면 그것 우선. 박제 없으면 — 그 snapshot 으로 한 번도
-     run 안 됐다는 뜻이라 empty 가 맞다 (사용자 결정 — 다른 snapshot 의 run logs 가 잘못 보이면 안 됨).
-     runHistory[0] (가장 최근 run) 은 fallback 으로도 안 씀: pin 을 옛 snapshot 으로 옮기면
-     runHistory[0] 는 새 snapshot 의 run 이라 stale. */
-  const runId = snapshotFallbackRunId;
-  void runHistory; // useQuery 는 다른 부수효과 (WS invalidate 캐시 키) 를 위해 유지.
+  /* 활성 snapshot 의 박제된 runId 가 있으면 그것 우선. 박제 없으면 (snapshot 으로 한 번도
+     run 안 됐거나 옛 run 정보 누락) project 의 latest run history 로 fallback — quarantine /
+     로그가 비어 보이는 confusion 회피. */
+  const runId = snapshotFallbackRunId || (runHistory?.[0]?.id ?? '');
 
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -1478,14 +1476,14 @@ function QuarantineHistoryArchive({ groups, severityFilter, t }: {
       acked: boolean;
       ackedBy?: string;
       ackedPhase?: string;
+      columns?: QuarantineGroup['columns'];
+      columnRoles?: QuarantineGroup['columnRoles'];
+      sampleRows?: QuarantineGroup['sampleRows'];
+      toBeValues?: QuarantineGroup['toBeValues'];
     }> = [];
     for (const g of groups) {
       for (const h of g.history ?? []) {
-        /* severity filter 가 history 의 ack 상태에도 적용:
-           - 'warning' tab → unack warning history 만
-           - 'skip'    tab → ack warning history 만
-           - 'error'   tab → error group 의 history (ack 무관 — error 는 ack 시스템 X)
-           - 'all'     tab → 전부 */
+        /* severity filter 가 history 의 ack 상태에도 적용. */
         if (g.severity === 'warning') {
           if (severityFilter === 'warning' && h.acked) continue;
           if (severityFilter === 'skip'    && !h.acked) continue;
@@ -1499,6 +1497,10 @@ function QuarantineHistoryArchive({ groups, severityFilter, t }: {
           acked: h.acked,
           ackedBy: h.ackedBy,
           ackedPhase: h.ackedPhase,
+          columns: h.columns,
+          columnRoles: h.columnRoles,
+          sampleRows: h.sampleRows,
+          toBeValues: h.toBeValues,
         });
       }
     }
@@ -1578,7 +1580,16 @@ function QuarantineHistoryArchive({ groups, severityFilter, t }: {
                             })()}
                           </td>
                         </tr>
-                        {isOpen && (
+                        {isOpen && (() => {
+                          /* archive expand 시 그 옛 entry (h) 의 sample 사용. backend 가 sample 채워줌. */
+                          const hView: QuarantineGroup = {
+                            ...g,
+                            columns: (h.columns && h.columns.length > 0) ? h.columns : g.columns,
+                            columnRoles: (h.columnRoles && h.columnRoles.length > 0) ? h.columnRoles : g.columnRoles,
+                            sampleRows: h.sampleRows ?? g.sampleRows,
+                            toBeValues: h.toBeValues ?? g.toBeValues,
+                          };
+                          return (
                           <tr>
                             <td colSpan={8} style={styles.archiveDetailTd}>
                               <div style={styles.cardExpand}>
@@ -1588,22 +1599,22 @@ function QuarantineHistoryArchive({ groups, severityFilter, t }: {
                                     <thead>
                                       <tr>
                                         <th style={{ ...styles.cardTh, ...styles.cardThTable }}>
-                                          {quarantinePkColumnName(g) ?? t('logs.quarantine.colTable')}
+                                          {quarantinePkColumnName(hView) ?? t('logs.quarantine.colTable')}
                                         </th>
                                         <th style={{ ...styles.cardTh, color: sevColor }}>
                                           {t('logs.quarantine.colAsIs')}
-                                          {quarantineViolatedColumnName(g) && (
-                                            <span style={{ fontWeight: 400, opacity: 0.75 }}> · {quarantineViolatedColumnName(g)}</span>
+                                          {quarantineViolatedColumnName(hView) && (
+                                            <span style={{ fontWeight: 400, opacity: 0.75 }}> · {quarantineViolatedColumnName(hView)}</span>
                                           )}
                                         </th>
                                         <th style={styles.cardTh}>{t('logs.quarantine.colToBe')}</th>
                                       </tr>
                                     </thead>
                                     <tbody>
-                                      {g.sampleRows.map((_, ri) => {
-                                        const pk = quarantineRowPk(g, ri);
-                                        const asIs = quarantineRowAsIs(g, ri);
-                                        const toBe = quarantineRowToBe(g, ri);
+                                      {hView.sampleRows.map((_, ri) => {
+                                        const pk = quarantineRowPk(hView, ri);
+                                        const asIs = quarantineRowAsIs(hView, ri);
+                                        const toBe = quarantineRowToBe(hView, ri);
                                         const asIsNullStyle = { ...styles.nullCell, color: sevColor, background: 'transparent', border: `1px solid ${sevBorder}` };
                                         return (
                                           <tr key={ri}>
@@ -1625,7 +1636,8 @@ function QuarantineHistoryArchive({ groups, severityFilter, t }: {
                               </div>
                             </td>
                           </tr>
-                        )}
+                          );
+                        })()}
                       </Fragment>
                     );
                   })}
