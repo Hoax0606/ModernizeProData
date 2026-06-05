@@ -4,11 +4,7 @@ import { useAuditLogStore, type AuditLogEntry } from '../store/auditLog';
 import { useAuthStore } from '../store/auth';
 import { useWorkspaceStore } from '../store/workspace';
 import { useSettingsStore } from '../store/settings';
-import {
-  useNotificationPrefsStore,
-  isEventEnabled,
-  actionToEventKey,
-} from '../store/notificationPreferences';
+import { isEventEnabled, actionToEventKey } from '../store/notificationPreferences';
 
 interface ToastItem {
   id: string;          // audit log id
@@ -37,7 +33,7 @@ export function NotificationToast() {
   const user = useAuthStore((s) => s.user);
   const globalNotifEnabled = useSettingsStore((s) => s.notifications);
   const globalNotifScope = useSettingsStore((s) => s.notificationScope);
-  const notifPrefSubs = useNotificationPrefsStore((s) => s.subs);
+  const notifDefaults = useSettingsStore((s) => s.notificationDefaults);
 
   const seenIdsRef = useRef<Set<string>>(new Set());
   const initializedRef = useRef(false);
@@ -82,7 +78,7 @@ export function NotificationToast() {
       seenIdsRef.current.add(l.id);
       // Event subscription
       const eventKey = actionToEventKey(l.action);
-      if (eventKey && !isEventEnabled(notifPrefSubs, l.projectId, eventKey)) continue;
+      if (eventKey && !isEventEnabled(notifDefaults, eventKey)) continue;
       // Scope (글로벌)
       if (globalNotifScope === 'mine-only' && user?.username && l.user !== user.username) continue;
 
@@ -90,7 +86,7 @@ export function NotificationToast() {
     }
     if (newItems.length === 0) return;
     setToasts((cur) => [...cur, ...newItems]);
-  }, [allLogs, allProjects, activeSiteId, globalNotifEnabled, notifPrefSubs, globalNotifScope, user?.username]);
+  }, [allLogs, allProjects, activeSiteId, globalNotifEnabled, notifDefaults, globalNotifScope, user?.username]);
 
   // 각 toast 가 일정 시간 후 자동 제거
   useEffect(() => {

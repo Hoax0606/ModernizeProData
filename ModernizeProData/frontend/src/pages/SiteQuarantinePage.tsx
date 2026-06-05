@@ -51,32 +51,39 @@ export function SiteQuarantinePage() {
 
   /** 페이지 내 탭 — Quarantine | Run History (#5: 구 Scheduler Run History 통합). */
   const [view, setView] = useState<'quarantine' | 'history'>('quarantine');
-  const [severityFilter, setSeverityFilter] = useState<'all' | QuarantineSeverity>('all');
+  const [severityFilter, setSeverityFilter] = useState<'all' | 'skip' | QuarantineSeverity>('all');
   const [projectFilter,  setProjectFilter]  = useState<string | null>(null);   // null = 모든 프로젝트
   const [pickedGroupId,  setPickedGroupId]  = useState<string | null>(null);
   const [openGroupId,    setOpenGroupId]    = useState<string | null>(null);
 
   /* ── 통계 ───────────────────────────────────────── */
+  /* ack 된 WARN 은 'skip' 으로 분리 카운트 (LogViewerPage 와 동일 규칙).
+     error 는 ack 무관 — error 는 ack 시스템 X. */
   const groupStats = useMemo(() => {
-    let errRows = 0, warnRows = 0;
+    let errRows = 0, warnRows = 0, skipRows = 0;
     for (const g of allGroups) {
-      if (g.severity === 'error') errRows += g.rowCount; else warnRows += g.rowCount;
+      if (g.severity === 'error') errRows += g.rowCount;
+      else if (g.ack) skipRows += g.rowCount;
+      else warnRows += g.rowCount;
     }
+    const errGroups  = allGroups.filter((g) => g.severity === 'error').length;
+    const warnGroups = allGroups.filter((g) => g.severity === 'warning' && !g.ack).length;
+    const skipGroups = allGroups.filter((g) => g.severity === 'warning' && !!g.ack).length;
     return {
       total: allGroups.length,
-      errGroups:  allGroups.filter((g) => g.severity === 'error').length,
-      warnGroups: allGroups.filter((g) => g.severity === 'warning').length,
-      errRows, warnRows,
-      totalRows: errRows + warnRows,
+      errGroups, warnGroups, skipGroups,
+      errRows, warnRows, skipRows,
+      totalRows: errRows + warnRows + skipRows,
     };
   }, [allGroups]);
 
   /* ── 필터링 ─────────────────────────────────────── */
-  const afterSeverity = useMemo(() => (
-    severityFilter === 'all'
-      ? allGroups
-      : allGroups.filter((g) => g.severity === severityFilter)
-  ), [allGroups, severityFilter]);
+  const afterSeverity = useMemo(() => {
+    if (severityFilter === 'all')     return allGroups;
+    if (severityFilter === 'skip')    return allGroups.filter((g) => g.severity === 'warning' && !!g.ack);
+    if (severityFilter === 'warning') return allGroups.filter((g) => g.severity === 'warning' && !g.ack);
+    return allGroups.filter((g) => g.severity === severityFilter);
+  }, [allGroups, severityFilter]);
 
   const afterProject = useMemo(() => (
     projectFilter ? afterSeverity.filter((g) => g.projectId === projectFilter) : afterSeverity
@@ -155,6 +162,7 @@ export function SiteQuarantinePage() {
               n: String(groupStats.totalRows),
               err: String(groupStats.errRows),
               warn: String(groupStats.warnRows),
+              skip: String(groupStats.skipRows),
             })}
           </div>
         </div>
@@ -168,6 +176,8 @@ export function SiteQuarantinePage() {
               active={severityFilter === 'error'}   onClick={() => setSeverityFilter('error')}   tone="error" />
             <SevTab label={t('logs.quarantine.filter.warnings')} count={groupStats.warnGroups}
               active={severityFilter === 'warning'} onClick={() => setSeverityFilter('warning')} tone="warning" />
+            <SevTab label={t('logs.quarantine.filter.skip')}     count={groupStats.skipGroups}
+              active={severityFilter === 'skip'}    onClick={() => setSeverityFilter('skip')} />
           </div>
           <select
             style={styles.projectSelect}

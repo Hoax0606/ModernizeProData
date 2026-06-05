@@ -23,7 +23,9 @@ spring:
       # 5 user 동시 polling peak = lightSync 5s + heavySync 30s + 화면별 polling
       # + csv-row-count + LoadStage/Quartz → 25-35 동시 req. pool 50 안전 마진.
       # PG default max_connections=100 의 절반 — Coord 1 노드만 PG 점유 (Worker 는
-      # REST only). 현장 PG max_connections 가 낮으면 HIKARI_POOL_MAX 로 override.
+      # REST only). 5 user × master setBaseline 같은 burst 시 pool exhaust 방지로
+      # 30→50 으로 확장. 현장 PG max_connections 가 낮으면 HIKARI_POOL_MAX 로
+      # site 별 override.
       maximum-pool-size: ${HIKARI_POOL_MAX:50}
       connection-timeout: 5000
       # 5분 idle 이후 회수. 작업 burst 후 connection slot 빠르게 반환.
@@ -131,6 +133,13 @@ modernize:
   # default: C:/modernize/output (PR run-output 결정 — system-wide, user-independent).
   output:
     base-path: ${MPD_OUTPUT_BASE_PATH:C:/modernize/output}
+
+  # ── perf 측정 인프라 (dev 진단 한정) ─────────────────────────────────
+  # true 일 때만 DuckDB lock 계측 + Hibernate generate_statistics 주기 dump +
+  # /actuator/metrics 노출. application-dev.yml 에서 override.
+  # prod default false → 측정 코드는 if (perfEnabled) 분기 한 줄만 진입, 오버헤드 사실상 0.
+  perf:
+    enabled: ${MPD_PERF:false}
 
   # Run 실행 튜닝 — LoadStage 의 binding 단위 병렬도. 1 = 순차 (옛 default).
   # HikariCP pool size 10 + Hikari connection-timeout 5s 라 worker 노드 안에서

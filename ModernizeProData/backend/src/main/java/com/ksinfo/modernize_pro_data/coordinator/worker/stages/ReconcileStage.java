@@ -66,6 +66,7 @@ public class ReconcileStage implements StageRunner {
         int failedCount = 0;
 
         for (MappingTableBinding binding : ctx.getBindings()) {
+            ctx.throwIfCancelled();   // abort/timeout 신호 시 RunCancelledException → LocalWorkerExecutor 가 stage failed 마킹.
             OffsetDateTime tableStart = OffsetDateTime.now();
             String tobeSchema = binding.getTobeSchema() == null ? "" : binding.getTobeSchema();
             String tobeTable  = binding.getTobeTable();

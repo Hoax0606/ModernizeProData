@@ -1400,13 +1400,18 @@ export function ArtifactsPage() {
   useEffect(() => {
     if (activeProjectId) fetchSnapshots(activeProjectId);
   }, [activeProjectId, fetchSnapshots]);
-  const latestMappingSnapshot = useMemo(() => {
-    const projectMapping = snapshots.filter(
-      (s) => s.projectId === activeProjectId && s.type === 'mapping',
-    );
-    const pinned = projectMapping.find((s) => pinnedIds.includes(s.id));
+  /* Artifacts 의 모든 source — pinned snapshot 이 있으면 type 무관 그것을 사용
+     (cutover snapshot pin 시 cutover run 의 박제 결과 표시), 없으면 latest mapping
+     snapshot 으로 fallback. 이전엔 type='mapping' 으로만 필터해서 cutover run 의
+     validation 이 ArtifactsPage 에서 절대 안 보이는 문제가 있었음 — cutover run 은
+     cutover snapshot 에만 박제되므로 mapping snapshot 의 executionContext 는
+     cutover 후에도 갱신되지 않기 때문. */
+  const activeSnapshot = useMemo(() => {
+    const projectSnaps = snapshots.filter((s) => s.projectId === activeProjectId);
+    const pinned = projectSnaps.find((s) => pinnedIds.includes(s.id));
     if (pinned) return pinned;
-    return [...projectMapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
+    const mapping = projectSnaps.filter((s) => s.type === 'mapping');
+    return [...mapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
   }, [snapshots, activeProjectId, pinnedIds]);
   const [mappingRules, setMappingRules] = useState<DiffRule[]>([]);
   const [snapshotData, setSnapshotData] = useState<SnapshotData | null>(null);
@@ -1423,9 +1428,9 @@ export function ArtifactsPage() {
       return;
     }
     let cancelled = false;
-    if (latestMappingSnapshot) {
+    if (activeSnapshot) {
       snapshotApi
-        .getMapping(latestMappingSnapshot.id)
+        .getMapping(activeSnapshot.id)
         .then((d) => {
           if (cancelled) return;
           setMappingRules(d.rules);
@@ -1441,7 +1446,7 @@ export function ArtifactsPage() {
         .catch(() => { if (!cancelled) { setMappingRules([]); setSnapshotData(null); } });
     }
     return () => { cancelled = true; };
-  }, [activeProjectId, latestMappingSnapshot]);
+  }, [activeProjectId, activeSnapshot]);
   useEffect(() => {
     if (!activeProjectId) {
       setAsisSchema(null);
@@ -1453,11 +1458,11 @@ export function ArtifactsPage() {
     tobeDdlApi.get(activeProjectId).then((d) => { if (!cancelled) setTobeSchema(d); }).catch(() => { if (!cancelled) setTobeSchema(null); });
     return () => { cancelled = true; };
   }, [activeProjectId]);
-  // latest mapping snapshot 의 박제된 execution_context 가 source — runs API 폴링이 아니라
+  // active snapshot 의 박제된 execution_context 가 source — runs API 폴링이 아니라
   // "snapshot 시점" 의 상태를 보여준다 (사용자 결정 — phase 2). snapshot 의 executionContext
   // 가 null (아직 한 번도 run 안 됨) 이면 diff 가 noRun=true 빈 상태.
   const successTables = useMemo<Set<string> | null>(() => {
-    const ctx = latestMappingSnapshot?.executionContext;
+    const ctx = activeSnapshot?.executionContext;
     if (!ctx) return null;
     const s = new Set<string>();
     for (const st of ctx.stages) {
@@ -1466,11 +1471,11 @@ export function ArtifactsPage() {
       }
     }
     return s;
-  }, [latestMappingSnapshot]);
+  }, [activeSnapshot]);
   // MIGRATION SQL 은 load stage 의 합성 SQL 만 (Transform 의 박제는 backend 에 디버깅용으로
   // 두지만 사용자에겐 노출 X — 사용자 의도: 실행되는 적재 SQL 만).
   const compiledSqlByTable = useMemo<Record<string, string>>(() => {
-    const ctx = latestMappingSnapshot?.executionContext;
+    const ctx = activeSnapshot?.executionContext;
     if (!ctx) return {};
     const map: Record<string, string> = {};
     const loadStage = ctx.stages.find((s) => s.stageKey === 'load');
@@ -1480,7 +1485,7 @@ export function ArtifactsPage() {
       }
     }
     return map;
-  }, [latestMappingSnapshot]);
+  }, [activeSnapshot]);
 
   const diff = useMemo(
     () => buildDiff(mappingRules, asisSchema, tobeSchema, successTables),
@@ -1490,7 +1495,7 @@ export function ArtifactsPage() {
   /* VALIDATION — pinned snapshot 의 박제된 run 의 validation_reports 를 일괄 prefetch.
      snapshot 의 executionContext.runId 가 source (= "그 시점의" 검증 결과). pin 변경 시 자동 swap.
      키는 tobe_table. 값이 undefined = 그 테이블에 대한 report 없음 (run 안 됐거나 binding 미포함). */
-  const validationRunId = latestMappingSnapshot?.executionContext?.runId ?? null;
+  const validationRunId = activeSnapshot?.executionContext?.runId ?? null;
   const [validationByTable, setValidationByTable] =
     useState<Record<string, ValidationReportDto>>({});
   useEffect(() => {
@@ -1514,8 +1519,8 @@ export function ArtifactsPage() {
   // DASHBOARD — TOBE/AS-IS DDL + mapping rules + snapshotData(bindings/codeMaps) 로 9 종 issue 검출.
   //   snapshot 도 전달 → Overview header 의 Captured/Run 표시에 사용.
   const dashboard = useMemo(
-    () => buildDashboard(tobeSchema, asisSchema, mappingRules, snapshotData, latestMappingSnapshot),
-    [tobeSchema, asisSchema, mappingRules, snapshotData, latestMappingSnapshot],
+    () => buildDashboard(tobeSchema, asisSchema, mappingRules, snapshotData, activeSnapshot),
+    [tobeSchema, asisSchema, mappingRules, snapshotData, activeSnapshot],
   );
 
   const [openCats, setOpenCats] = useState<Record<CategoryKey, boolean>>({

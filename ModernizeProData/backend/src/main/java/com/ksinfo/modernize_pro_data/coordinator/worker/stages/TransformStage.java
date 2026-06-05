@@ -101,6 +101,7 @@ public class TransformStage implements StageRunner {
         int failedCount = 0;
 
         for (MappingTableBinding childBinding : ctx.getBindings()) {
+            ctx.throwIfCancelled();   // abort/timeout 신호 시 RunCancelledException → LocalWorkerExecutor 가 stage failed 마킹.
             // 자식 link swap — sources + rules 모두 master 사용. MappingReportService 와 같은 패턴.
             // binding 변수는 master entity 로 swap (SQL 생성 시 master 의 sources/whereFilter 등).
             // childBinding 의 id 는 stage_table_results 키로 별도 보존.
@@ -142,6 +143,7 @@ public class TransformStage implements StageRunner {
 
                 long rowCount;
                 try (Statement st = duckDbService.statement()) {
+                    ctx.throwIfCancelled();   // (D) sub-step — 대용량 transform SQL 직전 cancel 체크.
                     st.execute(sql);
 
                     String fqTobe = quoteIdent(schema) + "." + quoteIdent("tobe_" + tobeTable);

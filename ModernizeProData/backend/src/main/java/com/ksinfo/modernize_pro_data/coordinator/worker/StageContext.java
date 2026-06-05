@@ -1,6 +1,7 @@
 package com.ksinfo.modernize_pro_data.coordinator.worker;
 
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunControlRegistry;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunHistory;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
@@ -38,6 +39,24 @@ public class StageContext {
     private Site site;
     private List<MappingTableBinding> bindings;
     private List<StageInstance> stages;
+
+    /**
+     * Cancel 신호 체크용 — abort/timeout 신호를 stage runner 가 table loop 마다 확인.
+     * RunExecutionListener 가 ctx 빌드 시 주입. null 이면 cancel 체크 비활성 (단위 테스트 등).
+     */
+    private RunControlRegistry runControlRegistry;
+
+    /**
+     * Stage runner 가 table loop 마다 호출 — cancel 신호 set 됐으면 즉시 throw.
+     * LocalWorkerExecutor 가 그것을 catch 해서 현재 stage 의 status 를 failed 로 마킹.
+     * registry 없으면 (테스트 환경) 아무것도 안 함.
+     */
+    public void throwIfCancelled() {
+        if (runControlRegistry != null && runHistory != null
+                && runControlRegistry.isCancelled(runHistory.getId())) {
+            throw new RunCancelledException("Run cancelled — runId=" + runHistory.getId());
+        }
+    }
 
     /** {base}/{projectId}/{runIndex}-{ts}/ */
     private Path outputDir;

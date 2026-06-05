@@ -96,6 +96,7 @@ public class ExtractStage implements StageRunner {
         int failedCount = 0;
 
         for (MappingTableBinding childBinding : bindings) {
+            ctx.throwIfCancelled();   // abort/timeout 신호 시 RunCancelledException → LocalWorkerExecutor 가 stage failed 마킹.
             // 자식 link swap — sources 가 master 에 있으므로 csv → parquet 도 master sources 기준.
             MappingTableBinding binding = childBinding;
             if (childBinding.getSharedFromProjectId() != null) {
@@ -142,6 +143,7 @@ public class ExtractStage implements StageRunner {
                 long totalRows = 0;
                 long fpMtime = 0L; long fpSize = 0L;   // AS-IS CSV fingerprint (WARN ack carry-over, 정책 3·6)
                 for (Map.Entry<String, String> entry : asisTableToSchema.entrySet()) {
+                    ctx.throwIfCancelled();   // (D) sub-step — 각 source CSV 처리 시작 전 cancel 체크.
                     String asisTable = entry.getKey();
                     Path csv = StageHelpers.resolveCsvFile(baseDir, entry.getValue(), asisTable);
                     if (csv == null) {
@@ -159,6 +161,7 @@ public class ExtractStage implements StageRunner {
                     String fqTable = quoteIdent(schema) + "." + quoteIdent("asis_" + asisTable);
 
                     try (Statement st = duckDbService.statement()) {
+                        ctx.throwIfCancelled();   // (D) sub-step — DuckDB CREATE TABLE AS SELECT FROM read_csv_auto (대용량 CSV read) 직전 cancel 체크.
                         st.execute("CREATE OR REPLACE TABLE " + fqTable
                                 + " AS SELECT * FROM read_csv_auto('" + escapedPath
                                 + "', header=true, all_varchar=true" + sampleSizeClause + encodingClause + ")");
@@ -170,6 +173,7 @@ public class ExtractStage implements StageRunner {
 
                         Path parquet = ctx.parquet1Dir().resolve(asisTable + ".parquet");
                         String escapedParquet = parquet.toString().replace("\\", "/").replace("'", "''");
+                        ctx.throwIfCancelled();   // (D) sub-step — parquet dump 직전 cancel 체크 (디스크 IO 큰 부분).
                         st.execute("COPY " + fqTable + " TO '" + escapedParquet + "' (FORMAT PARQUET)");
                     }
                     /* Step 3 — DuckDB 가 invalid byte 만났을 때 throw 안 하고 U+FFFD (대체 문자) 로

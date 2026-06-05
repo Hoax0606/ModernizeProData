@@ -203,6 +203,17 @@ export function ExecutionPage() {
     }
   }, [projectIdForReset]);
 
+  /* elapsed 1초 tick — AppShell lightSync 가 5초 (BE 부담 회피) 라 elapsed 가 5초씩
+     점프하던 문제 해결. running 중에만 활성, terminal 시 정지. 로컬 setState 만 trigger
+     하므로 BE 호출 X. RunHeader 의 elapsedMs / PipelineStages 의 stage 별 elapsedMs
+     모두 매 render Date.now() 로 재계산되므로 이 re-render 로 같이 갱신됨. */
+  const [, setElapsedTick] = useState(0);
+  useEffect(() => {
+    if (!run || isTerminal(run.status)) return;
+    const id = setInterval(() => setElapsedTick((v) => v + 1), 1_000);
+    return () => clearInterval(id);
+  }, [run?.id, run?.status]);
+
   /* === Hooks: 必ず early return より前 ===
      project/site が未確定でも hook 数を一定に保つため、ここに集約する.
      使用は早期 return 後に分岐. */
@@ -1316,9 +1327,11 @@ function PipelineStages({ t, stages, stageViews, quarantineByTable }: {
                 padding: '10px 14px',
                 cursor: expandable ? 'pointer' : 'default',
                 borderBottom: i < stages.length - 1 ? '1px solid var(--border)' : 'none',
+                /* Pipeline 박스 배경 — B3 배지 톤과 일관 (2026-06-04):
+                   ok=green-50 / running=navy-50 / err=red-50 / warn=amber-50 / idle=panel (배경 없음). */
                 background:
-                  st.tone === 'running' ? 'var(--green-50)'
-                  : st.tone === 'idle' ? 'var(--amber-50)'
+                  st.tone === 'ok' ? 'var(--green-50)'
+                  : st.tone === 'running' ? 'var(--navy-50)'
                   : st.tone === 'err' ? 'var(--red-50)'
                   : st.tone === 'warn' ? 'var(--amber-50)'
                   : 'var(--panel)',
@@ -1342,17 +1355,29 @@ function PipelineStages({ t, stages, stageViews, quarantineByTable }: {
                 <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-3)' }}>{st.sub}</div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <ProgressBar pct={st.pct} tone={st.tone} />
+                <ProgressBar
+                  pct={st.pct}
+                  tone={st.tone}
+                  success={st.tablesSuccess}
+                  failed={st.tablesFailed}
+                  total={st.tablesTotal}
+                />
                 <div style={{ width: 44, textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-2)' }}>{st.pct.toFixed(0)}%</div>
               </div>
               <div style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-2)' }}>{st.rate}</div>
-              <div style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-3)' }}>{t('execution.stages.etaPrefix')} {st.eta}</div>
+              {/* C4 (2026-06-04) — 기존 ETA 라벨 자리에 stage wall-clock 시간 표시.
+                 elapsedMs = 완료 시 durationMs, 진행 중 시 now - startedAt. 대기 중은 "—". */}
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--text-3)' }}>
+                {st.elapsedMs != null ? formatDuration(st.elapsedMs) : '—'}
+              </div>
               <div>
-                {st.tone === 'ok' && <StatusBadge tone="queued">{t('execution.stages.status.done')}</StatusBadge>}
-                {st.tone === 'running' && <StatusBadge tone="ok">{t('execution.stages.status.live')}</StatusBadge>}
+                {/* B3 (2026-06-04) — tone 명명 swap 제거. badge tone 이름과 의미 일치:
+                   ok(green) / running(navy) / err(red) / warn(amber) / queued(grey). */}
+                {st.tone === 'ok' && <StatusBadge tone="ok">{t('execution.stages.status.done')}</StatusBadge>}
+                {st.tone === 'running' && <StatusBadge tone="running">{t('execution.stages.status.live')}</StatusBadge>}
                 {st.tone === 'err' && <StatusBadge tone="err">{t('execution.stages.status.failed')}</StatusBadge>}
                 {st.tone === 'warn' && <StatusBadge tone="warn">{t('execution.stages.status.awaitingReview')}</StatusBadge>}
-                {st.tone === 'idle' && <StatusBadge tone="running">{t('execution.stages.status.queued')}</StatusBadge>}
+                {st.tone === 'idle' && <StatusBadge tone="queued">{t('execution.stages.status.queued')}</StatusBadge>}
               </div>
             </div>
             {isOpen && sv && hasFailed && (
@@ -1430,9 +1455,13 @@ function PipelineStages({ t, stages, stageViews, quarantineByTable }: {
 /* ───────────────────────── Shared atoms ────────────────────────── */
 
 function StatusBadge({ tone, children }: { tone: BadgeTone; children: React.ReactNode }) {
+  /* B3 정리 (2026-06-04, 사용자 확인: 디자이너 의도 없음):
+   * 이전: running=amber 라 warn 과 같은 색이라 진행 중인지 검토 대기인지 시각 구분 모호.
+   * 이후: running=navy(파랑) — "live = 진행 중" 의미 직관적, warn(amber) 와 명확 구분.
+   * queued(grey) / warn(amber) / err(red) / ok(green) / info(navy) 5색 의미 일관. */
   const palette: Record<BadgeTone, { bg: string; fg: string; bd: string }> = {
     ok:      { bg: 'var(--green-50)',  fg: 'var(--green)',  bd: 'var(--green)' },
-    running: { bg: 'var(--amber-50)',  fg: 'var(--amber)',  bd: 'var(--amber)' },
+    running: { bg: 'var(--navy-50)',   fg: 'var(--navy)',   bd: 'var(--navy)' },
     queued:  { bg: 'var(--panel-2)',   fg: 'var(--text-3)', bd: 'var(--border-strong)' },
     err:     { bg: 'var(--red-50)',    fg: 'var(--red)',    bd: 'var(--red)' },
     warn:    { bg: 'var(--amber-50)',  fg: 'var(--amber)',  bd: 'var(--amber)' },
@@ -1455,7 +1484,37 @@ function StatusBadge({ tone, children }: { tone: BadgeTone; children: React.Reac
   );
 }
 
-function ProgressBar({ pct, tone }: { pct: number; tone: StageTone }) {
+/**
+ * Stage 의 success/failed 비율을 시각적으로 분할 표시.
+ * - success → green segment
+ * - failed  → red segment
+ * - pending → bar background grey (빈 공간)
+ *
+ * total 또는 success/failed 정보 없으면 fallback = 단색 fill (stageFillColor #6-4:
+ * running 밝은 green / done 어두운 green / failed·warning red / idle amber).
+ */
+function ProgressBar({
+  pct, tone, success, failed, total,
+}: {
+  pct: number;
+  tone: StageTone;
+  success?: number;
+  failed?: number;
+  total?: number;
+}) {
+  const hasSegments = typeof total === 'number' && total > 0
+    && typeof success === 'number' && typeof failed === 'number';
+  if (hasSegments) {
+    const successPct = (success! / total!) * 100;
+    const failedPct = (failed! / total!) * 100;
+    return (
+      <div style={{ flex: 1, height: 6, background: 'var(--border)', borderRadius: 2, overflow: 'hidden', display: 'flex' }}>
+        <div style={{ width: `${successPct}%`, height: '100%', background: 'var(--green)', transition: 'width .4s ease' }} />
+        <div style={{ width: `${failedPct}%`, height: '100%', background: 'var(--red)', transition: 'width .4s ease' }} />
+      </div>
+    );
+  }
+  // Fallback (total 미상 / running 중 데이터 없음) — 단색 fill.
   return (
     <div style={{ flex: 1, height: 6, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
       <div style={{ width: `${Math.min(pct, 100)}%`, height: '100%', background: stageFillColor(tone), transition: 'width .4s ease' }} />

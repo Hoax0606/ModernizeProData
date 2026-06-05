@@ -69,6 +69,7 @@ public class RunTableResultsService {
                         LinkedHashMap::new,
                         Collectors.toList()));
 
+        int totalStageCount = stages.size();
         List<TableResultDto> list = new ArrayList<>(byTable.size());
         for (Map.Entry<String, List<StageTableResult>> e : byTable.entrySet()) {
             List<StageTableResult> rs = e.getValue();
@@ -78,7 +79,14 @@ public class RunTableResultsService {
 
             boolean anyFailed = rs.stream().anyMatch(r -> r.getStatus() == StageTableStatus.failed);
             boolean allSuccess = rs.stream().allMatch(r -> r.getStatus() == StageTableStatus.success);
-            String status = anyFailed ? "failed" : allSuccess ? "success" : "running";
+            /* "pending" — 처리된 stage 수가 전체보다 적고 failed 없음 + 처리된 것은 모두 success.
+               abort 시 미실행 stage 가 있는 binding 이 단순 "success" 로 잘못 표시되던 케이스 해소.
+               Pipeline 의 idle stage 와 의미적으로 일치 — FE 에서 idle tone (queued 라벨) 로 표시. */
+            boolean allStagesProcessed = rs.size() >= totalStageCount;
+            String status = anyFailed ? "failed"
+                    : (allSuccess && allStagesProcessed) ? "success"
+                    : allSuccess ? "pending"
+                    : "running";
 
             // rows = Load stage の rowCount (TO-BE 投入数). 無ければ 0.
             long rows = 0;
@@ -147,18 +155,27 @@ public class RunTableResultsService {
                         Collectors.groupingBy(
                                 r -> qualified(r.getTobeSchema(), r.getTobeTable()))));
 
+        // runId 별 전체 stage 수 (pending 판정에 필요).
+        Map<String, Integer> stageCountByRun = new HashMap<>();
+        for (StageInstance si : stages) {
+            stageCountByRun.merge(si.getRunId(), 1, Integer::sum);
+        }
+
         Map<String, TableSummaryDto> summaries = new HashMap<>();
         for (String runId : runIds) {
             Map<String, List<StageTableResult>> byTable = grouped.getOrDefault(runId, Collections.emptyMap());
-            int success = 0, failed = 0, running = 0;
+            int totalStageCount = stageCountByRun.getOrDefault(runId, 0);
+            int success = 0, failed = 0, running = 0, pending = 0;
             for (List<StageTableResult> rs : byTable.values()) {
                 boolean anyFailed = rs.stream().anyMatch(r -> r.getStatus() == StageTableStatus.failed);
                 boolean allSuccess = rs.stream().allMatch(r -> r.getStatus() == StageTableStatus.success);
+                boolean allStagesProcessed = rs.size() >= totalStageCount;
                 if (anyFailed) failed++;
-                else if (allSuccess) success++;
+                else if (allSuccess && allStagesProcessed) success++;
+                else if (allSuccess) pending++;        // 처리된 stage 까진 OK 인데 후속 stage 미실행 (abort 등).
                 else running++;
             }
-            summaries.put(runId, new TableSummaryDto(success + failed + running, success, failed, running));
+            summaries.put(runId, new TableSummaryDto(success + failed + running + pending, success, failed, running, pending));
         }
         return summaries;
     }
@@ -190,14 +207,15 @@ public class RunTableResultsService {
     ) {}
 
     /**
-     * Run History 一覧用 — 1 run の table 別件数サマリ. 0/0/0 = まだ table 処理が始まっていない.
+     * Run History 一覧用 — 1 run の table 別件数サマリ. 0/0/0/0 = まだ table 処理が始まっていない.
      *
      * @param total    集約された tobe_table 数 (= 当該 run が処理した binding 数)
      * @param success  全 stage success の table 数
      * @param failed   1 つでも failed のあった table 数
-     * @param running  上記以外 (running 状態残り)
+     * @param running  実行中 (一部 stage 残, 一部 result 未完了)
+     * @param pending  処理された stage は success だが後続 stage 未実行 (abort 等). Pipeline の idle 相当.
      */
-    public record TableSummaryDto(int total, int success, int failed, int running) {
-        public static TableSummaryDto empty() { return new TableSummaryDto(0, 0, 0, 0); }
+    public record TableSummaryDto(int total, int success, int failed, int running, int pending) {
+        public static TableSummaryDto empty() { return new TableSummaryDto(0, 0, 0, 0, 0); }
     }
 }
