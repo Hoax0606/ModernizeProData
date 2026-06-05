@@ -48,6 +48,25 @@ export interface QuarantineGroupAck {
   phase: 'test' | 'rehearsal' | 'cutover';
 }
 
+/**
+ * 같은 (binding × stage × rule_name) 의 옛 run 에서의 발생 이력.
+ * 현재 run 의 group 카드 아래 collapse panel 에 표시 — 운영자가 「지금 새로 쌓인 건지」 vs
+ * 「과거에도 누적되던 건지」 구분.
+ */
+export interface QuarantineHistoryEntry {
+  runId: string;
+  createdAt: string;                             // ISO timestamp
+  rowCount: number;
+  acked: boolean;
+  ackedBy?: string;
+  ackedPhase?: 'test' | 'rehearsal' | 'cutover';
+  /** archive expand 시 그 옛 entry 의 진짜 sample 표시. BE 가 sample_data 에서 unwrap. */
+  columns?: string[];
+  columnRoles?: QuarantineColumnRole[];
+  sampleRows?: QuarantineCell[][];
+  toBeValues?: QuarantineCell[];
+}
+
 export interface QuarantineGroup {
   id: string;
   bindingId?: string;                            // BE 만 채움. mock 은 비움. parquet 다운로드 endpoint key.
@@ -78,6 +97,11 @@ export interface QuarantineGroup {
   /** 같은 group key (binding+rule+reason) 의 explicit ack 총 개수 — fingerprint 무관.
    *  ack==null + priorAckCount>0 = "다른 CSV/phase 의 ack 만 있음" → FE 가 hint 표시. */
   priorAckCount?: number;
+  /**
+   * 같은 (binding × stage × rule_name) 의 이전 run 에서의 발생 이력. BE 가 채워줌.
+   * 비어있으면 첫 발생. card 의 collapse panel 에 표시.
+   */
+  history?: QuarantineHistoryEntry[];
 }
 
 /**
@@ -105,6 +129,12 @@ export function buildQuarantineGroups(_runId: string): QuarantineGroup[] {
       /* FK 위반 — JOIN 미스로 행 자체가 거부됨. */
       toBeValues: [null, null, null, null],
       rowCount: 4,
+      /* 과거 발생 이력 mock — 같은 (binding, stage, rule_name) 의 옛 run entry. BE 가 채워줄 자리. */
+      history: [
+        { runId: 'r-b807be66', createdAt: timeAt(8, 22, 14, 0), rowCount: 4, acked: true,  ackedBy: 'sue',  ackedPhase: 'test' },
+        { runId: 'r-40150b4a', createdAt: timeAt(7, 11, 3, 0),  rowCount: 5, acked: false },
+        { runId: 'r-92e6e42f', createdAt: timeAt(6, 45, 22, 0), rowCount: 3, acked: false },
+      ],
     },
     {
       id: 'g2',
@@ -148,6 +178,11 @@ export function buildQuarantineGroups(_runId: string): QuarantineGroup[] {
       /* Unique dup — 첫 occurrence 만 적재, 2번째는 dropped. */
       toBeValues: ['SKU-44011', null, 'SKU-90238', null, 'SKU-12345', null],
       rowCount: 6,
+      /* warning history — 모두 ack 됨 (skip status). */
+      history: [
+        { runId: 'r-aa11cc33', createdAt: timeAt(8, 30, 12, 0), rowCount: 6, acked: true, ackedBy: 'kim', ackedPhase: 'test' },
+        { runId: 'r-bb22dd44', createdAt: timeAt(7, 15, 5, 0),  rowCount: 4, acked: true, ackedBy: 'kim', ackedPhase: 'test' },
+      ],
     },
     {
       id: 'g4',
@@ -174,6 +209,12 @@ export function buildQuarantineGroups(_runId: string): QuarantineGroup[] {
       /* Range — 음수 거부, 적재되지 않음. */
       toBeValues: [null, null, null, null, null, null, null, null, null, null],
       rowCount: 10,
+      /* warning history — 미ack 다수 (반복 누적). */
+      history: [
+        { runId: 'r-cc33ee55', createdAt: timeAt(9, 5, 0, 0),  rowCount: 12, acked: false },
+        { runId: 'r-dd44ff66', createdAt: timeAt(8, 20, 8, 0), rowCount: 8,  acked: false },
+        { runId: 'r-ee55aa77', createdAt: timeAt(7, 40, 22, 0), rowCount: 10, acked: false },
+      ],
     },
     {
       id: 'g5',
@@ -198,6 +239,11 @@ export function buildQuarantineGroups(_runId: string): QuarantineGroup[] {
       /* Type parse fail — UDF 가 null 반환, 행 거부. */
       toBeValues: [null, null, null, null, null, null, null, null],
       rowCount: 8,
+      /* warning history — 일부 ack 일부 미ack. */
+      history: [
+        { runId: 'r-ff66bb88', createdAt: timeAt(8, 50, 33, 0), rowCount: 8, acked: false },
+        { runId: 'r-aa77cc99', createdAt: timeAt(7, 30, 18, 0), rowCount: 6, acked: true, ackedBy: 'lee', ackedPhase: 'rehearsal' },
+      ],
     },
     {
       id: 'g6',
@@ -223,6 +269,10 @@ export function buildQuarantineGroups(_runId: string): QuarantineGroup[] {
         '+81-3-1234-5678 / 09',
       ],
       rowCount: 4,
+      /* warning history — 미ack 만 (truncate 반복). */
+      history: [
+        { runId: 'r-bb88dd00', createdAt: timeAt(8, 0, 45, 0), rowCount: 4, acked: false },
+      ],
     },
   ];
 }
@@ -263,6 +313,11 @@ function buildSiteQuarantineBase(): QuarantineGroup[] {
       ],
       toBeValues: [null, null, null, null, null],
       rowCount: 5,
+      /* 과거 발생 mock — sg1 = error 라 ack 시스템 없음 (도구 정책). 모두 active. */
+      history: [
+        { runId: 'r-aa11bb22', createdAt: timeAt(9, 30, 18, 0), rowCount: 5, acked: false },
+        { runId: 'r-bb22cc33', createdAt: timeAt(8, 45, 2, 0),  rowCount: 7, acked: false },
+      ],
     },
     {
       id: 'sg2',
@@ -300,6 +355,11 @@ function buildSiteQuarantineBase(): QuarantineGroup[] {
       ],
       toBeValues: [null, null, null, null],
       rowCount: 4,
+      /* 과거 발생 mock — warning 도 누적되던 case. */
+      history: [
+        { runId: 'r-99aa88bb', createdAt: timeAt(8, 15, 30, 0), rowCount: 6, acked: true, ackedBy: 'kim', ackedPhase: 'test' },
+        { runId: 'r-aabbccdd', createdAt: timeAt(7, 5, 12, 0),  rowCount: 4, acked: false },
+      ],
     },
     {
       id: 'sg4',
@@ -317,6 +377,13 @@ function buildSiteQuarantineBase(): QuarantineGroup[] {
       ],
       toBeValues: [null, null],
       rowCount: 2,
+      /* 과거 발생 mock — checksum mismatch 가 반복되던 case. */
+      history: [
+        { runId: 'r-cc33dd44', createdAt: timeAt(7, 55, 11, 0), rowCount: 2, acked: false },
+        { runId: 'r-dd44ee55', createdAt: timeAt(7, 20, 30, 0), rowCount: 2, acked: false },
+        { runId: 'r-ee55ff66', createdAt: timeAt(6, 10, 45, 0), rowCount: 1, acked: false },
+        { runId: 'r-ff66aa77', createdAt: timeAt(5, 30, 22, 0), rowCount: 1, acked: false },
+      ],
     },
     {
       id: 'sg5',
@@ -348,6 +415,11 @@ function buildSiteQuarantineBase(): QuarantineGroup[] {
         '���',
       ],
       rowCount: 7,
+      /* 과거 발생 mock — encoding fallback 가 반복되던 case. */
+      history: [
+        { runId: 'r-77bb66cc', createdAt: timeAt(9, 0, 0, 0),   rowCount: 8, acked: false },
+        { runId: 'r-66cc55dd', createdAt: timeAt(8, 30, 15, 0), rowCount: 7, acked: false },
+      ],
     },
     {
       id: 'sg6',
@@ -371,6 +443,12 @@ function buildSiteQuarantineBase(): QuarantineGroup[] {
         '上海市黄浦区南京东路100号 国际中心写字楼 35层 (亚',
       ],
       rowCount: 3,
+      /* 과거 발생 mock — length overflow 가 반복되던 case. ack 모두 완료. */
+      history: [
+        { runId: 'r-55dd44ee', createdAt: timeAt(7, 50, 5, 0),  rowCount: 3, acked: true, ackedBy: 'lee',  ackedPhase: 'rehearsal' },
+        { runId: 'r-44ee33ff', createdAt: timeAt(6, 40, 18, 0), rowCount: 3, acked: true, ackedBy: 'lee',  ackedPhase: 'test' },
+        { runId: 'r-33ff22aa', createdAt: timeAt(5, 25, 9, 0),  rowCount: 4, acked: true, ackedBy: 'kim',  ackedPhase: 'test' },
+      ],
     },
   ];
 }

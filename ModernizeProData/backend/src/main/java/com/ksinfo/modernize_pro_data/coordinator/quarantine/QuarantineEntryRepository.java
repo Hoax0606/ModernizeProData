@@ -19,4 +19,13 @@ public interface QuarantineEntryRepository extends JpaRepository<QuarantineEntry
      */
     List<QuarantineEntry> findByStageInstanceIdAndBindingIdOrderByCreatedAtAsc(
             String stageInstanceId, String bindingId);
+
+    /**
+     * Archive panel 용 — 같은 (binding_id, rule_name) 의 **시간상 이전** entry.
+     * 현재 entry 의 createdAt 보다 옛 row 만. runId 도 자기 자신 제외.
+     * "최신 카드 = 현재", "archive = 그 이전 발생 이력" 의 시간 의미 보장.
+     * QuarantineController 가 toGroupView 시점에 호출 → group 의 history field 채움.
+     */
+    List<QuarantineEntry> findByBindingIdAndRuleNameAndCreatedAtLessThanAndRunIdNotOrderByCreatedAtDesc(
+            String bindingId, String ruleName, java.time.OffsetDateTime createdAt, String runId);
 }

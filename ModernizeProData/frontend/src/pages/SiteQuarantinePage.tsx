@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWorkspaceStore } from '../store/workspace';
 import { useT } from '../i18n';
@@ -9,6 +9,7 @@ import {
   quarantineRowPk,
   quarantinePkColumnName,
   quarantineViolatedColumnName,
+  buildSiteQuarantineGroups,
   type SiteQuarantineGroup,
   type QuarantineSeverity,
 } from './quarantineMock';
@@ -40,14 +41,34 @@ export function SiteQuarantinePage() {
     () => allProjects.filter((p) => p.siteId === activeSiteId),
     [allProjects, activeSiteId],
   );
-  /** activeSiteId 의 site 전체 quarantine. quarantineApi.bySite 로 fetch. */
+  /** activeSiteId 의 site 전체 quarantine. quarantineApi.bySite 로 fetch.
+   * Demo / UI 검증용 — localStorage flag 'mpd_demo_quarantine' = 'true' 이고 backend 가 empty 일 때
+   * mock buildSiteQuarantineGroups 결과 사용. console 에서 toggle:
+   *   localStorage.setItem('mpd_demo_quarantine','true')   // 켜기
+   *   localStorage.removeItem('mpd_demo_quarantine')        // 끄기 */
   const [allGroups, setAllGroups] = useState<SiteQuarantineGroup[]>([]);
   useEffect(() => {
     if (!activeSiteId) { setAllGroups([]); return; }
     quarantineApi.bySite(activeSiteId)
-      .then(setAllGroups)
-      .catch((e) => { console.error('site quarantine fetch failed', e); setAllGroups([]); });
-  }, [activeSiteId]);
+      .then((data) => {
+        if ((data?.length ?? 0) === 0
+            && typeof window !== 'undefined'
+            && window.localStorage?.getItem('mpd_demo_quarantine') === 'true') {
+          setAllGroups(buildSiteQuarantineGroups(siteProjects.map((p) => ({ id: p.id, name: p.name }))));
+        } else {
+          setAllGroups(data ?? []);
+        }
+      })
+      .catch((e) => {
+        console.error('site quarantine fetch failed', e);
+        if (typeof window !== 'undefined'
+            && window.localStorage?.getItem('mpd_demo_quarantine') === 'true') {
+          setAllGroups(buildSiteQuarantineGroups(siteProjects.map((p) => ({ id: p.id, name: p.name }))));
+        } else {
+          setAllGroups([]);
+        }
+      });
+  }, [activeSiteId, siteProjects]);
 
   /** 페이지 내 탭 — Quarantine | Run History (#5: 구 Scheduler Run History 통합). */
   const [view, setView] = useState<'quarantine' | 'history'>('quarantine');
@@ -222,6 +243,10 @@ export function SiteQuarantinePage() {
             />
           ))
         )}
+
+        {/* Page-level 「과거 발생 이력」 collapse section — 필터링된 group 의 옛 run entry 통합 list.
+            상단 = 최신 (Axis 1), 하단 = 과거 archive. severity / project / group dropdown 필터 모두 적용. */}
+        <HistoryArchiveSection groups={filteredGroups} severityFilter={severityFilter} t={t} />
       </div>
       </>
       )}
@@ -358,6 +383,218 @@ function SiteQuarantineCard({ g, t, open, onToggle, onOpenMapping }: {
         )}
       </div>
     </div>
+  );
+}
+
+/** Page-level 「과거 발생 이력」 collapse section. 모든 group 의 history entry flat list. */
+function HistoryArchiveSection({ groups, severityFilter, t }: {
+  groups: SiteQuarantineGroup[];
+  severityFilter: 'all' | QuarantineSeverity | 'skip';
+  t: (k: string, v?: Record<string, string>) => string;
+}) {
+  const [open, setOpen] = useState(false);
+  /* row 별 expand state — 펼치면 그 group 의 sample 표 표시 (Open mapping 없음). */
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  /* archive 자체 접으면 내부 row expand 도 reset — 다음 펼침 시 detail 닫힌 상태로 시작. */
+  useEffect(() => { if (!open) setExpandedKey(null); }, [open]);
+  /* 모든 group 의 history entry 를 group key 와 함께 flatten + 최신순 정렬. severity + group 전체 carry. */
+  const flatHistory = useMemo(() => {
+    const rows: Array<{
+      key: string;
+      group: SiteQuarantineGroup;
+      runId: string;
+      createdAt: string;
+      rowCount: number;
+      acked: boolean;
+      ackedBy?: string;
+      ackedPhase?: string;
+      columns?: typeof groups[number]['columns'];
+      columnRoles?: typeof groups[number]['columnRoles'];
+      sampleRows?: typeof groups[number]['sampleRows'];
+      toBeValues?: typeof groups[number]['toBeValues'];
+    }> = [];
+    for (const g of groups) {
+      for (const h of g.history ?? []) {
+        /* severity filter 가 history 의 ack 상태에도 적용:
+           - 'warning' tab → unack warning history 만
+           - 'skip'    tab → ack warning history 만
+           - 'error'/all → 그대로 (error 는 ack 시스템 X) */
+        if (g.severity === 'warning') {
+          if (severityFilter === 'warning' && h.acked) continue;
+          if (severityFilter === 'skip'    && !h.acked) continue;
+        }
+        rows.push({
+          key: g.id + '-' + h.runId,
+          group: g,
+          runId: h.runId,
+          createdAt: h.createdAt,
+          rowCount: h.rowCount,
+          acked: h.acked,
+          ackedBy: h.ackedBy,
+          ackedPhase: h.ackedPhase,
+          columns: h.columns,
+          columnRoles: h.columnRoles,
+          sampleRows: h.sampleRows,
+          toBeValues: h.toBeValues,
+        });
+      }
+    }
+    return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [groups, severityFilter]);
+
+  if (flatHistory.length === 0) return null;
+
+  return (
+    <>
+      {/* 카드 list 와 archive 사이 구분선. */}
+      <div style={styles.archiveSeparator} />
+      <div style={styles.archiveRoot}>
+        <div style={styles.archiveLeftBar} />
+        <div style={styles.archiveBody}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        style={styles.archiveToggle}
+        aria-expanded={open}
+      >
+        <span style={styles.archiveChevron}>{open ? '▾' : '▸'}</span>
+        {t('logs.quarantine.history.toggle', { n: String(flatHistory.length) })}
+      </button>
+      {open && (
+        <div style={styles.archivePanel}>
+          <table style={styles.archiveTable}>
+            <thead>
+              <tr>
+                <th style={{ ...styles.archiveTh, width: 24 }}></th>
+                <th style={styles.archiveTh}>{t('logs.quarantine.colProject')}</th>
+                <th style={styles.archiveTh}>Reason</th>
+                <th style={styles.archiveTh}>Table</th>
+                <th style={styles.archiveTh}>Stage</th>
+                <th style={styles.archiveTh}>Run ID</th>
+                <th style={styles.archiveTh}>Time</th>
+                <th style={{ ...styles.archiveTh, textAlign: 'right' }}>Rows</th>
+                <th style={styles.archiveTh}>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {flatHistory.map((h) => {
+                const g = h.group;
+                const isOpen = expandedKey === h.key;
+                const isErr = g.severity === 'error';
+                const sevColor  = isErr ? '#c92a3f' : '#a86b00';
+                const sevBg     = isErr ? 'rgba(232,93,117,0.08)' : 'rgba(232,181,99,0.10)';
+                const sevBorder = isErr ? '#e85d75' : '#e8b563';
+                const human = humanizeQuarantineDetail(g, t);
+                return (
+                  <Fragment key={h.key}>
+                    <tr
+                      style={{ cursor: 'pointer' }}
+                      onClick={() => setExpandedKey((cur) => (cur === h.key ? null : h.key))}
+                    >
+                      <td style={{ ...styles.archiveTd, color: 'var(--text-3)' }}>{isOpen ? '▾' : '▸'}</td>
+                      <td style={styles.archiveTd}>{h.group.projectName}</td>
+                      <td style={styles.archiveTd}>{h.group.reason}</td>
+                      <td style={{ ...styles.archiveTd, fontFamily: 'var(--mono)' }}>{h.group.table}</td>
+                      <td style={styles.archiveTd}>{h.group.stage}</td>
+                      <td style={{ ...styles.archiveTd, fontFamily: 'var(--mono)' }}>{h.runId}</td>
+                      <td style={{ ...styles.archiveTd, color: 'var(--text-3)' }}>{new Date(h.createdAt).toLocaleString()}</td>
+                      <td style={{ ...styles.archiveTd, textAlign: 'right' }}>{h.rowCount}</td>
+                      <td style={styles.archiveTd}>
+                        {(() => {
+                          /* Status badge — severity + ack 조합. severity tab 의 4 값과 일관:
+                             error (active) / warning (active) / skip (warning + ack). */
+                          if (g.severity === 'error') {
+                            return <span style={styles.statusErrorBadge}>error</span>;
+                          }
+                          if (h.acked) {
+                            return (
+                              <span
+                                style={styles.statusSkipBadge}
+                                title={h.ackedBy ? `${h.ackedBy} · ${h.ackedPhase ?? ''}` : undefined}
+                              >
+                                skip
+                              </span>
+                            );
+                          }
+                          return <span style={styles.statusWarningBadge}>warning</span>;
+                        })()}
+                      </td>
+                    </tr>
+                    {isOpen && (() => {
+                      /* archive expand 시 그 옛 entry (h) 의 sample 사용. backend 가 history 에 sample
+                         payload 채워줌. h.sampleRows 없으면 group g 의 sample fallback (옛 mock 호환). */
+                      const hView: SiteQuarantineGroup = {
+                        ...g,
+                        columns: h.group.columns,           // 같은 group 의 columns 구조 (보통 동일)
+                        columnRoles: h.group.columnRoles,
+                        sampleRows: h.sampleRows ?? g.sampleRows,
+                        toBeValues: h.toBeValues ?? g.toBeValues,
+                      };
+                      if (h.columns && h.columns.length > 0) hView.columns = h.columns;
+                      if (h.columnRoles && h.columnRoles.length > 0) hView.columnRoles = h.columnRoles;
+                      return (
+                      <tr>
+                        <td colSpan={9} style={styles.archiveDetailTd}>
+                          {/* 상세 — 기존 SiteQuarantineCard 의 cardExpand 와 동일 layout.
+                              Project / PK / AS-IS / TO-BE 4 column + cardTableWrap. Open mapping 없음. */}
+                          <div style={styles.cardExpand}>
+                            {human && <div style={styles.cardHumanDetail}>{human}</div>}
+                            <div style={styles.cardTableWrap}>
+                              <table style={styles.cardTable}>
+                                <thead>
+                                  <tr>
+                                    <th style={{ ...styles.cardTh, ...styles.cardThTable }}>{t('logs.quarantine.colProject')}</th>
+                                    <th style={{ ...styles.cardTh, ...styles.cardThTable }}>
+                                      {quarantinePkColumnName(hView) ?? t('logs.quarantine.colTable')}
+                                    </th>
+                                    <th style={{ ...styles.cardTh, color: sevColor }}>
+                                      {t('logs.quarantine.colAsIs')}
+                                      {quarantineViolatedColumnName(hView) && (
+                                        <span style={{ fontWeight: 400, opacity: 0.75 }}> · {quarantineViolatedColumnName(hView)}</span>
+                                      )}
+                                    </th>
+                                    <th style={styles.cardTh}>{t('logs.quarantine.colToBe')}</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {hView.sampleRows.map((_, ri) => {
+                                    const pk = quarantineRowPk(hView, ri);
+                                    const asIs = quarantineRowAsIs(hView, ri);
+                                    const toBe = quarantineRowToBe(hView, ri);
+                                    const asIsNullStyle = { ...styles.nullCell, color: sevColor, background: 'transparent', border: `1px solid ${sevBorder}` };
+                                    return (
+                                      <tr key={ri}>
+                                        <td style={{ ...styles.cardTd, ...styles.cardTdTable }}>{g.projectName}</td>
+                                        <td style={{ ...styles.cardTd, ...styles.cardTdTable }}>
+                                          {pk === null ? <span style={styles.nullCell}>—</span> : String(pk)}
+                                        </td>
+                                        <td style={{ ...styles.cardTd, color: sevColor, fontWeight: 700, background: sevBg }}>
+                                          {asIs === null ? <span style={asIsNullStyle}>NULL</span> : String(asIs)}
+                                        </td>
+                                        <td style={{ ...styles.cardTd, ...styles.cardTdToBe }}>
+                                          {toBe === null ? <span style={styles.nullCell}>NULL</span> : String(toBe)}
+                                        </td>
+                                      </tr>
+                                    );
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                      );
+                    })()}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -519,6 +756,8 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'inline-flex', alignItems: 'center',
     padding: '3px 10px', border: '1px solid', borderRadius: 999,
     fontSize: 10.5, fontWeight: 800, letterSpacing: 0.6,
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
   },
   cardStage: { fontSize: 11, color: 'var(--text-3)', fontWeight: 600 },
 
@@ -566,6 +805,157 @@ const styles: Record<string, React.CSSProperties> = {
   cardActions: {
     display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
     marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)',
+  },
+  /* 과거 발생 이력 — Site quarantine card 의 footer 접/펴 panel. */
+  historyRoot: {
+    marginTop: 8, paddingTop: 8,
+    borderTop: '1px dashed var(--border)',
+  },
+  historyEmpty: {
+    marginTop: 8, paddingTop: 8,
+    borderTop: '1px dashed var(--border)',
+    fontSize: 10.5, color: 'var(--text-4)', fontStyle: 'italic',
+  },
+  historyToggle: {
+    display: 'inline-flex', alignItems: 'center', gap: 6,
+    padding: '4px 8px', border: 'none', borderRadius: 3,
+    background: 'transparent', color: 'var(--text-2)',
+    fontSize: 11, fontWeight: 600, cursor: 'pointer',
+  },
+  historyChevron: {
+    fontSize: 10, color: 'var(--text-3)',
+  },
+  historyPanel: {
+    marginTop: 6, padding: '6px 10px',
+    background: 'var(--panel-2)',
+    border: '1px solid var(--border)', borderRadius: 4,
+    display: 'flex', flexDirection: 'column', gap: 4,
+  },
+  historyRow: {
+    display: 'flex', alignItems: 'center', gap: 12,
+    padding: '4px 0',
+    fontSize: 11,
+    borderBottom: '1px dotted var(--border)',
+  },
+  historyRunId: {
+    fontFamily: 'var(--mono)', color: 'var(--text)', minWidth: 110,
+  },
+  historyTs: {
+    color: 'var(--text-3)', minWidth: 160,
+  },
+  historyRows: {
+    color: 'var(--text-2)', minWidth: 70, textAlign: 'right',
+  },
+  historyAckBadge: {
+    marginLeft: 'auto',
+    fontSize: 10, fontWeight: 700,
+    color: 'var(--text-3)',
+    padding: '2px 6px',
+    background: 'var(--panel)',
+    border: '1px solid var(--border)', borderRadius: 3,
+  },
+  historyUnackBadge: {
+    marginLeft: 'auto',
+    fontSize: 10, fontWeight: 700,
+    color: 'var(--amber)',
+    padding: '2px 6px',
+    background: 'rgba(232,181,99,0.10)',
+    border: '1px solid var(--amber)', borderRadius: 3,
+  },
+  /* Page-level archive section — 카드 list 아래의 「과거 발생 이력」 collapse */
+  /* 카드 list 와 archive 사이 시각적 구분선. archive 의 marginTop 대체. */
+  archiveSeparator: {
+    height: 1,
+    marginTop: 20,
+    marginBottom: 16,
+    background: 'var(--border-strong)',
+  },
+  archiveRoot: {
+    display: 'flex',
+    flexShrink: 0,                                  /* scroll parent (column flex) 의 압축 방지 */
+    background: 'var(--panel)',
+    border: '1px solid var(--border)',
+    borderRadius: 6,
+    overflow: 'hidden',
+  },
+  /* 카드 의 cardLeftBar 와 같은 위치. severity 없는 archive 라 진한 회색. */
+  archiveLeftBar: {
+    width: 4, flexShrink: 0,
+    background: 'var(--text-3)',
+  },
+  archiveBody: {
+    flex: 1, minWidth: 0,
+    padding: '32px 18px',
+  },
+  archiveToggle: {
+    display: 'inline-flex', alignItems: 'center', gap: 10,
+    padding: '10px 16px', border: 'none', borderRadius: 4,
+    background: 'transparent', color: 'var(--text-2)',
+    fontSize: 13.5, fontWeight: 700, cursor: 'pointer',
+  },
+  archiveChevron: {
+    fontSize: 13, color: 'var(--text-3)',
+  },
+  archivePanel: {
+    marginTop: 10,
+    overflowX: 'auto',
+  },
+  archiveTable: {
+    width: '100%',
+    borderCollapse: 'collapse',
+    fontSize: 11.5,
+  },
+  archiveTh: {
+    padding: '6px 8px',
+    textAlign: 'left',
+    fontWeight: 700,
+    color: 'var(--text-2)',
+    background: 'var(--panel-2)',
+    borderBottom: '1px solid var(--border)',
+  },
+  archiveTd: {
+    padding: '6px 8px',
+    borderBottom: '1px solid var(--border)',
+    color: 'var(--text)',
+  },
+  archiveDetailTd: {
+    padding: '10px 14px 14px',
+    background: 'var(--panel)',
+    borderBottom: '1px solid var(--border)',
+  },
+  archiveDetailHuman: {
+    marginBottom: 8,
+    fontSize: 11.5,
+    color: 'var(--text-2)',
+    fontStyle: 'italic',
+  },
+  /* Status badge — severity tab 의 4 값과 일관 (error / warning / skip). */
+  statusErrorBadge: {
+    display: 'inline-block',
+    fontSize: 10, fontWeight: 700,
+    padding: '2px 8px',
+    color: '#c92a3f',
+    background: 'rgba(232,93,117,0.10)',
+    border: '1px solid #e85d75',
+    borderRadius: 3,
+  },
+  statusWarningBadge: {
+    display: 'inline-block',
+    fontSize: 10, fontWeight: 700,
+    padding: '2px 8px',
+    color: '#a86b00',
+    background: 'rgba(232,181,99,0.10)',
+    border: '1px solid #e8b563',
+    borderRadius: 3,
+  },
+  statusSkipBadge: {
+    display: 'inline-block',
+    fontSize: 10, fontWeight: 700,
+    padding: '2px 8px',
+    color: 'var(--text-3)',
+    background: 'var(--panel-2)',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 3,
   },
   actPrimary: {
     padding: '6px 14px', border: '1px solid #1f8a5c', borderRadius: 4,
