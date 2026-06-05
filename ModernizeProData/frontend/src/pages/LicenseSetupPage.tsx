@@ -85,15 +85,15 @@ export function LicenseSetupPage() {
     return (
       <div style={styles.wrap}>
         <div style={styles.column}>
-          <div style={styles.langBar}>
-            <LanguageDropdown language={language} onChange={setLanguage} />
-          </div>
           <div style={styles.brandBlock}>
             <img src="/mpd.png" alt="" width={56} height={56} style={styles.logo} />
             <div style={styles.title}><BrandName /></div>
           </div>
           <div style={styles.card}>
-            <div style={styles.cardTitle}>{t('licenseSetup.title')}</div>
+            <div style={styles.cardTitleRow}>
+              <div style={styles.cardTitle}>{t('licenseSetup.title')}</div>
+              <LanguageDropdown language={language} onChange={setLanguage} />
+            </div>
             <div style={styles.cardHint}>{t('licenseSetup.workerBlocked')}</div>
           </div>
           <div style={styles.footer}>
@@ -107,16 +107,16 @@ export function LicenseSetupPage() {
   return (
     <div style={styles.wrap}>
       <div style={styles.column}>
-        <div style={styles.langBar}>
-          <LanguageDropdown language={language} onChange={setLanguage} />
-        </div>
         <div style={styles.brandBlock}>
           <img src="/mpd.png" alt="" width={56} height={56} style={styles.logo} />
           <div style={styles.title}><BrandName /></div>
         </div>
 
         <form style={styles.card} onSubmit={onSubmit}>
-          <div style={styles.cardTitle}>{t('licenseSetup.title')}</div>
+          <div style={styles.cardTitleRow}>
+            <div style={styles.cardTitle}>{t('licenseSetup.title')}</div>
+            <LanguageDropdown language={language} onChange={setLanguage} />
+          </div>
           <div style={styles.cardHint}>{t('licenseSetup.hint')}</div>
 
           <div style={styles.label}>
@@ -183,7 +183,7 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: 22,
   },
-  langBar: { width: '100%', display: 'flex', justifyContent: 'flex-end' },
+  cardTitleRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
   brandBlock: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 },
   logo: { display: 'block', marginBottom: 4 },
   title: { fontSize: 24, fontWeight: 700, color: 'var(--text)', letterSpacing: -0.4 },
