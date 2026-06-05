@@ -1,8 +1,6 @@
 import { useMemo, useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useWorkspaceStore, type Project, type ProjectPhase, type Site, type ProjectEnvironment, type TobeDbByEnv, type TobeDbLocks } from '../store/workspace';
-import { useNotificationPrefsStore } from '../store/notificationPreferences';
-import { useSettingsStore } from '../store/settings';
 import { projectApi } from '../api/workspace';
 import { ApiError } from '../api/client';
 import { useAuthStore } from '../store/auth';
@@ -21,7 +19,7 @@ interface HighlightState { highlightSide?: HighlightSide }
 
 const ALL_PHASES: ProjectPhase[] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
 
-type SectionKey = 'general' | 'ddl' | 'tobedb' | 'notify' | 'danger';
+type SectionKey = 'general' | 'ddl' | 'tobedb' | 'danger';
 
 /**
  * Project Settings — 프로토타입의 6-section 구조.
@@ -80,7 +78,6 @@ export function SettingsPage() {
     ...(site?.tobeDbScope === 'project'
       ? [{ k: 'tobedb' as const, l: 'TO-BE DB', d: 'Project 별 TO-BE DB 접속 정보' }]
       : []),
-    { k: 'notify',    l: t('projectSettings.section.notify.label'),    d: t('projectSettings.sidebar.notify.desc') },
     { k: 'danger',    l: t('projectSettings.section.danger.label'),    d: t('projectSettings.sidebar.danger.desc'), danger: true },
   ];
 
@@ -124,7 +121,6 @@ export function SettingsPage() {
         {section === 'general'   && <PSGeneral   project={project} site={site} />}
         {section === 'ddl'       && <PSDdl       project={project} highlightSide={highlightSide} />}
         {section === 'tobedb'    && site && <PSTobeDb project={project} site={site} />}
-        {section === 'notify'    && <PSNotify    project={project} />}
         {section === 'danger'    && <PSDanger    project={project} />}
       </div>
     </div>
@@ -324,107 +320,6 @@ function PSTobeDb({ project, site }: { project: Project; site: Site }) {
 }
 
 /* Schedule 탭의 Run history 는 LogViewer 의 'Run history' 탭으로 이동했음. */
-
-/* ─── Notifications ──────────────────────────────────────── */
-
-function PSNotify({ project }: { project: Project }) {
-  const t = useT();
-  const readOnly = useActiveProjectReadOnly();
-  // Solution settings 의 Enable notifications. false 면 Event subscriptions 토글 일괄 비활성.
-  const globalNotifEnabled = useSettingsStore((s) => s.notifications);
-  const events = [
-    { k: 'run.started',      l: t('projectSettings.notify.event.runStarted.label'),      d: t('projectSettings.notify.event.runStarted.desc') },
-    { k: 'run.failed',       l: t('projectSettings.notify.event.runFailed.label'),       d: t('projectSettings.notify.event.runFailed.desc') },
-    { k: 'run.finished',     l: t('projectSettings.notify.event.runFinished.label'),     d: t('projectSettings.notify.event.runFinished.desc') },
-    { k: 'snapshot.pending', l: t('projectSettings.notify.event.snapPending.label'),     d: t('projectSettings.notify.event.snapPending.desc') },
-    { k: 'snapshot.approved',l: t('projectSettings.notify.event.snapApproved.label'),    d: t('projectSettings.notify.event.snapApproved.desc') },
-    { k: 'snapshot.rejected',l: t('projectSettings.notify.event.snapRejected.label'),    d: t('projectSettings.notify.event.snapRejected.desc') },
-    { k: 'snapshot.created', l: t('projectSettings.notify.event.snapCreated.label'),     d: t('projectSettings.notify.event.snapCreated.desc') },
-    { k: 'snapshot.deleted', l: t('projectSettings.notify.event.snapDeleted.label'),     d: t('projectSettings.notify.event.snapDeleted.desc') },
-    { k: 'snapshot.baseline',l: t('projectSettings.notify.event.snapBaseline.label'),    d: t('projectSettings.notify.event.snapBaseline.desc') },
-    { k: 'ddl.imported',     l: t('projectSettings.notify.event.ddlImported.label'),     d: t('projectSettings.notify.event.ddlImported.desc') },
-    { k: 'project.created',  l: t('projectSettings.notify.event.projectCreated.label'),  d: t('projectSettings.notify.event.projectCreated.desc') },
-    { k: 'project.phase',    l: t('projectSettings.notify.event.phaseChanged.label'),    d: t('projectSettings.notify.event.phaseChanged.desc') },
-    { k: 'project.assignee', l: t('projectSettings.notify.event.assigneeChanged.label'), d: t('projectSettings.notify.event.assigneeChanged.desc') },
-  ];
-
-  const subsMap          = useNotificationPrefsStore((s) => s.subs);
-  const setSubscription  = useNotificationPrefsStore((s) => s.setSubscription);
-
-  // store 에 저장된 현재 값
-  const savedSubs = subsMap[project.id] ?? {};
-
-  // 로컬 draft — Save 누르기 전까지는 store 에 반영 안 됨
-  const [draftSubs, setDraftSubs] = useState<Record<string, boolean>>(savedSubs);
-
-  // 프로젝트가 바뀌면 draft 를 저장값으로 재초기화
-  useEffect(() => {
-    setDraftSubs(subsMap[project.id] ?? {});
-    // 프로젝트 변경 시에만 초기화 — store map 변화로 인한 재초기화는 원치 않음 (자기가 저장한 직후 깜박임 방지)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project.id]);
-
-  const isOn = (k: string) => draftSubs[k] ?? true;
-
-  const isDirty = useMemo(() => {
-    for (const e of events) {
-      const d = draftSubs[e.k] ?? true;
-      const s = savedSubs[e.k] ?? true;
-      if (d !== s) return true;
-    }
-    return false;
-  }, [draftSubs, savedSubs, events]);
-
-  const handleSave = () => {
-    if (!isDirty) return;
-    for (const e of events) {
-      const v = draftSubs[e.k] ?? true;
-      setSubscription(project.id, e.k, v);
-    }
-  };
-
-  return (
-    <>
-      <PSHead
-        title="Notifications"
-        desc={t('projectSettings.head.notify.desc')}
-        actions={
-          <button
-            onClick={handleSave}
-            disabled={!isDirty || readOnly}
-            style={{ ...styles.btnPrimary, ...((!isDirty || readOnly) ? styles.btnDisabled : {}) }}
-          >
-            {t('projectSettings.action.saveChanges')}
-          </button>
-        }
-      />
-
-      <PSCard title={t('projectSettings.notify.subscriptions.title')} desc={t('projectSettings.notify.subscriptions.desc')}>
-        {events.map((e, i) => (
-          <div
-            key={e.k}
-            style={{
-              ...styles.notifyRow,
-              borderBottom: i < events.length - 1 ? '1px dashed var(--border)' : 'none',
-            }}
-          >
-            <div>
-              <div style={{ fontSize: 12, fontWeight: 500 }}>{e.l}</div>
-              <div style={{ fontSize: 10.5, color: 'var(--text-3)', marginTop: 2 }}>{e.d}</div>
-            </div>
-            <Toggle
-              on={globalNotifEnabled && isOn(e.k)}
-              onChange={() => setDraftSubs((cur) => ({ ...cur, [e.k]: !(cur[e.k] ?? true) }))}
-              disabled={!globalNotifEnabled || readOnly}
-              label=""
-            />
-          </div>
-        ))}
-      </PSCard>
-    </>
-  );
-}
-
 
 /* ─── Danger zone ────────────────────────────────────────── */
 
@@ -709,38 +604,6 @@ function PSInput({
       />
       {suffix && <span style={styles.inputSuffix}>{suffix}</span>}
     </div>
-  );
-}
-
-function Toggle({ on, onChange, label, disabled }: { on: boolean; onChange: (v: boolean) => void; label?: string; disabled?: boolean }) {
-  return (
-    <button
-      onClick={() => { if (!disabled) onChange(!on); }}
-      disabled={disabled}
-      style={{
-        display: 'inline-flex', alignItems: 'center', gap: 8,
-        padding: 0,
-        background: 'transparent',
-        border: 'none',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        fontSize: 11.5, color: on ? 'var(--text)' : 'var(--text-3)',
-        fontFamily: 'var(--mono)',
-        opacity: disabled ? 0.45 : 1,
-      }}
-    >
-      <span style={{
-        width: 22, height: 12, borderRadius: 7,
-        background: on ? 'var(--text-2)' : 'var(--border-strong)',
-        position: 'relative', display: 'inline-block',
-      }}>
-        <span style={{
-          position: 'absolute', top: 1, left: on ? 11 : 1,
-          width: 10, height: 10, borderRadius: '50%', background: '#fff',
-          transition: 'left .15s',
-        }} />
-      </span>
-      {label && <span>{label}</span>}
-    </button>
   );
 }
 

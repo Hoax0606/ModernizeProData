@@ -25,6 +25,9 @@ interface SettingsState {
   notifications: boolean;
   notificationScope: NotificationScope;
   notificationRetention: string;
+  /** 전 프로젝트 공통 이벤트 알림 on/off — eventKey → 활성 여부. 미설정 = true(켜짐).
+   *  Solution Settings 의 "All-project notifications" 가 source. */
+  notificationDefaults: Record<string, boolean>;
   /** External integrations master toggle — BE solution_settings.external_enabled の mirror.
    *  SchedulerPage が source of truth として BE から fetch する。store には optimistic な値が入る. */
   externalIntegrations: boolean;
@@ -35,6 +38,7 @@ interface SettingsState {
   setNotifications: (on: boolean) => void;
   setNotificationScope: (scope: NotificationScope) => void;
   setNotificationRetention: (retention: string) => void;
+  setNotificationDefault: (eventKey: string, enabled: boolean) => void;
   setExternalIntegrations: (on: boolean) => void;
   setProjectSort: (sort: ProjectSort) => void;
 }
@@ -55,6 +59,7 @@ export const useSettingsStore = create<SettingsState>()(
       notifications: true,
       notificationScope: 'all-project',
       notificationRetention: '90 days',
+      notificationDefaults: {},
       externalIntegrations: false,
       projectSort: 'created-asc',
 
@@ -63,6 +68,8 @@ export const useSettingsStore = create<SettingsState>()(
       setNotifications: (on) => set({ notifications: on }),
       setNotificationScope: (scope) => set({ notificationScope: scope }),
       setNotificationRetention: (retention) => set({ notificationRetention: retention }),
+      setNotificationDefault: (eventKey, enabled) =>
+        set((s) => ({ notificationDefaults: { ...s.notificationDefaults, [eventKey]: enabled } })),
       setExternalIntegrations: (on) => set({ externalIntegrations: on }),
       setProjectSort: (projectSort) => set({ projectSort }),
     }),
