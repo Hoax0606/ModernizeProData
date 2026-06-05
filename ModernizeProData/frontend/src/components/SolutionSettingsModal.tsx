@@ -173,9 +173,9 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
                   color: isMaster ? 'var(--text)' : 'var(--text-3)',
                 }}
               >
-                <option value="7 days">7일</option>
-                <option value="30 days">30일</option>
-                <option value="90 days">90일</option>
+                <option value="7 days">{t('solution.retention.7d')}</option>
+                <option value="30 days">{t('solution.retention.30d')}</option>
+                <option value="90 days">{t('solution.retention.90d')}</option>
                 <option value="OFF">OFF</option>
               </select>
             </div>

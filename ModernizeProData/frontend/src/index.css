@@ -30,6 +30,7 @@
   --navy-50: #e8f4f2;
   --green: #0c9e6a;
   --green-50: #e2f5ec;
+  --green-dark: #0a6b48;  /* 완료(done) stage 진행바 — running(밝은 --green) 보다 어두운 톤 */
   --amber: #b87219;
   --amber-50: #fdf0de;
   --red: #c42f2f;
@@ -83,6 +84,7 @@
   --navy-50: #152822;
   --green: #35cc88;
   --green-50: #0d2318;
+  --green-dark: #1f9460;  /* 완료(done) stage 진행바 — running(밝은 --green) 보다 어두운 톤 */
   --amber: #e8a84a;
   --amber-50: #271a0a;
   --red: #e06060;

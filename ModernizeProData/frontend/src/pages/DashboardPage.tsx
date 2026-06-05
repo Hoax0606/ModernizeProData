@@ -658,6 +658,18 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
     }
     return ids;
   }, [allSnapshots]);
+  // 프로젝트별 최신 approved snapshot 버전 — Version 컬럼용. 없으면 undefined.
+  const approvedVersionByProject = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of allSnapshots) {
+      if (s.status !== 'approved') continue;
+      const cur = m.get(s.projectId);
+      if (cur === undefined || String(s.version).localeCompare(cur, undefined, { numeric: true }) > 0) {
+        m.set(s.projectId, String(s.version));
+      }
+    }
+    return m;
+  }, [allSnapshots]);
 
   // 'Rows' KPI — AS-IS CSV 전체 data row 수 합 (2026-06-03: TO-BE 컬럼 기준 → AS-IS 기준).
   // 첫 호출은 전체 CSV scan 이라 느릴 수 있어 도착 전엔 '—' 표시. BE 가 mtime+size 캐시 보유.
@@ -836,6 +848,7 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
                 <tr>
                   <Th>{t('siteOverview.col.project')}</Th>
                   <Th>{t('siteOverview.col.phase')}</Th>
+                  <Th align="center">{t('siteOverview.col.version')}</Th>
                   <Th>{t('siteOverview.col.username')}</Th>
                   <Th align="right">{t('siteOverview.col.tables')}</Th>
                   <Th>{t('siteOverview.col.mapping')}</Th>
@@ -843,7 +856,7 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
               </thead>
               <tbody>
                 {filteredProjects.length === 0 ? (
-                  <tr><td colSpan={5} style={styles.emptyRow}>{t('siteOverview.empty')}</td></tr>
+                  <tr><td colSpan={6} style={styles.emptyRow}>{t('siteOverview.empty')}</td></tr>
                 ) : (
                   filteredProjects.map((p, i) => {
                     const stats = mappingStats[p.id];
@@ -880,6 +893,10 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
                         <td style={styles.td}>
                           <span style={{ ...styles.phaseChip, ...phaseChipColor(p.phase, p.runStatus) }}>{p.phase}</span>
                         </td>
+                        <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)', fontSize: 11.5,
+                                     color: approvedVersionByProject.has(p.id) ? 'var(--text-2)' : 'var(--text-4)' }}>
+                          {approvedVersionByProject.get(p.id) ?? '—'}
+                        </td>
                         <td style={styles.td} onClick={(e) => e.stopPropagation()}>
                           {canEditRow(p) ? (
                             (() => {
@@ -912,8 +929,8 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
                         <td style={styles.td}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 200 }}>
                             <ProgressBar pct={pct} />
-                            <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-2)', minWidth: 72, textAlign: 'right' }}>
-                              {rowMapped}/{rowTotal}
+                            <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-2)', minWidth: 96, textAlign: 'right' }}>
+                              {pct.toFixed(0)}% ({rowMapped}/{rowTotal})
                             </span>
                           </div>
                         </td>
@@ -1169,7 +1186,7 @@ const styles: Record<string, React.CSSProperties> = {
   /* Table */
   tableWrap: { background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: 12 },
-  td: { padding: '8px 12px' },
+  td: { padding: '11px 12px', verticalAlign: 'middle' },
   emptyRow: { padding: '60px 20px', textAlign: 'center', background: 'var(--zebra)' },
   emptyTitle: { fontSize: 13, fontWeight: 600, color: 'var(--text-3)', marginBottom: 6 },
   emptyHint: { fontSize: 11, color: 'var(--text-4)', fontFamily: 'var(--mono)' },

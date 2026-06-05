@@ -94,7 +94,7 @@ export function actionToEventKey(action: string): string | null {
   if (a.includes('baseline')) return 'snapshot.baseline';               // "baseline set ..." / "baseline cleared"
   if (a.includes('ddl import')) return 'ddl.imported';                  // "DDL imported"
   if (a.includes('project created')) return 'project.created';
-  if (a.includes('phase changed')) return 'project.phase';
+  // phase 변경은 알림 안 함 (2026-06-05) — 매핑 없음 → null → 토스트 X (audit 기록은 유지).
   if (a.includes('assignee changed')) return 'project.assignee';        // "assignee changed" / "execution assignee changed"
   return null;
 }

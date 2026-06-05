@@ -3,8 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { licenseApi } from '../api/license';
 import { BrandName } from '../components/BrandName';
+import { LanguageDropdown } from '../components/LanguageDropdown';
 import { useT } from '../i18n';
 import { useAuthStore } from '../store/auth';
+import { useSettingsStore } from '../store/settings';
 import { APP_VERSION } from '../lib/appVersion';
 
 /**
@@ -17,6 +19,8 @@ export function LicenseSetupPage() {
   const t = useT();
   const nav = useNavigate();
   const user = useAuthStore((s) => s.user);
+  const language = useSettingsStore((s) => s.language);
+  const setLanguage = useSettingsStore((s) => s.setLanguage);
   // Anonymous first-boot OR master only. A worker (admin role) that has
   // somehow landed here from a license-MISSING Coordinator should NOT be
   // able to apply a license file — that's master's job. Backend's
@@ -81,6 +85,9 @@ export function LicenseSetupPage() {
     return (
       <div style={styles.wrap}>
         <div style={styles.column}>
+          <div style={styles.langBar}>
+            <LanguageDropdown language={language} onChange={setLanguage} />
+          </div>
           <div style={styles.brandBlock}>
             <img src="/mpd.png" alt="" width={56} height={56} style={styles.logo} />
             <div style={styles.title}><BrandName /></div>
@@ -100,6 +107,9 @@ export function LicenseSetupPage() {
   return (
     <div style={styles.wrap}>
       <div style={styles.column}>
+        <div style={styles.langBar}>
+          <LanguageDropdown language={language} onChange={setLanguage} />
+        </div>
         <div style={styles.brandBlock}>
           <img src="/mpd.png" alt="" width={56} height={56} style={styles.logo} />
           <div style={styles.title}><BrandName /></div>
@@ -173,6 +183,7 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: 22,
   },
+  langBar: { width: '100%', display: 'flex', justifyContent: 'flex-end' },
   brandBlock: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 },
   logo: { display: 'block', marginBottom: 4 },
   title: { fontSize: 24, fontWeight: 700, color: 'var(--text)', letterSpacing: -0.4 },

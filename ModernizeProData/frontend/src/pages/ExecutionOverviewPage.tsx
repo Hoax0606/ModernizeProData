@@ -7,6 +7,7 @@ import { Checkbox } from '../components/Checkbox';
 import {
   buildStages,
   buildStagesFromStageViews,
+  stageFillColor,
   type Stage,
   type StageTone,
 } from '../lib/pipelineStages';
@@ -376,6 +377,16 @@ export function ExecutionOverviewPage() {
   const overallProgressPct = siteProjects.length
     ? siteProjects.reduce((a, p) => a + (metrics[p.id]?.progressPct ?? 0), 0) / siteProjects.length
     : 0;
+  // 실패(failed/aborted/timed_out) 프로젝트의 "안 된 분"(100-progressPct) 평균 — Overall
+  // Progress 바에서 green(완료) 뒤 red 세그먼트로 표시 (2026-06-05).
+  const failedPortionPct = siteProjects.length
+    ? siteProjects.reduce((a, p) => {
+        const m = metrics[p.id];
+        const failed = m && (m.runStatus === 'failed' || m.runStatus === 'timed_out' || m.runStatus === 'aborted');
+        return a + (failed ? (100 - (m.progressPct ?? 0)) : 0);
+      }, 0) / siteProjects.length
+    : 0;
+  const redPct = Math.max(0, Math.min(failedPortionPct, 100 - overallProgressPct));
 
   return (
     <div>
@@ -397,8 +408,12 @@ export function ExecutionOverviewPage() {
           <div style={{ flex: 1 }} />
           <span style={styles.overallProgressDim}>{statusHint}</span>
         </div>
-        <div style={styles.overallProgressOuter}>
+        <div style={{ ...styles.overallProgressOuter, display: 'flex' }}>
           <div style={{ ...styles.overallProgressInner, width: `${overallProgressPct}%` }} />
+          {redPct > 0 && (
+            <div style={{ height: '100%', width: `${redPct}%`, background: 'var(--red)' }}
+                 title={t('executionOverview.statusFailed', { n: failedRuns })} />
+          )}
         </div>
       </div>
 
@@ -623,12 +638,7 @@ export function ExecutionOverviewPage() {
                               style={{
                                 ...styles.pipelineSlotInner,
                                 width: `${st.pct}%`,
-                                background:
-                                  st.tone === 'ok'      ? 'var(--text-3)'
-                                  : st.tone === 'running' ? 'var(--green)'
-                                  : st.tone === 'err'   ? 'var(--red)'
-                                  : st.tone === 'warn'  ? 'var(--amber)'
-                                  : 'var(--amber)',
+                                background: stageFillColor(st.tone),
                               }}
                             />
                           </div>

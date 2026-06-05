@@ -59,6 +59,26 @@ export function buildStages(phase: ProjectPhase): Stage[] {
   return BASE_STAGES.map((s) => ({ ...s, pct: 0, tone: 'idle' }));
 }
 
+/**
+ * 통일된 stage tone → 진행바 채움색. (ExecutionPage 의 OverallProgress + ProgressBar,
+ * ExecutionOverviewPage 의 per-row 파이프라인 바가 모두 이 함수를 공유한다.)
+ *  - running : 밝은 hue (--green)              ← 실행 중
+ *  - ok      : 같은 hue 의 어두운 톤 (--green-dark) ← 완료 (#6-4)
+ *  - err     : 빨강 (--red)                     ← 실패 (#6-3)
+ *  - warn    : 빨강 (--red)                     ← failed_with_pending_warnings = 부분 실패 (#6-3)
+ *  - idle    : 미실행 대기 (--amber)
+ */
+export function stageFillColor(tone: StageTone): string {
+  switch (tone) {
+    case 'running': return 'var(--green)';
+    case 'ok':      return 'var(--green-dark)';
+    case 'err':     return 'var(--red)';
+    case 'warn':    return 'var(--red)';
+    case 'idle':
+    default:        return 'var(--amber)';
+  }
+}
+
 /** 完了した stage 의 数 (tone === 'ok'). 分数 표시용. */
 export function countDoneStages(stages: Stage[]): number {
   return stages.filter((s) => s.tone === 'ok').length;

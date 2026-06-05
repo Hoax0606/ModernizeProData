@@ -78,7 +78,7 @@ export function SettingsPage() {
     { k: 'ddl',       l: t('projectSettings.section.ddl.label'),       d: t('projectSettings.sidebar.ddl.desc') },
     // 프로젝트별 모드일 때만 TO-BE DB 섹션 노출.
     ...(site?.tobeDbScope === 'project'
-      ? [{ k: 'tobedb' as const, l: 'TO-BE DB', d: 'Project 별 TO-BE DB 접속 정보' }]
+      ? [{ k: 'tobedb' as const, l: 'TO-BE DB', d: t('projectSettings.sidebar.tobedb.desc') }]
       : []),
     { k: 'notify',    l: t('projectSettings.section.notify.label'),    d: t('projectSettings.sidebar.notify.desc') },
     { k: 'danger',    l: t('projectSettings.section.danger.label'),    d: t('projectSettings.sidebar.danger.desc'), danger: true },
@@ -297,7 +297,7 @@ function PSTobeDb({ project, site }: { project: Project; site: Site }) {
     <>
       <PSHead
         title="TO-BE Database"
-        desc="프로젝트별 TO-BE DB 접속 정보 (Site Setting 의 'TO-BE DB scope' 가 Per-project 일 때 사용)"
+        desc={t('projectSettings.head.tobedb.desc')}
         actions={
           <button
             onClick={handleSave}
@@ -344,7 +344,6 @@ function PSNotify({ project }: { project: Project }) {
     { k: 'snapshot.baseline',l: t('projectSettings.notify.event.snapBaseline.label'),    d: t('projectSettings.notify.event.snapBaseline.desc') },
     { k: 'ddl.imported',     l: t('projectSettings.notify.event.ddlImported.label'),     d: t('projectSettings.notify.event.ddlImported.desc') },
     { k: 'project.created',  l: t('projectSettings.notify.event.projectCreated.label'),  d: t('projectSettings.notify.event.projectCreated.desc') },
-    { k: 'project.phase',    l: t('projectSettings.notify.event.phaseChanged.label'),    d: t('projectSettings.notify.event.phaseChanged.desc') },
     { k: 'project.assignee', l: t('projectSettings.notify.event.assigneeChanged.label'), d: t('projectSettings.notify.event.assigneeChanged.desc') },
   ];
 
@@ -472,7 +471,6 @@ function PSDanger({ project }: { project: Project }) {
         phase: 'planning',
         tableCount: 0,
         ddlFiles: project.ddlFiles,
-        owner: project.owner,
       });
       closeDuplicate();
       navigate('/');
