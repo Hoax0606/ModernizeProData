@@ -31,7 +31,7 @@ import { useTobeDdlStore } from '../store/tobeDdl';
 import { useAuditLogStore } from '../store/auditLog';
 import { createWebSocket, subscribe } from '../api/ws';
 import { useNotificationStore } from '../store/notifications';
-import { useNotificationPrefsStore, isEventEnabled, actionToEventKey } from '../store/notificationPreferences';
+import { isEventEnabled, actionToEventKey } from '../store/notificationPreferences';
 import { useSettingsStore, type ProjectSort } from '../store/settings';
 import { useT } from '../i18n';
 
@@ -75,7 +75,7 @@ export function AppShell() {
   const allLogs = useAuditLogStore((s) => s.logs);
   const globalNotifEnabled = useSettingsStore((s) => s.notifications);
   const globalNotifScope   = useSettingsStore((s) => s.notificationScope);
-  const notifPrefSubs   = useNotificationPrefsStore((s) => s.subs);
+  const notifDefaults   = useSettingsStore((s) => s.notificationDefaults);
   const notifReadIdsByUser = useNotificationStore((s) => s.readIds);
   const notifDismissedIdsByUser = useNotificationStore((s) => s.dismissedIds);
   const markAllNotifRead = useNotificationStore((s) => s.markAllRead);
@@ -337,7 +337,7 @@ export function AppShell() {
       .filter((l) => {
         // Event subscription: action → event key 매핑이 존재하면 OFF 시 제외.
         const eventKey = actionToEventKey(l.action);
-        if (eventKey && !isEventEnabled(notifPrefSubs, l.projectId, eventKey)) return false;
+        if (eventKey && !isEventEnabled(notifDefaults, eventKey)) return false;
         // Scope (글로벌): 'mine-only' 면 본인이 한 action 만.
         if (globalNotifScope === 'mine-only' && currentUserName && l.user !== currentUserName) return false;
         return true;
@@ -369,7 +369,7 @@ export function AppShell() {
         };
       })
       .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-  }, [allLogs, allProjects, activeSiteId, notifPrefSubs, globalNotifScope, user?.username, globalNotifEnabled]);
+  }, [allLogs, allProjects, activeSiteId, notifDefaults, globalNotifScope, user?.username, globalNotifEnabled]);
 
   const visibleNotifs = useMemo(
     () => notifItems.filter((n) => !notifDismissedIds.includes(n.id)),

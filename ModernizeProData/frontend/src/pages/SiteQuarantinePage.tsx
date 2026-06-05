@@ -14,6 +14,7 @@ import {
   type QuarantineSeverity,
 } from './quarantineMock';
 import { quarantineApi } from '../api/quarantine';
+import { RunHistoryPanel } from '../components/RunHistoryPanel';
 
 /**
  * Site Quarantine — site 전체의 모든 프로젝트에서 모인 quarantine group 을 한 화면에 표시.
@@ -28,6 +29,13 @@ export function SiteQuarantinePage() {
   const navigate = useNavigate();
   const activeSiteId = useWorkspaceStore((s) => s.activeSiteId);
   const allProjects = useWorkspaceStore((s) => s.projects);
+  const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
+  // Open Mapping — group 의 projectId 로 activeProject 세팅 후 /mapping 이동.
+  // 이전엔 navigate('/mapping') 만 해 active project 없음 → "프로젝트 선택" (2026-06-05 fix).
+  const openMappingFor = (projectId: string) => {
+    setActiveProject(projectId);
+    navigate('/mapping', { state: { activateProjectId: projectId } });
+  };
 
   const siteProjects = useMemo(
     () => allProjects.filter((p) => p.siteId === activeSiteId),
@@ -62,6 +70,8 @@ export function SiteQuarantinePage() {
       });
   }, [activeSiteId, siteProjects]);
 
+  /** 페이지 내 탭 — Quarantine | Run History (#5: 구 Scheduler Run History 통합). */
+  const [view, setView] = useState<'quarantine' | 'history'>('quarantine');
   const [severityFilter, setSeverityFilter] = useState<'all' | 'skip' | QuarantineSeverity>('all');
   const [projectFilter,  setProjectFilter]  = useState<string | null>(null);   // null = 모든 프로젝트
   const [pickedGroupId,  setPickedGroupId]  = useState<string | null>(null);
@@ -131,6 +141,30 @@ export function SiteQuarantinePage() {
     <div style={styles.root}>
       <style>{QUAR_CARD_CSS}</style>
 
+      {/* 페이지 내 탭 — Quarantine | Run History */}
+      <div style={styles.viewTabs} role="tablist">
+        <button
+          type="button" role="tab" aria-selected={view === 'quarantine'}
+          onClick={() => setView('quarantine')}
+          style={{ ...styles.viewTab, ...(view === 'quarantine' ? styles.viewTabActive : {}) }}
+        >
+          {t('runResults.tab.quarantine')}
+        </button>
+        <button
+          type="button" role="tab" aria-selected={view === 'history'}
+          onClick={() => setView('history')}
+          style={{ ...styles.viewTab, ...(view === 'history' ? styles.viewTabActive : {}) }}
+        >
+          {t('runResults.tab.history')}
+        </button>
+      </div>
+
+      {view === 'history' ? (
+        <div style={styles.scroll}>
+          <RunHistoryPanel />
+        </div>
+      ) : (
+      <>
       <div style={styles.header}>
         {/* 위 줄 — stats */}
         <div style={styles.stats}>
@@ -205,7 +239,7 @@ export function SiteQuarantinePage() {
               t={t}
               open={openGroupId === g.id}
               onToggle={() => setOpenGroupId((cur) => (cur === g.id ? null : g.id))}
-              onOpenMapping={() => navigate('/mapping')}
+              onOpenMapping={() => openMappingFor(g.projectId)}
             />
           ))
         )}
@@ -214,6 +248,8 @@ export function SiteQuarantinePage() {
             상단 = 최신 (Axis 1), 하단 = 과거 archive. severity / project / group dropdown 필터 모두 적용. */}
         <HistoryArchiveSection groups={filteredGroups} severityFilter={severityFilter} t={t} />
       </div>
+      </>
+      )}
     </div>
   );
 }
@@ -573,6 +609,20 @@ const QUAR_CARD_CSS = `
 
 const styles: Record<string, React.CSSProperties> = {
   root: { display: 'flex', flexDirection: 'column', height: 'calc(100vh - 80px)', minHeight: 540 },
+
+  viewTabs: {
+    display: 'flex', gap: 4, marginBottom: 10,
+    borderBottom: '1px solid var(--border)',
+  },
+  viewTab: {
+    padding: '7px 16px', fontSize: 13, fontWeight: 500,
+    border: 'none', borderBottom: '2px solid transparent',
+    background: 'transparent', color: 'var(--text-3)', cursor: 'pointer',
+    marginBottom: -1,
+  },
+  viewTabActive: {
+    color: 'var(--text)', borderBottomColor: 'var(--accent, var(--green))',
+  },
 
   header: {
     /* 2 줄 stack — 위: stats, 아래: 필터 한 줄. */

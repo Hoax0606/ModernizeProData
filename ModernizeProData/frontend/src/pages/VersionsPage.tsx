@@ -191,10 +191,8 @@ export function VersionsPage() {
   // AUDIT LOG 접기/펼치기 상태
   const [auditLogExpanded, setAuditLogExpanded] = useState(true);
 
-  // Audit Log — store 에서 가져옴 (localStorage 영속, 페이지 이동에도 보존)
+  // Audit Log — store 에서 가져옴 (backend audit_log 가 source of truth)
   const allAuditLogs = useAuditLogStore((s) => s.logs);
-  const addAuditLogEntry = useAuditLogStore((s) => s.add);
-  const clearAuditLogByProject = useAuditLogStore((s) => s.clearByProject);
   const auditLogs = useMemo(
     () => allAuditLogs.filter((l) => l.projectId === activeProjectId),
     [allAuditLogs, activeProjectId],
@@ -203,26 +201,6 @@ export function VersionsPage() {
   // rehearsal 이후 phase 에서만 cutover snapshot 생성 가능
   const POST_REHEARSAL: ProjectPhase[] = ['rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
   const canCreateCutover = project ? POST_REHEARSAL.includes(project.phase) : false;
-
-  // Audit Log 추가 함수
-  const addAuditLog = (
-    action: string,
-    description: string,
-    snapshotName?: string,
-    snapshotId?: string,
-    snapshotType?: 'mapping' | 'cutover',
-  ) => {
-    if (!activeProjectId) return;
-    addAuditLogEntry({
-      projectId: activeProjectId,
-      user: user?.username || 'Unknown',
-      action,
-      description,
-      snapshotName,
-      snapshotId,
-      snapshotType,
-    });
-  };
 
   if (!project) {
     return (
@@ -272,40 +250,19 @@ export function VersionsPage() {
       // 방금 만든 snapshot 을 자동 선택
       setSelectedSnapshotId(newSnapshot.id);
 
-      // Audit log 기록 (description 이 있으면 전체 포함)
-      const actionLabel = createType === 'cutover' ? 'Cutover Snapshot created' : 'Snapshot created';
-      const desc = newDesc.trim();
-      const auditDesc = desc
-        ? `Created new ${createType} snapshot: ${name}\n${desc}`
-        : `Created new ${createType} snapshot: ${name}`;
-      addAuditLog(actionLabel, auditDesc, newSnapshot.version || 'v1.0', newSnapshot.id, createType);
-
+      // audit log 는 backend (createSnapshot controller) 가 자동 기록.
       resetCreate();
     } catch (error) {
       console.error('Failed to create snapshot:', error);
-      const failLabel = createType === 'cutover' ? 'Cutover Snapshot creation failed' : 'Snapshot creation failed';
-      addAuditLog(failLabel, `Failed to create snapshot: ${name}`);
     }
   };
 
   const handleRequest = async (id: string) => {
     try {
       await requestSnapshot(id);
-
-      // Audit log 기록
-      const snapshot = snapshots.find(s => s.id === id);
-      addAuditLog(
-        'approval requested',
-        `Requested approval for snapshot: ${snapshot?.name}`,
-        snapshot?.version,
-        snapshot?.id,
-        snapshot?.type ?? 'mapping',
-      );
-
-      // Phase 전환은 approve 시점에 처리 (ApprovalsPage)
+      // audit log + phase 전환은 backend (requestSnapshot / approve) 가 처리.
     } catch (error) {
       console.error('Failed to request approval:', error);
-      addAuditLog('request failed', `Failed to request approval for snapshot: ${snapshots.find(s => s.id === id)?.name}`);
     }
   };
 
@@ -513,13 +470,6 @@ export function VersionsPage() {
   );
 }
 
-const STATUS_KEY: Record<SnapshotStatus, TranslationKey> = {
-  draft:    'versions.status.draft',
-  pending:  'versions.status.pending',
-  approved: 'versions.status.approved',
-  rejected: 'versions.status.rejected',
-};
-
 function statusTone(s: SnapshotStatus): React.CSSProperties {
   switch (s) {
     case 'draft':    return { background: 'var(--panel-2)', color: 'var(--text-3)', borderColor: 'var(--border-strong)' };
@@ -615,6 +565,9 @@ function ChangeRow({ kind, category, rawKey, detail, fieldChanges }: {
 
   // 헤더 우측 라벨 — backend detail 을 신뢰하지 않고 client-side 재계산.
   // ADDED/DELETED 는 라벨 없음 (화살표만). MODIFIED 는 변경 항목에 따라.
+  // BE detail 리터럴(영문)을 현재 언어로 매핑. 미매핑 값은 그대로 (최소한 영문이라도 표시).
+  const mapDetail = (d: string): string =>
+    d === 'binding changed' ? t('versions.changes.label.binding') : d;
   const headerLabel = (() => {
     if (effectiveKind === 'added' || effectiveKind === 'removed') return '';
     if (effectiveKind === 'modified') {
@@ -623,9 +576,9 @@ function ChangeRow({ kind, category, rawKey, detail, fieldChanges }: {
       if (hasCol && hasSql) return t('versions.changes.label.both');
       if (hasCol)           return t('versions.changes.label.column');
       if (hasSql)           return t('versions.changes.label.rule');
-      return detail; // fallback
+      return mapDetail(detail); // fallback
     }
-    return detail;
+    return mapDetail(detail);
   })();
 
   // 기본은 접힌 상태. 헤더 클릭 시 토글.
@@ -831,7 +784,7 @@ function SnapshotDetailView({
             <span style={styles.detailValue}>{new Date(snapshot.createdAt).toLocaleString()}</span>
           </div>
           <div style={styles.detailGridItem}>
-            <span style={styles.detailLabel}>Tables</span>
+            <span style={styles.detailLabel}>Bindings</span>
             <span style={styles.detailValue}>{snapshot.tableCount}</span>
           </div>
           <div style={styles.detailGridItem}>

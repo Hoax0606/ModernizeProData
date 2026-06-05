@@ -9,6 +9,7 @@ import {
   runLogApi,
   type RunLogLevel,
   type RunLogLine,
+  type RunLogCounts,
 } from '../api/runLogs';
 import { runsApi, type RunHistoryDto, type RunTableResult } from '../api/runs';
 import { quarantineApi } from '../api/quarantine';
@@ -128,6 +129,17 @@ export function LogViewerPage() {
       .then((p) => setAllLines(p.lines))
       .catch((e) => { console.error('runLog fetch failed', e); setAllLines([]); });
   }, [runId]);
+
+  /** chip / footer 총계는 BE 실카운트 사용. allLines 는 max LOG_FETCH_LIMIT + INFO 는
+   *  BE 가 seq%100 샘플 적재라 fetch 배열로 세면 ~1/100 로 축소된다. counts endpoint 가
+   *  전건 카운트(WARN/ERROR 정확, INFO 는 적재된 샘플의 실수)를 돌려준다. */
+  const { data: realCounts } = useQuery<RunLogCounts>({
+    queryKey: ['run-log-counts', runId],
+    enabled: !!runId,
+    queryFn: () => runLogApi.counts(runId),
+    refetchInterval: 5_000,
+    staleTime: 2_000,
+  });
 
   /** Stream 모드 라인 — 검색/level/step 필터 적용. Quarantine 모드는 별도 데이터 소스(아래 groups)로 동작.
    *  stepFilter 매치는 정확 일치 또는 family prefix (예: 'validate' → 'validate.notnull') 둘 다 허용 —
@@ -447,6 +459,10 @@ export function LogViewerPage() {
   }, [allLines]);
 
   const totalCounts = useMemo(() => {
+    if (realCounts) {
+      return { info: realCounts.info, warn: realCounts.warn, error: realCounts.error, total: realCounts.total };
+    }
+    // counts endpoint 미응답 시 fetch 배열 폴백 (INFO 는 샘플이라 과소집계 가능).
     let info = 0, warn = 0, err = 0;
     for (const l of allLines) {
       if (l.level === 2) err++;
@@ -454,7 +470,7 @@ export function LogViewerPage() {
       else info++;
     }
     return { info, warn, error: err, total: allLines.length };
-  }, [allLines]);
+  }, [realCounts, allLines]);
 
   const selected: RunLogLine | null = useMemo(
     () => lines.find((l) => l.seq === selectedSeq) ?? null,
@@ -576,7 +592,7 @@ export function LogViewerPage() {
             />
 
             <div style={styles.levelGroup}>
-              <LevelChip label="INFO"  active={levelFilter.INFO}  count={totalCounts.info}
+              <LevelChip label="INFO"  active={levelFilter.INFO}  count={totalCounts.info} sampled
                 color="#a0a8b4" onClick={() => setLevelFilter((f) => ({ ...f, INFO: !f.INFO }))} />
               <LevelChip label="WARN"  active={levelFilter.WARN}  count={totalCounts.warn}
                 color="#e8b563" onClick={() => setLevelFilter((f) => ({ ...f, WARN: !f.WARN }))} />
@@ -1159,12 +1175,14 @@ export function LogViewerPage() {
 
 /* ─────────────────── small components ──────────────── */
 
-function LevelChip({ label, active, count, color, onClick }: {
+function LevelChip({ label, active, count, color, onClick, sampled }: {
   label: RunLogLevel; active: boolean; count: number; color: string; onClick: () => void;
+  sampled?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
+      title={sampled ? 'INFO 는 BE 가 seq%100 샘플로만 적재 — 카운트는 적재된 행 기준' : undefined}
       style={{
         ...styles.levelChip,
         color: active ? color : 'var(--text-4)',
@@ -1173,7 +1191,7 @@ function LevelChip({ label, active, count, color, onClick }: {
       }}
     >
       <span style={{ ...styles.levelChipDot, background: 'currentColor' }} />
-      <span>{label}</span>
+      <span>{label}{sampled ? ' (sampled)' : ''}</span>
       <span style={styles.levelChipCount}>{count}</span>
     </button>
   );

@@ -208,15 +208,6 @@ function childTablesFor(projectName: string): Record<CategoryKey, string[]> {
   };
 }
 
-/* 카테고리별 fx 수식바 mock context — 시트 개수/카운트 등 상위 요약 값. */
-const MOCK_FORMULA_CTX: Record<CategoryKey, FormulaContext> = {
-  dashboard:  { n: 18, progress: 32.8 },
-  diff:       { ASIS: 'legacy_db', TOBE: 'new_db', added: 1, removed: 1, changed: 2 },
-  ddl:        { table: 'm_user', n: 6, pk: 1 },
-  sql:        { ASIS: 'legacy_db', TOBE: 'new_db', n: 5 },
-  validation: { table: 'CUST_PROFILE', n: 5 },
-};
-
 /** 데이터가 들어간 행만 렌더 — 데이터 아래쪽에 빈 padding 행을 두지 않는다.
  *  예전엔 EMPTY_ROWS=20 으로 padding 을 깔았는데, 빈 셀들의 1px borderBottom 이
  *  쌓여서 가로줄(barcode) 처럼 보인다는 피드백이 있어 제거. */
@@ -821,9 +812,9 @@ const RULE_BADGE: Record<string, React.CSSProperties> = {
 
 /** MAPPING(diff) Status 컬럼 배지 — 매핑 strategy 분류. */
 const STRATEGY_BADGE: Record<string, React.CSSProperties> = {
-  rule:            { background: '#d4eedb', color: '#0a5a1f' },     // green
-  default:         { background: '#d6e3f3', color: '#0a448a' },     // blue
-  null:            { background: '#fbe8c6', color: '#8a5500' },     // amber (의도적 NULL — 주의 환기)
+  rule:            { background: '#dcf0e4', color: '#2f8f63' },     // pastel green
+  default:         { background: '#dde9f7', color: '#3a6ea5' },     // pastel blue
+  null:            { background: '#fdeecd', color: '#b07a2e' },     // pastel amber
   passed:          { background: 'transparent', color: '#605e5c' }, // plain
   // Summary 시트 전용 — strategy 가 아니라 ASIS/TOBE type kind 가 어긋난 매핑 카운트 행.
   // 주의 환기 의미로 warning red 계열 (null 의 amber 와 의미 구분).
@@ -832,9 +823,9 @@ const STRATEGY_BADGE: Record<string, React.CSSProperties> = {
 
 /** strategy 별 행 전체 tint (배지보다 연하게). */
 const STRATEGY_ROW_TINT: Record<string, string> = {
-  rule:            '#eef7f1',
-  default:         '#eef2fa',
-  null:            '#fbf4e6',
+  rule:            '#f1f9f4',
+  default:         '#f0f5fb',
+  null:            '#fdf6e8',
   passed:          '#ffffff',
   'type mismatch': '#fbeaea',
 };
@@ -1959,7 +1950,6 @@ function ExcelWorkbook({
       : undefined;
   const formulaText = substitute(SUMMARY_PLACEHOLDER[category.key], {
     project: projectName,
-    ...MOCK_FORMULA_CTX[category.key],
     ...(selectedTable ? { table: selectedTable } : {}),
     ...(validationN != null ? { n: validationN } : {}),
     ...(diffFx

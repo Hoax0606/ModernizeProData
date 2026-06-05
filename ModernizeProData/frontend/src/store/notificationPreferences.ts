@@ -53,13 +53,15 @@ export function getRetentionFor(
   return retentions[projectId] ?? '90 days';
 }
 
-/** 미설정 시 default true. */
+/**
+ * 이벤트 알림 표시 여부 — 전 프로젝트 공통(global) 설정 기준.
+ * defaults 에 키가 없으면(= 토글이 없는 이벤트) default true(항상 표시).
+ */
 export function isEventEnabled(
-  subs: Record<string, Record<string, boolean>>,
-  projectId: string,
+  defaults: Record<string, boolean>,
   eventKey: string,
 ): boolean {
-  return subs[projectId]?.[eventKey] ?? true;
+  return defaults[eventKey] ?? true;
 }
 
 /** 미설정 시 default 'all-project'. */
@@ -94,7 +96,7 @@ export function actionToEventKey(action: string): string | null {
   if (a.includes('baseline')) return 'snapshot.baseline';               // "baseline set ..." / "baseline cleared"
   if (a.includes('ddl import')) return 'ddl.imported';                  // "DDL imported"
   if (a.includes('project created')) return 'project.created';
-  if (a.includes('phase changed')) return 'project.phase';
+  // phase 변경은 알림 안 함 (2026-06-05) — 매핑 없음 → null → 토스트 X (audit 기록은 유지).
   if (a.includes('assignee changed')) return 'project.assignee';        // "assignee changed" / "execution assignee changed"
   return null;
 }

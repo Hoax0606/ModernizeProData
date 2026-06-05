@@ -354,18 +354,19 @@ export function MappingPage() {
   );
   useEffect(() => {
     ASIS_TABLES = ddlToAsisTables(asisSchema);
-    // PoC: Site 의 csvPath 가 채워져 있으면 모든 AS-IS 테이블을 imported 로 간주.
-    // (실제 파일 존재 / 행 수 검증은 백엔드 CSV import API 가 생기면 그 응답으로 교체.)
+    // imported 는 실제 csv 파일 존재로 판정. csvPath 가 설정돼 있어도 파일이 없으면 false.
+    // 각 AS-IS table 의 csv-row-count(byte-stream line count, 병렬 안전) 를 호출해
+    //  - 200 (파일 존재) → imported:true + rows 갱신
+    //  - 404 (CSV_FILE_NOT_FOUND) → imported:false 유지 (rows 0)
+    // row 수 0 여부까지는 안 따지고 파일 존재만 본다 (csv-arrived preflight 과 동일 기준).
     if (siteForDialect?.csvPath && siteForDialect.csvPath.trim() !== '') {
-      ASIS_TABLES = ASIS_TABLES.map((t) => ({ ...t, imported: true }));
-      // 각 AS-IS table 의 csv data row 수 fetch (header 제외). 큰 file 도 line count
-      // 로 ~15초. 병렬. 결과 도착마다 ASIS_TABLES.rows 갱신 + hydrationTick bump.
       const siteId = siteForDialect.id;
       for (const at of ASIS_TABLES) {
         csvPreviewApi.rowCount(siteId, at.name).then((r) => {
-          ASIS_TABLES = ASIS_TABLES.map((t) => t.name === at.name ? { ...t, rows: r.rowCount } : t);
+          ASIS_TABLES = ASIS_TABLES.map((t) =>
+            t.name === at.name ? { ...t, imported: true, rows: r.rowCount } : t);
           setHydrationTick((v) => v + 1);
-        }).catch(() => { /* file 없으면 0 유지 */ });
+        }).catch(() => { /* 파일 없음 → imported:false / rows 0 유지 */ });
       }
     }
     TOBE_TABLES = ddlToTobeTables(tobeSchema);
@@ -762,7 +763,7 @@ export function MappingPage() {
     return (
       <div style={styles.fullBleed}>
         <div style={styles.centerEmpty}>
-          <div style={{ color: 'var(--text-3)', fontSize: 13 }}>DDL 로딩 중</div>
+          <div style={{ color: 'var(--text-3)', fontSize: 13 }}>{t('mapping.loading.ddl')}</div>
         </div>
       </div>
     );
@@ -957,7 +958,7 @@ function InventoryTree({
           {onOpenFullImport && (
             <button
               onClick={onOpenFullImport}
-              title="프로젝트 전체 매핑 정의서를 import / 재적용 (모든 테이블)"
+              title={t('mapping.tooltip.importAll')}
               style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
                 margin: '4px 10px 8px', padding: '6px 10px',
@@ -1538,24 +1539,42 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
   const rowEdits = useMappingEditsStore(
     (s) => (activeProjectIdForRow ? s.rowEdits[activeProjectIdForRow]?.[table.internalName] : undefined) || EMPTY_ROW_EDITS,
   );
-  const [testStatus, setTestStatus] = useState<'idle' | 'running' | 'completed'>('idle');
+  const [testStatus, setTestStatus] = useState<'idle' | 'running' | 'completed' | 'failed'>('idle');
   const [testProgress, setTestProgress] = useState(0);
-  // Trial 은 DuckDB 위 in-memory 미리보기 — TO-BE DB 적재도, project phase 변경도 하지 않는다.
+  /* Trial 결과 캐시 — Trial = 실제 BE 변환(샘플 100행), Report 는 이 결과의 TOP 20 재사용 (#8-1).
+     DuckDB 위 in-memory 미리보기라 TO-BE DB 적재·phase 변경은 없음. */
+  const [trialResult, setTrialResult] = useState<MappingReportResult | null>(null);
+  const TRIAL_SAMPLE = 100;
+  // Trial 은 BE runReport 한 번의 round-trip — granular % 가 없으므로 도착 전엔 ~90% 까지
+  // 크리프 애니메이션, 성공 시 100, 실패 시 빨강 바.
   const startTest = useCallback(() => {
+    if (!activeProjectIdForRow) return;
+    const i = table.name.indexOf('.');
+    const tobeSchema = i > 0 ? table.name.slice(0, i) : '';
+    const tobeTable = i > 0 ? table.name.slice(i + 1) : table.name;
     setTestStatus('running');
     setTestProgress(0);
-  }, []);
+    setTrialResult(null);
+    mappingImportApi.runReport(activeProjectIdForRow, tobeSchema, tobeTable, TRIAL_SAMPLE)
+      .then((r) => {
+        setTrialResult(r);
+        setTestProgress(100);
+        setTestStatus(r.error ? 'failed' : 'completed');
+      })
+      .catch((e) => {
+        setTrialResult({
+          tobeSchema, tobeTable, headers: [], rows: [], rowCount: 0, truncated: false,
+          sql: null, error: e instanceof Error ? e.message : String(e),
+        });
+        setTestProgress(100);
+        setTestStatus('failed');
+      });
+  }, [activeProjectIdForRow, table.name]);
+  // running 동안 progress 크리프 (도착 전 ~90% 까지). 도착 시 startTest 가 100 으로 snap.
   useEffect(() => {
     if (testStatus !== 'running') return;
     const id = window.setInterval(() => {
-      setTestProgress((p) => {
-        if (p >= 100) {
-          window.clearInterval(id);
-          setTestStatus('completed');
-          return 100;
-        }
-        return Math.min(100, p + 4);
-      });
+      setTestProgress((p) => (p >= 90 ? 90 : p + 6));
     }, 80);
     return () => window.clearInterval(id);
   }, [testStatus]);
@@ -1710,10 +1729,10 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     || bindingSources.length === 0
     || missingImports.length > 0;
   const testDisabledReason =
-    bindingSources.length === 0 ? 'AS-IS source 가 연결되어 있지 않습니다.'
-    : missingImports.length > 0 ? `AS-IS extracted data 가 임포트되지 않았습니다: ${missingImports.map((a) => a.short).join(', ')}`
-    : counts.unmapped > 0 ? `Unmapped 컬럼이 ${counts.unmapped}개 남아 있습니다.`
-    : 'Run trial transformation for this table';
+    bindingSources.length === 0 ? t('mapping.test.disabled.noSource')
+    : missingImports.length > 0 ? t('mapping.test.disabled.notImported', { tables: missingImports.map((a) => a.short).join(', ') })
+    : counts.unmapped > 0 ? t('mapping.test.disabled.unmapped', { n: String(counts.unmapped) })
+    : t('mapping.test.disabled.ready');
 
   return (
     <div style={styles.workspace}>
@@ -1741,7 +1760,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                 <button
                   type="button"
                   onClick={triggerBindingHighlight}
-                  title="Table binding 패널을 엽니다."
+                  title={t('mapping.tooltip.openBinding')}
                   style={styles.csvMissingBtn}
                 >
                   <StatusBadge tone="warn">AS-IS source not bound →</StatusBadge>
@@ -1753,7 +1772,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                 <button
                   type="button"
                   onClick={() => useUiStore.getState().requestOpenSiteSettings({ focus: 'asis-csv' })}
-                  title="Site Settings → AS-IS CSV path 필드를 엽니다."
+                  title={t('mapping.tooltip.openCsvPath')}
                   style={styles.csvMissingBtn}
                 >
                   <StatusBadge tone="warn">{missingImports.length} CSV not imported →</StatusBadge>
@@ -1774,16 +1793,22 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
             reportOpen ? 'Close the Report to run Trial again'
             : testStatus === 'running' ? `Running ${testProgress}%`
             : testStatus === 'completed' ? 'Trial completed. Click to re-run.'
+            : testStatus === 'failed' ? (trialResult?.error ?? 'Trial failed. Click to re-run.')
             : testDisabledReason
           }
         >
           <Ic.play /> {testStatus === 'running' ? `Running ${testProgress}%` : 'Trial'}
         </button>
+        {testStatus === 'failed' && (
+          <span style={{ ...styles.reportChip, color: 'var(--red)', borderColor: 'var(--red)', cursor: 'default' }}>
+            Trial failed
+          </span>
+        )}
         {testStatus === 'completed' && (
           <button
             type="button"
             onClick={() => setReportOpen(true)}
-            title="변환 룰을 적용한 TO-BE 데이터 미리보기를 봅니다."
+            title={t('mapping.tooltip.openReport')}
             style={styles.reportChip}
           >
             <Ic.arrow /> Report
@@ -1794,7 +1819,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
       {!reportOpen && bindingSources.length === 0 && !isLinkedChild && (
         <div style={styles.noSourceBanner}>
           <Ic.warn />
-          <span>AS-IS 테이블이 매핑되지 않았습니다. <b>Table binding</b> 패널에서 <b>+ Add source</b>로 테이블을 추가하세요.</span>
+          <span>{t('mapping.banner.noSourceBound.pre')}<b>Table binding</b>{t('mapping.banner.noSourceBound.mid')}<b>+ Add source</b>{t('mapping.banner.noSourceBound.post')}</span>
         </div>
       )}
       {!reportOpen && (
@@ -1903,7 +1928,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                 ? { ...styles.btnSecondary, color: 'var(--text-3)' }
                 : styles.btnSecondary}
               onClick={() => setImportMappingOpen(true)}
-              title="이 TO-BE 테이블만 매핑 정의서로 재매칭"
+              title={t('mapping.tooltip.rematchTable')}
             >{mappingImported
                 ? <><Ic.check /> Table mapped</>
                 : <><i className="fa-solid fa-table" style={{ fontSize: 11 }} /> Re-map table</>}</button>
@@ -1924,7 +1949,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
           title="Import YAML"
           accept=".yml,.yaml"
           acceptLabel=".yml · .yaml"
-          hint="YAML 정의서로 매핑을 일괄 임포트합니다. 매칭된 unmapped 행만 채워지고, 이미 매핑된 행은 덮어쓰지 않습니다."
+          hint={t('mapping.import.yamlHint')}
           onClose={() => setImportYamlOpen(false)}
           onImported={() => setYamlImported(true)}
         />
@@ -1935,6 +1960,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
           table={table}
           rows={reportRows}
           sources={bindingSources}
+          prefetched={trialResult}
           onClose={() => setReportOpen(false)}
           onPickColumn={(tgt) => {
             const idx = visibleRows.findIndex((r) => r.tgt === tgt);
@@ -2136,7 +2162,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
             <div style={{ overflow: 'auto', padding: '12px 18px', flex: 1 }}>
               <label style={{ display: 'flex', gap: 8, padding: 8, border: '1px solid var(--border)', borderRadius: 4, marginBottom: 6, cursor: 'pointer' }}>
                 <input type="radio" name="link-target" checked={linkSelection === ''} onChange={() => setLinkSelection('')} />
-                <span>자체 정의 (unlink)</span>
+                <span>{t('mapping.binding.selfDefined')}</span>
               </label>
               {(() => {
                 // 같은 (tobeSchema, tobeTable) 이름 매칭되는 후보만 — 그 테이블을 포함한 다른 project 들.
@@ -2602,7 +2628,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
                 completions={aliasColumnOptions}
                 value={expandExpr}
                 onChange={onExpandChange}
-                placeholder={`예: CROSS JOIN LATERAL (VALUES ('phone', ${sources[0].alias}.PHONE), ('email', ${sources[0].alias}.EMAIL)) AS u(channel, value)`}
+                placeholder={`${t('mapping.eg')}: CROSS JOIN LATERAL (VALUES ('phone', ${sources[0].alias}.PHONE), ('email', ${sources[0].alias}.EMAIL)) AS u(channel, value)`}
                 style={styles.whereInput}
                 disabled={readOnly}
               />
@@ -2618,7 +2644,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
                 completions={aliasColumnOptions}
                 value={whereFilter}
                 onChange={onWhereChange}
-                placeholder={`예: ${sources[0].alias}.party_type = 'P'`}
+                placeholder={`${t('mapping.eg')}: ${sources[0].alias}.party_type = 'P'`}
                 style={styles.whereInput}
                 disabled={readOnly}
               />
@@ -2634,7 +2660,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
                 completions={aliasColumnOptions}
                 value={groupByExpr}
                 onChange={onGroupByChange}
-                placeholder={`예: EXTRACT(MONTH FROM ${sources[0].alias}.txn_date), ${sources[0].alias}.account`}
+                placeholder={`${t('mapping.eg')}: EXTRACT(MONTH FROM ${sources[0].alias}.txn_date), ${sources[0].alias}.account`}
                 style={styles.whereInput}
                 disabled={readOnly}
               />
@@ -3640,14 +3666,14 @@ function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, 
             <button
               type="button"
               onClick={handleClear}
-              title="이 컬럼의 매핑·룰 흔적을 모두 초기화합니다."
+              title={t('mapping.tooltip.resetColumn')}
               style={styles.inspectorHeaderIconBtn}
             ><Ic.refresh /></button>
           )}
           <button
             type="button"
             onClick={onClose}
-            title="Mapping detail 닫기"
+            title={t('mapping.tooltip.closeDetail')}
             style={styles.inspectorHeaderClose}
           ><Ic.x /></button>
         </div>
@@ -3874,7 +3900,7 @@ function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, 
                 value={editDefault}
                 onChange={setEditDefault}
                 language="sql"
-                placeholder={`예: 0  /  'N'  /  CURRENT_TIMESTAMP  (비우면 NULL — 모든 행에 이 값으로 채움)`}
+                placeholder={`${t('mapping.eg')}: 0  /  'N'  /  CURRENT_TIMESTAMP  ${t('mapping.placeholder.defaultEmptyNote')}`}
                 minHeight={48}
                 onCancel={() => setEditingRule(false)}
               />
@@ -4026,12 +4052,12 @@ function ImportFileModal({
                   title={file.name}
                 >{file.name}</div>
                 <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 4 }}>
-                  {(file.size / 1024).toFixed(1)} KB · 다른 파일을 선택하려면 다시 클릭
+                  {(file.size / 1024).toFixed(1)} KB · {t('mapping.import.reselectHint')}
                 </div>
               </div>
             ) : (
               <div style={{ textAlign: 'center', color: 'var(--text-3)' }}>
-                <div style={{ fontSize: 13, marginBottom: 4 }}>파일을 끌어다 놓거나 클릭해서 선택</div>
+                <div style={{ fontSize: 13, marginBottom: 4 }}>{t('mapping.import.dropHint')}</div>
                 <div style={{ fontSize: 11 }}>{acceptLabel}</div>
               </div>
             )}
@@ -4427,13 +4453,26 @@ function useReportRows(
   projectId: string | null,
   tobeSchema: string,
   tobeTable: string | undefined,
-): { result: MappingReportResult | null; loading: boolean } {
+  prefetched?: MappingReportResult | null,
+): { result: MappingReportResult | null; loading: boolean; durationMs: number | null; executedAt: Date | null } {
   const [result, setResult] = useState<MappingReportResult | null>(null);
   const [loading, setLoading] = useState(false);
+  // 실제 Report 쿼리 round-trip 소요시간 + 완료 시각 (상태바 표시용 — 가짜 0.0s/렌더타임 대체).
+  const [durationMs, setDurationMs] = useState<number | null>(null);
+  const [executedAt, setExecutedAt] = useState<Date | null>(null);
   useEffect(() => {
-    if (!projectId || !tobeTable) { setResult(null); return; }
+    if (!projectId || !tobeTable) { setResult(null); setDurationMs(null); setExecutedAt(null); return; }
+    // Trial 이 이미 변환한 결과(prefetched)가 있으면 재변환 없이 재사용 (#8-1) — 이중 변환 방지.
+    if (prefetched) {
+      setResult(prefetched);
+      setDurationMs(0);
+      setExecutedAt(new Date());
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
+    const startedAt = performance.now();
     mappingImportApi.runReport(projectId, tobeSchema, tobeTable, 20)
       .then((r) => { if (!cancelled) setResult(r); })
       .catch((e) => {
@@ -4442,10 +4481,15 @@ function useReportRows(
           sql: null, error: e instanceof Error ? e.message : String(e),
         });
       })
-      .finally(() => { if (!cancelled) setLoading(false); });
+      .finally(() => {
+        if (cancelled) return;
+        setDurationMs(performance.now() - startedAt);
+        setExecutedAt(new Date());
+        setLoading(false);
+      });
     return () => { cancelled = true; };
-  }, [projectId, tobeSchema, tobeTable]);
-  return { result, loading };
+  }, [projectId, tobeSchema, tobeTable, prefetched]);
+  return { result, loading, durationMs, executedAt };
 }
 
 /**
@@ -4532,12 +4576,14 @@ function isNumericType(t: string): boolean {
     || u.startsWith('numeric') || u.startsWith('number') || u.startsWith('decimal');
 }
 
-function ReportView({ table, rows, sources, onClose, onPickColumn }: {
+function ReportView({ table, rows, sources, prefetched, onClose, onPickColumn }: {
   table: TobeTable;
   rows: MappingRow[];
   /** Editor 가 현재 보유한 binding sources. table.sources (TOBE_TABLES) 가 module-level 이라
    * binding edit 으로 추가된 source 가 반영 안 되어, 명시적으로 받아서 사용. */
   sources: TobeTable['sources'];
+  /** Trial 이 이미 변환한 결과 — 있으면 재변환 없이 재사용 (#8-1). */
+  prefetched?: MappingReportResult | null;
   onClose: () => void;
   onPickColumn: (tgt: string) => void;
 }) {
@@ -4560,7 +4606,7 @@ function ReportView({ table, rows, sources, onClose, onPickColumn }: {
       ? { schema: table.name.slice(0, i), table: table.name.slice(i + 1) }
       : { schema: '', table: table.name };
   }, [table.name]);
-  const { result: report, loading: reportLoading } = useReportRows(activeProject?.id ?? null, tobeSplit.schema, tobeSplit.table);
+  const { result: report, loading: reportLoading, durationMs: reportDurationMs, executedAt: reportExecutedAt } = useReportRows(activeProject?.id ?? null, tobeSplit.schema, tobeSplit.table, prefetched);
   const reportColIdx = useMemo(() => {
     if (!report) return null;
     const m = new Map<string, number>();
@@ -4627,7 +4673,7 @@ function ReportView({ table, rows, sources, onClose, onPickColumn }: {
           <button
             type="button"
             onClick={onClose}
-            title="Mapping 화면으로 돌아가기"
+            title={t('mapping.tooltip.backToMapping')}
             style={{ ...styles.dbvTitleBtn, ...styles.dbvTitleBtnClose }}
             aria-label="Close report"
           >✕</button>
@@ -4649,7 +4695,7 @@ function ReportView({ table, rows, sources, onClose, onPickColumn }: {
           type="button"
           onClick={() => setViewMode('asis')}
           disabled={viewMode === 'asis' || !firstSource}
-          title={viewMode === 'asis' ? '이미 AS-IS 원본 보기' : 'AS-IS 의 raw VARCHAR 값으로 되돌리기'}
+          title={viewMode === 'asis' ? t('mapping.report.toAsisTitle.already') : t('mapping.report.toAsisTitle.revert')}
           style={{
             ...styles.dbvToolBtn,
             background: 'transparent',
@@ -4662,7 +4708,7 @@ function ReportView({ table, rows, sources, onClose, onPickColumn }: {
           type="button"
           onClick={() => setViewMode('tobe')}
           disabled={viewMode === 'tobe'}
-          title={viewMode === 'tobe' ? '이미 TO-BE 변환 결과' : 'TO-BE 변환 결과로 앞으로'}
+          title={viewMode === 'tobe' ? t('mapping.report.toTobeTitle.already') : t('mapping.report.toTobeTitle.forward')}
           style={{
             ...styles.dbvToolBtn,
             background: 'transparent',
@@ -4704,7 +4750,7 @@ function ReportView({ table, rows, sources, onClose, onPickColumn }: {
       {/* ⑥ 필터바 */}
       <div style={styles.dbvFilterbar}>
         <span style={styles.dbvFilterShowSql}>Show SQL</span>
-        <span style={styles.dbvFilterInput}>이 데이터는 DB에 저장되지 않습니다.</span>
+        <span style={styles.dbvFilterInput}>{t('mapping.report.notPersisted')}</span>
         <span style={styles.dbvFilterIcons}>
           {['▾','▶','✕','⟳','⊞','⚙'].map((s, i) => <span key={i} style={styles.dbvFilterIcon}>{s}</span>)}
         </span>
@@ -4718,17 +4764,17 @@ function ReportView({ table, rows, sources, onClose, onPickColumn }: {
       )}
       {viewMode === 'asis' && asisPreviewLoading && (
         <div style={{ padding: '8px 14px', background: '#fff8e1', color: '#856404', borderBottom: '1px solid #e8e8e8', fontSize: 11.5 }}>
-          ⏳ AS-IS raw CSV 로드 중
+          ⏳ {t('mapping.report.asisLoading')}
         </div>
       )}
       {viewMode === 'asis' && !asisPreviewLoading && !asisPreview && firstSource && (
         <div style={{ padding: '8px 14px', background: '#fde2e2', color: '#a02020', borderBottom: '1px solid #e8e8e8', fontSize: 11.5 }}>
-          ⚠ AS-IS CSV ({firstSource.table}) 를 로드하지 못했습니다.
+          ⚠ {t('mapping.report.csvLoadFailed', { table: firstSource.table })}
         </div>
       )}
       {viewMode === 'asis' && firstSource && effectiveSources.length > 1 && (
         <div style={{ padding: '6px 14px', background: '#eef4ff', color: '#3a5a8c', borderBottom: '1px solid #e8e8e8', fontSize: 10.5 }}>
-          ℹ {effectiveSources.length} source 중 첫 source ({firstSource.alias} = {firstSource.table}) 의 raw 값만 표시.
+          ℹ {t('mapping.report.firstSourceOnly', { n: String(effectiveSources.length), alias: firstSource.alias, table: firstSource.table })}
         </div>
       )}
 
@@ -4742,7 +4788,7 @@ function ReportView({ table, rows, sources, onClose, onPickColumn }: {
                 <th
                   key={r.tgt}
                   onClick={() => onPickColumn(r.tgt)}
-                  title={`${r.tgt} (${r.tgtType}) · 클릭해서 매핑 상세 보기`}
+                  title={t('mapping.report.cellTitle', { col: r.tgt, type: r.tgtType })}
                   style={styles.dbvGridCol}
                 >
                   <div style={styles.dbvColHeaderInner}>
@@ -4792,7 +4838,7 @@ function ReportView({ table, rows, sources, onClose, onPickColumn }: {
                   <button
                     type="button"
                     onClick={() => { void copyText(buildReportErrorMessage(report, t)); }}
-                    title="에러 메시지를 클립보드에 복사"
+                    title={t('mapping.tooltip.copyError')}
                     style={{
                       position: 'absolute', top: 8, right: 10,
                       padding: '2px 8px', fontSize: 10.5,
@@ -4873,7 +4919,9 @@ function ReportView({ table, rows, sources, onClose, onPickColumn }: {
         <span style={{ ...styles.dbvStatusBtn, ...styles.dbvStatusBtnDropdown }}>Export data</span>
         <span style={styles.dbvStatusSep} />
         <span style={styles.dbvStatusCenter}>
-          {rows.length} column(s), {dataRowCount} row(s) fetched - 0.0s, on {fmtDate(new Date())} at {fmtTime(new Date())}
+          {rows.length} column(s), {dataRowCount} row(s) fetched
+          {reportDurationMs != null ? ` - ${(reportDurationMs / 1000).toFixed(3)}s` : ''}
+          {reportExecutedAt ? `, on ${fmtDate(reportExecutedAt)} at ${fmtTime(reportExecutedAt)}` : ''}
         </span>
       </div>
 

@@ -4,6 +4,7 @@ import { Modal } from './Modal';
 import { BrandName } from './BrandName';
 import { Toggle } from './Toggle';
 import { useSettingsStore, type Theme, type Language, type NotificationScope } from '../store/settings';
+import { GLOBAL_EVENTS, type NotificationEventDef } from '../lib/notificationEvents';
 import { useAuthStore } from '../store/auth';
 import { LANGUAGE_LABELS, useT } from '../i18n';
 import { licenseApi, type LicenseDto, type LicenseStatus as LicenseStatusEnum } from '../api/license';
@@ -29,9 +30,17 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
   // 로컬 드래프트 — Save 전에는 store 에 반영 안 됨.
   const [theme, setTheme] = useState<Theme>(store.theme);
   const [language, setLanguage] = useState<Language>(store.language);
+  // All-project notifications 의 헤더 토글 = 전체 알림 마스터(on/off). 개별 이벤트와 독립.
   const [notifications, setNotifications] = useState(store.notifications);
   const [notifScope, setNotifScope] = useState<NotificationScope>(store.notificationScope);
   const [notifRetention, setNotifRetention] = useState(store.notificationRetention);
+  // All-project notifications — 글로벌 이벤트 on/off. 미설정 = true.
+  const buildDefaults = (src: Record<string, boolean>): Record<string, boolean> => {
+    const d: Record<string, boolean> = {};
+    for (const e of GLOBAL_EVENTS) d[e.k] = src[e.k] ?? true;
+    return d;
+  };
+  const [notifDefaults, setNotifDefaults] = useState<Record<string, boolean>>(() => buildDefaults(store.notificationDefaults));
 
   // 모달 열릴 때마다 store 의 현재 값으로 리셋
   useEffect(() => {
@@ -41,7 +50,9 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
     setNotifications(store.notifications);
     setNotifScope(store.notificationScope);
     setNotifRetention(store.notificationRetention);
-  }, [open, store.theme, store.language, store.notifications, store.notificationScope, store.notificationRetention]);
+    setNotifDefaults(buildDefaults(store.notificationDefaults));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, store.theme, store.language, store.notifications, store.notificationScope, store.notificationRetention, store.notificationDefaults]);
 
   // 변경 여부 — Save 버튼 활성 조건
   const isDirty = useMemo(() => {
@@ -50,8 +61,11 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
     if (notifications !== store.notifications) return true;
     if (notifScope !== store.notificationScope) return true;
     if (notifRetention !== store.notificationRetention) return true;
+    for (const e of GLOBAL_EVENTS) {
+      if ((notifDefaults[e.k] ?? true) !== (store.notificationDefaults[e.k] ?? true)) return true;
+    }
     return false;
-  }, [theme, language, notifications, notifScope, notifRetention, store]);
+  }, [theme, language, notifications, notifScope, notifRetention, notifDefaults, store]);
 
   const handleSave = async () => {
     if (!isDirty) return;
@@ -60,7 +74,37 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
     store.setNotifications(notifications);
     store.setNotificationScope(notifScope);
     if (isMaster) store.setNotificationRetention(notifRetention);
+    for (const e of GLOBAL_EVENTS) {
+      store.setNotificationDefault(e.k, notifDefaults[e.k] ?? true);
+    }
   };
+
+  // All-project notifications 카드의 이벤트 토글 행 + 그룹 "ALL" 토글.
+  const renderEventRows = (list: NotificationEventDef[]) =>
+    list.map((e, i) => (
+      <div
+        key={e.k}
+        style={{ ...styles.toggleRow, ...(i === list.length - 1 ? { borderBottom: 'none' } : {}) }}
+      >
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={styles.rowLabelTitle}>{t(e.labelKey)}</div>
+          <div style={styles.rowSub}>{t(e.descKey)}</div>
+        </div>
+        <Toggle
+          on={notifDefaults[e.k] ?? true}
+          onChange={() => setNotifDefaults((cur) => ({ ...cur, [e.k]: !(cur[e.k] ?? true) }))}
+          ariaLabel={t(e.labelKey)}
+        />
+      </div>
+    ));
+  // 헤더 토글 = 전체 알림 마스터. 개별 이벤트 토글과 독립 (개별을 꺼도 이 토글은 그대로).
+  const groupToggle = (
+    <Toggle
+      on={notifications}
+      onChange={() => setNotifications((v) => !v)}
+      ariaLabel={t('solution.notifications.toggleAll')}
+    />
+  );
 
   return (
     <Modal
@@ -126,19 +170,11 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
         title={t('solution.notifications')}
         desc={t('solution.notifications.desc')}
       >
-        <div style={styles.toggleRow}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={styles.rowLabelTitle}>{t('solution.notifications.enable')}</div>
-            <div style={styles.rowSub}>{t('solution.notifications.enableDesc')}</div>
-          </div>
-          <Toggle on={notifications} onChange={() => setNotifications((v) => !v)} ariaLabel={t('solution.notifications.enable')} />
-        </div>
-
         <div>
-          {/* Scope — Enable notifications 와 무관하게 항상 활성.
+          {/* Scope — All-project notifications 토글이 OFF 면 (전 이벤트 꺼짐) 비활성화.
               표준 Row 의 width:220 라벨 박스로는 hint 가 한 줄에 안 들어가서 custom 행. */}
           <div style={styles.row}>
-            <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ flex: 1, minWidth: 0, opacity: notifications ? 1 : 0.45 }}>
               <div style={styles.rowLabelTitle}>{t('projectSettings.notify.recipients.scope')}</div>
               <div style={{ ...styles.rowSub, whiteSpace: 'nowrap' }}>
                 {t('projectSettings.notify.recipients.scopeHint')}
@@ -147,7 +183,15 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
             <select
               value={notifScope}
               onChange={(e) => setNotifScope(e.target.value as NotificationScope)}
-              style={{ ...styles.select, width: 180, flexShrink: 0 }}
+              disabled={!notifications}
+              style={{
+                ...styles.select,
+                width: 180,
+                flexShrink: 0,
+                background: notifications ? 'var(--panel)' : 'var(--panel-2)',
+                color: notifications ? 'var(--text)' : 'var(--text-3)',
+                cursor: notifications ? 'pointer' : 'not-allowed',
+              }}
             >
               <option value="mine-only">{t('projectSettings.notify.scope.mine')}</option>
               <option value="all-project">{t('projectSettings.notify.scope.all')}</option>
@@ -173,14 +217,24 @@ export function SolutionSettingsModal({ open, onClose }: Props) {
                   color: isMaster ? 'var(--text)' : 'var(--text-3)',
                 }}
               >
-                <option value="7 days">7일</option>
-                <option value="30 days">30일</option>
-                <option value="90 days">90일</option>
+                <option value="7 days">{t('solution.retention.7d')}</option>
+                <option value="30 days">{t('solution.retention.30d')}</option>
+                <option value="90 days">{t('solution.retention.90d')}</option>
                 <option value="OFF">OFF</option>
               </select>
             </div>
           </Row>
         </div>
+      </Card>
+
+      {/* All-project notifications — 전 프로젝트 공통 이벤트 on/off. 프로젝트별 설정은 없음.
+          헤더의 ALL 토글로 그룹 전체 일괄 on/off. */}
+      <Card
+        title={t('solution.notifications.global')}
+        desc={t('solution.notifications.globalDesc')}
+        right={groupToggle}
+      >
+        {renderEventRows(GLOBAL_EVENTS)}
       </Card>
 
       {/* Internal scheduler / External integrations 카드 는 SchedulerPage 로 이동했음 (Phase 3). */}
@@ -737,6 +791,14 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--text-4)',
     fontFamily: 'var(--mono)',
     textAlign: 'center',
+  },
+  groupToggleLabel: {
+    fontSize: 10.5,
+    color: 'var(--text-3)',
+    fontFamily: 'var(--mono)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+    fontWeight: 600,
   },
   masterOnlyTag: {
     marginLeft: 8,

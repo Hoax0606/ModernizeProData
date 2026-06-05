@@ -27,6 +27,7 @@ import {
   BASE_STAGES,
   buildStages,
   buildStagesFromStageViews,
+  stageFillColor,
   type Stage,
   type StageTone,
 } from '../lib/pipelineStages';
@@ -47,6 +48,10 @@ interface ActiveRunState {
   failedStageIndex: number | null;
   failureReason: string | null;
   haltedAt: number | null;
+  /** 이 run 을 起動한 주체 (BE requestedBy). 'Admin' 하드코딩 대체 (#6-5). */
+  requestedBy: string;
+  /** 이 run 의 대상 테이블 수 (부분 실행 tables[] 길이, null=전체면 tableSummary.total) (#6-5). */
+  tableScopeCount: number;
 }
 
 type RunMode = 'test' | 'rehearsal' | 'cutover';
@@ -227,6 +232,9 @@ export function ExecutionPage() {
       failedStageIndex: failedIdx,
       failureReason: run.errorMessage ?? null,
       haltedAt: haltedAtMs,
+      requestedBy: run.requestedBy,
+      // 부분 실행이면 run.tables 길이, 전체 run(null)이면 stage 결과 집계 total.
+      tableScopeCount: run.tables?.length ?? run.tableSummary?.total ?? 0,
     };
   }, [run, stageViews]);
 
@@ -765,7 +773,10 @@ export function ExecutionPage() {
           <span>{t('execution.run.waitingForWorker')}</span>
         </div>
       )}
-      <PipelineStages t={t} stages={stages} stageViews={stageViews ?? undefined} quarantineByTable={quarantineByTable} />
+      {/* key = project:run — expanded(펼침) state 를 프로젝트/run 별로 분리 (#6-2).
+          전엔 PipelineStages 인스턴스가 프로젝트 전환에도 유지돼 A 에서 펼친 Validation 이
+          B 로 가도 펼쳐진 채로 남았다. key 변경 시 remount → 펼침 초기화. */}
+      <PipelineStages key={`${project.id}:${run?.id ?? 'norun'}`} t={t} stages={stages} stageViews={stageViews ?? undefined} quarantineByTable={quarantineByTable} />
       {/* Cutover review modal (정책 4·8 — 2026-06-01). cutover Start 시 rehearsal ack
           목록을 운영자가 confirm/reject 후 [Confirm & Start] → startrun + review 전송. */}
       <CutoverReviewModal
@@ -962,8 +973,8 @@ function RunHeader({
           <div style={{ fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)', marginTop: 3 }}>
             <span>run </span><b style={{ color: 'var(--text-2)' }}>{activeRun.runId}</b>
             <span> · </span>{t('execution.run.triggeredBy')}{' '}
-            <b style={{ color: 'var(--text-2)' }}>{project.executionAssignee ?? project.owner ?? 'Admin'}</b>
-            <span> · {t('execution.run.tablesSummary', { n: selectedTablesCount })}</span>
+            <b style={{ color: 'var(--text-2)' }}>{activeRun.requestedBy || project.executionAssignee || 'Admin'}</b>
+            <span> · {t('execution.run.tablesSummary', { n: activeRun.tableScopeCount })}</span>
           </div>
         </div>
         {/* halted 時のボタン: failed/aborted = Discard + Retry / completed = Discard のみ.
@@ -1250,14 +1261,7 @@ function OverallProgress({ t, stages }: { t: T; stages: Stage[] }) {
               style={{ flex: 1, background: 'var(--border)', position: 'relative', overflow: 'hidden' }}>
               <div style={{
                 width: `${st.pct}%`, height: '100%',
-                /* Overall progress fill — B3 배지 톤과 일관 (2026-06-04):
-                   ok=green / running=navy / err=red / warn=amber / idle=text-3 grey. */
-                background:
-                  st.tone === 'ok' ? 'var(--green)'
-                  : st.tone === 'running' ? 'var(--navy)'
-                  : st.tone === 'err' ? 'var(--red)'
-                  : st.tone === 'warn' ? 'var(--amber)'
-                  : 'var(--text-3)',
+                background: stageFillColor(st.tone),
                 // transition 제거 — JavaFX WebView (WebKit ~v608) 에서 빠른 polling +
 // width 변경이 compositing layer 재구성 폭주를 일으켜 native crash 유발.
 // 즉시 갱신으로 안전성 우선.
@@ -1303,17 +1307,25 @@ function PipelineStages({ t, stages, stageViews, quarantineByTable }: {
             const sv = viewByKey.get(st.id);
             const failedCount = sv?.tablesFailed ?? 0;
             const hasFailed = failedCount > 0 && !!sv?.tables?.length;
+            // warn tone = failed_with_pending_warnings. 경고 종료 stage 도 클릭해 원인(quarantine warning) 표시 (#6-1).
+            const warnTables = (st.tone === 'warn' && sv?.tables?.length)
+              ? sv.tables.filter((tr) =>
+                  (quarantineByTable?.get((tr.tobeTable ?? '').toLowerCase()) ?? []).some((g) => g.severity === 'warning'))
+              : [];
+            const isWarn = st.tone === 'warn' && !!sv?.tables?.length;
+            const warnCount = warnTables.length;
+            const expandable = hasFailed || isWarn;
             const isOpen = expanded === st.id;
             return (
             <Fragment key={st.id}>
             <div
-              onClick={hasFailed ? () => setExpanded(isOpen ? null : st.id) : undefined}
+              onClick={expandable ? () => setExpanded(isOpen ? null : st.id) : undefined}
               style={{
                 display: 'grid',
                 gridTemplateColumns: '24px 170px 1fr 80px 90px 80px',
                 gap: 14, alignItems: 'center',
                 padding: '10px 14px',
-                cursor: hasFailed ? 'pointer' : 'default',
+                cursor: expandable ? 'pointer' : 'default',
                 borderBottom: i < stages.length - 1 ? '1px solid var(--border)' : 'none',
                 /* Pipeline 박스 배경 — B3 배지 톤과 일관 (2026-06-04):
                    ok=green-50 / running=navy-50 / err=red-50 / warn=amber-50 / idle=panel (배경 없음). */
@@ -1332,6 +1344,11 @@ function PipelineStages({ t, stages, stageViews, quarantineByTable }: {
                   {hasFailed && (
                     <span style={{ marginLeft: 6, fontSize: 10, color: 'var(--red)', fontFamily: 'var(--mono)' }}>
                       {isOpen ? '▾' : '▸'} {failedCount} failed
+                    </span>
+                  )}
+                  {!hasFailed && isWarn && (
+                    <span style={{ marginLeft: 6, fontSize: 10, color: 'var(--amber)', fontFamily: 'var(--mono)' }}>
+                      {isOpen ? '▾' : '▸'} {warnCount} warning{warnCount === 1 ? '' : 's'}
                     </span>
                   )}
                 </div>
@@ -1363,7 +1380,7 @@ function PipelineStages({ t, stages, stageViews, quarantineByTable }: {
                 {st.tone === 'idle' && <StatusBadge tone="queued">{t('execution.stages.status.queued')}</StatusBadge>}
               </div>
             </div>
-            {isOpen && sv && (
+            {isOpen && sv && hasFailed && (
               <div style={{
                 padding: '4px 14px 12px 62px',
                 background: 'var(--red-50)',
@@ -1378,10 +1395,42 @@ function PipelineStages({ t, stages, stageViews, quarantineByTable }: {
                       </div>
                       {groups.length === 0 ? (
                         <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2, fontStyle: 'italic' }}>
-                          {errorDetailText(tr.errorDetail) ?? t('execution.stages.noErrorDetail') ?? 'No error detail recorded.'}
+                          {errorDetailText(tr.errorDetail) ?? t('execution.stages.noErrorDetail')}
                         </div>
                       ) : groups.map((g) => (
                         <div key={g.id} style={{ marginTop: 4, paddingLeft: 8, borderLeft: '2px solid var(--red)' }}>
+                          <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text)' }}>{g.reason}</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-2)', fontFamily: 'var(--mono)' }}>{g.detail}</div>
+                          <div style={{ fontSize: 10.5, color: 'var(--text-3)', marginTop: 1 }}>
+                            {g.stage} · {g.severity} · {g.sampleRows?.length ?? 0} sample{(g.sampleRows?.length ?? 0) === 1 ? '' : 's'}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {isOpen && sv && !hasFailed && isWarn && (
+              <div style={{
+                padding: '4px 14px 12px 62px',
+                background: 'var(--amber-50)',
+                borderBottom: i < stages.length - 1 ? '1px solid var(--border)' : 'none',
+              }}>
+                {warnTables.length === 0 ? (
+                  <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 8, fontStyle: 'italic' }}>
+                    {sv.errorSummary ?? t('execution.stages.noErrorDetail')}
+                  </div>
+                ) : warnTables.map((tr) => {
+                  const groups = (quarantineByTable?.get((tr.tobeTable ?? '').toLowerCase()) ?? [])
+                    .filter((g) => g.severity === 'warning');
+                  return (
+                    <div key={tr.tobeTable} style={{ marginTop: 8 }}>
+                      <div style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 600, color: 'var(--amber)' }}>
+                        ⚠ {tr.tobeSchema ? `${tr.tobeSchema}.` : ''}{tr.tobeTable}
+                      </div>
+                      {groups.map((g) => (
+                        <div key={g.id} style={{ marginTop: 4, paddingLeft: 8, borderLeft: '2px solid var(--amber)' }}>
                           <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text)' }}>{g.reason}</div>
                           <div style={{ fontSize: 11, color: 'var(--text-2)', fontFamily: 'var(--mono)' }}>{g.detail}</div>
                           <div style={{ fontSize: 10.5, color: 'var(--text-3)', marginTop: 1 }}>
@@ -1441,7 +1490,8 @@ function StatusBadge({ tone, children }: { tone: BadgeTone; children: React.Reac
  * - failed  → red segment
  * - pending → bar background grey (빈 공간)
  *
- * total 또는 success/failed 정보 없으면 fallback = 단색 fill (tone 기반, 기존 동작).
+ * total 또는 success/failed 정보 없으면 fallback = 단색 fill (stageFillColor #6-4:
+ * running 밝은 green / done 어두운 green / failed·warning red / idle amber).
  */
 function ProgressBar({
   pct, tone, success, failed, total,
@@ -1464,16 +1514,10 @@ function ProgressBar({
       </div>
     );
   }
-  // Fallback (total 미상 or running 중 데이터 없음) — 단색 fill, 기존 동작
-  const fill =
-    tone === 'ok'       ? 'var(--text-3)'
-    : tone === 'running'? 'var(--green)'
-    : tone === 'err'    ? 'var(--red)'
-    : tone === 'warn'   ? 'var(--amber)'
-    : 'var(--amber)';
+  // Fallback (total 미상 / running 중 데이터 없음) — 단색 fill.
   return (
     <div style={{ flex: 1, height: 6, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
-      <div style={{ width: `${Math.min(pct, 100)}%`, height: '100%', background: fill, transition: 'width .4s ease' }} />
+      <div style={{ width: `${Math.min(pct, 100)}%`, height: '100%', background: stageFillColor(tone), transition: 'width .4s ease' }} />
     </div>
   );
 }
