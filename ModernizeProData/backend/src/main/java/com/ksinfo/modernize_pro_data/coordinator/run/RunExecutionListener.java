@@ -59,6 +59,7 @@ public class RunExecutionListener {
     private final RunOutputPathResolver outputResolver;
     private final RunService runService;
     private final DuckDbService duckDbService;
+    private final com.ksinfo.modernize_pro_data.common.config.RunCapacityPlanner capacityPlanner;
     private final RunControlRegistry runControlRegistry;
     private final RunStageCacheService stageCacheService;
     private final WorkerNodeService workerNodeService;
@@ -160,8 +161,10 @@ public class RunExecutionListener {
         runLogIngest.openRun(runId, projectId);
         runControlRegistry.register(runId);   // pause/resume/cancel 제어 등록
         // 이 run 전용 격리 DuckDB connection 을 실행 thread 에 바인딩 — 동시 run 간 공유 connection
-        // "pending query result" 충돌 회피. finally 에서 반드시 unbind(close). sweep/restore/stage 전부 적용.
-        duckDbService.bindRunConnection();
+        // "pending query result" 충돌 회피 + run별 memory_limit 격리(독립 인스턴스). finally 에서 unbind(close).
+        // run별 temp_directory 로 spill 충돌도 방지.
+        String runDuckTemp = ctx.getOutputDir().resolve("duck-tmp").toString();
+        duckDbService.bindRunConnection(capacityPlanner.getRunMemoryLimit(), runDuckTemp);
         try {
             // 이전/크래시 run 의 DuckDB 작업 schema 정리 (실행 중 run = pending/running 은 보존).
             Set<String> activeSchemas = runRepo

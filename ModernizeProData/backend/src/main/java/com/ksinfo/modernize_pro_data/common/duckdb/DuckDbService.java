@@ -238,14 +238,34 @@ public class DuckDbService {
      * 모두 이 connection 을 쓴다 (run 간 공유 connection 동시 사용 충돌 회피). unbindRunConnection 과 짝.
      * 같은 thread 에서 중복 호출되면 무시 (재진입 방어 — 기존 connection 유지).
      */
-    public void bindRunConnection() {
+    public void bindRunConnection(String memoryLimit, String runTempDir) {
         if (runScoped.get() != null) return;
         try {
-            runScoped.set(requestConnection());
-        } catch (SQLException e) {
+            Connection c = memoryMode ? openRunInstance() : requestConnection();
+            try (Statement st = c.createStatement()) {
+                if (memoryLimit != null && !memoryLimit.isBlank()) {
+                    st.execute("SET memory_limit='" + memoryLimit.replace("'", "''") + "'");
+                }
+                String tmp = (runTempDir != null && !runTempDir.isBlank()) ? runTempDir : tempDirectory;
+                try { Files.createDirectories(Path.of(tmp)); } catch (Exception ignore) { /* 권한/IO — SET 단계서 재실패 시 무시 */ }
+                st.execute("SET temp_directory='" + tmp.replace("\\", "/").replace("'", "''") + "'");
+            }
+            runScoped.set(c);
+            log.info("run-scoped DuckDB connection bound (memoryMode={} memory_limit={} temp={})",
+                    memoryMode, memoryLimit, runTempDir);
+        } catch (Exception e) {
             // 바인딩 실패해도 statement() 가 공유 connection 으로 폴백 — run 진행 자체는 가능.
             log.warn("run-scoped DuckDB connection 바인딩 실패 — 공유 connection 폴백: {}", e.getMessage());
         }
+    }
+
+    /** run 전용 독립 in-memory DuckDB 인스턴스. 확장(encodings/icu)·UDF 를 새 인스턴스에 재등록. */
+    private Connection openRunInstance() throws SQLException {
+        Connection c = DriverManager.getConnection("jdbc:duckdb:");
+        UdfRegistry.registerAll(c);
+        loadEncodingsExtension(c);
+        loadIcuExtension(c);
+        return c;
     }
 
     /** 현재 thread 의 run-scoped connection 을 제거 + close. @Async 풀 thread 재사용 시 누수 방지 위해 finally 에서 호출 필수. */
@@ -268,7 +288,9 @@ public class DuckDbService {
         final Connection dup;
         synchronized (this) {
             long t1 = perfEnabled ? System.nanoTime() : 0L;
-            dup = ((org.duckdb.DuckDBConnection) getConnection()).duplicate();
+            Connection rc = runScoped.get();
+            Connection src = (rc != null) ? rc : getConnection();
+            dup = ((org.duckdb.DuckDBConnection) src).duplicate();
             if (perfEnabled) {
                 long t2 = System.nanoTime();
                 long waitMs = (t1 - t0) / 1_000_000;
