@@ -159,6 +159,9 @@ public class RunExecutionListener {
 
         runLogIngest.openRun(runId, projectId);
         runControlRegistry.register(runId);   // pause/resume/cancel 제어 등록
+        // 이 run 전용 격리 DuckDB connection 을 실행 thread 에 바인딩 — 동시 run 간 공유 connection
+        // "pending query result" 충돌 회피. finally 에서 반드시 unbind(close). sweep/restore/stage 전부 적용.
+        duckDbService.bindRunConnection();
         try {
             // 이전/크래시 run 의 DuckDB 작업 schema 정리 (실행 중 run = pending/running 은 보존).
             Set<String> activeSchemas = runRepo
@@ -209,6 +212,7 @@ public class RunExecutionListener {
             safeFail(runId, e.getMessage());
         } finally {
             runControlRegistry.remove(runId);
+            duckDbService.unbindRunConnection();   // run-scoped DuckDB connection close (@Async thread 재사용 누수 방지)
             try {
                 runLogIngest.closeRun(runId);
             } catch (Exception e) {

@@ -311,6 +311,7 @@ type Selection = { side: Side; name: string; internalName?: string } | null;
 type TableBindingEdit = { sources: TobeTable['sources']; mode: 'join' | 'union' };
 
 export function MappingPage() {
+  const t = useT();
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const projects = useWorkspaceStore((s) => s.projects);
   const activeProject = useMemo(
@@ -936,6 +937,7 @@ function InventoryTree({
   mappingImported?: boolean;
   onOpenFullImport?: () => void;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(true);
   const isOpen = alwaysOpen ?? open;
   const accent = side === 'asis' ? 'var(--amber)' : 'var(--navy)';
@@ -1799,19 +1801,19 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
         >
           <Ic.play /> {testStatus === 'running' ? `Running ${testProgress}%` : 'Trial'}
         </button>
-        {testStatus === 'failed' && (
-          <span style={{ ...styles.reportChip, color: 'var(--red)', borderColor: 'var(--red)', cursor: 'default' }}>
-            Trial failed
-          </span>
-        )}
-        {testStatus === 'completed' && (
+        {/* 완료/실패 둘 다 Report 열기 가능 — 실패 시 Report 에서 에러 메시지·힌트를 확인한다. */}
+        {(testStatus === 'completed' || testStatus === 'failed') && (
           <button
             type="button"
             onClick={() => setReportOpen(true)}
-            title={t('mapping.tooltip.openReport')}
-            style={styles.reportChip}
+            title={testStatus === 'failed'
+              ? (trialResult?.error ?? 'Trial failed — open Report to see the error.')
+              : t('mapping.tooltip.openReport')}
+            style={testStatus === 'failed'
+              ? { ...styles.reportChip, color: 'var(--red)', borderColor: 'var(--red)' }
+              : styles.reportChip}
           >
-            <Ic.arrow /> Report
+            <Ic.arrow /> {testStatus === 'failed' ? 'Report (error)' : 'Report'}
           </button>
         )}
       </div>
@@ -3998,6 +4000,7 @@ function ImportFileModal({
   onClose: () => void;
   onImported?: () => void;
 }) {
+  const t = useT();
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);

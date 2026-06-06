@@ -57,6 +57,20 @@ public class DuckDbService {
 
     private Connection connection;
 
+    /**
+     * run 실행 thread 별 격리 connection (per-run). bindRunConnection 으로 set, unbind 로 close.
+     * null 이면 (사용자 요청 외 경로 / 테스트) 공유 connection 사용.
+     *
+     * 왜: run stage 들은 같은 단일 공유 connection 의 statement() 를 썼다. 동시 2개 run 이
+     * 같은 connection 에서 한쪽이 ResultSet 읽는 중 다른 쪽이 execute → DuckDB JDBC 의
+     * pending result 가 무효화돼 "Attempting to execute an unsuccessful or closed pending
+     * query result" 로 깨졌다 (6개 동시 실행 시 재현, 1개씩이면 안 겹쳐서 정상). run 마다
+     * 별 thread(@Async) 라 ThreadLocal 로 run 전용 connection 을 묶으면 stage 코드 변경 없이
+     * statement() 가 자동으로 격리 connection 을 반환한다. 같은 in-memory DB 인스턴스를 공유
+     * (duplicate)하므로 run 별 schema 데이터는 그대로 보인다.
+     */
+    private final ThreadLocal<Connection> runScoped = new ThreadLocal<>();
+
     public Connection getConnection() throws SQLException {
         long t0 = perfEnabled ? System.nanoTime() : 0L;
         final Connection c;
@@ -214,7 +228,33 @@ public class DuckDbService {
     }
 
     public Statement statement() throws SQLException {
-        return getConnection().createStatement();
+        // run thread 에 격리 connection 이 바인딩돼 있으면 그것을, 아니면 공유 connection 을 쓴다.
+        Connection rc = runScoped.get();
+        return (rc != null ? rc : getConnection()).createStatement();
+    }
+
+    /**
+     * 현재 thread 에 그 run 전용 격리 connection 을 바인딩. 이후 이 thread 의 statement() 호출은
+     * 모두 이 connection 을 쓴다 (run 간 공유 connection 동시 사용 충돌 회피). unbindRunConnection 과 짝.
+     * 같은 thread 에서 중복 호출되면 무시 (재진입 방어 — 기존 connection 유지).
+     */
+    public void bindRunConnection() {
+        if (runScoped.get() != null) return;
+        try {
+            runScoped.set(requestConnection());
+        } catch (SQLException e) {
+            // 바인딩 실패해도 statement() 가 공유 connection 으로 폴백 — run 진행 자체는 가능.
+            log.warn("run-scoped DuckDB connection 바인딩 실패 — 공유 connection 폴백: {}", e.getMessage());
+        }
+    }
+
+    /** 현재 thread 의 run-scoped connection 을 제거 + close. @Async 풀 thread 재사용 시 누수 방지 위해 finally 에서 호출 필수. */
+    public void unbindRunConnection() {
+        Connection c = runScoped.get();
+        runScoped.remove();
+        if (c != null) {
+            try { c.close(); } catch (SQLException e) { log.warn("run-scoped DuckDB connection close 실패: {}", e.getMessage()); }
+        }
     }
 
     /**
