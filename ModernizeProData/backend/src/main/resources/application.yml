@@ -85,6 +85,13 @@ spring:
 server:
   address: 0.0.0.0
   port: 8080
+  # Undertow (tomcat 대신). worker = blocking servlet 처리 thread.
+  # 기본값은 io-threads(코어 수) × 8 이라 저코어 PC 에선 빠듯할 수 있어 하한을 명시한다.
+  # 동시 run(별도 run-exec- 풀) 와 무관하게, 다중 사용자 polling(5s/30s) + 진행 조회 peak 흡수용.
+  # 메타 DB 를 쓰는 req 는 결국 Hikari pool(50)에 묶이므로 worker 를 과하게 키워도 DB 동시성은 pool 이 cap.
+  undertow:
+    threads:
+      worker: ${UNDERTOW_WORKER_THREADS:128}
   servlet:
     encoding:
       charset: UTF-8
