@@ -64,6 +64,14 @@ public class StageContext {
     /** DuckDB 안 schema name (run 별 격리). 예: run_r-12345678 */
     private String duckdbSchema;
 
+    /**
+     * 이 run 의 DuckDB connection (RunExecutionListener 가 bind 직후 주입).
+     * LoadStage 의 병렬 Future thread 는 ThreadLocal(runScoped)을 못 보므로, run connection 을
+     * ctx 로 받아 duplicate 해야 run 전용 인스턴스의 데이터를 조회할 수 있다. memory-mode 가
+     * 아니거나 bind 실패면 null → duplicateOf 가 공유 base 폴백.
+     */
+    private java.sql.Connection duckConnection;
+
     /** RunLog ingest 의 line seq cursor. stage runner 가 ingest 후 update. */
     private long logLineSeqCursor;
 

@@ -268,6 +268,24 @@ public class DuckDbService {
         return c;
     }
 
+    /** 현재 thread 에 바인딩된 run-scoped connection (없으면 null). RunExecutionListener 가 ctx 로 전달. */
+    public Connection currentRunConnection() {
+        return runScoped.get();
+    }
+
+    /**
+     * 주어진 src connection 과 같은 DuckDB 인스턴스를 바라보는 새 connection 을 duplicate.
+     * src 가 null 이면 공유 base. LoadStage 의 병렬 Future thread 가 ctx 의 run connection 을
+     * 넘겨 run 전용 인스턴스의 데이터를 조회할 때 쓴다 (그 thread 엔 ThreadLocal 이 없으므로).
+     * caller 가 close() 책임.
+     */
+    public Connection duplicateOf(Connection src) throws SQLException {
+        synchronized (this) {
+            Connection base = (src != null) ? src : getConnection();
+            return ((org.duckdb.DuckDBConnection) base).duplicate();
+        }
+    }
+
     /** 현재 thread 의 run-scoped connection 을 제거 + close. @Async 풀 thread 재사용 시 누수 방지 위해 finally 에서 호출 필수. */
     public void unbindRunConnection() {
         Connection c = runScoped.get();
@@ -275,32 +293,6 @@ public class DuckDbService {
         if (c != null) {
             try { c.close(); } catch (SQLException e) { log.warn("run-scoped DuckDB connection close 실패: {}", e.getMessage()); }
         }
-    }
-
-    /**
-     * 같은 DuckDB 인스턴스를 공유하는 별도 connection. 병렬 작업(Load 병렬 적재)에서
-     * 단일 공유 connection 동시 사용을 피하기 위해 thread 마다 하나씩 쓰고 닫는다.
-     * DuckDBConnection.duplicate() 는 같은 in-memory/file db 를 바라보는 새 connection.
-     * caller 가 close() 책임. (UDF 는 미등록 — Load 의 read-only COPY 엔 불필요.)
-     */
-    public Connection duplicateConnection() throws SQLException {
-        long t0 = perfEnabled ? System.nanoTime() : 0L;
-        final Connection dup;
-        synchronized (this) {
-            long t1 = perfEnabled ? System.nanoTime() : 0L;
-            Connection rc = runScoped.get();
-            Connection src = (rc != null) ? rc : getConnection();
-            dup = ((org.duckdb.DuckDBConnection) src).duplicate();
-            if (perfEnabled) {
-                long t2 = System.nanoTime();
-                long waitMs = (t1 - t0) / 1_000_000;
-                long holdMs = (t2 - t1) / 1_000_000;
-                if (waitMs > 5 || holdMs > 100) {
-                    log.info("[perf] duckdb.duplicate waitMs={} holdMs={}", waitMs, holdMs);
-                }
-            }
-        }
-        return dup;
     }
 
     /**

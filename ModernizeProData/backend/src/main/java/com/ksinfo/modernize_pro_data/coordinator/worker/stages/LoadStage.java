@@ -237,7 +237,7 @@ public class LoadStage implements StageRunner {
                   순서가 1:1) — PG DDL ordinal 과 무관하게 정확히 들어가게 함. */
             String fqTobeDuck = quoteIdent(schema) + "." + quoteIdent("tobe_" + tobeTable);
             List<String> tobeColumns = new ArrayList<>();
-            try (Connection duck = duckDbService.duplicateConnection();
+            try (Connection duck = duckDbService.duplicateOf(ctx.getDuckConnection());
                  Statement metaSt = duck.createStatement();
                  ResultSet rs = metaSt.executeQuery("SELECT * FROM " + fqTobeDuck + " LIMIT 0")) {
                 ResultSetMetaData md = rs.getMetaData();
@@ -270,7 +270,7 @@ public class LoadStage implements StageRunner {
                 try {
                     pgCopyManager.truncate(conn, pgQualified);
                     String runIdForCancel = ctx.getRunHistory().getId();
-                    try (Connection duck = duckDbService.duplicateConnection();
+                    try (Connection duck = duckDbService.duplicateOf(ctx.getDuckConnection());
                          Statement duckSt = duck.createStatement();
                          ResultSet rs = duckSt.executeQuery("SELECT * FROM " + fqTobeDuck)) {
                         // cancel supplier — COPY 도중 Stop 누르면 행 루프가 중단 throw → conn close → COPY abort.

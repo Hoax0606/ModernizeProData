@@ -165,6 +165,8 @@ public class RunExecutionListener {
         // run별 temp_directory 로 spill 충돌도 방지.
         String runDuckTemp = ctx.getOutputDir().resolve("duck-tmp").toString();
         duckDbService.bindRunConnection(capacityPlanner.getRunMemoryLimit(), runDuckTemp);
+        // LoadStage 병렬 Future thread 는 ThreadLocal 을 못 보므로 run connection 을 ctx 로 전달.
+        ctx.setDuckConnection(duckDbService.currentRunConnection());
         try {
             // 이전/크래시 run 의 DuckDB 작업 schema 정리 (실행 중 run = pending/running 은 보존).
             Set<String> activeSchemas = runRepo
