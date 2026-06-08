@@ -8,6 +8,8 @@ import {
   buildStages,
   buildStagesFromStageViews,
   stageFillColor,
+  successFillColor,
+  isPipelineComplete,
   type Stage,
   type StageTone,
 } from '../lib/pipelineStages';
@@ -409,7 +411,8 @@ export function ExecutionOverviewPage() {
           <span style={styles.overallProgressDim}>{statusHint}</span>
         </div>
         <div style={{ ...styles.overallProgressOuter, display: 'flex' }}>
-          <div style={{ ...styles.overallProgressInner, width: `${overallProgressPct}%` }} />
+          {/* 하나라도 run 진행 중이면 밝은 초록, 전부 끝나면 어두운 초록 (#59) — pipeline 바와 동일 규칙. */}
+          <div style={{ ...styles.overallProgressInner, width: `${overallProgressPct}%`, background: successFillColor(runningRuns === 0) }} />
           {redPct > 0 && (
             <div style={{ height: '100%', width: `${redPct}%`, background: 'var(--red)' }}
                  title={t('executionOverview.statusFailed', { n: failedRuns })} />
@@ -540,6 +543,8 @@ export function ExecutionOverviewPage() {
                 const rowBg = checked ? 'var(--navy-50)' : i % 2 ? 'var(--zebra)' : 'transparent';
                 const dimColor = dimmed ? 'var(--text-4)' : undefined;
                 const pipelineStages: Stage[] = buildStagesFromMetric(metrics[p.id], p.phase);
+                // 이 프로젝트 파이프라인 전체가 끝나야 완료 segment 가 어두워진다 (#59).
+                const pipelineComplete = isPipelineComplete(pipelineStages);
                 return (
                   <tr key={p.id} style={{ background: rowBg, borderBottom: '1px solid var(--border)' }}>
                     <td style={{ ...styles.td, paddingLeft: 12 }}>
@@ -638,7 +643,7 @@ export function ExecutionOverviewPage() {
                               style={{
                                 ...styles.pipelineSlotInner,
                                 width: `${st.pct}%`,
-                                background: stageFillColor(st.tone),
+                                background: stageFillColor(st.tone, pipelineComplete),
                               }}
                             />
                           </div>

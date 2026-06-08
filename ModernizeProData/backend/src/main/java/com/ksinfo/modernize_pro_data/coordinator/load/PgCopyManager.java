@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.postgresql.PGConnection;
 import org.postgresql.copy.CopyManager;
 import org.postgresql.copy.PGCopyOutputStream;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.InputStream;
@@ -32,6 +33,19 @@ import java.util.stream.Collectors;
 public class PgCopyManager {
 
     /**
+     * Bulk load connection 의 session-level 튜닝 (서버 config·restart·superuser 불필요).
+     *  - synchronous_commit=off: COPY 한 방엔 commit 1회라 효과는 작지만 free.
+     *  - maintenance_work_mem↑: 적재 후 PK 인덱스 빌드(ensurePkIndex CONCURRENTLY) 가속.
+     * 서버 레벨(max_wal_size/shared_buffers/checkpoint_timeout)은 도구가 못 건드림 — TO-BE PG
+     * DBA 가 postgresql.conf 로. (임의 고객 PG 서버 config 를 도구가 바꾸지 않는다.)
+     */
+    @Value("${modernize.load.synchronous-commit-off:true}")
+    private boolean syncCommitOff;
+
+    @Value("${modernize.load.maintenance-work-mem:512MB}")
+    private String maintenanceWorkMem;
+
+    /**
      * site.tobeDbByEnv[env] map 으로부터 JDBC Connection 오픈.
      * caller 는 반드시 try-with-resources 로 wrap (leak 방지).
      */
@@ -51,7 +65,23 @@ public class PgCopyManager {
         Properties props = new Properties();
         if (username != null) props.setProperty("user", username);
         if (password != null) props.setProperty("password", password);
-        return DriverManager.getConnection(url, props);
+        Connection conn = DriverManager.getConnection(url, props);
+        applyLoadSessionTuning(conn);
+        return conn;
+    }
+
+    /** 적재 connection 에 session-level 튜닝 적용. 실패해도 적재 자체엔 영향 없음 (best-effort). */
+    private void applyLoadSessionTuning(Connection conn) {
+        try (var st = conn.createStatement()) {
+            if (syncCommitOff) {
+                st.execute("SET synchronous_commit = off");
+            }
+            if (maintenanceWorkMem != null && !maintenanceWorkMem.isBlank()) {
+                st.execute("SET maintenance_work_mem = '" + maintenanceWorkMem.replace("'", "''") + "'");
+            }
+        } catch (Exception e) {
+            log.warn("load session tuning skip: {}", e.getMessage());
+        }
     }
 
     /**

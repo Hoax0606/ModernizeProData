@@ -28,6 +28,8 @@ import {
   buildStages,
   buildStagesFromStageViews,
   stageFillColor,
+  successFillColor,
+  isPipelineComplete,
   type Stage,
   type StageTone,
 } from '../lib/pipelineStages';
@@ -1246,6 +1248,8 @@ function PreflightPanel({
 function OverallProgress({ t, stages }: { t: T; stages: Stage[] }) {
   const overall = stages.length > 0 ? stages.reduce((a, x) => a + x.pct, 0) / stages.length : 0;
   const done = stages.filter((s) => s.tone === 'ok').length;
+  // 파이프라인 전체가 끝나야 완료 segment 가 어두워진다 (#59).
+  const complete = isPipelineComplete(stages);
   return (
     <div style={{ ...styles.section, background: 'var(--panel)' }}>
       <div style={{ padding: '14px 18px' }}>
@@ -1261,7 +1265,7 @@ function OverallProgress({ t, stages }: { t: T; stages: Stage[] }) {
               style={{ flex: 1, background: 'var(--border)', position: 'relative', overflow: 'hidden' }}>
               <div style={{
                 width: `${st.pct}%`, height: '100%',
-                background: stageFillColor(st.tone),
+                background: stageFillColor(st.tone, complete),
                 // transition 제거 — JavaFX WebView (WebKit ~v608) 에서 빠른 polling +
 // width 변경이 compositing layer 재구성 폭주를 일으켜 native crash 유발.
 // 즉시 갱신으로 안전성 우선.
@@ -1297,6 +1301,9 @@ function PipelineStages({ t, stages, stageViews, quarantineByTable }: {
     for (const sv of stageViews ?? []) m.set(sv.stageKey, sv);
     return m;
   }, [stageViews]);
+
+  // 파이프라인 전체 종료 여부 — 완료 segment 의 밝음/어두움 결정 (#59).
+  const complete = isPipelineComplete(stages);
 
   return (
     <div style={{ ...styles.section, background: 'var(--panel)' }}>
@@ -1361,6 +1368,7 @@ function PipelineStages({ t, stages, stageViews, quarantineByTable }: {
                   success={st.tablesSuccess}
                   failed={st.tablesFailed}
                   total={st.tablesTotal}
+                  pipelineComplete={complete}
                 />
                 <div style={{ width: 44, textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-2)' }}>{st.pct.toFixed(0)}%</div>
               </div>
@@ -1494,13 +1502,15 @@ function StatusBadge({ tone, children }: { tone: BadgeTone; children: React.Reac
  * running 밝은 green / done 어두운 green / failed·warning red / idle amber).
  */
 function ProgressBar({
-  pct, tone, success, failed, total,
+  pct, tone, success, failed, total, pipelineComplete = true,
 }: {
   pct: number;
   tone: StageTone;
   success?: number;
   failed?: number;
   total?: number;
+  /** 파이프라인 전체 종료 여부 — success segment 의 밝음(진행 중)/어두움(완료) 결정 (#59). */
+  pipelineComplete?: boolean;
 }) {
   const hasSegments = typeof total === 'number' && total > 0
     && typeof success === 'number' && typeof failed === 'number';
@@ -1509,7 +1519,7 @@ function ProgressBar({
     const failedPct = (failed! / total!) * 100;
     return (
       <div style={{ flex: 1, height: 6, background: 'var(--border)', borderRadius: 2, overflow: 'hidden', display: 'flex' }}>
-        <div style={{ width: `${successPct}%`, height: '100%', background: 'var(--green)', transition: 'width .4s ease' }} />
+        <div style={{ width: `${successPct}%`, height: '100%', background: successFillColor(pipelineComplete), transition: 'width .4s ease' }} />
         <div style={{ width: `${failedPct}%`, height: '100%', background: 'var(--red)', transition: 'width .4s ease' }} />
       </div>
     );
@@ -1517,7 +1527,7 @@ function ProgressBar({
   // Fallback (total 미상 / running 중 데이터 없음) — 단색 fill.
   return (
     <div style={{ flex: 1, height: 6, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
-      <div style={{ width: `${Math.min(pct, 100)}%`, height: '100%', background: stageFillColor(tone), transition: 'width .4s ease' }} />
+      <div style={{ width: `${Math.min(pct, 100)}%`, height: '100%', background: stageFillColor(tone, pipelineComplete), transition: 'width .4s ease' }} />
     </div>
   );
 }

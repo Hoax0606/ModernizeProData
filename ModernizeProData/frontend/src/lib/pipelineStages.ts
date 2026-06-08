@@ -71,23 +71,41 @@ export function buildStages(phase: ProjectPhase): Stage[] {
 }
 
 /**
+ * 파이프라인(또는 진행바 묶음) 전체가 종료됐는지 — running stage 가 하나도 없고,
+ * 실행된(ok/err/warn) stage 가 하나라도 있을 때 true. 색의 밝음/어두움 결정용.
+ */
+export function isPipelineComplete(stages: Stage[]): boolean {
+  if (stages.some((s) => s.tone === 'running')) return false;
+  return stages.some((s) => s.tone === 'ok' || s.tone === 'err' || s.tone === 'warn');
+}
+
+/**
  * 통일된 stage tone → 진행바 채움색. (ExecutionPage 의 OverallProgress + ProgressBar,
- * ExecutionOverviewPage 의 per-row 파이프라인 바가 모두 이 함수를 공유한다.)
+ * ExecutionOverviewPage 의 per-row 파이프라인 바 + Overall Process 바가 공유한다.)
+ *
+ * 색의 밝음/어두움은 **stage 단위가 아니라 파이프라인 전체 진행 상태** 기준 (#59 정정):
+ * 하나라도 진행 중이면(완료 전) 완료된 segment 도 밝은 초록 유지, 파이프라인이
+ * 전부 끝나야(`pipelineComplete=true`) 어두운 초록으로 가라앉힌다.
  *  - running : 밝은 hue (--green)              ← 실행 중
- *  - ok      : 같은 hue 의 어두운 톤 (--green-dark) ← 완료 (#6-4)
- *  - err     : 빨강 (--red)                     ← 실패 (#6-3)
- *  - warn    : 빨강 (--red)                     ← failed_with_pending_warnings = 부분 실패 (#6-3)
+ *  - ok      : 진행 중이면 밝은 --green, 완료되면 --green-dark
+ *  - err     : 빨강 (--red)                     ← 실패
+ *  - warn    : 빨강 (--red)                     ← failed_with_pending_warnings = 부분 실패
  *  - idle    : 미실행 대기 (--amber)
  */
-export function stageFillColor(tone: StageTone): string {
+export function stageFillColor(tone: StageTone, pipelineComplete = true): string {
   switch (tone) {
     case 'running': return 'var(--green)';
-    case 'ok':      return 'var(--green-dark)';
+    case 'ok':      return pipelineComplete ? 'var(--green-dark)' : 'var(--green)';
     case 'err':     return 'var(--red)';
     case 'warn':    return 'var(--red)';
     case 'idle':
     default:        return 'var(--amber)';
   }
+}
+
+/** success(완료) segment 의 채움색 — 파이프라인 완료 전 밝은 초록 / 완료 후 어두운 초록. */
+export function successFillColor(pipelineComplete: boolean): string {
+  return pipelineComplete ? 'var(--green-dark)' : 'var(--green)';
 }
 
 /** 完了した stage 의 数 (tone === 'ok'). 分数 표시용. */

@@ -26,6 +26,7 @@ import org.springframework.transaction.event.TransactionalEventListener;
 
 import java.nio.file.Path;
 import java.time.OffsetDateTime;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -64,6 +65,7 @@ public class RunExecutionListener {
     private final RunStageCacheService stageCacheService;
     private final WorkerNodeService workerNodeService;
     private final WorkerDispatcher workerDispatcher;
+    private final RunOutputCleaner outputCleaner;
 
     @Value("${modernize.mode:coordinator}")
     private String mode;
@@ -223,6 +225,16 @@ public class RunExecutionListener {
             } catch (Exception e) {
                 log.warn("Failed to close RunLog runId={}", runId, e);
             }
+            // worker 디스크 누적 방지 — scratch(duck-tmp/temp) 즉시 삭제 + 프로젝트별 최근 N개만 보존.
+            // (진행 중 run 의 outputDir 은 protect 로 절대 삭제 안 함.)
+            try {
+                if (ctx != null && ctx.getOutputDir() != null) {
+                    outputCleaner.cleanScratch(ctx.getOutputDir());
+                    outputCleaner.applyRetention(ctx.getOutputDir(), activeRunOutputDirs());
+                }
+            } catch (Exception e) {
+                log.warn("output cleanup failed runId={}: {}", runId, e.getMessage());
+            }
         }
         log.info("Run execution thread finished runId={}", runId);
     }
@@ -233,6 +245,22 @@ public class RunExecutionListener {
         } catch (Exception e) {
             log.error("Failed to mark run as failed runId={}", runId, e);
         }
+    }
+
+    /** retention 삭제에서 제외할 경로 — 진행 중(pending/running) run 의 outputDir (metadata 박제값). */
+    private Set<Path> activeRunOutputDirs() {
+        Set<Path> dirs = new HashSet<>();
+        try {
+            for (RunHistory r : runRepo.findByStatusIn(List.of(RunStatus.pending, RunStatus.running))) {
+                Object od = r.getMetadata() == null ? null : r.getMetadata().get("outputDir");
+                if (od instanceof String s && !s.isBlank()) {
+                    dirs.add(Path.of(s));
+                }
+            }
+        } catch (Exception e) {
+            log.warn("activeRunOutputDirs lookup failed: {}", e.getMessage());
+        }
+        return dirs;
     }
 
     /** stage-cache HIT 시 extract/reconcile/transform StageInstance 를 success(skipped) 마킹 → executor 가 skip. */
