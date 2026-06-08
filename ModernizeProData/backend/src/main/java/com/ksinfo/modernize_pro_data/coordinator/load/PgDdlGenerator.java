@@ -135,11 +135,76 @@ public final class PgDdlGenerator {
         return "\"" + name.replace("\"", "\"\"") + "\"";
     }
 
-    /** 디버그·테스트용 — schema 가 비어있을 때 unqualified 식별자. */
-    @SuppressWarnings("unused")
-    static String pgQualifiedExample(String schema, String table) {
-        if (schema == null || schema.isBlank()) return "\"" + table + "\"";
-        return "\"" + schema + "\".\"" + table + "\"";
+    /** schema.table 형태의 quoted identifier. schema 가 비면 unquoted. */
+    public static String qualifiedTable(String schema, String table) {
+        if (schema == null || schema.isBlank()) return ident(table);
+        return ident(schema) + "." + ident(table);
+    }
+
+    /**
+     * UK 부착 SQL. {@code ALTER TABLE ... ADD CONSTRAINT name UNIQUE (cols)}.
+     * 이미 존재 시 PG 가 에러 → 호출 측이 try/catch 로 멱등 보장.
+     */
+    public static String addUniqueConstraintSql(String schema, String table,
+                                                String constraintName, List<String> columns) {
+        String quotedCols = columns.stream().map(PgDdlGenerator::ident).collect(Collectors.joining(", "));
+        return "ALTER TABLE " + qualifiedTable(schema, table)
+                + " ADD CONSTRAINT " + ident(constraintName)
+                + " UNIQUE (" + quotedCols + ")";
+    }
+
+    /**
+     * FK 부착 SQL (NOT VALID). {@code ALTER TABLE ... ADD CONSTRAINT fk FOREIGN KEY (...) REFERENCES ref(...) [ON DELETE ...] [ON UPDATE ...] [DEFERRABLE ...] NOT VALID}.
+     * NOT VALID 로 부착하면 기존 데이터의 검증은 건너뛰고 신규 INSERT 부터 강제. 검증은 {@link #validateForeignKeySql} 로 분리.
+     *
+     * @param deferrableInfo 예) "DEFERRABLE INITIALLY DEFERRED" / "DEFERRABLE INITIALLY IMMEDIATE" / "DEFERRABLE" / null
+     */
+    public static String addForeignKeyNotValidSql(String schema, String table, String fkName,
+                                                  List<String> columns,
+                                                  String refSchema, String refTable, List<String> refColumns,
+                                                  String onDelete, String onUpdate, String deferrableInfo) {
+        String quotedCols = columns.stream().map(PgDdlGenerator::ident).collect(Collectors.joining(", "));
+        String quotedRefCols = refColumns.stream().map(PgDdlGenerator::ident).collect(Collectors.joining(", "));
+        StringBuilder sb = new StringBuilder();
+        sb.append("ALTER TABLE ").append(qualifiedTable(schema, table))
+                .append(" ADD CONSTRAINT ").append(ident(fkName))
+                .append(" FOREIGN KEY (").append(quotedCols).append(")")
+                .append(" REFERENCES ").append(qualifiedTable(refSchema, refTable))
+                .append(" (").append(quotedRefCols).append(")");
+        if (onDelete != null && !onDelete.isBlank() && !"NO ACTION".equalsIgnoreCase(onDelete.trim())) {
+            sb.append(" ON DELETE ").append(onDelete.trim().toUpperCase());
+        }
+        if (onUpdate != null && !onUpdate.isBlank() && !"NO ACTION".equalsIgnoreCase(onUpdate.trim())) {
+            sb.append(" ON UPDATE ").append(onUpdate.trim().toUpperCase());
+        }
+        if (deferrableInfo != null && !deferrableInfo.isBlank()) {
+            sb.append(" ").append(deferrableInfo.trim().toUpperCase());
+        }
+        sb.append(" NOT VALID");
+        return sb.toString();
+    }
+
+    /** {@code ALTER TABLE ... VALIDATE CONSTRAINT fk}. NOT VALID 로 부착한 FK 의 기존 데이터 검증. */
+    public static String validateForeignKeySql(String schema, String table, String fkName) {
+        return "ALTER TABLE " + qualifiedTable(schema, table)
+                + " VALIDATE CONSTRAINT " + ident(fkName);
+    }
+
+    /**
+     * CHECK 부착 SQL (NOT VALID). {@code ALTER TABLE ... ADD CONSTRAINT name CHECK (expr) NOT VALID}.
+     * NOT VALID 라 기존 데이터 검증 skip → {@link #validateCheckConstraintSql} 로 분리 검증.
+     */
+    public static String addCheckConstraintNotValidSql(String schema, String table,
+                                                       String constraintName, String checkExpression) {
+        return "ALTER TABLE " + qualifiedTable(schema, table)
+                + " ADD CONSTRAINT " + ident(constraintName)
+                + " CHECK (" + checkExpression + ") NOT VALID";
+    }
+
+    /** {@code ALTER TABLE ... VALIDATE CONSTRAINT name}. CHECK 도 FK 와 동일한 검증 명령. */
+    public static String validateCheckConstraintSql(String schema, String table, String constraintName) {
+        return "ALTER TABLE " + qualifiedTable(schema, table)
+                + " VALIDATE CONSTRAINT " + ident(constraintName);
     }
 
     /** 디버그용 — 컬럼 리스트를 한 줄로 (테스트 가독성). */
