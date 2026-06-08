@@ -83,6 +83,37 @@ let ASIS_TABLES: AsisTable[] = [];
 
 let TOBE_TABLES: TobeTable[] = [];
 
+// AS-IS csv 파일 존재(imported) + data row 수 캐시 — 키 = `${siteId}|${tableName}`.
+// hydrationTick 마다 재fetch 되던 회귀 + 동시 중복(stampede) 방지용으로 module-level 에 박제.
+// imported 판정은 가벼운 csv-preview(limit 1, 404=missing) 로, rows(무거운 full scan)는
+// table 당 1회만 + 직렬 큐로 background fetch (worker thread 포화 회피).
+const ASIS_IMPORTED_CACHE = new Map<string, boolean>();
+const ASIS_ROWS_CACHE = new Map<string, number>();
+const ASIS_EXIST_INFLIGHT = new Set<string>();
+const ASIS_ROWS_QUEUE: Array<{ siteId: string; name: string; key: string }> = [];
+let asisRowsDraining = false;
+
+/** rows 큐를 한 번에 하나씩 처리 — 동시 다중 full-scan 으로 인한 서버 포화 방지. */
+async function drainAsisRowsQueue(onProgress: () => void): Promise<void> {
+  if (asisRowsDraining) return;
+  asisRowsDraining = true;
+  try {
+    while (ASIS_ROWS_QUEUE.length > 0) {
+      const job = ASIS_ROWS_QUEUE.shift()!;
+      if (ASIS_ROWS_CACHE.has(job.key)) continue;
+      try {
+        const r = await csvPreviewApi.rowCount(job.siteId, job.name);
+        ASIS_ROWS_CACHE.set(job.key, r.rowCount);
+        onProgress();
+      } catch {
+        /* 실패 → 미캐시 유지 (rows 0 표시) */
+      }
+    }
+  } finally {
+    asisRowsDraining = false;
+  }
+}
+
 let MAPPING_BY_TOBE: Record<string, MappingRow[]> = {};
 
 type AsisColumn = { name: string; type: string; pk?: boolean; nullPct?: number; distinct?: number };
@@ -354,22 +385,16 @@ export function MappingPage() {
     (s) => s.projects.find((p) => p.id === s.activeProjectId) ?? null,
   );
   useEffect(() => {
-    ASIS_TABLES = ddlToAsisTables(asisSchema);
-    // imported 는 실제 csv 파일 존재로 판정. csvPath 가 설정돼 있어도 파일이 없으면 false.
-    // 각 AS-IS table 의 csv-row-count(byte-stream line count, 병렬 안전) 를 호출해
-    //  - 200 (파일 존재) → imported:true + rows 갱신
-    //  - 404 (CSV_FILE_NOT_FOUND) → imported:false 유지 (rows 0)
-    // row 수 0 여부까지는 안 따지고 파일 존재만 본다 (csv-arrived preflight 과 동일 기준).
-    if (siteForDialect?.csvPath && siteForDialect.csvPath.trim() !== '') {
-      const siteId = siteForDialect.id;
-      for (const at of ASIS_TABLES) {
-        csvPreviewApi.rowCount(siteId, at.name).then((r) => {
-          ASIS_TABLES = ASIS_TABLES.map((t) =>
-            t.name === at.name ? { ...t, imported: true, rows: r.rowCount } : t);
-          setHydrationTick((v) => v + 1);
-        }).catch(() => { /* 파일 없음 → imported:false / rows 0 유지 */ });
+    // imported/rows 는 module-level 캐시에서 즉시 반영 (가벼움). 실제 fetch 는 아래 별도 effect 가
+    // session 당 1회만 수행 — 여기서 매 hydrationTick 마다 무거운 full-scan 을 재발화하지 않는다.
+    const siteId = siteForDialect?.id ?? '';
+    ASIS_TABLES = ddlToAsisTables(asisSchema).map((t) => {
+      const key = siteId + '|' + t.name;
+      if (ASIS_IMPORTED_CACHE.get(key) === true) {
+        return { ...t, imported: true, rows: ASIS_ROWS_CACHE.get(key) ?? 0 };
       }
-    }
+      return t;
+    });
     TOBE_TABLES = ddlToTobeTables(tobeSchema);
     ASIS_COLUMNS = ddlToAsisColumns(asisSchema);
     MAPPING_BY_TOBE = ddlToMappingByTobe(tobeSchema);
@@ -382,6 +407,41 @@ export function MappingPage() {
     TOBE_DIALECT = tobeRaw ? normalizeDialect(tobeRaw) : (tobeSchema?.latestImport?.dialect ?? 'oracle');
     setHydrationTick((t) => t + 1);
   }, [asisSchema, tobeSchema, siteForDialect, projectForDialect]);
+
+  // AS-IS csv 파일 존재(imported) + row 수 — schema/site 확정 후 table 별 1회만 fetch.
+  //  1) 존재 판정: 가벼운 csv-preview(limit 1, 404=missing). 옛 full-scan rowCount 판정 회귀 수정.
+  //  2) rows: 파일 존재 확정 + 미캐시일 때만 직렬 큐에 넣어 background full-scan (1개씩, 포화 회피).
+  // 캐시/in-flight 가드로 hydrationTick 재발화에도 중복 호출 안 함.
+  const asisTableNamesKey = useMemo(
+    () => (asisSchema?.tables ?? []).map((t) => qualifiedName(t)).join('\n'),
+    [asisSchema],
+  );
+  useEffect(() => {
+    const siteId = siteForDialect?.id;
+    const csvPath = siteForDialect?.csvPath;
+    if (!siteId || !csvPath || csvPath.trim() === '') return;
+    const names = asisTableNamesKey ? asisTableNamesKey.split('\n') : [];
+    let queued = false;
+    for (const name of names) {
+      const key = siteId + '|' + name;
+      // 1) 존재 판정 (가벼움)
+      if (!ASIS_IMPORTED_CACHE.has(key) && !ASIS_EXIST_INFLIGHT.has(key)) {
+        ASIS_EXIST_INFLIGHT.add(key);
+        csvPreviewApi.forTable(siteId, name, 1)
+          .then(() => { ASIS_IMPORTED_CACHE.set(key, true); setHydrationTick((v) => v + 1); })
+          .catch(() => { ASIS_IMPORTED_CACHE.set(key, false); })
+          .finally(() => { ASIS_EXIST_INFLIGHT.delete(key); });
+      }
+      // 2) rows (무거움) — 파일 존재 확정 + 미캐시 + 큐에 없을 때만 1회.
+      if (ASIS_IMPORTED_CACHE.get(key) === true
+          && !ASIS_ROWS_CACHE.has(key)
+          && !ASIS_ROWS_QUEUE.some((j) => j.key === key)) {
+        ASIS_ROWS_QUEUE.push({ siteId, name, key });
+        queued = true;
+      }
+    }
+    if (queued) void drainAsisRowsQueue(() => setHydrationTick((v) => v + 1));
+  }, [siteForDialect?.id, siteForDialect?.csvPath, asisTableNamesKey, hydrationTick]);
 
   // Pre-flight Fix → 첫 unmapped row 찾아 scrollIntoView + 1초 teal pulse.
   // ExecutionPage 가 navigate('/mapping', { state: { fixTarget: { kind } } }) 로 진입.

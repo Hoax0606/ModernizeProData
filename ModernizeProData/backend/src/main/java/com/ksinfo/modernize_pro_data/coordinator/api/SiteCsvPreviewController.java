@@ -57,6 +57,13 @@ public class SiteCsvPreviewController {
     private record RowCountCacheEntry(long mtime, long size, long rowCount) {}
     private static final java.util.Map<String, RowCountCacheEntry> ROW_COUNT_CACHE =
             new java.util.concurrent.ConcurrentHashMap<>();
+    /**
+     * 같은 파일에 대한 동시 full-scan stampede 방지 — Mapping 화면이 전 AS-IS 테이블의
+     * row-count 를 한꺼번에 호출하면 cache miss 상태에서 동일 파일을 N 번 scan 해 worker
+     * thread 를 고갈시킨다. 첫 요청만 실제 scan, 나머지는 같은 future 를 기다린다.
+     */
+    private static final java.util.Map<String, java.util.concurrent.CompletableFuture<Long>> ROW_COUNT_INFLIGHT =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     public record CsvPreview(
             String table,
@@ -207,10 +214,43 @@ public class SiteCsvPreviewController {
         } catch (IOException e) {
             return 0;
         }
-        RowCountCacheEntry cached = ROW_COUNT_CACHE.get(cacheKey);
-        if (cached != null && cached.mtime() == fMtime && cached.size() == fSize) {
-            return cached.rowCount();
+        if (isFresh(ROW_COUNT_CACHE.get(cacheKey), fMtime, fSize)) {
+            return ROW_COUNT_CACHE.get(cacheKey).rowCount();
         }
+        // cache miss → 동일 파일 동시 scan 은 하나로 합친다 (stampede 방지).
+        java.util.concurrent.CompletableFuture<Long> mine = new java.util.concurrent.CompletableFuture<>();
+        java.util.concurrent.CompletableFuture<Long> running = ROW_COUNT_INFLIGHT.putIfAbsent(cacheKey, mine);
+        if (running != null) {
+            try {
+                return running.get();
+            } catch (Exception e) {
+                return 0;
+            }
+        }
+        try {
+            // 소유권 획득 후 재확인 — 직전에 다른 스레드가 막 채웠을 수 있음.
+            if (isFresh(ROW_COUNT_CACHE.get(cacheKey), fMtime, fSize)) {
+                long v = ROW_COUNT_CACHE.get(cacheKey).rowCount();
+                mine.complete(v);
+                return v;
+            }
+            long v = scanDataRows(csvFile, fMtime, fSize, cacheKey);
+            mine.complete(v);
+            return v;
+        } catch (Throwable t) {
+            mine.complete(0L);
+            return 0;
+        } finally {
+            ROW_COUNT_INFLIGHT.remove(cacheKey, mine);
+        }
+    }
+
+    private static boolean isFresh(RowCountCacheEntry e, long mtime, long size) {
+        return e != null && e.mtime() == mtime && e.size() == size;
+    }
+
+    /** 실제 byte-stream line count + 캐시 적재. */
+    private long scanDataRows(Path csvFile, long fMtime, long fSize, String cacheKey) {
         long lines = 0;
         try (Stream<String> stream = Files.lines(csvFile, java.nio.charset.StandardCharsets.UTF_8)) {
             lines = stream.count();

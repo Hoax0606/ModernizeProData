@@ -14,7 +14,7 @@ interface ToastItem {
   isCutover: boolean;
 }
 
-const TOAST_DURATION_MS = 4000;
+const TOAST_DURATION_MS = 2200;
 
 /**
  * 새 audit log entry 가 생기면 우측 하단에 잠깐 떴다 사라지는 toast.

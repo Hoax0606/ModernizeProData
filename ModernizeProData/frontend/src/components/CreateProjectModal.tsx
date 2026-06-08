@@ -12,6 +12,15 @@ interface Props {
   onClose: () => void;
 }
 
+type CreateMode = 'single' | 'multiple';
+
+interface ProjectRow {
+  id: number;
+  name: string;
+  asis: File | null;
+  tobe: File | null;
+}
+
 export function CreateProjectModal({ open, onClose }: Props) {
   const t = useT();
   const createProject = useWorkspaceStore((s) => s.createProject);
@@ -20,22 +29,33 @@ export function CreateProjectModal({ open, onClose }: Props) {
   const activeSite = useMemo(() => sites.find((s) => s.id === activeSiteId) ?? null, [sites, activeSiteId]);
   const currentUser = useAuthStore((s) => s.user);
 
+  const [mode, setMode] = useState<CreateMode>('single');
+
+  // single 모드 필드
   const [name, setName] = useState('');
   const [asisFile, setAsisFile] = useState<File | null>(null);
   const [tobeFile, setTobeFile] = useState<File | null>(null);
+
+  // multiple 모드 행들
+  const rowSeq = useRef(0);
+  const newRow = (): ProjectRow => ({ id: ++rowSeq.current, name: '', asis: null, tobe: null });
+  const [rows, setRows] = useState<ProjectRow[]>(() => [newRow()]);
+  // 생성 실패한 행 id — 강조 표시용.
+  const [failedRowIds, setFailedRowIds] = useState<Set<number>>(() => new Set());
+
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const asisInputRef = useRef<HTMLInputElement | null>(null);
-  const tobeInputRef = useRef<HTMLInputElement | null>(null);
 
   const reset = () => {
+    setMode('single');
     setName('');
     setAsisFile(null);
     setTobeFile(null);
+    rowSeq.current = 0;
+    setRows([newRow()]);
+    setFailedRowIds(new Set());
     setError(null);
     setSubmitting(false);
-    if (asisInputRef.current) asisInputRef.current.value = '';
-    if (tobeInputRef.current) tobeInputRef.current.value = '';
   };
 
   // 모달을 열 때마다 폼을 초기화한다 (닫았다 다시 열어도 이전 입력값이 남지 않게).
@@ -44,110 +64,224 @@ export function CreateProjectModal({ open, onClose }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  /** 프로젝트 1개 생성 + (선택) DDL 임포트. 성공 true, 실패 false. */
+  const createOne = async (projName: string, asis: File | null, tobe: File | null): Promise<boolean> => {
+    const project = await createProject({
+      name: projName,
+      phase: 'planning',
+      tableCount: 0,
+      tobeTableCount: 0,
+      ddlFiles: [],
+      owner: currentUser?.username ?? '—',
+    });
+    if (asis) await asisDdlApi.import(project.id, asis);
+    if (tobe) await tobeDdlApi.import(project.id, tobe);
+    return true;
+  };
+
+  const namedRows = rows.filter((r) => r.name.trim() !== '');
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || !activeSite || submitting) return;
+    if (submitting || !activeSite) return;
     setError(null);
+
+    if (mode === 'single') {
+      if (!name.trim()) return;
+      setSubmitting(true);
+      try {
+        const project = await createProject({
+          name: name.trim(),
+          phase: 'planning',
+          tableCount: 0,
+          tobeTableCount: 0,
+          ddlFiles: [],
+          owner: currentUser?.username ?? '—',
+        });
+        if (asisFile) {
+          try {
+            await asisDdlApi.import(project.id, asisFile);
+          } catch (err) {
+            console.error('[createProject] AS-IS DDL import failed', err);
+            setError(t('createProject.error.asisDdl'));
+            setSubmitting(false);
+            return;
+          }
+        }
+        if (tobeFile) {
+          try {
+            await tobeDdlApi.import(project.id, tobeFile);
+          } catch (err) {
+            console.error('[createProject] TO-BE DDL import failed', err);
+            setError(t('createProject.error.tobeDdl'));
+            setSubmitting(false);
+            return;
+          }
+        }
+        reset();
+        onClose();
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'PROJECT_NAME_DUPLICATE') {
+          setError(t('createProject.error.duplicate'));
+        } else {
+          setError(t('createProject.error.generic'));
+        }
+        setSubmitting(false);
+      }
+      return;
+    }
+
+    // multiple 모드 — 이름이 있는 행만 순차 생성. 실패 행은 강조 후 모달 유지.
+    if (namedRows.length === 0) {
+      setError(t('createProject.error.empty'));
+      return;
+    }
     setSubmitting(true);
-    try {
-      const project = await createProject({
-        name: name.trim(),
-        phase: 'planning',
-        tableCount: 0,
-        ddlFiles: [],
-        owner: currentUser?.username ?? '—',
-      });
-
-      if (asisFile) {
-        try {
-          await asisDdlApi.import(project.id, asisFile);
-        } catch (err) {
-          console.error('[createProject] AS-IS DDL import failed', err);
-          setError(t('createProject.error.asisDdl'));
-          setSubmitting(false);
-          return;
-        }
+    const failed = new Set<number>();
+    for (const r of namedRows) {
+      try {
+        await createOne(r.name.trim(), r.asis, r.tobe);
+      } catch (err) {
+        console.error('[createProject] bulk row failed', r.name, err);
+        failed.add(r.id);
       }
-      if (tobeFile) {
-        try {
-          await tobeDdlApi.import(project.id, tobeFile);
-        } catch (err) {
-          console.error('[createProject] TO-BE DDL import failed', err);
-          setError(t('createProject.error.tobeDdl'));
-          setSubmitting(false);
-          return;
-        }
-      }
-
-      // 양쪽 DDL 임포트가 끝났으면 백엔드가 phase 를 analysis 로 자동 전환했을 수 있다.
-      // workspace store 의 다음 fetch 에서 갱신되므로 여기선 별도 처리 불필요.
-
+    }
+    if (failed.size === 0) {
       reset();
       onClose();
-    } catch (err) {
-      if (err instanceof ApiError && err.code === 'PROJECT_NAME_DUPLICATE') {
-        setError(t('createProject.error.duplicate'));
-      } else {
-        setError(t('createProject.error.generic'));
-      }
-      setSubmitting(false);
+      return;
     }
+    // 성공한 행은 제거하고 실패한 행만 남겨 재시도 가능하게.
+    setRows((cur) => cur.filter((r) => failed.has(r.id) || r.name.trim() === ''));
+    setFailedRowIds(failed);
+    setError(t('createProject.error.bulkPartial', { n: failed.size }));
+    setSubmitting(false);
   };
 
   if (!activeSite) return null;
+
+  const updateRow = (id: number, patch: Partial<ProjectRow>) =>
+    setRows((cur) => cur.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  const addRow = () => setRows((cur) => [...cur, newRow()]);
+  const removeRow = (id: number) =>
+    setRows((cur) => (cur.length <= 1 ? cur : cur.filter((r) => r.id !== id)));
+
+  const submitDisabled = submitting
+    || (mode === 'single' ? !name.trim() : namedRows.length === 0);
 
   return (
     <Modal
       open={open}
       onClose={onClose}
-      width={520}
+      width={mode === 'multiple' ? 820 : 520}
       title={t('createProject.title')}
     >
       <form onSubmit={handleSubmit} style={styles.form}>
-        <Field label={t('createProject.name')}>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            style={styles.input}
-            autoFocus
-            required
+        {/* 생성 모드 선택 */}
+        <div style={styles.segmented}>
+          <button
+            type="button"
+            onClick={() => setMode('single')}
+            style={{ ...styles.segBtn, ...(mode === 'single' ? styles.segBtnActive : {}) }}
             disabled={submitting}
-          />
-        </Field>
-
-        {/* DDL 영역은 <label> 로 감싸면 내부 <input type=file> 가 label 클릭마다
-            자동 trigger 되어 파일 다이얼로그가 중복으로 뜬다. div 로 감싼다. */}
-        <div style={styles.field}>
-          <div style={styles.label}>{t('createProject.ddl')}</div>
-          <div style={styles.ddlPairs}>
-            <DdlPicker
-              side="asis"
-              labelText={t('createProject.ddl.asisLabel')}
-              file={asisFile}
-              onPick={setAsisFile}
-              inputRef={asisInputRef}
-              importLabel={t('asisDdl.button.import')}
-              changeLabel={t('createProject.ddl.change')}
-              selectedLabel={t('createProject.ddl.selected')}
-              notSelectedLabel={t('createProject.ddl.notSelected')}
-              removeLabel={t('createProject.ddlRemove')}
-              disabled={submitting}
-            />
-            <DdlPicker
-              side="tobe"
-              labelText={t('createProject.ddl.tobeLabel')}
-              file={tobeFile}
-              onPick={setTobeFile}
-              inputRef={tobeInputRef}
-              importLabel={t('tobeDdl.button.import')}
-              changeLabel={t('createProject.ddl.change')}
-              selectedLabel={t('createProject.ddl.selected')}
-              notSelectedLabel={t('createProject.ddl.notSelected')}
-              removeLabel={t('createProject.ddlRemove')}
-              disabled={submitting}
-            />
-          </div>
+          >
+            {t('createProject.mode.single')}
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode('multiple')}
+            style={{ ...styles.segBtn, ...(mode === 'multiple' ? styles.segBtnActive : {}) }}
+            disabled={submitting}
+          >
+            {t('createProject.mode.multiple')}
+          </button>
         </div>
+
+        {mode === 'single' ? (
+          <>
+            <Field label={t('createProject.name')}>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                style={styles.input}
+                autoFocus
+                required
+                disabled={submitting}
+              />
+            </Field>
+            <div style={styles.field}>
+              <div style={styles.label}>{t('createProject.ddl')}</div>
+              <div style={styles.ddlRow}>
+                <CompactDdlPicker
+                  labelText={t('createProject.ddl.asisLabel')}
+                  file={asisFile}
+                  onPick={setAsisFile}
+                  disabled={submitting}
+                />
+                <CompactDdlPicker
+                  labelText={t('createProject.ddl.tobeLabel')}
+                  file={tobeFile}
+                  onPick={setTobeFile}
+                  disabled={submitting}
+                />
+              </div>
+            </div>
+          </>
+        ) : (
+          <div style={styles.field}>
+            <div style={styles.hint}>{t('createProject.multiHint')}</div>
+            <div style={styles.rowList}>
+              {rows.map((r, idx) => (
+                <div
+                  key={r.id}
+                  style={{
+                    ...styles.projRow,
+                    ...(failedRowIds.has(r.id) ? styles.projRowFailed : {}),
+                  }}
+                >
+                  <span style={styles.rowIdx}>{idx + 1}</span>
+                  <input
+                    value={r.name}
+                    onChange={(e) => updateRow(r.id, { name: e.target.value })}
+                    style={{ ...styles.input, ...styles.rowNameInput }}
+                    placeholder={t('createProject.rowName')}
+                    disabled={submitting}
+                    autoFocus={idx === rows.length - 1}
+                  />
+                  <CompactDdlPicker
+                    labelText={t('createProject.ddl.asisLabel')}
+                    file={r.asis}
+                    onPick={(f) => updateRow(r.id, { asis: f })}
+                    disabled={submitting}
+                  />
+                  <CompactDdlPicker
+                    labelText={t('createProject.ddl.tobeLabel')}
+                    file={r.tobe}
+                    onPick={(f) => updateRow(r.id, { tobe: f })}
+                    disabled={submitting}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeRow(r.id)}
+                    style={styles.rowRemoveBtn}
+                    title={t('createProject.ddlRemove')}
+                    disabled={submitting || rows.length <= 1}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={addRow}
+              style={styles.addRowBtn}
+              disabled={submitting}
+            >
+              + {t('createProject.addRow')}
+            </button>
+          </div>
+        )}
 
         {error && <div style={styles.errorBox}>{error}</div>}
 
@@ -162,10 +296,12 @@ export function CreateProjectModal({ open, onClose }: Props) {
           </button>
           <button
             type="submit"
-            style={{ ...styles.btnPrimary, ...(submitting ? styles.btnDisabled : {}) }}
-            disabled={submitting}
+            style={{ ...styles.btnPrimary, ...(submitDisabled ? styles.btnDisabled : {}) }}
+            disabled={submitDisabled}
           >
-            {t('createProject.submit')}
+            {mode === 'multiple'
+              ? t('createProject.submitMulti', { n: namedRows.length })
+              : t('createProject.submit')}
           </button>
         </div>
       </form>
@@ -173,81 +309,57 @@ export function CreateProjectModal({ open, onClose }: Props) {
   );
 }
 
-interface DdlPickerProps {
-  side: 'asis' | 'tobe';
+interface CompactDdlPickerProps {
   labelText: string;
   file: File | null;
   onPick: (f: File | null) => void;
-  inputRef: React.RefObject<HTMLInputElement | null>;
-  importLabel: string;
-  changeLabel: string;
-  selectedLabel: string;
-  notSelectedLabel: string;
-  removeLabel: string;
   disabled: boolean;
 }
 
-function DdlPicker({
-  side, labelText, file, onPick, inputRef,
-  importLabel, changeLabel, selectedLabel, notSelectedLabel,
-  removeLabel, disabled,
-}: DdlPickerProps) {
-  const isSelected = !!file;
-  void side;
+/** 한 줄짜리 DDL picker — 빈 상태는 점선 버튼, 선택 상태는 초록 pill. */
+function CompactDdlPicker({ labelText, file, onPick, disabled }: CompactDdlPickerProps) {
+  const ref = useRef<HTMLInputElement | null>(null);
+  const selected = !!file;
   return (
-    <div style={isSelected ? styles.ddlPickerSelected : styles.ddlPickerEmpty}>
-      <div style={{ ...styles.ddlPickerHeader, borderBottom: isSelected ? '1px solid var(--border)' : 'none' }}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={styles.ddlPickerTitleRow}>
-            <span style={styles.ddlPickerTitle}>{labelText}</span>
-            {isSelected
-              ? <span style={styles.ddlPickerBadgeOk}>{selectedLabel}</span>
-              : <span style={styles.ddlPickerBadgeWarn}>{notSelectedLabel}</span>}
-          </div>
-        </div>
-        <input
-          ref={inputRef}
-          type="file"
-          accept=".sql,.ddl,.txt"
-          onChange={(e) => onPick(e.target.files?.[0] ?? null)}
-          style={{ display: 'none' }}
-        />
-        {!isSelected && (
+    <div style={selected ? styles.compactSel : styles.compactEmpty}>
+      <input
+        ref={ref}
+        type="file"
+        accept=".sql,.ddl,.txt"
+        onChange={(e) => onPick(e.target.files?.[0] ?? null)}
+        style={{ display: 'none' }}
+      />
+      {selected ? (
+        <>
           <button
             type="button"
-            onClick={() => inputRef.current?.click()}
-            style={styles.btnImportNavy}
+            onClick={() => ref.current?.click()}
+            style={styles.compactPillBody}
             disabled={disabled}
+            title={file!.name}
           >
-            {importLabel}
-          </button>
-        )}
-      </div>
-      {isSelected && file && (
-        <div style={styles.ddlPickerBody}>
-          <span style={styles.ddlFileName}>{file.name}</span>
-          <span style={styles.ddlFileSize}>{formatSize(file.size)}</span>
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            style={styles.btnChangeNavy}
-            disabled={disabled}
-          >
-            {changeLabel}
+            <span style={styles.compactTag}>{labelText}</span>
+            <span style={styles.compactName}>{file!.name}</span>
           </button>
           <button
             type="button"
-            onClick={() => {
-              onPick(null);
-              if (inputRef.current) inputRef.current.value = '';
-            }}
-            style={styles.ddlRemoveBtn}
-            title={removeLabel}
+            onClick={() => { onPick(null); if (ref.current) ref.current.value = ''; }}
+            style={styles.compactClear}
             disabled={disabled}
           >
             ×
           </button>
-        </div>
+        </>
+      ) : (
+        <button
+          type="button"
+          onClick={() => ref.current?.click()}
+          style={styles.compactImport}
+          disabled={disabled}
+        >
+          <i className="fa-solid fa-plus" style={{ fontSize: 9 }} />
+          <span>{labelText}</span>
+        </button>
       )}
     </div>
   );
@@ -263,24 +375,11 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
 const styles: Record<string, React.CSSProperties> = {
-  subtitle: {
-    fontSize: 11,
-    color: 'var(--text-3)',
-    fontFamily: 'var(--mono)',
-    fontWeight: 400,
-    marginTop: 2,
-  },
   form: { display: 'flex', flexDirection: 'column', gap: 14 },
-  field: { display: 'flex', flexDirection: 'column', gap: 4 },
+  field: { display: 'flex', flexDirection: 'column', gap: 6 },
   label: { fontSize: 12.5, fontWeight: 600, color: 'var(--text)' },
-  hint: { fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
+  hint: { fontSize: 11, color: 'var(--text-3)' },
   input: {
     padding: '8px 10px',
     border: '1px solid var(--border-strong)',
@@ -291,95 +390,141 @@ const styles: Record<string, React.CSSProperties> = {
     outline: 'none',
   },
 
-  /* DDL pickers — DdlSchemaPanel 과 동일한 헤더 + 배지 + 우측 버튼 패턴 */
-  ddlPairs: { display: 'flex', flexDirection: 'column', gap: 10 },
-  ddlPickerEmpty: {
-    border: '1px solid var(--red)',
-    background: 'var(--red-50)',
-    borderRadius: 4,
-  },
-  ddlPickerSelected: {
-    border: '1px solid var(--green)',
-    background: 'var(--green-50)',
-    borderRadius: 4,
-  },
-  ddlPickerHeader: {
-    padding: '10px 14px 9px',
+  /* 모드 선택 segmented control */
+  segmented: {
     display: 'flex',
-    alignItems: 'center',
-    gap: 10,
-  },
-  ddlPickerTitleRow: { display: 'flex', alignItems: 'center', gap: 8 },
-  ddlPickerTitle: { fontSize: 12, fontWeight: 600, color: 'var(--text)' },
-  ddlPickerBadgeOk: {
-    padding: '1px 6px',
-    fontSize: 10,
-    fontWeight: 600,
-    background: 'var(--green-50)',
-    color: 'var(--green)',
-    border: '1px solid var(--green)',
-    borderRadius: 3,
-  },
-  ddlPickerBadgeWarn: {
-    padding: '1px 6px',
-    fontSize: 10,
-    fontWeight: 600,
-    background: 'var(--red-50)',
-    color: 'var(--red)',
-    border: '1px solid var(--red)',
-    borderRadius: 3,
-  },
-  ddlPickerBody: {
-    padding: '8px 14px',
-    background: 'var(--panel)',
-    display: 'flex',
-    alignItems: 'center',
-    gap: 10,
-  },
-  ddlFileName: {
-    flex: 1,
-    color: 'var(--text)',
-    fontFamily: 'var(--mono)',
-    fontSize: 11.5,
+    gap: 0,
+    border: '1px solid var(--border-strong)',
+    borderRadius: 6,
     overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
+    alignSelf: 'flex-start',
   },
-  ddlFileSize: { fontSize: 10.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
-  ddlRemoveBtn: {
-    width: 22,
-    height: 22,
+  segBtn: {
+    padding: '6px 16px',
+    background: 'var(--panel)',
+    color: 'var(--text-2)',
+    border: 'none',
+    fontSize: 12.5,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  segBtnActive: { background: 'var(--navy)', color: '#fff' },
+
+  /* DDL 한 줄 배치 (AS-IS · TO-BE side by side) */
+  ddlRow: { display: 'flex', gap: 8 },
+
+  /* multiple 모드 행 리스트 */
+  rowList: { display: 'flex', flexDirection: 'column', gap: 8 },
+  projRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '8px 10px',
+    border: '1px solid var(--border)',
+    borderRadius: 6,
+    background: 'var(--panel-2)',
+  },
+  projRowFailed: { borderColor: 'var(--red)', background: 'var(--red-50)' },
+  rowIdx: {
+    fontSize: 11,
+    fontFamily: 'var(--mono)',
+    color: 'var(--text-3)',
+    minWidth: 14,
+    textAlign: 'center',
+  },
+  rowNameInput: { flex: 1, minWidth: 0 },
+  rowRemoveBtn: {
+    width: 24,
+    height: 24,
     background: 'transparent',
     border: 'none',
     color: 'var(--text-3)',
     cursor: 'pointer',
-    fontSize: 16,
+    fontSize: 17,
     lineHeight: 1,
     padding: 0,
+    flexShrink: 0,
   },
-  btnImportNavy: {
+  addRowBtn: {
+    alignSelf: 'flex-start',
+    marginTop: 4,
     padding: '6px 12px',
-    minWidth: 148,
-    background: 'var(--navy)',
-    color: '#fff',
-    border: '1px solid var(--navy)',
+    background: 'var(--panel)',
+    border: '1px dashed var(--border-strong)',
+    color: 'var(--navy)',
     borderRadius: 4,
     fontSize: 12,
     fontWeight: 600,
     cursor: 'pointer',
-    whiteSpace: 'nowrap',
-    textAlign: 'center',
   },
-  btnChangeNavy: {
-    padding: '4px 10px',
+
+  /* 한 줄 DDL picker */
+  compactEmpty: { flex: 1, minWidth: 0, display: 'flex' },
+  compactSel: {
+    flex: 1,
+    minWidth: 0,
+    display: 'flex',
+    alignItems: 'center',
+    border: '1px solid var(--green)',
+    background: 'var(--green-50)',
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  compactImport: {
+    flex: 1,
+    minWidth: 0,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    padding: '7px 10px',
     background: 'var(--panel)',
-    color: 'var(--navy)',
-    border: '1px solid var(--navy)',
-    borderRadius: 3,
+    border: '1px dashed var(--border-strong)',
+    color: 'var(--text-2)',
+    borderRadius: 4,
     fontSize: 11.5,
     fontWeight: 600,
     cursor: 'pointer',
     whiteSpace: 'nowrap',
+  },
+  compactPillBody: {
+    flex: 1,
+    minWidth: 0,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '7px 4px 7px 10px',
+    background: 'transparent',
+    border: 'none',
+    cursor: 'pointer',
+    overflow: 'hidden',
+  },
+  compactTag: {
+    fontSize: 10,
+    fontWeight: 700,
+    color: 'var(--green)',
+    fontFamily: 'var(--mono)',
+    flexShrink: 0,
+  },
+  compactName: {
+    fontSize: 11.5,
+    color: 'var(--text)',
+    fontFamily: 'var(--mono)',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  compactClear: {
+    width: 22,
+    height: 22,
+    flexShrink: 0,
+    background: 'transparent',
+    border: 'none',
+    color: 'var(--text-3)',
+    cursor: 'pointer',
+    fontSize: 15,
+    lineHeight: 1,
+    padding: 0,
   },
 
   errorBox: {
@@ -401,16 +546,6 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 4,
     fontSize: 12.5,
     cursor: 'pointer',
-  },
-  btnGhostSmall: {
-    padding: '4px 10px',
-    background: 'var(--panel)',
-    border: '1px solid var(--border-strong)',
-    color: 'var(--text-2)',
-    borderRadius: 3,
-    fontSize: 11.5,
-    cursor: 'pointer',
-    whiteSpace: 'nowrap',
   },
   btnPrimary: {
     padding: '7px 14px',
