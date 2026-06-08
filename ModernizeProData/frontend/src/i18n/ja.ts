@@ -990,6 +990,10 @@ export const ja: Record<TranslationKey, string> = {
   'createProject.submitMulti':     '{n}件のプロジェクトを作成',
   'createProject.error.bulkPartial': '{n}件のプロジェクト作成に失敗しました。強調表示された行を確認してください。',
   'createProject.error.empty':     'プロジェクト名を1つ以上入力してください。',
+  'createProject.autoFromFolder':  'AS-IS フォルダ/ファイルから自動作成',
+  'createProject.sharedTobe':      '全プロジェクトに同じ TO-BE を使用',
+  'createProject.sharedTobeRow':   '共有',
+  'createProject.error.noDdlInFolder': '選択内に .sql/.ddl/.txt ファイルがありません。',
   'createSite.error.duplicate':    '同じ名前のサイトが既に存在します。',
   'createSite.error.generic':      'サイトの作成に失敗しました。',
 

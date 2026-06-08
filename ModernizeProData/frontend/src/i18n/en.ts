@@ -984,6 +984,10 @@ export const en: Record<TranslationKey, string> = {
   'createProject.submitMulti':     'Create {n} projects',
   'createProject.error.bulkPartial': '{n} project(s) failed to create. Check the highlighted rows.',
   'createProject.error.empty':     'Enter at least one project name.',
+  'createProject.autoFromFolder':  'Auto-create from AS-IS folder/files',
+  'createProject.sharedTobe':      'Use one TO-BE for all projects',
+  'createProject.sharedTobeRow':   'shared',
+  'createProject.error.noDdlInFolder': 'No .sql/.ddl/.txt files found in the selection.',
   'createSite.error.duplicate':    'A site with the same name already exists.',
   'createSite.error.generic':      'Failed to create the site.',
 

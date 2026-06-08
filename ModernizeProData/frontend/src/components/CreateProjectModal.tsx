@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal } from './Modal';
+import { Checkbox } from './Checkbox';
 import { useWorkspaceStore } from '../store/workspace';
 import { useAuthStore } from '../store/auth';
 import { asisDdlApi } from '../api/asisDdl';
@@ -42,6 +43,12 @@ export function CreateProjectModal({ open, onClose }: Props) {
   const [rows, setRows] = useState<ProjectRow[]>(() => [newRow()]);
   // 생성 실패한 행 id — 강조 표시용.
   const [failedRowIds, setFailedRowIds] = useState<Set<number>>(() => new Set());
+  // (B) 전 행 공유 TO-BE — 6개가 같은 TO-BE 스키마면 한 번만 고르게.
+  const [applySharedTobe, setApplySharedTobe] = useState(false);
+  const [sharedTobe, setSharedTobe] = useState<File | null>(null);
+  // AS-IS 폴더/다중파일 자동 생성용 hidden input. webkitdirectory 지원(Chromium)→폴더,
+  // 미지원→multiple 파일 선택으로 자동 폴백.
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
 
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -54,8 +61,38 @@ export function CreateProjectModal({ open, onClose }: Props) {
     rowSeq.current = 0;
     setRows([newRow()]);
     setFailedRowIds(new Set());
+    setApplySharedTobe(false);
+    setSharedTobe(null);
     setError(null);
     setSubmitting(false);
+  };
+
+  /** 파일명에서 DDL 확장자 제거 → 프로젝트 이름 후보. */
+  const stripDdlExt = (fileName: string) => fileName.replace(/\.(sql|ddl|txt)$/i, '');
+
+  /**
+   * AS-IS 폴더(webkitdirectory) 또는 다중파일 선택 → 파일마다 행 자동 생성.
+   * 이름 = 파일명(확장자 뗌), AS-IS = 그 파일. TO-BE 는 사용자가 채움(또는 공유 TO-BE).
+   * 폴더가 하위 디렉터리까지 재귀로 주므로 확장자로 필터.
+   */
+  const handleFolderPick = (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    const exts = ['.sql', '.ddl', '.txt'];
+    const picked = Array.from(fileList)
+      .filter((f) => exts.some((e) => f.name.toLowerCase().endsWith(e)));
+    if (picked.length === 0) {
+      setError(t('createProject.error.noDdlInFolder'));
+      return;
+    }
+    const newRows: ProjectRow[] = picked.map((f) => ({
+      id: ++rowSeq.current, name: stripDdlExt(f.name), asis: f, tobe: null,
+    }));
+    // 기존에 의미있는 행(이름/파일 입력됨)은 보존, 빈 기본 행만 대체.
+    setRows((cur) => {
+      const meaningful = cur.filter((r) => r.name.trim() || r.asis || r.tobe);
+      return [...meaningful, ...newRows];
+    });
+    setError(null);
   };
 
   // 모달을 열 때마다 폼을 초기화한다 (닫았다 다시 열어도 이전 입력값이 남지 않게).
@@ -140,7 +177,8 @@ export function CreateProjectModal({ open, onClose }: Props) {
     const failed = new Set<number>();
     for (const r of namedRows) {
       try {
-        await createOne(r.name.trim(), r.asis, r.tobe);
+        const tobe = (applySharedTobe && sharedTobe) ? sharedTobe : r.tobe;
+        await createOne(r.name.trim(), r.asis, tobe);
       } catch (err) {
         console.error('[createProject] bulk row failed', r.name, err);
         failed.add(r.id);
@@ -230,6 +268,52 @@ export function CreateProjectModal({ open, onClose }: Props) {
         ) : (
           <div style={styles.field}>
             <div style={styles.hint}>{t('createProject.multiHint')}</div>
+
+            {/* AS-IS 폴더/다중파일 자동 생성 + 공유 TO-BE 토글 */}
+            <div style={styles.multiTools}>
+              <input
+                ref={(el) => {
+                  folderInputRef.current = el;
+                  // webkitdirectory 지원 엔진(Chromium)→폴더 선택, 미지원→multiple 파일 선택 폴백.
+                  if (el) { el.setAttribute('webkitdirectory', ''); el.setAttribute('directory', ''); }
+                }}
+                type="file"
+                multiple
+                accept=".sql,.ddl,.txt"
+                style={{ display: 'none' }}
+                onChange={(e) => { handleFolderPick(e.target.files); if (e.target) e.target.value = ''; }}
+              />
+              <button
+                type="button"
+                onClick={() => folderInputRef.current?.click()}
+                style={styles.autoBtn}
+                disabled={submitting}
+              >
+                <i className="fa-solid fa-folder-open" style={{ fontSize: 11 }} />
+                <span>{t('createProject.autoFromFolder')}</span>
+              </button>
+
+              <label style={styles.sharedToggle}>
+                <Checkbox
+                  checked={applySharedTobe}
+                  onChange={() => setApplySharedTobe((v) => !v)}
+                  disabled={submitting}
+                  ariaLabel={t('createProject.sharedTobe')}
+                />
+                <span>{t('createProject.sharedTobe')}</span>
+              </label>
+              {applySharedTobe && (
+                <div style={styles.sharedTobePicker}>
+                  <CompactDdlPicker
+                    labelText={t('createProject.ddl.tobeLabel')}
+                    file={sharedTobe}
+                    onPick={setSharedTobe}
+                    disabled={submitting}
+                  />
+                </div>
+              )}
+            </div>
+
             <div style={styles.rowList}>
               {rows.map((r, idx) => (
                 <div
@@ -254,12 +338,18 @@ export function CreateProjectModal({ open, onClose }: Props) {
                     onPick={(f) => updateRow(r.id, { asis: f })}
                     disabled={submitting}
                   />
-                  <CompactDdlPicker
-                    labelText={t('createProject.ddl.tobeLabel')}
-                    file={r.tobe}
-                    onPick={(f) => updateRow(r.id, { tobe: f })}
-                    disabled={submitting}
-                  />
+                  {applySharedTobe ? (
+                    <span style={styles.sharedTobeRowTag}>
+                      {t('createProject.ddl.tobeLabel')} · {t('createProject.sharedTobeRow')}
+                    </span>
+                  ) : (
+                    <CompactDdlPicker
+                      labelText={t('createProject.ddl.tobeLabel')}
+                      file={r.tobe}
+                      onPick={(f) => updateRow(r.id, { tobe: f })}
+                      disabled={submitting}
+                    />
+                  )}
                   <button
                     type="button"
                     onClick={() => removeRow(r.id)}
@@ -412,6 +502,53 @@ const styles: Record<string, React.CSSProperties> = {
 
   /* DDL 한 줄 배치 (AS-IS · TO-BE side by side) */
   ddlRow: { display: 'flex', gap: 8 },
+
+  /* multiple 모드 도구줄 (폴더 자동 + 공유 TO-BE) */
+  multiTools: {
+    display: 'flex',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 12,
+    padding: '8px 0 2px',
+  },
+  autoBtn: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '6px 12px',
+    background: 'var(--panel)',
+    border: '1px solid var(--navy)',
+    color: 'var(--navy)',
+    borderRadius: 4,
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  },
+  sharedToggle: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    fontSize: 12,
+    color: 'var(--text)',
+    cursor: 'pointer',
+  },
+  sharedTobePicker: { display: 'flex', minWidth: 220, flex: 1 },
+  sharedTobeRowTag: {
+    flex: 1,
+    minWidth: 0,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '7px 10px',
+    fontSize: 11,
+    fontFamily: 'var(--mono)',
+    color: 'var(--text-3)',
+    background: 'var(--panel-2)',
+    border: '1px dashed var(--border-strong)',
+    borderRadius: 4,
+    whiteSpace: 'nowrap',
+  },
 
   /* multiple 모드 행 리스트 */
   rowList: { display: 'flex', flexDirection: 'column', gap: 8 },

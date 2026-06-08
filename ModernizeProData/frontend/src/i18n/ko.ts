@@ -988,6 +988,10 @@ export const ko = {
   'createProject.submitMulti':     '프로젝트 {n}개 생성',
   'createProject.error.bulkPartial': '{n}개 프로젝트 생성에 실패했습니다. 강조된 행을 확인하세요.',
   'createProject.error.empty':     '프로젝트 이름을 하나 이상 입력하세요.',
+  'createProject.autoFromFolder':  'AS-IS 폴더/파일에서 자동 생성',
+  'createProject.sharedTobe':      '모든 프로젝트에 같은 TO-BE 사용',
+  'createProject.sharedTobeRow':   '공유',
+  'createProject.error.noDdlInFolder': '선택한 항목에 .sql/.ddl/.txt 파일이 없습니다.',
   'createSite.error.duplicate':    '같은 이름의 사이트가 이미 존재합니다.',
   'createSite.error.generic':      '사이트 생성에 실패했습니다.',
 
