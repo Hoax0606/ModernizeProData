@@ -3,6 +3,12 @@ package com.ksinfo.modernize_pro_data.coordinator.worker.stages;
 import com.ksinfo.modernize_pro_data.common.duckdb.DuckDbService;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlColumn;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlColumnRepository;
+import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlConstraint;
+import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlConstraintColumn;
+import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlConstraintColumnRepository;
+import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlConstraintRepository;
+import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlForeignKey;
+import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlForeignKeyRepository;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTable;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository;
 import com.ksinfo.modernize_pro_data.coordinator.load.PgCopyManager;
@@ -74,6 +80,9 @@ public class LoadStage implements StageRunner {
     private final StageTableResultRepository stageTableResultRepo;
     private final DdlTableRepository ddlTableRepo;
     private final DdlColumnRepository ddlColumnRepo;
+    private final DdlConstraintRepository ddlConstraintRepo;
+    private final DdlConstraintColumnRepository ddlConstraintColumnRepo;
+    private final DdlForeignKeyRepository ddlForeignKeyRepo;
     private final DuckDbService duckDbService;
     private final PgCopyManager pgCopyManager;
     private final QuarantineService quarantineService;
@@ -107,11 +116,17 @@ public class LoadStage implements StageRunner {
         // PoC1 부트스트랩 — TO-BE DDL 의 컬럼 메타 미리 적재. ensurePgTable 가 사용.
         // (별도 migration tooling 도입 전까지 LoadStage 가 schema/table 도 자동 생성.)
         String projectId = ctx.getProject().getId();
+        List<DdlTable> tobeTables = ddlTableRepo.findByProjectIdAndSideOrderByOrdinalAsc(projectId, "tobe");
         Map<String, List<DdlColumn>> columnsByTable = new HashMap<>();
-        for (DdlTable t : ddlTableRepo.findByProjectIdAndSideOrderByOrdinalAsc(projectId, "tobe")) {
+        for (DdlTable t : tobeTables) {
             columnsByTable.put(t.getPhysicalName(),
                     ddlColumnRepo.findByTableIdOrderByOrdinalAsc(t.getId()));
         }
+        // UK / FK / CHECK 메타 사전 로딩 (적재 후 부착에 사용)
+        Map<String, List<UniqueConstraintMeta>> uniqueByTable = new HashMap<>();
+        Map<String, List<ForeignKeyMeta>> fksByTable = new HashMap<>();
+        Map<String, List<CheckConstraintMeta>> checksByTable = new HashMap<>();
+        loadConstraintMetas(tobeTables, uniqueByTable, fksByTable, checksByTable);
 
         Path tempDir = ctx.getOutputDir().resolve("temp");
         try {
@@ -135,7 +150,7 @@ public class LoadStage implements StageRunner {
                     log.warn("Load cancelled — skipping remaining tables runId={}", runId);
                     break;
                 }
-                if (loadBinding(ctx, stage, b, dbConfig, tempDir, columnsByTable)) success.incrementAndGet();
+                if (loadBinding(ctx, stage, b, dbConfig, tempDir, columnsByTable, uniqueByTable, fksByTable, checksByTable)) success.incrementAndGet();
                 else failed.incrementAndGet();
                 stage.setTablesSuccess(success.get());
                 stage.setTablesFailed(failed.get());
@@ -153,7 +168,7 @@ public class LoadStage implements StageRunner {
                     futures.add(pool.submit(() -> {
                         // 병렬 task 도 시작 시 cancel 확인 — 이미 취소면 적재 skip.
                         if (runControlRegistry.isCancelled(runId)) { failed.incrementAndGet(); return; }
-                        if (loadBinding(ctx, stage, b, dbConfig, tempDir, columnsByTable)) success.incrementAndGet();
+                        if (loadBinding(ctx, stage, b, dbConfig, tempDir, columnsByTable, uniqueByTable, fksByTable, checksByTable)) success.incrementAndGet();
                         else failed.incrementAndGet();
                         // stage entity save 경합 회피용 동기화 — Load 끝 broadcast.
                         synchronized (stage) {
@@ -208,7 +223,10 @@ public class LoadStage implements StageRunner {
      */
     private boolean loadBinding(StageContext ctx, StageInstance stage, MappingTableBinding binding,
                                 Map<String, Object> dbConfig, Path tempDir,
-                                Map<String, List<DdlColumn>> columnsByTable) {
+                                Map<String, List<DdlColumn>> columnsByTable,
+                                Map<String, List<UniqueConstraintMeta>> uniqueByTable,
+                                Map<String, List<ForeignKeyMeta>> fksByTable,
+                                Map<String, List<CheckConstraintMeta>> checksByTable) {
         String schema = ctx.getDuckdbSchema();
         OffsetDateTime tableStart = OffsetDateTime.now();
         String tobeSchema = binding.getTobeSchema() == null ? "" : binding.getTobeSchema();
@@ -280,10 +298,12 @@ public class LoadStage implements StageRunner {
                 } finally {
                     if (fkDisabled) pgCopyManager.restoreConstraints(conn);
                 }
-                /* 적재 후 PK 인덱스 자동 생성 — Verify 의 ORDER BY PK 가 seq scan 가는 비용
-                   회피. IF NOT EXISTS 로 재실행 멱등. CONCURRENTLY 는 트랜잭션 안에서 못 쓰니
-                   AutoCommit 켠 상태에서만 시도. 실패해도 적재 자체는 성공 — log 만 남김. */
-                ensurePkIndex(ctx, conn, tobeSchema, tobeTable, columnsByTable);
+                /* 적재 후 UK / FK 부착. PG 의 PRIMARY KEY 제약은 createTableIfNotExists 단계에서
+                   이미 inline 으로 들어가 있고 PG 가 자동으로 <table>_pkey unique index 를 만든다 —
+                   별도 PK 인덱스는 redundant 라 만들지 않는다. */
+                ensureUniqueConstraints(ctx, conn, tobeSchema, tobeTable, uniqueByTable);
+                ensureForeignKeys(ctx, conn, tobeSchema, tobeTable, fksByTable);
+                ensureCheckConstraints(ctx, conn, tobeSchema, tobeTable, checksByTable);
             }
 
             result.setStatus(StageTableStatus.success);
@@ -364,56 +384,199 @@ public class LoadStage implements StageRunner {
     }
 
     /**
-     * 적재 후 PK 인덱스 자동 생성. Verify 의 PK ORDER BY 가 인덱스 scan 사용하게.
-     *
-     * <ul>
-     *   <li>PK 컬럼 = DdlColumn.pkOrder ASC. PK 가 없으면 skip.</li>
-     *   <li>{@code CREATE INDEX CONCURRENTLY IF NOT EXISTS} — 대용량 테이블의 잠금 회피 +
-     *       재실행 멱등. CONCURRENTLY 는 transaction 안에서 못 쓰므로 autoCommit 켠다.</li>
-     *   <li>인덱스 이름 = {@code idx_pk_<schema>_<table>} (충돌 회피).</li>
-     *   <li>실패는 적재 자체엔 영향 없음 — log 만 남기고 계속.</li>
-     * </ul>
+     * 적재 후 UK 부착. {@code ALTER TABLE ... ADD CONSTRAINT name UNIQUE (...)}.
+     * 이미 존재 시 PG 에러 → catch 후 log 만 (멱등). 실패는 적재 자체엔 영향 없음.
      */
-    private void ensurePkIndex(StageContext ctx, Connection conn, String tobeSchema, String tobeTable,
-                               Map<String, List<DdlColumn>> columnsByTable) {
-        List<DdlColumn> cols = columnsByTable.get(tobeTable);
-        if (cols == null || cols.isEmpty()) return;
-        List<String> pkCols = cols.stream()
-                .filter(c -> c.getPkOrder() != null)
-                .sorted(java.util.Comparator.comparing(DdlColumn::getPkOrder))
-                .map(DdlColumn::getPhysicalName)
-                .toList();
-        if (pkCols.isEmpty()) return;
-
-        String fqTobe = pgTableName(tobeSchema, tobeTable);
-        String idxName = "idx_pk_"
-                + ((tobeSchema == null || tobeSchema.isBlank()) ? "" : tobeSchema.toLowerCase() + "_")
-                + tobeTable.toLowerCase();
-        String quotedCols = pkCols.stream()
-                .map(c -> "\"" + c.replace("\"", "\"\"") + "\"")
-                .collect(Collectors.joining(", "));
-        String sql = "CREATE INDEX CONCURRENTLY IF NOT EXISTS \""
-                + idxName.replace("\"", "\"\"") + "\" ON " + fqTobe + " (" + quotedCols + ")";
+    void ensureUniqueConstraints(StageContext ctx, Connection conn, String tobeSchema, String tobeTable,
+                                 Map<String, List<UniqueConstraintMeta>> uniqueByTable) {
+        List<UniqueConstraintMeta> uks = uniqueByTable.getOrDefault(tobeTable, List.of());
+        if (uks.isEmpty()) return;
 
         boolean prevAutoCommit;
-        try {
-            prevAutoCommit = conn.getAutoCommit();
-        } catch (Exception e) {
-            log.warn("ensurePkIndex: getAutoCommit failed for {}: {}", tobeTable, e.getMessage());
+        try { prevAutoCommit = conn.getAutoCommit(); }
+        catch (Exception e) {
+            log.warn("ensureUniqueConstraints getAutoCommit failed for {}: {}", tobeTable, e.getMessage());
             return;
         }
         try {
             if (!prevAutoCommit) conn.setAutoCommit(true);
-            try (Statement st = conn.createStatement()) {
-                st.execute(sql);
+            for (UniqueConstraintMeta uk : uks) {
+                String sql = PgDdlGenerator.addUniqueConstraintSql(tobeSchema, tobeTable, uk.name(), uk.columns());
+                try (Statement st = conn.createStatement()) {
+                    st.execute(sql);
+                    ingest(ctx, "Ensured UK " + uk.name() + " on " + tobeTable
+                            + " (" + String.join(",", uk.columns()) + ")", true);
+                } catch (Exception e) {
+                    log.warn("ensureUniqueConstraints skip {} ({}): {}", tobeTable, uk.name(), e.getMessage());
+                }
             }
-            ingest(ctx, "Ensured PK index " + idxName + " on " + tobeTable + " (" + String.join(",", pkCols) + ")", true);
         } catch (Exception e) {
-            log.warn("ensurePkIndex skip {} ({}): {}", tobeTable, idxName, e.getMessage());
+            log.warn("ensureUniqueConstraints failed for {}: {}", tobeTable, e.getMessage());
         } finally {
             try { conn.setAutoCommit(prevAutoCommit); } catch (Exception ignored) {}
         }
     }
+
+    /**
+     * 적재 후 FK 부착 — NOT VALID 로 추가 후 VALIDATE 분리. 락 최소화.
+     * 같은 binding 안의 자식 테이블이 먼저 적재되고 부모는 아직일 수 있어 부모 row 부재 시 VALIDATE 실패 가능 —
+     * 그 경우 log 만 남기고 적재 자체는 성공. 운영팀이 사후 VALIDATE 재시도.
+     */
+    void ensureForeignKeys(StageContext ctx, Connection conn, String tobeSchema, String tobeTable,
+                           Map<String, List<ForeignKeyMeta>> fksByTable) {
+        List<ForeignKeyMeta> fks = fksByTable.getOrDefault(tobeTable, List.of());
+        if (fks.isEmpty()) return;
+
+        boolean prevAutoCommit;
+        try { prevAutoCommit = conn.getAutoCommit(); }
+        catch (Exception e) {
+            log.warn("ensureForeignKeys getAutoCommit failed for {}: {}", tobeTable, e.getMessage());
+            return;
+        }
+        try {
+            if (!prevAutoCommit) conn.setAutoCommit(true);
+            for (ForeignKeyMeta fk : fks) {
+                String addSql = PgDdlGenerator.addForeignKeyNotValidSql(
+                        tobeSchema, tobeTable, fk.name(), fk.columns(),
+                        fk.refSchema(), fk.refTable(), fk.refColumns(),
+                        fk.onDelete(), fk.onUpdate(), fk.deferrableInfo());
+                String validateSql = PgDdlGenerator.validateForeignKeySql(tobeSchema, tobeTable, fk.name());
+                try (Statement st = conn.createStatement()) {
+                    st.execute(addSql);
+                } catch (Exception e) {
+                    log.warn("ensureForeignKeys ADD skip {} ({}): {}", tobeTable, fk.name(), e.getMessage());
+                    continue;
+                }
+                try (Statement st = conn.createStatement()) {
+                    st.execute(validateSql);
+                    ingest(ctx, "Ensured FK " + fk.name() + " on " + tobeTable
+                            + " (" + String.join(",", fk.columns()) + " -> " + fk.refTable() + ")", true);
+                } catch (Exception e) {
+                    log.warn("ensureForeignKeys VALIDATE skip {} ({}) — added NOT VALID, validate failed: {}",
+                            tobeTable, fk.name(), e.getMessage());
+                    ingest(ctx, "FK " + fk.name() + " added NOT VALID on " + tobeTable
+                            + " (VALIDATE deferred to operator)", true);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("ensureForeignKeys failed for {}: {}", tobeTable, e.getMessage());
+        } finally {
+            try { conn.setAutoCommit(prevAutoCommit); } catch (Exception ignored) {}
+        }
+    }
+
+    /** ddl_constraints / ddl_constraint_columns / ddl_foreign_keys 를 묶어서 한 번에 사전 로딩. */
+    private void loadConstraintMetas(List<DdlTable> tobeTables,
+                                     Map<String, List<UniqueConstraintMeta>> uniqueByTable,
+                                     Map<String, List<ForeignKeyMeta>> fksByTable,
+                                     Map<String, List<CheckConstraintMeta>> checksByTable) {
+        if (tobeTables.isEmpty()) return;
+        List<String> tobeTableIds = tobeTables.stream().map(DdlTable::getId).toList();
+        Map<String, String> tableNameById = new HashMap<>();
+        for (DdlTable t : tobeTables) tableNameById.put(t.getId(), t.getPhysicalName());
+
+        List<DdlConstraint> allUks = ddlConstraintRepo.findByTableIdInAndType(tobeTableIds, DdlConstraint.TYPE_UK);
+        List<DdlConstraint> allFks = ddlConstraintRepo.findByTableIdInAndType(tobeTableIds, DdlConstraint.TYPE_FK);
+        List<DdlConstraint> allChecks = ddlConstraintRepo.findByTableIdInAndType(tobeTableIds, DdlConstraint.TYPE_CHECK);
+
+        List<String> ukIds = allUks.stream().map(DdlConstraint::getId).toList();
+        List<String> fkIds = allFks.stream().map(DdlConstraint::getId).toList();
+
+        Map<String, List<DdlConstraintColumn>> ukColsByCid = ukIds.isEmpty() ? Map.of()
+                : ddlConstraintColumnRepo.findByConstraintIdInOrderByOrdinalAsc(ukIds).stream()
+                        .collect(Collectors.groupingBy(DdlConstraintColumn::getConstraintId));
+        Map<String, List<DdlConstraintColumn>> fkColsByCid = fkIds.isEmpty() ? Map.of()
+                : ddlConstraintColumnRepo.findByConstraintIdInOrderByOrdinalAsc(fkIds).stream()
+                        .collect(Collectors.groupingBy(DdlConstraintColumn::getConstraintId));
+        Map<String, DdlForeignKey> fkRefByCid = fkIds.isEmpty() ? Map.of()
+                : ddlForeignKeyRepo.findByConstraintIdIn(fkIds).stream()
+                        .collect(Collectors.toMap(DdlForeignKey::getConstraintId, f -> f));
+
+        for (DdlConstraint uk : allUks) {
+            String tname = tableNameById.get(uk.getTableId());
+            if (tname == null) continue;
+            List<DdlConstraintColumn> cols = ukColsByCid.getOrDefault(uk.getId(), List.of());
+            UniqueConstraintMeta meta = new UniqueConstraintMeta(uk.getName(),
+                    cols.stream().map(DdlConstraintColumn::getColumnName).toList());
+            uniqueByTable.computeIfAbsent(tname, k -> new ArrayList<>()).add(meta);
+        }
+
+        for (DdlConstraint fkc : allFks) {
+            String tname = tableNameById.get(fkc.getTableId());
+            if (tname == null) continue;
+            DdlForeignKey fk = fkRefByCid.get(fkc.getId());
+            if (fk == null) continue;
+            List<DdlConstraintColumn> cols = fkColsByCid.getOrDefault(fkc.getId(), List.of());
+            ForeignKeyMeta meta = new ForeignKeyMeta(
+                    fkc.getName(),
+                    cols.stream().map(DdlConstraintColumn::getColumnName).toList(),
+                    fk.getRefSchemaName(), fk.getRefTableName(),
+                    cols.stream().map(DdlConstraintColumn::getRefColumnName).toList(),
+                    fk.getOnDelete(), fk.getOnUpdate(), fk.getDeferrableInfo());
+            fksByTable.computeIfAbsent(tname, k -> new ArrayList<>()).add(meta);
+        }
+
+        for (DdlConstraint ck : allChecks) {
+            String tname = tableNameById.get(ck.getTableId());
+            if (tname == null) continue;
+            String expr = ck.getCheckExpression();
+            if (expr == null || expr.isBlank()) continue;
+            checksByTable.computeIfAbsent(tname, k -> new ArrayList<>())
+                    .add(new CheckConstraintMeta(ck.getName(), expr));
+        }
+    }
+
+    /**
+     * 적재 후 CHECK 부착 — TO-BE DDL 에 정의된 CHECK 만 (AS-IS Oracle 표현식은 자동 변환 위험으로 부착 X).
+     * NOT VALID + VALIDATE 2단계 — 기존 데이터 위반 시 NOT VALID 상태로 남기고 운영팀 사후 정제.
+     */
+    void ensureCheckConstraints(StageContext ctx, Connection conn, String tobeSchema, String tobeTable,
+                                Map<String, List<CheckConstraintMeta>> checksByTable) {
+        List<CheckConstraintMeta> checks = checksByTable.getOrDefault(tobeTable, List.of());
+        if (checks.isEmpty()) return;
+
+        boolean prevAutoCommit;
+        try { prevAutoCommit = conn.getAutoCommit(); }
+        catch (Exception e) {
+            log.warn("ensureCheckConstraints getAutoCommit failed for {}: {}", tobeTable, e.getMessage());
+            return;
+        }
+        try {
+            if (!prevAutoCommit) conn.setAutoCommit(true);
+            for (CheckConstraintMeta ck : checks) {
+                String addSql = PgDdlGenerator.addCheckConstraintNotValidSql(
+                        tobeSchema, tobeTable, ck.name(), ck.checkExpression());
+                String validateSql = PgDdlGenerator.validateCheckConstraintSql(tobeSchema, tobeTable, ck.name());
+                try (Statement st = conn.createStatement()) {
+                    st.execute(addSql);
+                } catch (Exception e) {
+                    log.warn("ensureCheckConstraints ADD skip {} ({}): {}", tobeTable, ck.name(), e.getMessage());
+                    continue;
+                }
+                try (Statement st = conn.createStatement()) {
+                    st.execute(validateSql);
+                    ingest(ctx, "Ensured CHECK " + ck.name() + " on " + tobeTable, true);
+                } catch (Exception e) {
+                    log.warn("ensureCheckConstraints VALIDATE skip {} ({}) — added NOT VALID, validate failed: {}",
+                            tobeTable, ck.name(), e.getMessage());
+                    ingest(ctx, "CHECK " + ck.name() + " added NOT VALID on " + tobeTable
+                            + " (VALIDATE deferred to operator)", true);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("ensureCheckConstraints failed for {}: {}", tobeTable, e.getMessage());
+        } finally {
+            try { conn.setAutoCommit(prevAutoCommit); } catch (Exception ignored) {}
+        }
+    }
+
+    record UniqueConstraintMeta(String name, List<String> columns) {}
+
+    record ForeignKeyMeta(String name, List<String> columns,
+                          String refSchema, String refTable, List<String> refColumns,
+                          String onDelete, String onUpdate, String deferrableInfo) {}
+
+    record CheckConstraintMeta(String name, String checkExpression) {}
 
     /** PostgreSQL 의 qualified table 명. schema 가 비면 unquoted (default search_path). */
     /**
