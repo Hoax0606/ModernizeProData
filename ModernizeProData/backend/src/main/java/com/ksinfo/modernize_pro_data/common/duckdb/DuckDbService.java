@@ -303,15 +303,20 @@ public class DuckDbService {
      * pending query result" 가 난다 (2026-06-04 — 다중 사용자 Report 동시 실행에서 발생).
      * duplicate() + UDF 등록으로 요청마다 독립 세션을 쓴다. caller 가 close() 책임.
      */
-    public synchronized Connection requestConnection() throws SQLException {
-        Connection dup = ((org.duckdb.DuckDBConnection) getConnection()).duplicate();
+    public Connection requestConnection() throws SQLException {
+        // Report/Trial/preview 는 read_csv(AS-IS 파일) 직접이라 공유 db 데이터가 필요 없다.
+        // base.duplicate() 는 같은 인스턴스를 공유해 동시 요청 시 pending result 가 무효화된다
+        // → 독립 in-memory 인스턴스로 완전 격리 (file-mode 다중 프로젝트 동시 Report 충돌 해소).
+        Connection c = DriverManager.getConnection("jdbc:duckdb:");
         try {
-            UdfRegistry.registerAll(dup);
+            UdfRegistry.registerAll(c);
+            loadEncodingsExtension(c);
+            loadIcuExtension(c);
         } catch (Exception e) {
-            // UDF 등록 실패 시에도 connection 자체는 사용 가능 — UDF 없는 쿼리는 정상.
-            log.warn("DuckDB UDF 등록 실패 (request connection): {}", e.getMessage());
+            // 확장/UDF 등록 실패해도 connection 자체는 사용 가능.
+            log.warn("DuckDB 확장/UDF 등록 실패 (request connection): {}", e.getMessage());
         }
-        return dup;
+        return c;
     }
 
     /**
