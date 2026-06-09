@@ -26,7 +26,7 @@
 - i18n: 자체 구현 (`src/i18n/{ko,ja,en}.ts` + `useT` 훅)
 
 ### 운영 형태
-- **Coordinator (본사)** ↔ **Worker (현장)** 분리. Worker 는 Coordinator 의 REST + WebSocket 으로만 통신. 메타 DB 직접 접속 금지. 등록은 URL + 토큰으로.
+- **Coordinator** ↔ **Worker** 분리 (둘 다 현장 사이트에 설치 — 작은 사이트는 한 PC, 큰 사이트는 같은 LAN 의 별도 PC). Worker 는 Coordinator 의 REST + WebSocket 으로만 통신. 메타 DB 직접 접속 금지. 등록은 URL + 토큰으로.
 - 인스톨러: PG 18 동봉, 기존 PG 가 있으면 그것을 사용하거나 별도 설치 선택.
 
 ## 디렉터리 맵
@@ -138,8 +138,8 @@ cd ModernizeProData/frontend; npx tsc --noEmit
 
 | 용어 | 의미 |
 |---|---|
-| Coordinator | 본사 관리 노드. 메타 DB 소유. 모든 권한 행사 지점. |
-| Worker | 현장 격리망에 설치되는 실행 노드. REST/WS 로만 통신. |
+| Coordinator | 현장 사이트의 관리 노드. 메타 DB 소유. 모든 권한 행사 지점. (본사 = 개발팀 위치 — 소스 수정·빌드·릴리스 전용, 운영 참여 X) |
+| Worker | 현장 사이트의 실행 노드. Coordinator 와 같은 PC 또는 같은 LAN 의 별도 PC. REST/WS 로만 통신. |
 | Site | 한 고객사의 한 운영 환경 단위. AS-IS / TO-BE / 환경 라벨(dev/test/stg/prod) 보유. |
 | Project | Site 안의 이행 단위. 하나의 AS-IS → TO-BE 매핑 작업. |
 | Phase | Project 의 진행 단계 (위 9단계). |
