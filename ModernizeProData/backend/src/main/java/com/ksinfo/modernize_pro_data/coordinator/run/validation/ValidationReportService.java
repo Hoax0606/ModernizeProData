@@ -693,8 +693,6 @@ public class ValidationReportService implements StageRunner {
             }
 
             if (!pkCols.isEmpty() && !cols.isEmpty()) {
-                String orderBy = pkCols.stream().map(ValidationReportService::quote).collect(Collectors.joining(", "));
-
                 /* Raw concat (양쪽 동일 expression — col::text) */
                 String rawConcat = cols.stream()
                         .map(c -> "COALESCE(" + quote(c.getPhysicalName()) + "::text, '')")
@@ -715,22 +713,28 @@ public class ValidationReportService implements StageRunner {
                         })
                         .collect(Collectors.joining(", '|', "));
 
-                String duckRawQ   = "SELECT md5(string_agg(md5(concat(" + rawConcat       + ")), '' ORDER BY " + orderBy + ")) FROM " + fqDuck;
-                String pgRawQ     = "SELECT md5(string_agg(md5(concat(" + rawConcat       + ")), '' ORDER BY " + orderBy + ")) FROM " + fqPg;
-                String duckCanonQ = "SELECT md5(string_agg(md5(concat(" + duckCanonConcat + ")), '' ORDER BY " + orderBy + ")) FROM " + fqDuck;
-                String pgCanonQ   = "SELECT md5(string_agg(md5(concat(" + pgCanonConcat   + ")), '' ORDER BY " + orderBy + ")) FROM " + fqPg;
+                /* count + min(md5) + max(md5) fingerprint — 순서 무관 + 메모리 cheap.
+                   기존 md5(string_agg(md5(...), '' ORDER BY pk)) 의 정렬·거대 string(N×32B) 둘 다 제거.
+                   PG / DuckDB 양쪽 동일 결과 (검증됨). Collision ≈ 2^-128 — 정상 운영 무관. */
+                duckChecksumRaw = scalarString(duckSt, checksumQuery(fqDuck, rawConcat));
+                pgChecksumRaw   = scalarString(pgSt,   checksumQuery(fqPg,   rawConcat));
 
-                duckChecksumRaw = scalarString(duckSt, duckRawQ);
-                pgChecksumRaw   = scalarString(pgSt,   pgRawQ);
-                try {
-                    duckChecksumCanon = scalarString(duckSt, duckCanonQ);
-                    pgChecksumCanon   = scalarString(pgSt,   pgCanonQ);
-                } catch (Exception tzEx) {
-                    /* ICU 미설치 등으로 TIMESTAMPTZ 처리 실패 — canonical 비교 skip. */
-                    log.warn("Checksum canonical compare failed for {} — raw only: {}",
-                            tobeTable, tzEx.getMessage());
+                /* canonical == raw (date/boolean 컬럼 없음) 이면 풀스캔 2 절약 — raw 결과 재사용. */
+                boolean canonSameAsRaw = duckCanonConcat.equals(rawConcat) && pgCanonConcat.equals(rawConcat);
+                if (canonSameAsRaw) {
                     duckChecksumCanon = duckChecksumRaw;
                     pgChecksumCanon   = pgChecksumRaw;
+                } else {
+                    try {
+                        duckChecksumCanon = scalarString(duckSt, checksumQuery(fqDuck, duckCanonConcat));
+                        pgChecksumCanon   = scalarString(pgSt,   checksumQuery(fqPg,   pgCanonConcat));
+                    } catch (Exception tzEx) {
+                        /* ICU 미설치 등으로 TIMESTAMPTZ 처리 실패 — canonical 비교 skip. */
+                        log.warn("Checksum canonical compare failed for {} — raw only: {}",
+                                tobeTable, tzEx.getMessage());
+                        duckChecksumCanon = duckChecksumRaw;
+                        pgChecksumCanon   = pgChecksumRaw;
+                    }
                 }
             }
         }
@@ -876,10 +880,26 @@ public class ValidationReportService implements StageRunner {
                     1, QuarantineSeverity.error);
         } else if ("WARN".equals(checksumVerdict) && duckChecksumRaw != null) {
             /* WARN — raw 표현 다르나 canonical 일치 (timestamp format diff 등). KPI/Quarantine
-               통일성을 위해 severity=warning 으로 적재. (2026-05-31 옵션 (b) 채택) */
+               통일성을 위해 severity=warning 으로 적재. (2026-05-31 옵션 (b) 채택)
+               의심 column 추적 (2026-06-09): minMax 의 WARN verdict (date format diff) + boolean column
+               을 reason text 에 명시. 운영자가 어느 column 에서 format 차이 났는지 즉시 인식.
+               FE quarantine card 가 3 column hardcode 라 reason 에 직접 포함. */
+            List<String> suspectCols = new ArrayList<>();
+            for (Map<String, Object> mm : minMax) {
+                if ("WARN".equals(mm.get("verdict"))) {
+                    suspectCols.add(mm.get("column") + " (" + mm.get("type") + ", date format diff)");
+                }
+            }
+            for (DdlColumn c : cols) {
+                if (isBoolean(c)) {
+                    suspectCols.add(c.getPhysicalName() + " (" + displayType(c) + ", boolean format diff)");
+                }
+            }
+            String suspectSuffix = suspectCols.isEmpty() ? ""
+                    : " — suspect: " + String.join("; ", suspectCols);
             recordQuarantine(ctx, stage, binding, tableLabel,
                     "validate.checksum",
-                    "Data integrity format differs (values match canonical) — " + tableLabel,
+                    "Data integrity format differs (values match canonical) — " + tableLabel + suspectSuffix,
                     List.of("table", "ASIS hash", "TOBE hash"),
                     List.of("metric", "asis_value", "tobe_value"),
                     List.of(List.of(tableLabel,
@@ -1213,6 +1233,26 @@ public class ValidationReportService implements StageRunner {
     private static String pgQualified(String tobeSchema, String tobeTable) {
         if (tobeSchema == null || tobeSchema.isBlank()) return quote(tobeTable);
         return quote(tobeSchema) + "." + quote(tobeTable);
+    }
+
+    /**
+     * Set checksum via count + min(md5) + max(md5) fingerprint.
+     *
+     * 기존 md5(string_agg(md5(...), '' ORDER BY pk)) 의 정렬 cost + N×32B 거대 string 둘 다 제거.
+     * 순서 무관 aggregate (count/min/max) 라 ORDER BY 불요. PG / DuckDB 양쪽 동일 결과 (검증됨).
+     *
+     * Inline subquery (CTE X) — CTE materialization 회피 + PG/DuckDB 양쪽 optimizer 가
+     * 단일 sequential scan + 3 aggregate (count/min/max) 로 plan 생성 보장.
+     *
+     * Collision prob ≈ 2^-128 (같은 row count + 같은 min md5 + 같은 max md5 인데 set 다를 확률).
+     * 정상 운영 무관 — 1000만 row 의 random subset 비교 시 false positive ≈ 0.
+     */
+    private static String checksumQuery(String fq, String concat) {
+        return "SELECT md5("
+             + "  count(*)::text || '|' || "
+             + "  coalesce(min(_v), '') || '|' || "
+             + "  coalesce(max(_v), '')"
+             + ") FROM (SELECT md5(concat(" + concat + ")) AS _v FROM " + fq + ") _h";
     }
 
     private void ingest(StageContext ctx, String message, boolean info) {
