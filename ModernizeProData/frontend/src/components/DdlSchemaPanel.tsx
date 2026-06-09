@@ -18,6 +18,19 @@ interface Props {
  * 미 인포트 = 빨강, 인포트 완료 = 초록 베이스의 외곽 카드 + Import / Re-import / Delete 액션.
  * 삭제는 inline confirm bar (UserManagement 패턴) 로 확인.
  */
+/** 백엔드 dialect 문자열 → 표시 라벨. 알 수 없으면 원문 대문자화. */
+function dialectLabel(d: string): string {
+  switch (d.toLowerCase()) {
+    case 'oracle': return 'Oracle';
+    case 'postgres':
+    case 'postgresql': return 'PostgreSQL';
+    case 'mysql': return 'MySQL';
+    case 'sqlserver':
+    case 'mssql': return 'SQL Server';
+    default: return d.charAt(0).toUpperCase() + d.slice(1);
+  }
+}
+
 export function DdlSchemaPanel({ project, side, highlight }: Props) {
   const t = useT();
   const readOnly = useActiveProjectReadOnly();
@@ -116,6 +129,10 @@ export function DdlSchemaPanel({ project, side, highlight }: Props) {
             {hasSchema
               ? <span style={styles.badgeOk}>imported</span>
               : <span style={styles.badgeWarn}>not imported</span>}
+            {/* #71-B — import 후 백엔드가 판정한 정확한 dialect 배지 (Oracle/PostgreSQL/…). */}
+            {hasSchema && imported?.dialect && (
+              <span style={styles.badgeDialect}>{dialectLabel(imported.dialect)}</span>
+            )}
           </div>
           <div style={styles.desc}>{t(descKey)}</div>
         </div>
@@ -204,7 +221,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '10px 14px 9px',
     borderBottom: '1px solid var(--border)',
     display: 'flex',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     gap: 10,
   },
   titleRow: { display: 'flex', alignItems: 'center', gap: 8 },
@@ -226,6 +243,16 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'var(--red-50)',
     color: 'var(--red)',
     border: '1px solid var(--red)',
+    borderRadius: 3,
+  },
+  badgeDialect: {
+    padding: '1px 6px',
+    fontSize: 10,
+    fontWeight: 600,
+    fontFamily: 'var(--mono)',
+    background: 'var(--navy-50)',
+    color: 'var(--navy)',
+    border: '1px solid var(--navy)',
     borderRadius: 3,
   },
   body: { padding: '12px 14px', background: 'var(--panel)' },

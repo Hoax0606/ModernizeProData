@@ -88,13 +88,11 @@ export function NotificationToast() {
     setToasts((cur) => [...cur, ...newItems]);
   }, [allLogs, allProjects, activeSiteId, globalNotifEnabled, notifDefaults, globalNotifScope, user?.username]);
 
-  // 각 toast 가 일정 시간 후 자동 제거
+  // 일정 시간 후 현재 떠 있는 toast 를 "한 번에 전부" 제거 (하나씩 staggered 제거 X).
+  // 새 toast 가 추가되면 deps[toasts] 로 타이머 리셋 → 같이 뜬 것들이 함께 사라진다.
   useEffect(() => {
     if (toasts.length === 0) return;
-    const oldest = toasts[0];
-    const id = setTimeout(() => {
-      setToasts((cur) => cur.filter((t) => t.id !== oldest.id));
-    }, TOAST_DURATION_MS);
+    const id = setTimeout(() => setToasts([]), TOAST_DURATION_MS);
     return () => clearTimeout(id);
   }, [toasts]);
 

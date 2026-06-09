@@ -96,25 +96,22 @@ function AppRoutes() {
   // location-mutator APIs update the URL but do NOT reload the page —
   // that left users stuck on /login forever even after the URL changed.
   useEffect(() => {
-    if (location.pathname === '/license-setup') return;
     fetch('/api/v1/health/info?_=' + Date.now(), { cache: 'no-store' })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        const lic = d?.data?.licenseStatus;
-        if (lic === 'MISSING') {
+        if (!d) return;
+        // install 언어 보정 — 사용자가 직접 고르기 전(languageExplicit=false)이면 백엔드
+        // defaultLanguage(=MSI 설치 언어) 적용. license-setup 포함 모든 화면에서 실행해
+        // 첫 화면이 OS locale 로 새지 않게 한다 (영어 MSI 인데 일본어로 뜨던 버그).
+        const lang = d?.data?.defaultLanguage;
+        if (lang === 'ko' || lang === 'ja' || lang === 'en') {
+          useSettingsStore.getState().applyDefaultLanguage(lang);
+        }
+        // 라이선스 없으면 wizard 로. 이미 license-setup 이면 재이동 안 함 (루프 방지).
+        if (d?.data?.licenseStatus === 'MISSING' && location.pathname !== '/license-setup') {
           try { useAuthStore.getState().logout(); } catch {}
           navigate('/license-setup', { replace: true });
-          return;
         }
-        try {
-          const persisted = localStorage.getItem('modernize-settings');
-          if (!persisted) {
-            const lang = d?.data?.defaultLanguage;
-            if (lang === 'ko' || lang === 'ja' || lang === 'en') {
-              useSettingsStore.getState().setLanguage(lang);
-            }
-          }
-        } catch {}
       })
       .catch(() => {});
   }, [location.pathname, navigate]);

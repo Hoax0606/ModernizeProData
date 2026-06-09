@@ -123,7 +123,7 @@ export function MappingOnboarding({ project }: { project: Project }) {
         <Step n={3} title={t('onboarding.step.mapping')} active />
       </div>
 
-      <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+      <div style={{ display: 'flex', gap: 10, justifyContent: 'center', alignItems: 'flex-start' }}>
         <DdlImportButton
           projectId={project.id}
           siteId={project.siteId}

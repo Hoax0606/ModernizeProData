@@ -44,23 +44,34 @@ internal sealed class MainForm : Form
         // taskbar 항목 강제. WinForms default 가 true 지만 명시해 회귀 방지.
         ShowInTaskbar = true;
 
-        // exe 의 embedded icon (csproj ApplicationIcon = ..\assets\mpd.ico) 을 Form 으로.
-        // staging 에 별도 .ico copy 없이도 title bar / taskbar 에 brand icon 표시.
+        // Form icon — embedded mpd.ico (멀티해상도) 를 직접 로드. ExtractAssociatedIcon 은
+        // 단일 32px small icon 만 줘서 고DPI/다중 모니터의 taskbar 가 적정 크기를 못 찾아
+        // 아이콘이 비거나 placeholder 로 뜨던 문제가 있었다. 멀티사이즈 .ico 를 통째로 넘기면
+        // Windows 가 모니터 DPI 별 최적 크기를 골라 title bar / taskbar 모두 선명하게 표시.
         try
         {
-            string? exePath = Environment.ProcessPath;
-            if (!string.IsNullOrEmpty(exePath))
+            using var icoStream = typeof(MainForm).Assembly.GetManifestResourceStream("mpd.ico");
+            if (icoStream != null)
             {
-                Icon? ico = Icon.ExtractAssociatedIcon(exePath);
-                if (ico != null) Icon = ico;
+                Icon = new Icon(icoStream);
+            }
+            else
+            {
+                // embedded resource 못 찾으면 exe 연결 아이콘으로 폴백.
+                string? exePath = Environment.ProcessPath;
+                if (!string.IsNullOrEmpty(exePath))
+                {
+                    Icon? ico = Icon.ExtractAssociatedIcon(exePath);
+                    if (ico != null) Icon = ico;
+                }
             }
         }
-        catch { /* icon 추출 실패 silent — 기본 OS icon 표시 */ }
+        catch { /* icon 로드 실패 silent — 기본 OS icon 표시 */ }
 
         _web = new WebView2 { Dock = DockStyle.Fill };
         Controls.Add(_web);
 
-        HandleCreated += (_, _) => ApplyBrandTitleBar();
+        HandleCreated += (_, _) => { ApplyBrandTitleBar(); ForceWindowIcon(); };
         Shown += async (_, _) => await InitWebViewAsync();
         FormClosing += (_, _) =>
         {
@@ -73,6 +84,23 @@ internal sealed class MainForm : Form
     /// Brand title bar (Windows 11 22000+). 회색 default → navy + white text.
     /// 이전 Windows / 실패 시 silent (Form 정상 작동).
     /// </summary>
+    /// <summary>
+    /// Form.Icon 외에 WM_SETICON 으로 top-level window 에 아이콘을 한 번 더 강제 지정.
+    /// WebView2 child control 이 부모 window 아이콘 표시를 방해하는 경우 taskbar 아이콘이
+    /// 비어 보이던 것을 회피 (#63). Form.Icon 이 null 이면 no-op.
+    /// </summary>
+    private void ForceWindowIcon()
+    {
+        try
+        {
+            if (!IsHandleCreated || Icon == null) return;
+            IntPtr h = Icon.Handle;
+            NativeMethods.SendMessage(Handle, NativeMethods.WM_SETICON, (IntPtr)NativeMethods.ICON_BIG, h);
+            NativeMethods.SendMessage(Handle, NativeMethods.WM_SETICON, (IntPtr)NativeMethods.ICON_SMALL, h);
+        }
+        catch { /* best-effort */ }
+    }
+
     private void ApplyBrandTitleBar()
     {
         // Brand mint/teal #0e7268 (React 의 --navy 변수와 동일 brand). border 는

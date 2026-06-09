@@ -55,6 +55,14 @@ if ($Combo) {
     $Pairs = $null
 }
 
+# Frontend 는 invocation 당 한 번만 빌드되므로 단일 언어로 박제. combo 의 언어가 하나면
+# 그 언어, 여러 언어가 섞이면 'en' fallback. 이 값이 VITE_DEFAULT_LANG 로 들어가
+# 설치 앱의 첫 화면(License/Login) 기본 언어가 OS locale 이 아닌 MSI 언어를 따르게 한다.
+$FrontendLang = if ($Pairs) {
+    if (($BuildLangs | Measure-Object).Count -eq 1) { $BuildLangs[0] } else { 'en' }
+} elseif ($Language -in 'en','ko','ja') { $Language } else { 'en' }
+Write-Host "Frontend default language: $FrontendLang" -ForegroundColor Magenta
+
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
@@ -160,11 +168,14 @@ try {
     # VITE_APP_VERSION — auto-bump 버전을 FE 의 단일 소스 (src/lib/appVersion.ts) 로
     # 주입. AboutModal / LoginPage / LicenseSetupPage footer 가 MSI 버전과 일치.
     $prevViteVer = $env:VITE_APP_VERSION
+    $prevViteLang = $env:VITE_DEFAULT_LANG
     $env:VITE_APP_VERSION = $Version
+    $env:VITE_DEFAULT_LANG = $FrontendLang
     try {
         Invoke-Native { & npx vite build }
     } finally {
         $env:VITE_APP_VERSION = $prevViteVer
+        $env:VITE_DEFAULT_LANG = $prevViteLang
     }
     if ($LASTEXITCODE -ne 0) { throw "vite build failed (exit $LASTEXITCODE)" }
 } finally {

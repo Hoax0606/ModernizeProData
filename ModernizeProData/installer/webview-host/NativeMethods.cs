@@ -25,6 +25,14 @@ internal static class NativeMethods
     public const int DWMWA_CAPTION_COLOR = 35;
     public const int DWMWA_TEXT_COLOR    = 36;
 
+    /// <summary>WM_SETICON — title bar / taskbar 아이콘을 window 에 강제 지정.</summary>
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    public const int WM_SETICON = 0x0080;
+    public const int ICON_SMALL = 0;
+    public const int ICON_BIG   = 1;
+
     /// <summary>Convert System.Drawing.Color → COLORREF (0x00BBGGRR).</summary>
     public static int ToColorRef(System.Drawing.Color c) =>
         (c.B << 16) | (c.G << 8) | c.R;
