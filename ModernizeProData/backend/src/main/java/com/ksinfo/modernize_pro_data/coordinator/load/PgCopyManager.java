@@ -34,12 +34,15 @@ public class PgCopyManager {
 
     /**
      * Bulk load connection 의 session-level 튜닝 (서버 config·restart·superuser 불필요).
-     *  - synchronous_commit=off: COPY 한 방엔 commit 1회라 효과는 작지만 free.
-     *  - maintenance_work_mem↑: 적재 후 PK 인덱스 빌드(ensurePkIndex CONCURRENTLY) 가속.
+     *  - synchronous_commit=off: **기본 비활성(false)**. 이 워크로드는 테이블당 COPY 1방 = commit
+     *    1회라 fsync 1회만 아껴 효과 거의 없음(<5% 예상). 게다가 commit ack 후 fsync 전 crash 시 마지막
+     *    commit 유실 가능 → durability 손상. rehearsal/test 에서만 명시 opt-in, **cutover 는 절대 끄지
+     *    않음**(production 전환 — 정확성 > 속도, LoadStage 가 allowSyncCommitOff=false 로 강제).
+     *  - maintenance_work_mem↑: 적재 후 PK 인덱스 빌드(ensurePkIndex CONCURRENTLY) 가속. real 효과 — 항상.
      * 서버 레벨(max_wal_size/shared_buffers/checkpoint_timeout)은 도구가 못 건드림 — TO-BE PG
      * DBA 가 postgresql.conf 로. (임의 고객 PG 서버 config 를 도구가 바꾸지 않는다.)
      */
-    @Value("${modernize.load.synchronous-commit-off:true}")
+    @Value("${modernize.load.synchronous-commit-off:false}")
     private boolean syncCommitOff;
 
     @Value("${modernize.load.maintenance-work-mem:512MB}")
@@ -50,6 +53,14 @@ public class PgCopyManager {
      * caller 는 반드시 try-with-resources 로 wrap (leak 방지).
      */
     public Connection openConnection(Map<String, Object> dbConfig) throws Exception {
+        return openConnection(dbConfig, true);
+    }
+
+    /**
+     * {@code allowSyncCommitOff}=false 면 config 가 켜져있어도 synchronous_commit 을 끄지 않는다.
+     * LoadStage 가 cutover run 에서 false 를 넘겨 production durability 를 보장한다.
+     */
+    public Connection openConnection(Map<String, Object> dbConfig, boolean allowSyncCommitOff) throws Exception {
         String host = (String) dbConfig.get("host");
         Object portObj = dbConfig.get("port");
         String database = (String) dbConfig.get("database");
@@ -66,14 +77,15 @@ public class PgCopyManager {
         if (username != null) props.setProperty("user", username);
         if (password != null) props.setProperty("password", password);
         Connection conn = DriverManager.getConnection(url, props);
-        applyLoadSessionTuning(conn);
+        applyLoadSessionTuning(conn, allowSyncCommitOff);
         return conn;
     }
 
     /** 적재 connection 에 session-level 튜닝 적용. 실패해도 적재 자체엔 영향 없음 (best-effort). */
-    private void applyLoadSessionTuning(Connection conn) {
+    private void applyLoadSessionTuning(Connection conn, boolean allowSyncCommitOff) {
         try (var st = conn.createStatement()) {
-            if (syncCommitOff) {
+            // synchronous_commit=off 는 config 켜짐 + caller 가 허용(=cutover 아님) 일 때만.
+            if (syncCommitOff && allowSyncCommitOff) {
                 st.execute("SET synchronous_commit = off");
             }
             if (maintenanceWorkMem != null && !maintenanceWorkMem.isBlank()) {

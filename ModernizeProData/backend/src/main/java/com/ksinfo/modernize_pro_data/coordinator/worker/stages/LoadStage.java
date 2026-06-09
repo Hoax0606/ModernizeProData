@@ -128,14 +128,8 @@ public class LoadStage implements StageRunner {
         Map<String, List<CheckConstraintMeta>> checksByTable = new HashMap<>();
         loadConstraintMetas(tobeTables, uniqueByTable, fksByTable, checksByTable);
 
-        Path tempDir = ctx.getOutputDir().resolve("temp");
-        try {
-            Files.createDirectories(tempDir);
-        } catch (Exception e) {
-            failStage(stage, startedAt, 0, ctx.getBindings().size(), "temp dir create failed: " + e.getMessage());
-            return;
-        }
-
+        // (옛 CSV-파일 경유 COPY 시절의 staging 디렉터리였으나, 현재는 DuckDB ResultSet →
+        //  PGCopyOutputStream 직스트림이라 temp 폴더가 더 이상 필요 없다. 생성 제거 #73.)
         List<MappingTableBinding> bindings = ctx.getBindings();
         AtomicInteger success = new AtomicInteger();
         AtomicInteger failed = new AtomicInteger();
@@ -150,7 +144,7 @@ public class LoadStage implements StageRunner {
                     log.warn("Load cancelled — skipping remaining tables runId={}", runId);
                     break;
                 }
-                if (loadBinding(ctx, stage, b, dbConfig, tempDir, columnsByTable, uniqueByTable, fksByTable, checksByTable)) success.incrementAndGet();
+                if (loadBinding(ctx, stage, b, dbConfig, columnsByTable, uniqueByTable, fksByTable, checksByTable)) success.incrementAndGet();
                 else failed.incrementAndGet();
                 stage.setTablesSuccess(success.get());
                 stage.setTablesFailed(failed.get());
@@ -168,7 +162,7 @@ public class LoadStage implements StageRunner {
                     futures.add(pool.submit(() -> {
                         // 병렬 task 도 시작 시 cancel 확인 — 이미 취소면 적재 skip.
                         if (runControlRegistry.isCancelled(runId)) { failed.incrementAndGet(); return; }
-                        if (loadBinding(ctx, stage, b, dbConfig, tempDir, columnsByTable, uniqueByTable, fksByTable, checksByTable)) success.incrementAndGet();
+                        if (loadBinding(ctx, stage, b, dbConfig, columnsByTable, uniqueByTable, fksByTable, checksByTable)) success.incrementAndGet();
                         else failed.incrementAndGet();
                         // stage entity save 경합 회피용 동기화 — Load 끝 broadcast.
                         synchronized (stage) {
@@ -222,7 +216,7 @@ public class LoadStage implements StageRunner {
      * DuckDB 는 duplicateConnection(공유 connection 동시 사용 회피), PG 는 per-binding openConnection.
      */
     private boolean loadBinding(StageContext ctx, StageInstance stage, MappingTableBinding binding,
-                                Map<String, Object> dbConfig, Path tempDir,
+                                Map<String, Object> dbConfig,
                                 Map<String, List<DdlColumn>> columnsByTable,
                                 Map<String, List<UniqueConstraintMeta>> uniqueByTable,
                                 Map<String, List<ForeignKeyMeta>> fksByTable,
@@ -282,7 +276,10 @@ public class LoadStage implements StageRunner {
                   CSV 직렬화 → PGCopyOutputStream. PgCopyManager.copyInFromResultSet 참고. */
             String pgQualified = pgTableName(tobeSchema, tobeTable);
             long rows;
-            try (Connection conn = pgCopyManager.openConnection(dbConfig)) {
+            // cutover = production 전환 → synchronous_commit 절대 끄지 않음 (durability 우선).
+            boolean cutover = ctx.getRunHistory().getRunType()
+                    == com.ksinfo.modernize_pro_data.coordinator.run.RunType.cutover;
+            try (Connection conn = pgCopyManager.openConnection(dbConfig, !cutover)) {
                 ensurePgTable(ctx, conn, tobeSchema, tobeTable, columnsByTable);
                 boolean fkDisabled = pgCopyManager.tryDisableConstraints(conn);
                 try {

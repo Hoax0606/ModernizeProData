@@ -29,4 +29,11 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
   </ItemGroup>
 
+  <!-- 멀티해상도 .ico 를 embedded resource 로도 포함 — Form.Icon 을 ExtractAssociatedIcon
+       (단일 32px small icon) 대신 이 multi-size .ico 로 로드해, 고DPI/다중 모니터에서
+       taskbar 아이콘이 비거나 placeholder("삭제된 앱")로 뜨던 문제 회피. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\assets\mpd.ico" LogicalName="mpd.ico" />
+  </ItemGroup>
+
 </Project>

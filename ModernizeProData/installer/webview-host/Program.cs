@@ -17,12 +17,12 @@ internal static class Program
     {
         var opts = HostOptions.Parse(args);
 
-        // 명시적 AUMID 호출 제거 (2026-06-02) — system 에 등록 안 된 AUMID 를 박으면
-        // Windows 가 그 ID 의 icon / display name 을 찾지 못해 taskbar icon 자체가
-        // 누락된다 (group lookup miss). process 의 main module (.exe) 기반 자동
-        // grouping 을 사용 — 이 경우 ApplicationIcon (mpd.ico) 가 taskbar 에 정상 표시.
-        // 향후 AUMID 가 필요해지면 registry (HKCU\Software\Classes\AppUserModelId\<id>)
-        // 에 IconUri / DisplayName 같이 등록한 뒤 다시 호출해야 한다.
+        // 명시적 AUMID 지정 — taskbar 그룹화를 .exe path(단일파일 self-extract 시 temp 경로라
+        // 불안정)가 아니라 안정적인 brand ID 로 고정. taskbar 아이콘은 이 AUMID 그룹의 window
+        // 아이콘(MainForm 이 embedded mpd.ico 를 Form.Icon + WM_SETICON 으로 세팅)을 사용한다.
+        // (2026-06-02 에 AUMID 를 뺐던 건 그 시점 Form.Icon 이 비어 group 아이콘 lookup 이
+        //  비었기 때문. 이제 embedded multi-size icon 으로 window 아이콘이 항상 있으므로 OK.)
+        try { NativeMethods.SetCurrentProcessExplicitAppUserModelID(opts.AppId); } catch { /* best-effort */ }
 
         ApplicationConfiguration.Initialize();
         Application.Run(new MainForm(opts));

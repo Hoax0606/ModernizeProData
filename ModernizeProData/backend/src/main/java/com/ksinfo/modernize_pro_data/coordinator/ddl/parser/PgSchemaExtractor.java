@@ -41,32 +41,226 @@ public class PgSchemaExtractor {
     private final DataSource dataSource;
 
     public ParsedDdl extract(byte[] content) {
-        String stagingId = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
-        String stagingSchema = "tobe_ddl_validate_" + stagingId;
-        String sql = new String(content, StandardCharsets.UTF_8);
-
-        try (Connection conn = dataSource.getConnection()) {
-            conn.setAutoCommit(true);
-
-            try (Statement st = conn.createStatement()) {
-                st.execute("CREATE SCHEMA \"" + stagingSchema + "\"");
-                st.execute("SET search_path TO \"" + stagingSchema + "\", public");
-            }
-
-            try (Statement st = conn.createStatement()) {
-                st.execute(sql);
+        String raw = new String(content, StandardCharsets.UTF_8);
+        // self-healing — 적용 중 "schema X does not exist"(SQLState 3F000) 가 나오면 그 X 를
+        // strip 대상에 추가하고 재시도. dump 이 schema 를 어떤 형태로 참조하든(CREATE SCHEMA 유무
+        // 무관) 결국 모든 schema 한정자가 제거돼 staging 으로 유입된다. (schema 종류 만큼만 반복)
+        java.util.Set<String> extraStrip = new java.util.LinkedHashSet<>();
+        SQLException lastError = null;
+        for (int attempt = 0; attempt < 8; attempt++) {
+            String stagingSchema = "tobe_ddl_validate_"
+                    + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+            String sql = sanitizeDumpForStaging(raw, extraStrip);
+            boolean retry = false;
+            try (Connection conn = dataSource.getConnection()) {
+                conn.setAutoCommit(true);
+                try {
+                    try (Statement st = conn.createStatement()) {
+                        st.execute("CREATE SCHEMA \"" + stagingSchema + "\"");
+                        st.execute("SET search_path TO \"" + stagingSchema + "\", public");
+                    }
+                    try (Statement st = conn.createStatement()) {
+                        st.execute(sql);
+                    } catch (SQLException e) {
+                        String miss = extractMissingSchema(e);
+                        if (miss != null && extraStrip.add(miss.toLowerCase(Locale.ROOT))) {
+                            lastError = e;
+                            retry = true;   // 미식별 schema 발견 → strip 후 재시도
+                        } else {
+                            throw new TobeDdlApplyException(friendlyApplyError(e, sql), e);
+                        }
+                    }
+                    if (!retry) {
+                        ParsedDdl parsed = buildParsedDdl(conn, stagingSchema);
+                        // staging 에 적용하느라 schema 한정자를 떼었기 때문에 추출된 테이블의 schema 가
+                        // 비어버린다. 원본 dump 의 "<schema>.<table>" 에서 실제 schema(banksys 등)를
+                        // 읽어 복원 — 안 하면 mapping/load 가 schema 불일치로 깨진다.
+                        restoreOriginalSchemas(parsed, raw);
+                        return parsed;
+                    }
+                } finally {
+                    // DISCARD ALL 로 풀 반납 전 세션 초기화 — search_path 오염 누수 차단(42P01 회피).
+                    resetSession(conn);
+                }
             } catch (SQLException e) {
-                throw new TobeDdlApplyException(
-                        "TO-BE DDL 적용 실패 — PG 문법으로 작성되었는지 확인하세요. 원인: "
-                                + e.getMessage(), e);
+                throw new RuntimeException("PgSchemaExtractor connection failed: " + e.getMessage(), e);
+            } finally {
+                cleanupStagingSchema(stagingSchema);
             }
-
-            return buildParsedDdl(conn, stagingSchema);
-        } catch (SQLException e) {
-            throw new RuntimeException("PgSchemaExtractor connection failed: " + e.getMessage(), e);
-        } finally {
-            cleanupStagingSchema(stagingSchema);
         }
+        throw new TobeDdlApplyException(
+                "TO-BE DDL 적용 실패 — schema 참조를 해소하지 못했습니다. 원인: "
+                        + (lastError != null ? lastError.getMessage() : ""), lastError);
+    }
+
+    /**
+     * 적용 실패 SQLException 을 사용자가 "무엇이 문제인지" 알 수 있는 메시지로 분류.
+     * PG 원문(위치 포함)도 끝에 붙여 정확한 지점을 보게 한다.
+     */
+    private static String friendlyApplyError(SQLException e, String sql) {
+        String state = sqlState(e);
+        String raw = e.getMessage() == null ? "" : e.getMessage().trim();
+        String low = sql.toLowerCase(Locale.ROOT);
+
+        // 중복 정의 (같은 객체가 파일 안에 두 번).
+        if ("42P07".equals(state) || "42710".equals(state) || "42P06".equals(state) || "42723".equals(state)) {
+            String name = firstQuoted(raw);
+            return (name != null
+                    ? "DDL 파일 안에 \"" + name + "\" 이(가) 중복 정의돼 있습니다. 중복을 제거하세요."
+                    : "DDL 파일 안에 중복 정의된 객체가 있습니다.")
+                    + " (원인: " + raw + ")";
+        }
+        // Oracle/MySQL 문법을 TO-BE(PostgreSQL)에 넣은 경우.
+        if (low.contains("varchar2") || low.contains("nvarchar2") || low.contains("number(")
+                || low.contains(" clob") || low.contains("auto_increment") || low.contains("engine=")) {
+            return "이 DDL 은 PostgreSQL 문법이 아닌 것 같습니다 (Oracle/MySQL?). "
+                    + "TO-BE 는 PostgreSQL DDL 이어야 합니다. (원인: " + raw + ")";
+        }
+        // 순수 문법 오류.
+        if ("42601".equals(state)) {
+            return "SQL 문법 오류입니다. 표시된 위치를 확인하세요. (원인: " + raw + ")";
+        }
+        return "TO-BE DDL 적용 실패. (원인: " + raw + ")";
+    }
+
+    /**
+     * 원본 dump 의 {@code CREATE TABLE <schema>.<table>} 에서 테이블별 실제 schema 를 읽어
+     * 추출된 ParsedTable 에 복원. (staging 적용 시 schema 한정자를 떼어 schema 가 비어버리므로.)
+     * dump 에 schema 한정자가 없던 테이블은 그대로 둔다.
+     */
+    static void restoreOriginalSchemas(ParsedDdl parsed, String rawDump) {
+        java.util.Map<String, String> tableSchema = new java.util.HashMap<>();
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                "(?i)CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?"
+                        + "\"?([A-Za-z_][A-Za-z0-9_$]*)\"?\\s*\\.\\s*\"?([A-Za-z_][A-Za-z0-9_$]*)\"?")
+                .matcher(rawDump);
+        while (m.find()) {
+            String schema = m.group(1);
+            String table = m.group(2);
+            if (!schema.equalsIgnoreCase("pg_catalog") && !schema.equalsIgnoreCase("information_schema")) {
+                tableSchema.put(table.toLowerCase(Locale.ROOT), schema);
+            }
+        }
+        if (tableSchema.isEmpty()) return;
+        for (ParsedTable t : parsed.getTables()) {
+            String orig = tableSchema.get(t.getPhysicalName().toLowerCase(Locale.ROOT));
+            if (orig != null) t.setSchemaName(orig);
+        }
+    }
+
+    private static String sqlState(SQLException root) {
+        for (Throwable t = root; t != null; t = t.getCause()) {
+            if (t instanceof SQLException se && se.getSQLState() != null) return se.getSQLState();
+        }
+        return null;
+    }
+
+    private static String firstQuoted(String s) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"([^\"]+)\"").matcher(s == null ? "" : s);
+        return m.find() ? m.group(1) : null;
+    }
+
+    /** SQLException 체인에서 invalid_schema_name(3F000) 의 따옴표 schema 명 추출 (메시지 언어 무관). */
+    private static String extractMissingSchema(SQLException root) {
+        for (Throwable t = root; t != null; t = t.getCause()) {
+            if (t instanceof SQLException se && "3F000".equals(se.getSQLState())) {
+                String msg = se.getMessage() == null ? "" : se.getMessage();
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"([^\"]+)\"").matcher(msg);
+                if (m.find()) return m.group(1);
+            }
+        }
+        return null;
+    }
+
+    /** 풀 반납 전 connection 세션 상태 초기화 — search_path 오염 누수 차단. best-effort. */
+    private void resetSession(Connection conn) {
+        try (Statement st = conn.createStatement()) {
+            st.execute("DISCARD ALL");
+        } catch (SQLException e) {
+            log.warn("PgSchemaExtractor session reset (DISCARD ALL) failed: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 업로드된 TO-BE DDL 을 staging schema 적용에 안전하게 전처리.
+     *
+     * pg_dump 산출물은 (1) {@code SELECT pg_catalog.set_config('search_path', ...)} / {@code SET
+     * search_path} 로 우리 staging 경로를 덮고, (2) {@code public.customer_contacts} 처럼 schema
+     * 한정명을 써서 staging 이 아니라 메타 DB 의 public 에 테이블을 만든다 → 재적용 시 "relation
+     * already exists", staging 은 비어 "CREATE TABLE 못찾음". (3) {@code OWNER TO}/{@code GRANT}/
+     * {@code CREATE SCHEMA} 는 존재하지 않는 role/schema 로 적용 실패.
+     *
+     * 메타 추출 목적이므로 이들 dump 부가 구문을 제거하고 schema 한정자를 떼어 전부 staging 으로
+     * 유입시킨다. (heuristic — 표준 pg_dump 케이스 대응.)
+     */
+    static String sanitizeDumpForStaging(String sql) {
+        return sanitizeDumpForStaging(sql, java.util.Collections.emptySet());
+    }
+
+    static String sanitizeDumpForStaging(String sql, java.util.Set<String> extraSchemas) {
+        // 1) dump 이 선언/사용하는 schema 이름 수집 (CREATE SCHEMA + search_path + qualified 참조 + public).
+        //    이들 <schema>. 한정자를 떼어 전부 staging 으로 유입시킨다.
+        java.util.Set<String> schemas = new java.util.LinkedHashSet<>();
+        schemas.add("public");
+        for (String s : extraSchemas) if (s != null && !s.isBlank()) schemas.add(s);
+        java.util.regex.Matcher cs = java.util.regex.Pattern
+                .compile("(?im)^\\s*CREATE\\s+SCHEMA\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?\"?([A-Za-z_][A-Za-z0-9_$]*)\"?")
+                .matcher(sql);
+        while (cs.find()) schemas.add(cs.group(1));
+        java.util.regex.Matcher sp = java.util.regex.Pattern
+                .compile("(?im)(?:SET\\s+search_path|set_config\\(\\s*'+search_path'+\\s*,)\\s*[=,]?\\s*(.+)$")
+                .matcher(sql);
+        while (sp.find()) {
+            for (String tok : sp.group(1).split(",")) {
+                String name = tok.replaceAll("[\"';)]", "").trim();
+                if (name.matches("[A-Za-z_][A-Za-z0-9_$]*") && !name.equalsIgnoreCase("false")
+                        && !name.equalsIgnoreCase("true") && !name.startsWith("$") && !name.startsWith("pg_")) {
+                    schemas.add(name);
+                }
+            }
+        }
+        // qualified object 참조에서도 schema 명 수집 — dump 이 CREATE SCHEMA 없이 banksys.tbl 만
+        // 써도 banksys 를 잡아낸다. 키워드 뒤의 "<schema>." 패턴.
+        java.util.regex.Matcher qr = java.util.regex.Pattern
+                .compile("(?i)\\b(?:TABLE|SEQUENCE|INDEX|VIEW|TRIGGER|REFERENCES|ONLY|INTO|JOIN|UPDATE|ON|FROM)\\s+"
+                        + "(?:IF\\s+(?:NOT\\s+)?EXISTS\\s+)?(?:ONLY\\s+)?\"?([A-Za-z_][A-Za-z0-9_$]*)\"?\\s*\\.")
+                .matcher(sql);
+        while (qr.find()) {
+            String name = qr.group(1);
+            if (!name.startsWith("pg_")) schemas.add(name);
+        }
+
+        // 2) dump 부가 구문 제거 (staging 외부 의존 → 적용 실패 회피).
+        StringBuilder out = new StringBuilder(sql.length());
+        for (String line : sql.split("\n", -1)) {
+            String upper = line.trim().toUpperCase(Locale.ROOT);
+            String lower = line.trim().toLowerCase(Locale.ROOT);
+            if (upper.startsWith("SET SEARCH_PATH")) continue;
+            if (lower.contains("set_config('search_path'") || lower.contains("set_config(''search_path''")
+                    || lower.contains("set_config( 'search_path'")) continue;
+            if (upper.contains(" OWNER TO ")) continue;
+            if (upper.startsWith("GRANT ") || upper.startsWith("REVOKE ")) continue;
+            if (upper.startsWith("CREATE SCHEMA") || upper.startsWith("ALTER SCHEMA") || upper.startsWith("DROP SCHEMA")) continue;
+            // staging(번들 PG) 환경에 없을 수 있는 의존 구문 제거 — 문법은 맞아도 적용 실패하는 것들.
+            if (upper.startsWith("CREATE EXTENSION") || upper.startsWith("ALTER EXTENSION")
+                    || upper.startsWith("DROP EXTENSION") || upper.startsWith("COMMENT ON EXTENSION")) continue;
+            if (upper.startsWith("CREATE ROLE") || upper.startsWith("ALTER ROLE") || upper.startsWith("DROP ROLE")
+                    || upper.startsWith("CREATE USER") || upper.startsWith("ALTER USER") || upper.startsWith("DROP USER")) continue;
+            if (upper.startsWith("SET DEFAULT_TABLESPACE") || upper.startsWith("SET DEFAULT_TABLE_ACCESS_METHOD")) continue;
+            if (upper.contains("SET TABLESPACE")) continue;   // ALTER TABLE ... SET TABLESPACE x;
+            out.append(line).append('\n');
+        }
+
+        // 3) 수집한 모든 <schema>. 한정자 제거 (quoted/unquoted, 대소문자 무시).
+        String body = out.toString();
+        for (String sc : schemas) {
+            String q = java.util.regex.Pattern.quote(sc);
+            body = body.replaceAll("(?i)\\b" + q + "\\.", "");
+            body = body.replaceAll("(?i)\"" + q + "\"\\.", "");
+        }
+        // 4) inline TABLESPACE 절 제거 ( ") TABLESPACE pg_default" 같은 — 없는 tablespace 거부 회피).
+        body = body.replaceAll("(?i)\\s+TABLESPACE\\s+\"?[A-Za-z_][A-Za-z0-9_$]*\"?", "");
+        return body;
     }
 
     private void cleanupStagingSchema(String stagingSchema) {

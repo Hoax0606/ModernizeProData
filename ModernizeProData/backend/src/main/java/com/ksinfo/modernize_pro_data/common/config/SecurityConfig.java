@@ -47,6 +47,10 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/v1/health/**").permitAll()
                         .requestMatchers("/api/v1/auth/**").permitAll()
+                        // 핸들러에서 예외가 나면 Spring 이 /error 로 forward 하는데, 이게 permitAll
+                        // 이 아니면 익명 forward 가 다시 막혀 실제 500 이 403 으로 둔갑한다 (원인 가림).
+                        // /error 를 열어 실제 에러/상태가 그대로 전달되게 한다.
+                        .requestMatchers("/error").permitAll()
                         // First-boot license import — anonymous, only succeeds
                         // while no license is yet loaded (controller-side guard).
                         .requestMatchers("/api/v1/license/initial-setup").permitAll()

@@ -125,8 +125,7 @@ public class DdlImportService {
 
         DdlImport ddlImport = DdlImport.create(
                 projectId, side, filename, content.length,
-                HashUtil.sha256Hex(content), "oracle", importedBy);
-                //sha256Hex(content), dialect, importedBy);
+                HashUtil.sha256Hex(content), dialect, importedBy);
         ddlImport.setTableCount(parsed.getTables().size());
         ddlImport.setColumnCount(parsed.totalColumnCount());
         ddlImportRepo.save(ddlImport);
