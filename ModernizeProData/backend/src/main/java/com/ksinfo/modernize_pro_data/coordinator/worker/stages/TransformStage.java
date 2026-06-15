@@ -144,7 +144,8 @@ public class TransformStage implements StageRunner {
                 long rowCount;
                 try (Statement st = duckDbService.statement()) {
                     ctx.throwIfCancelled();   // (D) sub-step — 대용량 transform SQL 직전 cancel 체크.
-                    st.execute(sql);
+                    // runCancellable: transform 쿼리 도중 abort 시 statement.cancel() 로 즉시 interrupt.
+                    ctx.runCancellable(st, () -> st.execute(sql));
 
                     String fqTobe = quoteIdent(schema) + "." + quoteIdent("tobe_" + tobeTable);
                     try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + fqTobe)) {
@@ -157,7 +158,7 @@ public class TransformStage implements StageRunner {
                     if (ctx.getRunHistory().getRunType() != RunType.cutover) {
                         Path parquet = ctx.parquet2Dir().resolve(tobeTable + ".parquet");
                         String escapedParquet = parquet.toString().replace("\\", "/").replace("'", "''");
-                        st.execute("COPY " + fqTobe + " TO '" + escapedParquet + "' (FORMAT PARQUET)");
+                        ctx.runCancellable(st, () -> st.execute("COPY " + fqTobe + " TO '" + escapedParquet + "' (FORMAT PARQUET)"));
                     }
                 }
 
@@ -174,6 +175,9 @@ public class TransformStage implements StageRunner {
                 stage.setTablesFailed(failedCount);
                 stageInstanceRepo.save(stage);
                 broadcaster.stageProgress(runId, stage);
+            } catch (com.ksinfo.modernize_pro_data.coordinator.worker.RunCancelledException ce) {
+                // cancel(statement interrupt 포함)은 table 실패가 아니라 run 중단 — 그대로 전파.
+                throw ce;
             } catch (Exception e) {
                 OffsetDateTime tableEnd = OffsetDateTime.now();
                 result.setStatus(StageTableStatus.failed);

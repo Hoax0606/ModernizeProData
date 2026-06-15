@@ -6,6 +6,7 @@ import { useWorkspaceStore } from '../store/workspace';
 import { useAuthStore, roleLabel, type UserRole } from '../store/auth';
 import { ApiError } from '../api/client';
 import { usersApi } from '../api/users';
+import { healthApi } from '../api/auth';
 import { useT, type TranslationKey } from '../i18n';
 
 interface Props {
@@ -462,6 +463,20 @@ function nodeStatusTone(s: NodeStatus): React.CSSProperties {
   }
 }
 
+/** Worker online 판정 timeout — 백엔드 WorkerNodeService.ONLINE_TIMEOUT_SECONDS(90s) 와 동일. */
+const NODE_ONLINE_TIMEOUT_MS = 90_000;
+
+/**
+ * badge 표시용 실제 상태 — store 의 status 는 REGISTERED 면 무조건 'online' 이라 heartbeat 신선도를
+ * 안 본다(2026-06-11 버그: 12h 전 heartbeat 인데 green 으로 표시). last_seen_at 이 timeout 지났으면
+ * 'offline' 로 보정 (백엔드 online 판정과 일치).
+ */
+function effectiveNodeStatus(status: NodeStatus, lastHeartbeatAt: string | null): NodeStatus {
+  if (status !== 'online') return status;
+  if (!lastHeartbeatAt) return 'offline';
+  return (Date.now() - new Date(lastHeartbeatAt).getTime() <= NODE_ONLINE_TIMEOUT_MS) ? 'online' : 'offline';
+}
+
 function NodesTab() {
   const t = useT();
   const nodes = useWorkerNodesStore((s) => s.nodes);
@@ -472,11 +487,20 @@ function NodesTab() {
   const fetchSites = useWorkspaceStore((s) => s.fetchSites);
 
   const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
+  // Coordinator(이 화면을 주는 노드) 자신의 설치 버전 — 워커 버전과 같은 출처(modernize.version).
+  const [coordVersion, setCoordVersion] = useState<string | null>(null);
 
   useEffect(() => {
     void refresh();
     void fetchSites();
+    healthApi.info().then((i) => setCoordVersion(i.appVersion ?? null)).catch(() => {});
   }, [refresh, fetchSites]);
+
+  // 모달 열려있는 동안 30초마다 갱신 — heartbeat 신선도 badge 가 live 하게 (열어둔 채 stale 방지).
+  useEffect(() => {
+    const id = window.setInterval(() => { void refresh(); }, 30_000);
+    return () => window.clearInterval(id);
+  }, [refresh]);
 
   const siteNameOf = (siteId: string | null): string => {
     if (!siteId) return '—';
@@ -506,7 +530,15 @@ function NodesTab() {
 
   return (
     <>
-      <div style={styles.subTitle}>{t('workerNode.subtitle')}</div>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
+        <div style={styles.subTitle}>{t('workerNode.subtitle')}</div>
+        <div style={{ flex: 1 }} />
+        {coordVersion && (
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-3)', whiteSpace: 'nowrap' }}>
+            {t('workerNode.coordinatorVersion', { version: coordVersion })}
+          </span>
+        )}
+      </div>
 
       <div style={styles.tableWrap}>
         <table style={styles.table}>
@@ -515,18 +547,19 @@ function NodesTab() {
               <Th>{t('workerNode.col.name')}</Th>
               <Th>{t('workerNode.col.owner')}</Th>
               <Th>{t('workerNode.col.status')}</Th>
+              <Th>{t('workerNode.col.version')}</Th>
               <Th>{t('workerNode.col.heartbeat')}</Th>
               <Th>{t('workerNode.col.actions')}</Th>
             </tr>
           </thead>
           <tbody>
             {nodes.length === 0 ? (
-              <tr><td colSpan={5} style={styles.emptyRow}>{t('workerNode.empty')}</td></tr>
+              <tr><td colSpan={6} style={styles.emptyRow}>{t('workerNode.empty')}</td></tr>
             ) : (
               grouped.map((group) => (
                 <React.Fragment key={group.siteId ?? '__none__'}>
                   <tr>
-                    <td colSpan={5} style={styles.groupHeader}>
+                    <td colSpan={6} style={styles.groupHeader}>
                       {group.siteName} <span style={{ color: 'var(--text-4)', fontWeight: 400 }}>({group.rows.length})</span>
                     </td>
                   </tr>
@@ -536,7 +569,7 @@ function NodesTab() {
                     if (confirmRevokeId === n.id) {
                       return (
                         <tr key={n.id} style={{ background: 'var(--red-50)', borderBottom: '1px solid var(--border)' }}>
-                          <td colSpan={5} style={styles.confirmCell}>
+                          <td colSpan={6} style={styles.confirmCell}>
                             <div style={styles.confirmBar}>
                               <span style={styles.confirmText}>
                                 {t('workerNode.confirmRevokePre')}<b>{n.name}</b>{t('workerNode.confirmRevokePost')}
@@ -564,10 +597,19 @@ function NodesTab() {
                           {siteNameOf(n.siteId)}
                         </td>
                         <td style={styles.td}>
-                          <span style={{ ...styles.statusBadge, ...nodeStatusTone(n.status) }}>
-                            <span style={{ ...styles.statusDot, background: nodeStatusTone(n.status).color }} />
-                            {t(NODE_STATUS_KEY[n.status])}
-                          </span>
+                          {(() => {
+                            // heartbeat 신선도 반영한 실제 상태 (12h 전 heartbeat 인데 green 뜨던 버그 수정).
+                            const eff = effectiveNodeStatus(n.status, n.lastHeartbeatAt);
+                            return (
+                              <span style={{ ...styles.statusBadge, ...nodeStatusTone(eff) }}>
+                                <span style={{ ...styles.statusDot, background: nodeStatusTone(eff).color }} />
+                                {t(NODE_STATUS_KEY[eff])}
+                              </span>
+                            );
+                          })()}
+                        </td>
+                        <td style={{ ...styles.td, fontFamily: 'var(--mono)', fontSize: 11.5, color: n.appVersion ? 'var(--text-2)' : 'var(--text-4)', whiteSpace: 'nowrap' }}>
+                          {n.appVersion ?? '—'}
                         </td>
                         <td style={{ ...styles.td, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-3)', whiteSpace: 'nowrap' }}>
                           {relativeTime(n.lastHeartbeatAt ?? undefined, t)}

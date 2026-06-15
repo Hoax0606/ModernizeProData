@@ -58,6 +58,40 @@ public class StageContext {
         }
     }
 
+    /** runCancellable 에 넘기는 SQL 동작 (Exception 던질 수 있음). */
+    @FunctionalInterface
+    public interface SqlAction {
+        void run() throws Exception;
+    }
+
+    /**
+     * 긴 단일 쿼리(예: CREATE TABLE AS read_csv, transform)를 실행하는 동안 {@code st} 를
+     * RunControlRegistry 에 등록해, abort/timeout 시 {@link java.sql.Statement#cancel()} 로
+     * 쿼리 진행 중에도 즉시 interrupt 되게 한다. throwIfCancelled 가 쿼리 <em>직전</em>에만
+     * 잡던 갭(긴 쿼리 도중엔 stage 끝까지 대기)을 메운다.
+     *
+     * <p>interrupt 로 인해 action 이 예외를 던지고 그 시점 run 이 cancelled 상태면, 일반 실패가
+     * 아니라 {@link RunCancelledException} 으로 전환해 던진다(호출부가 cancel 을 그대로 전파하도록).
+     */
+    public void runCancellable(java.sql.Statement st, SqlAction action) throws Exception {
+        String runId = runHistory != null ? runHistory.getId() : null;
+        boolean registered = false;
+        if (runControlRegistry != null && runId != null && st != null) {
+            runControlRegistry.registerStatement(runId, st);
+            registered = true;
+        }
+        try {
+            action.run();
+        } catch (Exception e) {
+            if (runControlRegistry != null && runId != null && runControlRegistry.isCancelled(runId)) {
+                throw new RunCancelledException("Run cancelled (statement interrupted) — runId=" + runId);
+            }
+            throw e;
+        } finally {
+            if (registered) runControlRegistry.unregisterStatement(runId, st);
+        }
+    }
+
     /** {base}/{projectId}/{runIndex}-{ts}/ */
     private Path outputDir;
 

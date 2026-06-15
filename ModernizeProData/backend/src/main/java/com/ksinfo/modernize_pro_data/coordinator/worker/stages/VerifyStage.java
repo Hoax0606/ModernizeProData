@@ -162,19 +162,24 @@ public class VerifyStage implements StageRunner {
                     failedCount++;
                 } else {
                     ctx.throwIfCancelled();   // (D) sub-step — PK 정렬 전수 비교 (가장 시간 큰 부분) 직전 cancel 체크.
-                    // row count 일치 → PK 정렬 전수 비교 (행 정체성·누락 검출)
+                    // row count 일치 → 정렬 전수 비교 (행 정체성·누락 검출).
+                    // PK 있으면 PK 로, 없으면 전 컬럼으로 full-row 비교 (2026-06-11 보강: 이전엔 PK 없으면
+                    // 첫 컬럼 하나로만 비교 → 첫 컬럼이 unique 아니면 무의미/오탐. 전 컬럼이면 누락·변경 검출).
                     List<String> pkCols = pkColumns(columnsByTable.get(tobeTable));
-                    String pkMismatch = compareAllPkRows(fqDuck, pgQualified, pkCols, dbConfig);
+                    boolean noPk = pkCols.isEmpty();
+                    List<String> compareCols = noPk ? allColumns(columnsByTable.get(tobeTable)) : pkCols;
+                    String pkMismatch = compareCols.isEmpty() ? null
+                            : compareAllPkRows(fqDuck, pgQualified, compareCols, dbConfig);
                     if (pkMismatch != null) {
                         Map<String, Object> sampleData = new HashMap<>();
-                        sampleData.put("reason", "PK row mismatch");
+                        sampleData.put("reason", noPk ? "Row mismatch (full-row compare, no PK)" : "PK row mismatch");
                         sampleData.put("detail", tableLabel + ": " + pkMismatch);
                         sampleData.put("severity", "error");
                         sampleData.put("stageLabel", "verify.rowmatch");
                         sampleData.put("table", tableLabel);
                         sampleData.put("columns", List.of("pk", "detail"));
                         sampleData.put("columnRoles", List.of("pk", "violated"));
-                        sampleData.put("sampleRows", List.of(List.of(String.join(",", pkCols), pkMismatch)));
+                        sampleData.put("sampleRows", List.of(List.of(String.join(",", compareCols), pkMismatch)));
                         quarantineService.record(
                                 ctx.getRunHistory().getId(),
                                 stage.getId(),
@@ -259,8 +264,16 @@ public class VerifyStage implements StageRunner {
                 .filter(c -> c.getPkOrder() != null)
                 .sorted(Comparator.comparing(DdlColumn::getPkOrder))
                 .forEach(c -> pks.add(c.getPhysicalName()));
-        if (pks.isEmpty()) pks.add(cols.get(0).getPhysicalName());
+        // PK 없으면 빈 list 반환 (이전엔 첫 컬럼으로 fallback 했으나 무의미 — 호출부가 전 컬럼
+        // full-row 비교로 처리, 2026-06-11).
         return pks;
+    }
+
+    /** 테이블의 전 컬럼 physical_name (PK 없는 테이블의 full-row 비교용). */
+    private static List<String> allColumns(List<DdlColumn> cols) {
+        List<String> out = new ArrayList<>();
+        if (cols != null) for (DdlColumn c : cols) out.add(c.getPhysicalName());
+        return out;
     }
 
     /**

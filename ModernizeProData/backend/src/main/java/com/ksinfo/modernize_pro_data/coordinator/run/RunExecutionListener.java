@@ -166,7 +166,10 @@ public class RunExecutionListener {
         // "pending query result" 충돌 회피 + run별 memory_limit 격리(독립 인스턴스). finally 에서 unbind(close).
         // run별 temp_directory 로 spill 충돌도 방지.
         String runDuckTemp = ctx.getOutputDir().resolve("duck-tmp").toString();
-        duckDbService.bindRunConnection(capacityPlanner.getRunMemoryLimit(), runDuckTemp);
+        // adaptive memory_limit — register(위) 직후라 activeCount 에 이 run 포함. 혼자 돌면 usable
+        // 거의 전부를 받아 spill 최소화 (단일 run 이 1/maxConcurrent 로 굶어 느려지던 버그 해소, 2026-06-11).
+        duckDbService.bindRunConnection(
+                capacityPlanner.getRunMemoryLimit(runControlRegistry.activeCount()), runDuckTemp);
         // LoadStage 병렬 Future thread 는 ThreadLocal 을 못 보므로 run connection 을 ctx 로 전달.
         ctx.setDuckConnection(duckDbService.currentRunConnection());
         try {

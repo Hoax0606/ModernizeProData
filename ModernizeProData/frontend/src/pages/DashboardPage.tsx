@@ -755,7 +755,13 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
 
   // KPI — TO-BE schema (total) + mapping_rules (mapped) を全 project で集計.
   // mappedTables = 全列 mapped 済 (READY) のテーブル数.
-  const doneProjects = projects.filter((p) => p.phase === 'done').length;
+  // "Projects" KPI = mapping 이 끝난(全 TO-BE 테이블이 READY) project 수 / 전체.
+  // phase==='done' 기준이면 planning~rehearsal 동안 항상 0/N 이라 무의미 → mapping 완료
+  // 기준으로 진행률을 보여준다 (2026-06-10).
+  const doneProjects = projects.filter((p) => {
+    const ms = mappingStats[p.id];
+    return !!ms && ms.totalTables > 0 && ms.readyTables >= ms.totalTables;
+  }).length;
   const totalTables = projects.reduce((a, p) => a + (mappingStats[p.id]?.totalTables ?? 0), 0);
   const mappedTables = projects.reduce((a, p) => a + (mappingStats[p.id]?.readyTables ?? 0), 0);
   const totalColumns = projects.reduce((a, p) => a + (mappingStats[p.id]?.totalColumns ?? 0), 0);

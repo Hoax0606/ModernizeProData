@@ -116,6 +116,25 @@ function AppRoutes() {
       .catch(() => {});
   }, [location.pathname, navigate]);
 
+  // 세션 만료 watcher (2026-06-11) — zustand 셀렉터는 "시간 경과" 로는 재평가되지 않아,
+  // 마운트된 SPA 가 JWT 만료(예: 야간 8h)돼도 화면이 로그인된 채 남아있다가 다음 API 401
+  // 때에만 로그아웃됐다. FE polling 마저 멈추면 그 트리거조차 없어 "로그인된 듯 보이지만
+  // 클릭하면 로그인 화면" 혼란. 30초마다(+네비게이션 즉시) 만료를 직접 검사해 로그인 화면으로.
+  useEffect(() => {
+    const check = () => {
+      const s = useAuthStore.getState();
+      if (s.token && !s.isAuthenticated()) {
+        try { s.logout(); } catch { /* noop */ }
+        if (location.pathname !== '/login' && location.pathname !== '/license-setup') {
+          navigate('/login', { replace: true });
+        }
+      }
+    };
+    check();
+    const id = window.setInterval(check, 30_000);
+    return () => window.clearInterval(id);
+  }, [location.pathname, navigate]);
+
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />

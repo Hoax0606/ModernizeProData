@@ -466,6 +466,12 @@ public class MappingImportService {
             }
             validateRequired("column_mapping.csv", REQUIRED_RULE_COLUMNS, headers.keySet());
 
+            // schema-lenient 매칭 — 맵핑정의서가 schema 한정(예: BANKSYS.TRANSACTIONS)인데 AS-IS/TO-BE
+            // DDL 은 schema 없이(TRANSACTIONS) 임포트되면(또는 반대) exact "schema|table" 키가 안 맞아
+            // 유효 row 가 통째로 silent drop 되던 버그(2026-06-11). 테이블명만으로도 매칭되게 fallback.
+            java.util.Set<String> asisTableOnly = projectAsisKeys == null ? java.util.Set.of() : tableNamesOf(projectAsisKeys);
+            java.util.Set<String> tobeTableOnly = projectTobeKeys == null ? java.util.Set.of() : tableNamesOf(projectTobeKeys);
+
             String lastTobeTableRaw = null;
             String lastTobeColumn   = null;
 
@@ -497,7 +503,8 @@ public class MappingImportService {
                 // 主源 이었던 problem 의 대책 (2026-05-29 추가).
                 if (projectTobeKeys != null) {
                     String tobeCheckKey = tobeSchema.toLowerCase() + "|" + tobeTable.toLowerCase();
-                    if (!projectTobeKeys.contains(tobeCheckKey)) {
+                    if (!projectTobeKeys.contains(tobeCheckKey)
+                            && !tobeTableOnly.contains(tobeTable.toLowerCase())) {
                         log.warn("[mapping-import] skipping row — tobe_table '{}.{}' not in project's TO-BE DDL",
                                 tobeSchema, tobeTable);
                         continue;
@@ -517,7 +524,10 @@ public class MappingImportService {
                         String aSchema = adot2 > 0 ? asisTableRawCheck.substring(0, adot2) : "";
                         String aTable  = adot2 > 0 ? asisTableRawCheck.substring(adot2 + 1) : asisTableRawCheck;
                         String checkKey = aSchema.toLowerCase() + "|" + aTable.toLowerCase();
-                        if (!projectAsisKeys.contains(checkKey)) {
+                        if (!projectAsisKeys.contains(checkKey)
+                                && !asisTableOnly.contains(aTable.toLowerCase())) {
+                            log.warn("[mapping-import] skipping row — asis_table '{}' not in project's AS-IS DDL",
+                                    asisTableRawCheck);
                             continue;
                         }
                     }
@@ -526,7 +536,8 @@ public class MappingImportService {
                 // 않으면 mapping 만 만들어지고 Load 단계에서 PG 에 그 table 이 없어 통째로 fail.
                 if (projectTobeKeys != null) {
                     String checkKey = tobeSchema.toLowerCase() + "|" + tobeTable.toLowerCase();
-                    if (!projectTobeKeys.contains(checkKey)) {
+                    if (!projectTobeKeys.contains(checkKey)
+                            && !tobeTableOnly.contains(tobeTable.toLowerCase())) {
                         continue;
                     }
                 }
@@ -1398,6 +1409,16 @@ public class MappingImportService {
 
     private static String escape(String s) {
         return s.replace("'", "''");
+    }
+
+    /** "schema|table" 키 set 에서 table 부분만 추출 (schema-lenient 매칭 fallback 용). */
+    private static java.util.Set<String> tableNamesOf(java.util.Set<String> schemaTableKeys) {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        for (String k : schemaTableKeys) {
+            int p = k.indexOf('|');
+            out.add(p >= 0 ? k.substring(p + 1) : k);
+        }
+        return out;
     }
 
     /**

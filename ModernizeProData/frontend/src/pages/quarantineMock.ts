@@ -69,6 +69,7 @@ export interface QuarantineHistoryEntry {
 
 export interface QuarantineGroup {
   id: string;
+  runId?: string;                                // 이 quarantine 이 속한 run (BE 채움). archive self-row 용.
   bindingId?: string;                            // BE 만 채움. mock 은 비움. parquet 다운로드 endpoint key.
   reason: string;                                // 짧은 제목 — severity color 로 강조
   detail: string;                                // 세부 (어떤 컬럼/제약), 예: "GL_ENTRY.acct_no → ACCT_MASTER.account_no"
@@ -290,6 +291,8 @@ export function buildQuarantineGroups(_runId: string): QuarantineGroup[] {
 export interface SiteQuarantineGroup extends QuarantineGroup {
   projectId: string;
   projectName: string;
+  /** false = 프로젝트의 최신 run 이 아닌 직전 run 의 quarantine (새 run 시작됨) → "지난 Run" 표시. */
+  fromLatestRun?: boolean;
 }
 
 function buildSiteQuarantineBase(): QuarantineGroup[] {

@@ -33,4 +33,7 @@ public interface RunHistoryRepository extends JpaRepository<RunHistory, String> 
 
     /** Project 의 누적 run 수 (output dir 의 runIndex 결정용). */
     long countByProjectId(String projectId);
+
+    /** 현재 coordinator 가 코디네이트 중인 in-flight run 수 (status 별). in-flight 게이트용. */
+    long countByStatus(RunStatus status);
 }

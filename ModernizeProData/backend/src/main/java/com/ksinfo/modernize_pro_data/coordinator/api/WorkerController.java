@@ -46,6 +46,8 @@ public class WorkerController {
             WorkerStatus status,
             OffsetDateTime registeredAt,
             OffsetDateTime lastSeenAt,
+            /** Worker daemon 이 보고한 설치 앱 버전 (예: 1.0.25). 미보고/구버전은 null. */
+            String appVersion,
             OffsetDateTime createdAt,
             String createdBy
     ) {}
@@ -58,11 +60,11 @@ public class WorkerController {
         return new WorkerSummaryDto(
                 w.getWorkerId(), w.getName(), w.getSiteId(), w.getUserId(), username,
                 w.getStatus(),
-                w.getRegisteredAt(), w.getLastSeenAt(),
+                w.getRegisteredAt(), w.getLastSeenAt(), w.getAppVersion(),
                 w.getCreatedAt(), w.getCreatedBy());
     }
 
-    public record RegisterRequest(String hostname) {}
+    public record RegisterRequest(String hostname, String appVersion) {}
 
     @GetMapping
     @PreAuthorize("hasRole('MASTER')")
@@ -89,7 +91,7 @@ public class WorkerController {
             @RequestBody RegisterRequest req,
             Authentication auth
     ) {
-        WorkerNode w = workerNodeService.selfRegister(auth.getName(), req.hostname());
+        WorkerNode w = workerNodeService.selfRegister(auth.getName(), req.hostname(), req.appVersion());
         return ApiResponse.ok(toDto(w));
     }
 
@@ -98,7 +100,7 @@ public class WorkerController {
             @RequestBody RegisterRequest req,
             Authentication auth
     ) {
-        workerNodeService.touchLastSeen(auth.getName(), req.hostname());
+        workerNodeService.touchLastSeen(auth.getName(), req.hostname(), req.appVersion());
         return ApiResponse.ok(null);
     }
 }

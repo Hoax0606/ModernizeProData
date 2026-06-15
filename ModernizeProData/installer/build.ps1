@@ -491,6 +491,14 @@ function Invoke-JpackageForLang {
     $appDesc   = if ($isWorker) { 'Modernize Pro Data - Worker' } else { 'Modernize Pro Data - Coordinator' }
     $profiles  = if ($isWorker) { 'prod,worker' } else { 'prod' }
     $mpdMode   = if ($isWorker) { 'worker' } else { 'coordinator' }
+    # Heap (2026-06-10): role 별로 다르게 — heap 필요량의 성질이 다르기 때문.
+    #  - Coordinator = hub(JVM heap) + executor 겸함. heap 필요량이 코디네이트하는 run 수에
+    #    비례 → RAM% 로 스케일 (큰 머신=큰 fleet=heap↑ 자동). 16GB->~4.8g / 32GB->~9.6g.
+    #  - Worker = 실행 전용. DuckDB 는 native(off-heap)라 데이터·RAM 무관하게 heap 필요량이
+    #    거의 평평(~2.5GB, 대용량 테이블 sampling/validation margin 포함) → 고정.
+    #    RAM% 로 하면 큰 머신서 heap 과대할당 → RunCapacityPlanner 가 그만큼 DuckDB 예산에서
+    #    빼 동시성 손해. 고정이면 reconcile 이 2.5GB 만 빼 나머지를 DuckDB 동시 run 에 줌.
+    $heapOpt   = if ($isWorker) { '-Xmx2560m' } else { '-XX:MaxRAMPercentage=30.0' }
 
     $jpackageArgs = @(
         '--type',         'msi'
@@ -517,10 +525,10 @@ function Invoke-JpackageForLang {
         '--java-options', '-XX:TieredStopAtLevel=1'
         # JavaFX native DLLs live alongside the fat jar inside $APPDIR.
         '--java-options', '-Djava.library.path=$APPDIR'
-        # Heap = 4GB. AuditStage 의 SAMPLE_LIMIT 1000 cap 으로 OOM risk 자체는
-        # 줄였지만, 대용량 (transaction_monthly 등) 운영 시 안전 margin.
-        # JVM default = 256MB ~ system RAM 의 1/4. 명시로 일관성 확보.
-        '--java-options', '-Xmx4g'
+        # Heap — role 별 ($heapOpt 참조 위). coordinator=RAM% 30%, worker=고정 2.5GB.
+        # RunCapacityPlanner 가 이 heap 을 Runtime.maxMemory() 로 읽어 DuckDB 예산에서 빼므로
+        # heap·DuckDB·(coordinator 면 메타PG) 가 RAM 안에 공존 (초과예약 → swap/OOM 방지).
+        '--java-options', $heapOpt
         '--win-per-user-install'
         '--win-menu'
         '--win-menu-group', $appName

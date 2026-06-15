@@ -135,23 +135,41 @@ public class QuarantineController {
 
         List<SiteQuarantineGroupView> result = new ArrayList<>();
         for (Project p : projects) {
-            RunHistory latest = runRepo.findFirstByProjectIdOrderByStartedAtDesc(p.getId());
-            if (latest == null) continue;
+            List<RunHistory> runs = runRepo.findByProjectIdOrderByStartedAtDesc(p.getId());
+            if (runs.isEmpty()) continue;
 
-            List<QuarantineEntry> entries = quarantineRepo.findByRunIdOrderByCreatedAtAsc(latest.getId());
-            if (entries.isEmpty()) continue;
+            // quarantine 가 있는 "가장 최근 run" 을 anchor 로 한다. 최신 run 이 비어있으면
+            // (새 run 이 막 시작됐거나 clean run) → 직전 run 의 quarantine 을 보여주되, 그게 더 이상
+            // 최신 run 이 아니므로 fromLatestRun=false 로 표시 → FE 가 "지난 Run" 으로 마킹(B 방식).
+            RunHistory srcRun = null;
+            List<QuarantineEntry> entries = List.of();
+            for (RunHistory r : runs) {
+                List<QuarantineEntry> es = quarantineRepo.findByRunIdOrderByCreatedAtAsc(r.getId());
+                if (!es.isEmpty()) { srcRun = r; entries = es; break; }
+            }
+            if (srcRun == null) continue;
+            boolean fromLatestRun = runs.get(0).getId().equals(srcRun.getId());
 
             Map<String, String> stageKeyById = loadStageKeys(entries);
+            // Site-wide 뷰도 ack(skip) 상태를 표시 — per-project 에서 Skip 한 WARN 이 여기서도
+            // skip 으로 보이게 (직접 ack 는 안 하고 상태만 반영). byRun 과 동일한 carry-over 규칙.
+            Map<String, AckSummary> ackByKey = loadAckSummaryByGroup(entries, p.getId(), srcRun.getRunType());
             for (QuarantineEntry e : entries) {
                 String stage = stageKeyById.getOrDefault(e.getStageInstanceId(), "unknown");
-                // Site-wide 뷰는 ack 정보 미표시 (분류 작업 페이지 아님). null/0 전달.
-                QuarantineGroupView g = toGroupView(e, stage, null, 0);
+                Map<String, Object> s = e.getSampleData() == null ? Map.of() : e.getSampleData();
+                String reason = (String) s.getOrDefault("reason", e.getRuleName());
+                AckSummary summary = ackByKey.get(e.getBindingId() + "|" + e.getRuleName() + "|" + reason);
+                AckInfoView ack = summary == null ? null : summary.ack();
+                int priorCount = summary == null ? 0 : summary.priorAckCount();
+                QuarantineGroupView g = toGroupView(e, stage, ack, priorCount);
                 result.add(new SiteQuarantineGroupView(
-                        g.id(), g.bindingId(), g.reason(), g.detail(), g.severity(), g.stage(),
+                        g.id(), g.runId(), g.bindingId(), g.reason(), g.detail(), g.severity(), g.stage(),
                         g.firstSeenAt(), g.table(),
                         g.columns(), g.columnRoles(), g.sampleRows(), g.toBeValues(),
                         g.rowCount(),
                         p.getId(), p.getName(),
+                        g.ack(),
+                        fromLatestRun,
                         g.history()));
             }
         }
@@ -249,6 +267,7 @@ public class QuarantineController {
                 .toList();
         return new QuarantineGroupView(
                 e.getId(),
+                e.getRunId(),
                 e.getBindingId(),
                 (String) s.getOrDefault("reason", e.getRuleName()),
                 (String) s.getOrDefault("detail", ""),
@@ -269,6 +288,7 @@ public class QuarantineController {
 
     public record QuarantineGroupView(
             String id,
+            String runId,                     // 이 quarantine entry 가 속한 run
             String bindingId,                 // 다운로드 endpoint key — group 단위 parquet
             String reason,
             String detail,
@@ -313,6 +333,7 @@ public class QuarantineController {
 
     public record SiteQuarantineGroupView(
             String id,
+            String runId,
             String bindingId,
             String reason,
             String detail,
@@ -327,6 +348,8 @@ public class QuarantineController {
             long rowCount,
             String projectId,
             String projectName,
+            AckInfoView ack,                  // null = ack 없음. per-project Skip(ack) 상태를 site 뷰에도 반영
+            boolean fromLatestRun,            // false = 이 quarantine 은 프로젝트의 최신 run 이 아닌 직전 run 것 (새 run 시작됨) → FE 가 "지난 Run" 표시
             List<HistoryEntryView> history    // 같은 (binding, rule_name) 의 옛 run entry. FE archive panel 용
     ) {}
 }

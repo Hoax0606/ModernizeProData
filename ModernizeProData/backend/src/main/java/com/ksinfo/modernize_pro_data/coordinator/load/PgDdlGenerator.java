@@ -93,11 +93,33 @@ public final class PgDdlGenerator {
                 return "NUMERIC";
             case "INT":
             case "INTEGER":
+            case "INT4":
                 return "INTEGER";
             case "BIGINT":
+            case "INT8":
+                // PG 내부 타입명 int8 = bigint. 정수형엔 수정자(precision) 안 붙인다 — TO-BE DDL 을
+                // PgSchemaExtractor 가 udt_name(int8)+numeric_precision(64bit)로 캡처해 "INT8(64)" 가
+                // 되면, 그대로 발급 시 CREATE TABLE 이 "type modifier is not allowed for type int8" 로
+                // 실패하던 버그. canonical 'BIGINT'(modifier 없음)로 발급해 해소.
                 return "BIGINT";
             case "SMALLINT":
+            case "INT2":
                 return "SMALLINT";
+            case "BOOL":
+                return "BOOLEAN";
+            case "FLOAT4":
+                return "REAL";
+            case "FLOAT8":
+                return "DOUBLE PRECISION";
+            case "BPCHAR":
+                return "CHAR" + (len != null && len > 0 ? "(" + len + ")" : "");
+            case "JSON":
+            case "JSONB":
+                return "JSONB";
+            case "UUID":
+                return "UUID";
+            case "TIMESTAMPTZ":
+                return "TIMESTAMP WITH TIME ZONE";
             case "FLOAT":
             case "BINARY_DOUBLE":
                 return "DOUBLE PRECISION";

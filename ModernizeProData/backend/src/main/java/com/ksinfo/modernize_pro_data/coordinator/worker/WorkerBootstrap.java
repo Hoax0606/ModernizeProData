@@ -67,6 +67,11 @@ public class WorkerBootstrap {
     @Value("${modernize.worker.password:}")
     private String workerPassword;
 
+    /** 설치 앱 버전 — 빌드가 -Dmodernize.version 으로 주입 (개발 실행 시 'dev').
+     *  self-register / heartbeat 시 Coordinator 에 보고해 User Management 에서 표시. */
+    @Value("${modernize.version:dev}")
+    private String appVersion;
+
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
@@ -84,6 +89,34 @@ public class WorkerBootstrap {
     /** RUN_CANCEL 수신 시 worker process 의 stage runner 를 깨우기 위해 사용. */
     @Autowired
     private RunControlRegistry runControlRegistry;
+
+    /** worker 동시 실행 상한 산정 (RAM/CPU 기반). 초과 run 은 큐 대기. */
+    @Autowired
+    private com.ksinfo.modernize_pro_data.common.config.RunCapacityPlanner capacityPlanner;
+
+    /** worker 측 run 실행 풀 — maxConcurrent 만 동시 실행, 나머지는 큐. 이전엔 run 마다 raw thread
+     *  를 만들어 상한이 없었다(배정된 만큼 전부 동시 → 메모리 폭발). lazy 초기화. */
+    private volatile java.util.concurrent.ExecutorService runPool;
+
+    private java.util.concurrent.ExecutorService runPool() {
+        java.util.concurrent.ExecutorService p = runPool;
+        if (p == null) {
+            synchronized (this) {
+                p = runPool;
+                if (p == null) {
+                    int n = Math.max(1, capacityPlanner.getMaxConcurrent());
+                    java.util.concurrent.atomic.AtomicInteger seq = new java.util.concurrent.atomic.AtomicInteger();
+                    p = new java.util.concurrent.ThreadPoolExecutor(
+                            n, n, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
+                            new java.util.concurrent.LinkedBlockingQueue<>(),
+                            r -> { Thread t = new Thread(r, "worker-run-" + seq.incrementAndGet()); t.setDaemon(true); return t; });
+                    runPool = p;
+                    log.info("Worker run pool created: maxConcurrent={} (자원 기반, 초과분 큐 대기)", n);
+                }
+            }
+        }
+        return p;
+    }
 
     public record Status(
             String coordinatorUrl,
@@ -124,7 +157,7 @@ public class WorkerBootstrap {
         if (jwt.get() == null && !ensureLoggedIn()) return;
         try {
             JsonNode body = postJson("/api/v1/workers/heartbeat",
-                    "{\"hostname\":\"" + escape(hostname()) + "\"}");
+                    "{\"hostname\":\"" + escape(hostname()) + "\",\"appVersion\":\"" + escape(appVersion) + "\"}");
             // 401 일 때 ensureLoggedIn() 가 재로그인 + self-register 도 다시.
             updateStatus("registered", body.path("data").path("workerId").asText(currentWorkerId()), null);
         } catch (Unauthorized ignored) {
@@ -177,7 +210,7 @@ public class WorkerBootstrap {
     private void selfRegister() {
         try {
             JsonNode body = postJson("/api/v1/workers/self-register",
-                    "{\"hostname\":\"" + escape(hostname()) + "\"}");
+                    "{\"hostname\":\"" + escape(hostname()) + "\",\"appVersion\":\"" + escape(appVersion) + "\"}");
             String workerId = body.path("data").path("workerId").asText(null);
             updateStatus("registered", workerId, null);
             log.info("Self-registered as workerId={}", workerId);
@@ -321,17 +354,16 @@ public class WorkerBootstrap {
 
         switch (type) {
             case "RUN_START" -> {
-                // STOMP 콜백 thread 는 stage runner 의 긴 작업으로 막아두면 안 된다 — 별 thread 로.
-                Thread t = new Thread(() -> {
-                    log.info("Worker received RUN_START runId={}", runId);
+                // STOMP 콜백 thread 는 막지 않는다 — 동시성 상한 풀에 제출. maxConcurrent 초과분은
+                // 큐에서 대기 → 슬롯 나면 실행 (이전 raw-thread 방식은 상한이 없어 메모리 폭발).
+                log.info("Worker received RUN_START runId={} (queued to run pool)", runId);
+                runPool().submit(() -> {
                     try {
                         runExecutionListener.executeRun(runId);
                     } catch (Exception e) {
                         log.error("Worker run execution failed runId={}", runId, e);
                     }
-                }, "worker-run-" + runId);
-                t.setDaemon(true);
-                t.start();
+                });
             }
             case "RUN_CANCEL" -> {
                 String reason = String.valueOf(body.getOrDefault("reason", ""));

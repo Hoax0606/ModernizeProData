@@ -12,6 +12,8 @@ export interface WorkerSummaryDto {
   status: WorkerStatus;
   registeredAt: string | null;
   lastSeenAt: string | null;
+  /** Worker daemon 이 보고한 설치 앱 버전 (예: 1.0.25). 미보고/구버전은 null. */
+  appVersion: string | null;
   createdAt: string;
   createdBy: string;
 }

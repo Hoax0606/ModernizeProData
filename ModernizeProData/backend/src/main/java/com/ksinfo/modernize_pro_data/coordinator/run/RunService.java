@@ -73,6 +73,15 @@ public class RunService {
 
     @org.springframework.beans.factory.annotation.Value("${modernize.coordinator.self-username:master}")
     private String coordinatorSelfUsername;
+
+    /**
+     * coordinator 가 동시에 코디네이트할 수 있는 in-flight run 총수 상한 (워커 수 무관).
+     * 모든 run 의 로그·집계·메타DB·WS 가 coordinator 한 대로 모이므로, 워커를 아무리 늘려도
+     * 동시 run 이 이 수를 넘으면 hub 가 포화된다 → 초과분은 reject (안전밸브, 2026-06-10).
+     * 기본 32 — 다중 머신 fleet 도 통과하되 폭주 burst(예: 100개 startAll)는 막음. 0/음수 = 무제한.
+     */
+    @org.springframework.beans.factory.annotation.Value("${modernize.run.max-inflight-coordinated:32}")
+    private int maxInflightCoordinated;
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
     private final MappingTableBindingRepository bindingRepo;
@@ -186,6 +195,19 @@ public class RunService {
             return RunResult.locked("project already in run_status: " + currentStatus);
         }
 
+        // 2.5. In-flight 게이트 (워커 수 무관) — coordinator 가 동시 코디네이트하는 run 총수 상한.
+        //   hub(로그·집계·메타DB·WS)가 한 대로 모이므로 동시 run 폭주 시 포화/OOM. 초과분 reject.
+        //   (soft cap — 병렬 startAll 의 미세 race 로 약간 초과 가능하나 안전밸브 목적엔 충분.)
+        if (maxInflightCoordinated > 0) {
+            long inflight = runHistoryRepo.countByStatus(RunStatus.running);
+            if (inflight >= maxInflightCoordinated) {
+                log.warn("startRun rejected: coordinator in-flight capacity reached ({} >= {}) projectId={}",
+                        inflight, maxInflightCoordinated, projectId);
+                return RunResult.rejected("coordinator at capacity (" + inflight
+                        + " runs in flight, limit " + maxInflightCoordinated + ") — retry shortly");
+            }
+        }
+
         // 3. Snapshot 解決
         //   - rehearsal: latest approved 'mapping' snapshot
         //   - cutover  : latest approved 'cutover' snapshot (必須)
@@ -197,9 +219,21 @@ public class RunService {
 
         // 3.5. Worker dispatch decision — assignee 의 Worker daemon 이 등록 + heartbeat 살아있으면
         //   그 worker 로 WS push (RunExecutionListener 가 Coordinator local 실행 skip).
-        //   offline / 미등록 / 미할당 / Coordinator self 면 그냥 Coordinator 가 local 실행 fallback.
-        //   (REJECT 정책은 운영 부담이 커서 fallback 으로 통일 — Worker 안 켜져있어도 일이 멈추지 않게.)
+        //   미할당(null) / Coordinator self 면 Coordinator 가 local 실행 (정상 — 4대 풀가동 시 1대 몫).
         String resolvedWorker = resolveWorkerForProject(project);
+
+        // 3.5a. 명시 배정된 Worker 가 offline 이면 REJECT (2026-06-10 OOM 완화).
+        //   이전엔 offline 이어도 Coordinator 가 local 로 떠안았다 — 그런데 OOM → heartbeat 처리 지연
+        //   → 워커 offline 으로 보임 → 그 run 들이 전부 local 로 떨어짐 → OOM 가중되는 악순환의 핵심.
+        //   self / 미할당 run 은 그대로 local 허용 (coordinator 도 executor 다). 남의 워커가 꺼져있는데
+        //   coordinator 가 대신 떠안는 경우만 차단 → 운영자가 워커 켜거나 재배정하도록 명확히 안내.
+        if (resolvedWorker != null && !resolvedWorker.isBlank()
+                && !resolvedWorker.equals(coordinatorSelfUsername)
+                && workerNodeService.findOnlineForUsername(resolvedWorker).isEmpty()) {
+            log.warn("startRun rejected: assigned worker '{}' offline projectId={}", resolvedWorker, projectId);
+            return RunResult.rejected("assigned worker '" + resolvedWorker
+                    + "' is offline — start that worker or reassign the project");
+        }
 
         // 3.6. Resume-from-failed-run 검증 — resumeFromRunId 가 주어지면 옛 run 정합성 확인.
         //   조건 통과: same snapshot + same selectedTables (또는 옛 run 의 superset) + 옛 run 의

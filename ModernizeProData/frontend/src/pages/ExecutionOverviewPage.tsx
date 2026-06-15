@@ -77,6 +77,8 @@ export function ExecutionOverviewPage() {
   // key = projectId, value = 새 executionAssignee ('' = unassigned).
   const [assigneeDraft, setAssigneeDraft] = useState<Record<string, string>>({});
   const [savingAssignees, setSavingAssignees] = useState(false);
+  // Run 거부(REJECTED/LOCKED) 사유 — 브라우저 alert 대신 인라인 배너로 표시.
+  const [rejectMsgs, setRejectMsgs] = useState<string[]>([]);
 
   const dirtyAssigneeIds = useMemo(() => Object.keys(assigneeDraft).filter((id) => {
     const p = projects.find((p) => p.id === id);
@@ -241,14 +243,19 @@ export function ExecutionOverviewPage() {
     return true;
   });
 
-  // 체크박스 활성 기준: ready / sign-off 만 (test · rehearsal · cutover 는 실행 중 상태).
+  // 체크박스 활성 기준: (a) Run 대상 = ready / sign-off, (b) Abort 대상 = 지금 running 인 run.
+  // 이전엔 ready/sign-off 만 선택 가능해서, run 이 시작되어 phase 가 rehearsal/cutover/test 로
+  // 바뀌면 체크박스가 비활성 → 선택을 잃은 running run 을 다시 선택 못 해 Abort 가 불가능했다
+  // (2026-06-10 수정). running row 도 선택 가능하게 해 abort 경로를 연다.
   // 담당자 dropdown 은 Coordinator(master) 만 변경 가능. 그 외는 text 로만 표시 (본인 row 포함).
   // 단 체크박스(run/abort 대상 선택) 는 본인 row 도 가능.
   const isMine = (p: Project) => !!user?.username && p.executionAssignee === user.username;
   const canEditRow = (_p: Project) => isMaster;
+  const isRunningNow = (p: Project) => apiMetrics[p.id]?.runStatus === 'running';
+  const isRunnable = (p: Project) => p.phase === 'ready' || p.phase === 'sign-off';
   const isSelectable = (p: Project) => {
     if (!isMaster && !isMine(p)) return false;
-    return p.phase === 'ready' || p.phase === 'sign-off';
+    return isRunnable(p) || isRunningNow(p);
   };
 
   const toggleOne = (id: string) =>
@@ -277,16 +284,20 @@ export function ExecutionOverviewPage() {
     }
   };
 
-  const runningPhases: Project['phase'][] = ['cutover', 'rehearsal', 'hypercare', 'test'];
-  const selectedRunningCount = siteProjects.filter(
-    (p) => selected.has(p.id) && runningPhases.includes(p.phase),
-  ).length;
+  // 선택된 row 를 Run 대상 / Abort 대상으로 분리. running row 도 선택 가능해졌으므로
+  // Run 은 runnable(ready/sign-off) 만, Abort 는 지금 running 인 run 만 대상으로 한다.
+  const runnableSelectedIds = [...selected].filter((id) => {
+    const p = siteProjects.find((pp) => pp.id === id);
+    return !!p && isRunnable(p);
+  });
+  const abortableSelectedIds = [...selected].filter((id) => apiMetrics[id]?.runStatus === 'running');
+  const selectedRunningCount = abortableSelectedIds.length;
 
-  const runCount = selected.size;
-  // 선택된 row 중 executionAssignee 미할당 (또는 draft 의 변경 도 unassigned) 이
-  // 하나라도 있으면 Run 금지 — Worker delegate 대상이 없는 row 는 RunService 가
-  // REJECTED 반환하므로 UI 에서 미리 차단해 혼란 방지.
-  const hasUnassignedSelected = [...selected].some((id) => {
+  const runCount = runnableSelectedIds.length;
+  // Run 대상 중 executionAssignee 미할당 (또는 draft 변경도 unassigned) 이 하나라도 있으면
+  // Run 금지 — Worker delegate 대상이 없는 row 는 RunService 가 REJECTED 반환하므로 UI 에서
+  // 미리 차단해 혼란 방지. (Abort 대상에는 적용 안 함 — 이미 실행 중이라 assignee 무관.)
+  const hasUnassignedSelected = runnableSelectedIds.some((id) => {
     const draft = assigneeDraft[id];
     const effective = draft !== undefined ? draft : (siteProjects.find((p) => p.id === id)?.executionAssignee ?? '');
     return !effective;
@@ -297,12 +308,14 @@ export function ExecutionOverviewPage() {
   const handleRefresh = () => { loadMetrics(); loadWorkers(); };
   const handleRun = async () => {
     if (!isMaster || !activeSiteId) return;
-    const ids = [...selected];
+    // Run 은 runnable(ready/sign-off) 선택분만 — running row 도 선택 가능해졌으므로 여기서 분리.
+    const ids = runnableSelectedIds;
     if (ids.length === 0) return;
     // 선택 project 일괄 실행 — /runs/all (startAll) 로 호출해 각 run 에 bulk marker 가
     // 박힌다. 이것이 (1) 개별 ExecutionPage 의 site-level lock 감지 (2) abort 권한
     // master 한정 분기의 근거. 개별 start 반복은 bulk marker 가 안 붙어 둘 다 안 됨.
     const setActive = useExecutionPreflightStore.getState().setActiveRunId;
+    setRejectMsgs([]);
     const rejected: string[] = [];
     try {
       const res = await runsApi.startAll(activeSiteId, ids);
@@ -319,7 +332,8 @@ export function ExecutionOverviewPage() {
     }
     if (rejected.length > 0) {
       console.warn('[ExecutionOverview] run rejected', rejected);
-      window.alert(rejected.join('\n'));
+      // 브라우저 네이티브 alert 대신 인라인 배너로 표시 (2026-06-11).
+      setRejectMsgs(rejected);
     }
     // 선택 유지 — Run 직후 Abort 활성화를 위해 selectedRunningCount 가 살아 있어야 함.
     loadMetrics();
@@ -340,16 +354,6 @@ export function ExecutionOverviewPage() {
     if (activeSiteId) fetchProjects(activeSiteId);
   };
 
-  // KPI 집계 — phase 기준 (running/done counter 용).
-  const status = siteProjects.reduce(
-    (a, p) => {
-      if (p.phase === 'done') return { ...a, done: a.done + 1 };
-      if (runningPhases.includes(p.phase)) return { ...a, running: a.running + 1 };
-      return a;
-    },
-    { running: 0, done: 0 },
-  );
-
   // (B) Overall progress / toolbar 상단 안내 — metrics 상태에 따라 동적.
   const metricValues = Object.values(metrics);
   const runningRuns = metricValues.filter((m) => m.runStatus === 'running').length;
@@ -357,6 +361,11 @@ export function ExecutionOverviewPage() {
     (m) => m.runStatus === 'failed' || m.runStatus === 'timed_out' || m.runStatus === 'aborted',
   ).length;
   const successRuns = metricValues.filter((m) => m.runStatus === 'success').length;
+  // "Projects" KPI — 실행 batch 진행률. in-play = run 이 한 번이라도 잡힌 project 총수
+  // (running + terminal), terminal = 끝난(success/failed/aborted/timed_out) run. 실행이
+  // 진행될수록 분모는 고정, 분자가 끝난 것만큼 올라간다 (2026-06-10).
+  const terminalRuns = successRuns + failedRuns;
+  const runsInPlay = runningRuns + terminalRuns;
   const anyRun = runningRuns + failedRuns + successRuns > 0;
   const statusHint = !anyRun
     ? t('executionOverview.noRunYet')
@@ -394,7 +403,7 @@ export function ExecutionOverviewPage() {
     <div>
       {/* KPI row — Phase Mix 없음 */}
       <div style={styles.kpiRow}>
-        <Kpi label={t('executionOverview.kpi.projects')} value={`${status.done} / ${siteProjects.length}`} tone="info" />
+        <Kpi label={t('executionOverview.kpi.projects')} value={`${terminalRuns} / ${runsInPlay}`} tone="info" />
         <Kpi label={t('executionOverview.kpi.running')}  value={runningRuns} tone={runningRuns > 0 ? 'warn' : undefined} />
         <Kpi label={t('executionOverview.kpi.tables')}   value={`${totalTablesDone} / ${totalTables}`} />
         <Kpi label={t('executionOverview.kpi.rows')}     value={totalRows.toLocaleString()} />
@@ -512,6 +521,28 @@ export function ExecutionOverviewPage() {
           {canAbort ? t('executionOverview.btn.abortN', { n: selectedRunningCount }) : t('executionOverview.btn.abort')}
         </button>
       </div>
+
+      {/* Run 거부 사유 — 인라인 red 배너 (브라우저 alert 대체) */}
+      {rejectMsgs.length > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'flex-start', gap: 8,
+          padding: '8px 12px', marginBottom: 8, borderRadius: 6,
+          background: 'var(--red-50)', border: '1px solid var(--red)',
+        }}>
+          <span style={{ color: 'var(--red)', fontWeight: 700, flexShrink: 0 }}>⛔ {t('executionOverview.runRejected')}</span>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {rejectMsgs.map((m, i) => (
+              <span key={i} style={{ fontSize: 12, color: 'var(--text-2)', fontFamily: 'var(--mono)' }}>{m}</span>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => setRejectMsgs([])}
+            style={{ background: 'none', border: 'none', color: 'var(--text-3)', cursor: 'pointer', fontSize: 16, lineHeight: 1, flexShrink: 0 }}
+            aria-label={t('common.close')}
+          >×</button>
+        </div>
+      )}
 
       {/* Table */}
       <div style={styles.tableWrap}>

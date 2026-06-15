@@ -14,6 +14,7 @@ import {
 } from '../store/executionPreflight';
 import { runPreflight, isAllPass, type TableCheckResult } from '../lib/preflightValidation';
 import { tobeDbApi } from '../api/tobeDb';
+import { useTobeDbHealth } from '../hooks/useTobeDbHealth';
 import { csvPreviewApi } from '../api/csvPreview';
 import { mappingImportApi } from '../api/mappingImport';
 import { runsApi, errorDetailText, type RunHistoryDto, type StageView } from '../api/runs';
@@ -109,6 +110,9 @@ export function ExecutionPage() {
     if (!project) return;
     useExecutionPreflightStore.getState().setActiveRunId(project.id, runId);
   };
+  // 실행 target env 의 TO-BE DB 실시간 도달성 — run 진행 중엔 5s, 평소 12s 로 poll.
+  // (hook 은 early-return 위에 둬야 하므로 site 미확정 시 site?.id = undefined → 자동 disabled.)
+  const tobeHealth = useTobeDbHealth(site?.id, true, activeRunId ? 5_000 : 12_000);
   /* TO-BE / AS-IS DDL schemas — used for table selector + preflight validation. */
   const tobeSchema = useTobeDdlStore((s) => project ? s.schemasByProject[project.id] : undefined);
   const asisSchema = useAsisDdlStore((s) => project ? s.schemasByProject[project.id] : undefined);
@@ -705,10 +709,13 @@ export function ExecutionPage() {
   // 정의 직전 블록 참조.)
   const runIsBulk = run?.metadata != null && (run.metadata as Record<string, unknown>).bulk === true;
   const canStop = isMaster || (isMyProject && !runIsBulk);
-  /* Retry / Discard も Stop と同じ権限 — bystander が他人の run を rewind / abort できないように.
-     (origin/dev 2026-05-31 取り込み) */
-  const canRetry = canStop;
-  const canDiscard = canStop;
+  /* Retry / Discard — terminal(failed/timed_out/aborted) run 의 복구라 bulk 여부와 무관하게
+     assignee 본인(isMyProject)도 가능해야 한다. 이전엔 canStop(=bulk run 이면 master 한정)을
+     그대로 써서, master 가 /runs/all 로 일괄 시작한 run 이 실패하면 배정된 worker 가 자기 run 을
+     Resume/Discard 못 하고 "Run failed …" 만 보였다 (2026-06-11 수정). bystander(타 worker)는
+     isMyProject=false 라 여전히 못 함 — assignee 본인만 자기 실패 run 복구. */
+  const canRetry = isMaster || isMyProject;
+  const canDiscard = isMaster || isMyProject;
 
   const handleStopRun = async () => {
     if (!canStop) return;
@@ -744,6 +751,28 @@ export function ExecutionPage() {
         onRetry={handleRetry}
         onDiscard={handleDiscard}
       />
+      {/* TO-BE DB 실시간 단절 경고 — run 진행 중인데 target env 가 unreachable 이면 즉시 red 배너.
+          (CheckStage 의 1회 ping 만으로는 중간 단절을 못 잡던 갭을 메움.) */}
+      {(() => {
+        const eh = tobeHealth?.[site.environment];
+        const runActive = !!run && !isTerminal(run.status);
+        if (!runActive || !eh || eh.reachable) return null;
+        return (
+          <div style={{
+            padding: '8px 14px', margin: '8px 0', borderRadius: 4,
+            background: 'var(--red-50)', border: '1px solid var(--red)',
+            fontSize: 12, color: 'var(--red)', display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600,
+          }}>
+            <span>⛔</span>
+            <span>{t('execution.run.tobeDbDown', { env: site.environment })}</span>
+            {eh.message && (
+              <span style={{ fontWeight: 400, color: 'var(--text-3)', fontFamily: 'var(--mono)', fontSize: 11 }}>
+                {eh.message}
+              </span>
+            )}
+          </div>
+        );
+      })()}
       <DisabledOverlay disabled={controlsLocked}>
         <TableSelector
           t={t}

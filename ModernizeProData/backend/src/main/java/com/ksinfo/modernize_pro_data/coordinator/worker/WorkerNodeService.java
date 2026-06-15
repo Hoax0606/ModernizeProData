@@ -38,11 +38,12 @@ public class WorkerNodeService {
     private final AuditLogService auditLogService;
 
     @Transactional
-    public WorkerNode selfRegister(String username, String hostname) {
+    public WorkerNode selfRegister(String username, String hostname, String appVersion) {
         User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new ApiException("USER_NOT_FOUND",
                         "User not found: " + username, HttpStatus.NOT_FOUND));
         String name = (hostname == null || hostname.isBlank()) ? user.getUsername() : hostname.trim();
+        String version = (appVersion == null || appVersion.isBlank()) ? null : appVersion.trim();
 
         WorkerNode existing = repo.findFirstByUserIdAndNameOrderByCreatedAtDesc(user.getId(), name)
                 .orElse(null);
@@ -52,11 +53,12 @@ public class WorkerNodeService {
             existing.setStatus(WorkerStatus.REGISTERED);
             existing.setSiteId(user.getSiteId());
             existing.setLastSeenAt(now);
+            if (version != null) existing.setAppVersion(version);
             if (existing.getRegisteredAt() == null) existing.setRegisteredAt(now);
             return repo.save(existing);
         }
 
-        WorkerNode w = WorkerNode.createForUser(user.getId(), user.getSiteId(), name, user.getUsername());
+        WorkerNode w = WorkerNode.createForUser(user.getId(), user.getSiteId(), name, user.getUsername(), version);
         repo.save(w);
         auditLogService.record(user.getSiteId(), null, user.getUsername(), "WORKER_REGISTERED")
                 .target(hostname)
@@ -65,12 +67,14 @@ public class WorkerNodeService {
     }
 
     @Transactional
-    public void touchLastSeen(String username, String hostname) {
+    public void touchLastSeen(String username, String hostname, String appVersion) {
         User user = userRepository.findByUsername(username).orElse(null);
         if (user == null) return;
         String name = (hostname == null || hostname.isBlank()) ? user.getUsername() : hostname.trim();
+        String version = (appVersion == null || appVersion.isBlank()) ? null : appVersion.trim();
         repo.findFirstByUserIdAndNameOrderByCreatedAtDesc(user.getId(), name).ifPresent(w -> {
             w.setLastSeenAt(OffsetDateTime.now());
+            if (version != null) w.setAppVersion(version);
             repo.save(w);
         });
     }

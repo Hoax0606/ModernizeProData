@@ -1,7 +1,6 @@
 package com.ksinfo.modernize_pro_data.coordinator.run;
 
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineAckService;
-import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntry;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineEntryRepository;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
@@ -145,28 +144,16 @@ public class ExecutionOverviewService {
                 .toList();
 
         long errorCount = quarantineRepo.countByRunIdAndSeverity(runId, QuarantineSeverity.error);
-        // WARN entry 전체 + group 별 ack 매칭 → ackedCount = ack 된 group 의 entry 합.
-        // KPI/그리드 "M/N 처리" 분수 표시용 (단위 = entry, group 단위 아님 — 기존 warningCount 와 통일).
-        List<QuarantineEntry> warnEntries = quarantineRepo.findByRunIdOrderByCreatedAtAsc(runId).stream()
-                .filter(q -> q.getSeverity() == QuarantineSeverity.warning)
-                .toList();
-        long warningCount = warnEntries.size();
+        // WARN 카운트 + ack 분수 — 매 poll 마다 WARN entry 를 통째로 로드(JSONB hydration)하던 것을
+        // count + group projection 쿼리로 교체 (2026-06-10 OOM 완화). ack 매칭에 필요한 group key
+        // (binding_id, rule_name, reason) + 건수만 가져와 ack 된 group 의 건수를 합산.
+        long warningCount = quarantineRepo.countByRunIdAndSeverity(runId, QuarantineSeverity.warning);
         long warningAckedCount = 0;
-        if (!warnEntries.isEmpty()) {
-            java.util.Map<String, java.util.List<QuarantineEntry>> byGroup = new java.util.LinkedHashMap<>();
-            for (QuarantineEntry q : warnEntries) {
-                String reason = q.getSampleData() == null ? ""
-                        : String.valueOf(q.getSampleData().getOrDefault("reason", ""));
-                String key = q.getBindingId() + "|" + q.getRuleName() + "|" + reason;
-                byGroup.computeIfAbsent(key, k -> new java.util.ArrayList<>()).add(q);
-            }
-            for (java.util.Map.Entry<String, java.util.List<QuarantineEntry>> e : byGroup.entrySet()) {
-                QuarantineEntry sample = e.getValue().get(0);
-                String reason = sample.getSampleData() == null ? ""
-                        : String.valueOf(sample.getSampleData().getOrDefault("reason", ""));
-                if (ackService.findExplicitAck(p.getId(), sample.getBindingId(),
-                        sample.getRuleName(), reason, latest.getRunType()).isPresent()) {
-                    warningAckedCount += e.getValue().size();
+        if (warningCount > 0) {
+            for (QuarantineEntryRepository.WarnGroupCount g : quarantineRepo.warnGroupsByRun(runId)) {
+                if (ackService.findExplicitAck(p.getId(), g.getBindingId(),
+                        g.getRuleName(), g.getReason(), latest.getRunType()).isPresent()) {
+                    warningAckedCount += g.getCnt();
                 }
             }
         }

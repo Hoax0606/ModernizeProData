@@ -938,11 +938,11 @@ function verdictText(v: 'PASS' | 'FAIL' | 'WARN' | 'SKIP' | string): string {
   return String(v ?? '');
 }
 
-/** BE 의 overview item 라벨 → 화면 표시. SHA-256 만 친숙화하고 나머지는 BE 원본 그대로.
- *  (2026-05-31 사용자 결정: SHA-256 hex 용어가 고객사 친숙도 낮아 'Data Integrity Check' 로
- *  변경하되, 다른 항목은 운영팀에 익숙한 기존 어휘 유지). */
+/** BE 의 overview item 라벨 → 화면 표시.
+ *  (2026-06-11 사용자 결정: 'Data Integrity Check' → 'SHA-256 Check' 로 명시. 단 실제 해시
+ *  구현은 현재 md5 — 명칭-구현 일치시키려면 별도로 sha256 교체 필요[TODO].) */
 function friendlyOverviewItem(item: string): string {
-  if (item === 'Checksum SHA-256') return 'Data Integrity Check';
+  if (item === 'Checksum SHA-256') return 'SHA-256 Check';
   return item;
 }
 

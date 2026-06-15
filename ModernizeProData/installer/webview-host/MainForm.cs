@@ -72,7 +72,9 @@ internal sealed class MainForm : Form
         Controls.Add(_web);
 
         HandleCreated += (_, _) => { ApplyBrandTitleBar(); ForceWindowIcon(); };
-        Shown += async (_, _) => await InitWebViewAsync();
+        // Shown = window 가 실제 표시됨 = taskbar 버튼 생성 완료 시점 → 아이콘 재적용
+        // (HandleCreated 시점엔 taskbar 버튼이 아직 없어 WM_SETICON 이 헛돌 수 있었음).
+        Shown += async (_, _) => { ForceWindowIcon(); await InitWebViewAsync(); };
         FormClosing += (_, _) =>
         {
             // host 종료 시 backend Java 프로세스도 자연 stop — Java 의 SwingGuiApp 가
@@ -129,6 +131,10 @@ internal sealed class MainForm : Form
 
         var env = await CoreWebView2Environment.CreateAsync(null, userDataDir, null);
         await _web.EnsureCoreWebView2Async(env);
+
+        // WebView2 초기화가 window 의 rendering surface 를 재생성하면서 top-level 아이콘이
+        // 리셋돼 taskbar 아이콘이 간헐적으로 비던 문제 (2026-06-11). init 완료 후 한 번 더 강제.
+        ForceWindowIcon();
 
         var settings = _web.CoreWebView2.Settings;
         settings.AreDefaultContextMenusEnabled = false;   // 우클릭 메뉴 X

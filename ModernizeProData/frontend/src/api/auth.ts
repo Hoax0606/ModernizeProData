@@ -29,6 +29,8 @@ export const authApi = {
 export interface HealthInfo {
   name: string;
   mode: string;
+  /** Coordinator 설치 앱 버전 (예: 1.0.25). 개발 실행 시 'dev'. */
+  appVersion?: string;
   /** Coordinator self user — 이 username 의 run 은 Coordinator 안에서 local 실행되어
    *  Worker daemon heartbeat 가 없으므로, online dot 은 항상 online 으로 표시한다. */
   coordinatorSelfUsername?: string;

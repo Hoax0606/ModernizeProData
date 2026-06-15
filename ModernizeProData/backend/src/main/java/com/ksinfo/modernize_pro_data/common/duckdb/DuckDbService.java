@@ -241,7 +241,16 @@ public class DuckDbService {
     public void bindRunConnection(String memoryLimit, String runTempDir) {
         if (runScoped.get() != null) return;
         try {
-            Connection c = memoryMode ? openRunInstance() : requestConnection();
+            // file-mode(prod): run 전용 file-backed DuckDB (run.duckdb). 테이블이 디스크에
+            // materialize 되고 RAM 은 memory_limit(버퍼풀)로 상한 → 동시 다중 run 이 RAM 을
+            // 다 먹어 batch 거듭될수록 느려지던 문제 해결. run 마다 독립 파일이라 격리도 유지.
+            // memory-mode(dev): in-memory 유지.
+            String dbFile = null;
+            if (!memoryMode && runTempDir != null && !runTempDir.isBlank()) {
+                try { Files.createDirectories(Path.of(runTempDir)); } catch (Exception ignore) { /* SET 단계서 재실패 시 처리 */ }
+                dbFile = runTempDir.replace("\\", "/") + "/run.duckdb";
+            }
+            Connection c = openRunInstance(dbFile);
             try (Statement st = c.createStatement()) {
                 if (memoryLimit != null && !memoryLimit.isBlank()) {
                     st.execute("SET memory_limit='" + memoryLimit.replace("'", "''") + "'");
@@ -251,17 +260,21 @@ public class DuckDbService {
                 st.execute("SET temp_directory='" + tmp.replace("\\", "/").replace("'", "''") + "'");
             }
             runScoped.set(c);
-            log.info("run-scoped DuckDB connection bound (memoryMode={} memory_limit={} temp={})",
-                    memoryMode, memoryLimit, runTempDir);
+            log.info("run-scoped DuckDB connection bound (memoryMode={} dbFile={} memory_limit={})",
+                    memoryMode, dbFile, memoryLimit);
         } catch (Exception e) {
             // 바인딩 실패해도 statement() 가 공유 connection 으로 폴백 — run 진행 자체는 가능.
             log.warn("run-scoped DuckDB connection 바인딩 실패 — 공유 connection 폴백: {}", e.getMessage());
         }
     }
 
-    /** run 전용 독립 in-memory DuckDB 인스턴스. 확장(encodings/icu)·UDF 를 새 인스턴스에 재등록. */
-    private Connection openRunInstance() throws SQLException {
-        Connection c = DriverManager.getConnection("jdbc:duckdb:");
+    /**
+     * run 전용 독립 DuckDB 인스턴스. dbFile=null 이면 in-memory, 아니면 file-backed(run.duckdb).
+     * 확장(encodings/icu)·UDF 를 새 인스턴스에 재등록.
+     */
+    private Connection openRunInstance(String dbFile) throws SQLException {
+        String url = (dbFile == null || dbFile.isBlank()) ? "jdbc:duckdb:" : "jdbc:duckdb:" + dbFile;
+        Connection c = DriverManager.getConnection(url);
         UdfRegistry.registerAll(c);
         loadEncodingsExtension(c);
         loadIcuExtension(c);

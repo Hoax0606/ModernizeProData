@@ -628,10 +628,15 @@ public class PgSchemaExtractor {
     }
 
     private String buildRawType(String dataType, Integer length, Integer precision, Integer scale) {
+        String dt = dataType == null ? "" : dataType.toUpperCase(Locale.ROOT);
         StringBuilder sb = new StringBuilder(dataType);
         if (length != null && length > 0) {
+            // 문자형 길이 (varchar/char/bpchar). 정수/실수엔 character_maximum_length 가 안 옴.
             sb.append("(").append(length).append(")");
-        } else if (precision != null && precision > 0) {
+        } else if ((dt.equals("NUMERIC") || dt.equals("DECIMAL")) && precision != null && precision > 0) {
+            // 수정자(precision[,scale])는 NUMERIC/DECIMAL 에만 유효. int8/int4/float8 등의
+            // numeric_precision(=비트폭 64/32/53)은 타입 수정자가 아니므로 붙이면 안 된다
+            // (붙이면 "type modifier is not allowed" 로 CREATE TABLE 실패).
             sb.append("(").append(precision);
             if (scale != null && scale > 0) sb.append(",").append(scale);
             sb.append(")");

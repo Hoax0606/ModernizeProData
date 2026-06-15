@@ -3,7 +3,9 @@ package com.ksinfo.modernize_pro_data.coordinator.run;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.sql.Statement;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -25,6 +27,8 @@ public class RunControlRegistry {
 
     private static final class Control {
         volatile boolean cancelled;
+        /** 현재 이 run 에서 실행 중인 long-running JDBC Statement 들. cancel 시 interrupt 대상. */
+        final Set<Statement> activeStatements = ConcurrentHashMap.newKeySet();
     }
 
     private final Map<String, Control> controls = new ConcurrentHashMap<>();
@@ -39,14 +43,47 @@ public class RunControlRegistry {
         controls.remove(runId);
     }
 
-    /** abort / timeout 시 호출 — executor 가 다음 stage 경계에서 break. */
+    /**
+     * abort / timeout 시 호출 — (1) cancelled 플래그 set → executor 가 stage 경계/loop 에서 break,
+     * (2) 현재 실행 중인 긴 DuckDB statement 를 {@link Statement#cancel()} 로 즉시 interrupt
+     *     → CREATE TABLE AS read_csv / transform 같은 단일 대형 쿼리도 stage 경계까지 안 기다리고 멈춘다.
+     *
+     * statement.cancel() 은 다른 thread(이 abort thread)에서 호출 — JDBC cancel 의 정상 용법.
+     * DuckDB JDBC(1.5.3.0)는 connection 단위 interrupt 라 run-scoped connection 에만 영향.
+     * 미지원/이미 종료 등으로 throw 해도 무시(graceful) — 그 경우 기존처럼 다음 경계에서 반응.
+     */
     public void cancel(String runId) {
         Control c = controls.get(runId);
-        if (c != null) c.cancelled = true;
+        if (c == null) return;
+        c.cancelled = true;
+        for (Statement st : c.activeStatements) {
+            try {
+                st.cancel();
+            } catch (Throwable t) {
+                log.debug("statement.cancel() skipped (unsupported/closed) runId={}: {}", runId, t.toString());
+            }
+        }
     }
 
     public boolean isCancelled(String runId) {
         Control c = controls.get(runId);
         return c != null && c.cancelled;
+    }
+
+    /** 현재 이 프로세스에서 실행 중(register~remove 사이)인 run 수. adaptive memory_limit 산정용. */
+    public int activeCount() {
+        return controls.size();
+    }
+
+    /** 긴 쿼리 실행 직전 등록 — abort 시 interrupt 대상에 포함. {@link #unregisterStatement} 와 짝. */
+    public void registerStatement(String runId, Statement st) {
+        Control c = controls.get(runId);
+        if (c != null && st != null) c.activeStatements.add(st);
+    }
+
+    /** 쿼리 종료 후 해제 (leak 방지). */
+    public void unregisterStatement(String runId, Statement st) {
+        Control c = controls.get(runId);
+        if (c != null && st != null) c.activeStatements.remove(st);
     }
 }

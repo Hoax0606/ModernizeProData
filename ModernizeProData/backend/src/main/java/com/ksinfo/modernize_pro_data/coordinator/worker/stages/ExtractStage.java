@@ -162,9 +162,11 @@ public class ExtractStage implements StageRunner {
 
                     try (Statement st = duckDbService.statement()) {
                         ctx.throwIfCancelled();   // (D) sub-step — DuckDB CREATE TABLE AS SELECT FROM read_csv_auto (대용량 CSV read) 직전 cancel 체크.
-                        st.execute("CREATE OR REPLACE TABLE " + fqTable
+                        // runCancellable: 대용량 CSV read 도중 abort 시 statement.cancel() 로 즉시 interrupt
+                        // (직전 체크만으로는 이 쿼리가 끝날 때까지 못 멈추던 갭).
+                        ctx.runCancellable(st, () -> st.execute("CREATE OR REPLACE TABLE " + fqTable
                                 + " AS SELECT * FROM read_csv_auto('" + escapedPath
-                                + "', header=true, all_varchar=true" + sampleSizeClause + encodingClause + ")");
+                                + "', header=true, all_varchar=true" + sampleSizeClause + encodingClause + ")"));
 
                         try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + fqTable)) {
                             rs.next();
@@ -174,7 +176,7 @@ public class ExtractStage implements StageRunner {
                         Path parquet = ctx.parquet1Dir().resolve(asisTable + ".parquet");
                         String escapedParquet = parquet.toString().replace("\\", "/").replace("'", "''");
                         ctx.throwIfCancelled();   // (D) sub-step — parquet dump 직전 cancel 체크 (디스크 IO 큰 부분).
-                        st.execute("COPY " + fqTable + " TO '" + escapedParquet + "' (FORMAT PARQUET)");
+                        ctx.runCancellable(st, () -> st.execute("COPY " + fqTable + " TO '" + escapedParquet + "' (FORMAT PARQUET)"));
                     }
                     /* Step 3 — DuckDB 가 invalid byte 만났을 때 throw 안 하고 U+FFFD (대체 문자) 로
                        silent 치환. 정상 read 통과한 것 같지만 데이터 일부 손상.
@@ -205,6 +207,10 @@ public class ExtractStage implements StageRunner {
                 stage.setTablesFailed(failedCount);
                 stageInstanceRepo.save(stage);
                 broadcaster.stageProgress(runId, stage);
+            } catch (com.ksinfo.modernize_pro_data.coordinator.worker.RunCancelledException ce) {
+                // cancel(statement interrupt 포함)은 table 실패가 아니라 run 중단 — quarantine 카드
+                // 없이 그대로 전파해 LocalWorkerExecutor 가 stage 를 cancelled 로 처리하게 한다.
+                throw ce;
             } catch (Exception e) {
                 OffsetDateTime tableEnd = OffsetDateTime.now();
                 result.setStatus(StageTableStatus.failed);

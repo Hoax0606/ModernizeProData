@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWorkspaceStore } from '../store/workspace';
 import { useT } from '../i18n';
@@ -30,11 +30,11 @@ export function SiteQuarantinePage() {
   const activeSiteId = useWorkspaceStore((s) => s.activeSiteId);
   const allProjects = useWorkspaceStore((s) => s.projects);
   const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
-  // Open Mapping — group 의 projectId 로 activeProject 세팅 후 /mapping 이동.
-  // 이전엔 navigate('/mapping') 만 해 active project 없음 → "프로젝트 선택" (2026-06-05 fix).
-  const openMappingFor = (projectId: string) => {
+  // Go to Execution — group 의 projectId 로 activeProject 세팅 후 그 프로젝트의 Execution 으로 이동.
+  // (All 뷰는 Skip 을 직접 안 하고 해당 프로젝트로 이동만. 2026-06-09 Open Mapping → Execution.)
+  const goToExecution = (projectId: string) => {
     setActiveProject(projectId);
-    navigate('/mapping', { state: { activateProjectId: projectId } });
+    navigate('/execution', { state: { activateProjectId: projectId } });
   };
 
   const siteProjects = useMemo(
@@ -47,7 +47,7 @@ export function SiteQuarantinePage() {
    *   localStorage.setItem('mpd_demo_quarantine','true')   // 켜기
    *   localStorage.removeItem('mpd_demo_quarantine')        // 끄기 */
   const [allGroups, setAllGroups] = useState<SiteQuarantineGroup[]>([]);
-  useEffect(() => {
+  const fetchGroups = useCallback(() => {
     if (!activeSiteId) { setAllGroups([]); return; }
     quarantineApi.bySite(activeSiteId)
       .then((data) => {
@@ -70,6 +70,14 @@ export function SiteQuarantinePage() {
       });
   }, [activeSiteId, siteProjects]);
 
+  // 최초 + 주기 refetch — 다음 run 이 시작되면 latest run 이 바뀌므로, 이전 run 의 quarantine 이
+  // 곧바로 history 로 내려가고 현재 카드가 새 run 기준으로 갱신되게 한다 (stale 방지).
+  useEffect(() => {
+    fetchGroups();
+    const id = setInterval(fetchGroups, 7000);
+    return () => clearInterval(id);
+  }, [fetchGroups]);
+
   /** 페이지 내 탭 — Quarantine | Run History (#5: 구 Scheduler Run History 통합). */
   const [view, setView] = useState<'quarantine' | 'history'>('quarantine');
   const [severityFilter, setSeverityFilter] = useState<'all' | 'skip' | QuarantineSeverity>('all');
@@ -77,38 +85,52 @@ export function SiteQuarantinePage() {
   const [pickedGroupId,  setPickedGroupId]  = useState<string | null>(null);
   const [openGroupId,    setOpenGroupId]    = useState<string | null>(null);
 
+  /* 현재(=최신 run) quarantine 만 카드/통계에 쓴다. fromLatestRun===false (새 run 이 이미
+     시작돼 옛 run 것) 은 카드에서 빼고 아래 "과거 발생 이력(archive)" 으로만 보낸다 (엄격 B).
+     mock(fromLatestRun undefined) 은 active 로 취급. */
+  const activeGroups = useMemo(
+    () => allGroups.filter((g) => g.fromLatestRun !== false),
+    [allGroups],
+  );
+
   /* ── 통계 ───────────────────────────────────────── */
   /* ack 된 WARN 은 'skip' 으로 분리 카운트 (LogViewerPage 와 동일 규칙).
      error 는 ack 무관 — error 는 ack 시스템 X. */
   const groupStats = useMemo(() => {
     let errRows = 0, warnRows = 0, skipRows = 0;
-    for (const g of allGroups) {
+    for (const g of activeGroups) {
       if (g.severity === 'error') errRows += g.rowCount;
       else if (g.ack) skipRows += g.rowCount;
       else warnRows += g.rowCount;
     }
-    const errGroups  = allGroups.filter((g) => g.severity === 'error').length;
-    const warnGroups = allGroups.filter((g) => g.severity === 'warning' && !g.ack).length;
-    const skipGroups = allGroups.filter((g) => g.severity === 'warning' && !!g.ack).length;
+    const errGroups  = activeGroups.filter((g) => g.severity === 'error').length;
+    const warnGroups = activeGroups.filter((g) => g.severity === 'warning' && !g.ack).length;
+    const skipGroups = activeGroups.filter((g) => g.severity === 'warning' && !!g.ack).length;
     return {
-      total: allGroups.length,
+      total: activeGroups.length,
       errGroups, warnGroups, skipGroups,
       errRows, warnRows, skipRows,
       totalRows: errRows + warnRows + skipRows,
     };
-  }, [allGroups]);
+  }, [activeGroups]);
 
   /* ── 필터링 ─────────────────────────────────────── */
   const afterSeverity = useMemo(() => {
-    if (severityFilter === 'all')     return allGroups;
-    if (severityFilter === 'skip')    return allGroups.filter((g) => g.severity === 'warning' && !!g.ack);
-    if (severityFilter === 'warning') return allGroups.filter((g) => g.severity === 'warning' && !g.ack);
-    return allGroups.filter((g) => g.severity === severityFilter);
-  }, [allGroups, severityFilter]);
+    if (severityFilter === 'all')     return activeGroups;
+    if (severityFilter === 'skip')    return activeGroups.filter((g) => g.severity === 'warning' && !!g.ack);
+    if (severityFilter === 'warning') return activeGroups.filter((g) => g.severity === 'warning' && !g.ack);
+    return activeGroups.filter((g) => g.severity === severityFilter);
+  }, [activeGroups, severityFilter]);
 
   const afterProject = useMemo(() => (
     projectFilter ? afterSeverity.filter((g) => g.projectId === projectFilter) : afterSeverity
   ), [afterSeverity, projectFilter]);
+
+  /* archive 에 넘길 group — active + 과거run(fromLatestRun=false) 모두 포함, project 필터만 적용.
+     과거run group 은 archive 안에서 self-occurrence 로 렌더된다. */
+  const archiveGroups = useMemo(() => (
+    projectFilter ? allGroups.filter((g) => g.projectId === projectFilter) : allGroups
+  ), [allGroups, projectFilter]);
 
   /* All 이 기본이므로 dropdown 미선택 시 (severity + project 만 적용된) 모든 카드 표시.
      dropdown 으로 group 하나 고르면 그 카드만 보이고 나머지는 hide. */
@@ -239,14 +261,14 @@ export function SiteQuarantinePage() {
               t={t}
               open={openGroupId === g.id}
               onToggle={() => setOpenGroupId((cur) => (cur === g.id ? null : g.id))}
-              onOpenMapping={() => openMappingFor(g.projectId)}
+              onOpenMapping={() => goToExecution(g.projectId)}
             />
           ))
         )}
 
         {/* Page-level 「과거 발생 이력」 collapse section — 필터링된 group 의 옛 run entry 통합 list.
             상단 = 최신 (Axis 1), 하단 = 과거 archive. severity / project / group dropdown 필터 모두 적용. */}
-        <HistoryArchiveSection groups={filteredGroups} severityFilter={severityFilter} t={t} />
+        <HistoryArchiveSection groups={archiveGroups} severityFilter={severityFilter} t={t} />
       </div>
       </>
       )}
@@ -315,7 +337,12 @@ function SiteQuarantineCard({ g, t, open, onToggle, onOpenMapping }: {
             {open ? '▾' : '▸'}
           </button>
           <div style={styles.cardTitles}>
-            <div style={{ ...styles.cardReason, color: sevColor }}>{g.reason}</div>
+            <div style={{ ...styles.cardReason, color: sevColor }}>
+              {g.reason}
+              {g.fromLatestRun === false && (
+                <span style={styles.pastRunBadge}>{t('siteQuarantine.pastRun')}</span>
+              )}
+            </div>
             {human && <div style={styles.cardHumanDetail}>{human}</div>}
           </div>
           <div style={styles.cardMetaRight}>
@@ -375,7 +402,7 @@ function SiteQuarantineCard({ g, t, open, onToggle, onOpenMapping }: {
 
             <div style={styles.cardActions} onClick={(e) => e.stopPropagation()}>
               <button type="button" style={styles.actPrimary} onClick={onOpenMapping}>
-                {t('logs.quarantine.act.openMapping')}
+                {t('logs.quarantine.act.goToExecution')}
               </button>
               <div style={{ flex: 1 }} />
             </div>
@@ -414,6 +441,32 @@ function HistoryArchiveSection({ groups, severityFilter, t }: {
       toBeValues?: typeof groups[number]['toBeValues'];
     }> = [];
     for (const g of groups) {
+      /* 과거 run(fromLatestRun=false) 의 self occurrence — 새 run 이 시작되며 카드에서 빠진 옛
+         quarantine 을 archive 에 그대로 보여준다 (엄격 B). active group(최신 run)은 카드에 있으니 제외. */
+      if (g.fromLatestRun === false) {
+        const selfAcked = !!g.ack;
+        let includeSelf = true;
+        if (g.severity === 'warning') {
+          if (severityFilter === 'warning' && selfAcked) includeSelf = false;
+          if (severityFilter === 'skip'    && !selfAcked) includeSelf = false;
+        }
+        if (includeSelf) {
+          rows.push({
+            key: g.id + '-self',
+            group: g,
+            runId: g.runId ?? '—',
+            createdAt: g.firstSeenAt,
+            rowCount: g.rowCount,
+            acked: selfAcked,
+            ackedBy: g.ack?.acknowledgedBy,
+            ackedPhase: g.ack?.phase,
+            columns: g.columns,
+            columnRoles: g.columnRoles,
+            sampleRows: g.sampleRows,
+            toBeValues: g.toBeValues,
+          });
+        }
+      }
       for (const h of g.history ?? []) {
         /* severity filter 가 history 의 ack 상태에도 적용:
            - 'warning' tab → unack warning history 만
@@ -737,11 +790,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11.5, color: 'var(--text-2)', lineHeight: 1.45,
     marginTop: 4, wordBreak: 'keep-all',
   },
-  /* humanDetail — DB 표기를 사람말로 풀이. mono 가 아닌 본문 폰트로 별도 줄. */
-  cardHumanDetail: {
-    fontSize: 11.5, color: 'var(--text-2)', lineHeight: 1.45,
-    marginTop: 4, wordBreak: 'keep-all',
-  },
   cardMetaRight: {
     display: 'grid',
     gridTemplateColumns: '160px 72px 132px',
@@ -760,6 +808,21 @@ const styles: Record<string, React.CSSProperties> = {
     flexShrink: 0,
   },
   cardStage: { fontSize: 11, color: 'var(--text-3)', fontWeight: 600 },
+  /* 새 run 이 시작돼 이 quarantine 이 더 이상 최신 run 게 아닐 때 — "지난 Run" 표시. */
+  pastRunBadge: {
+    marginLeft: 8,
+    padding: '1px 7px',
+    fontSize: 9.5,
+    fontWeight: 800,
+    fontFamily: 'var(--mono)',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+    color: 'var(--text-3)',
+    background: 'var(--panel-2)',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 999,
+    verticalAlign: 'middle',
+  },
 
   cardExpand: { marginTop: 12 },
   cardTableWrap: {

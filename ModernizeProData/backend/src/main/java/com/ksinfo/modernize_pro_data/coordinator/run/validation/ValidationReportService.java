@@ -716,8 +716,8 @@ public class ValidationReportService implements StageRunner {
                 /* count + min(md5) + max(md5) fingerprint — 순서 무관 + 메모리 cheap.
                    기존 md5(string_agg(md5(...), '' ORDER BY pk)) 의 정렬·거대 string(N×32B) 둘 다 제거.
                    PG / DuckDB 양쪽 동일 결과 (검증됨). Collision ≈ 2^-128 — 정상 운영 무관. */
-                duckChecksumRaw = scalarString(duckSt, checksumQuery(fqDuck, rawConcat));
-                pgChecksumRaw   = scalarString(pgSt,   checksumQuery(fqPg,   rawConcat));
+                duckChecksumRaw = scalarString(duckSt, checksumQuery(fqDuck, rawConcat, false));
+                pgChecksumRaw   = scalarString(pgSt,   checksumQuery(fqPg,   rawConcat, true));
 
                 /* canonical == raw (date/boolean 컬럼 없음) 이면 풀스캔 2 절약 — raw 결과 재사용. */
                 boolean canonSameAsRaw = duckCanonConcat.equals(rawConcat) && pgCanonConcat.equals(rawConcat);
@@ -726,8 +726,8 @@ public class ValidationReportService implements StageRunner {
                     pgChecksumCanon   = pgChecksumRaw;
                 } else {
                     try {
-                        duckChecksumCanon = scalarString(duckSt, checksumQuery(fqDuck, duckCanonConcat));
-                        pgChecksumCanon   = scalarString(pgSt,   checksumQuery(fqPg,   pgCanonConcat));
+                        duckChecksumCanon = scalarString(duckSt, checksumQuery(fqDuck, duckCanonConcat, false));
+                        pgChecksumCanon   = scalarString(pgSt,   checksumQuery(fqPg,   pgCanonConcat, true));
                     } catch (Exception tzEx) {
                         /* ICU 미설치 등으로 TIMESTAMPTZ 처리 실패 — canonical 비교 skip. */
                         log.warn("Checksum canonical compare failed for {} — raw only: {}",
@@ -1247,12 +1247,21 @@ public class ValidationReportService implements StageRunner {
      * Collision prob ≈ 2^-128 (같은 row count + 같은 min md5 + 같은 max md5 인데 set 다를 확률).
      * 정상 운영 무관 — 1000만 row 의 random subset 비교 시 false positive ≈ 0.
      */
-    private static String checksumQuery(String fq, String concat) {
-        return "SELECT md5("
-             + "  count(*)::text || '|' || "
-             + "  coalesce(min(_v), '') || '|' || "
-             + "  coalesce(max(_v), '')"
-             + ") FROM (SELECT md5(concat(" + concat + ")) AS _v FROM " + fq + ") _h";
+    private static String checksumQuery(String fq, String concat, boolean pg) {
+        // 2026-06-11: md5 → SHA-256 (감사 신뢰도 — Artifacts 라벨 'SHA-256 Check' 와 구현 일치).
+        // 행별 해시 + (count|min|max) fingerprint. 순서 무관. PG/DuckDB 가 같은 UTF-8 바이트를
+        // SHA-256 → 같은 hex 라 양쪽 결과 일치.
+        if (pg) {
+            // PostgreSQL 11+ : sha256(bytea)→bytea. text 를 UTF8 bytea(convert_to)로 변환 후 해시 → hex.
+            String row = "encode(sha256(convert_to(concat(" + concat + "), 'UTF8')), 'hex')";
+            return "SELECT encode(sha256(convert_to("
+                 + "count(*)::text || '|' || coalesce(min(_v), '') || '|' || coalesce(max(_v), '')"
+                 + ", 'UTF8')), 'hex') FROM (SELECT " + row + " AS _v FROM " + fq + ") _h";
+        }
+        // DuckDB : sha256(varchar)→hex varchar.
+        return "SELECT sha256("
+             + "count(*)::text || '|' || coalesce(min(_v), '') || '|' || coalesce(max(_v), '')"
+             + ") FROM (SELECT sha256(concat(" + concat + ")) AS _v FROM " + fq + ") _h";
     }
 
     private void ingest(StageContext ctx, String message, boolean info) {

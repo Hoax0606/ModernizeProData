@@ -8,6 +8,7 @@ import {
   type TobeDbLocks,
 } from '../store/workspace';
 import { tobeDbApi } from '../api/tobeDb';
+import { useTobeDbHealth } from '../hooks/useTobeDbHealth';
 import { useT, type TranslationKey } from '../i18n';
 import { TestConnectionResult, type TestStatus } from './TestConnectionResult';
 import { LockIcon } from './LockIcon';
@@ -67,6 +68,11 @@ export function TobeDbCard({
   const t = useT();
   const [testStatus, setTestStatus] = useState<TestStatus>('idle');
   const [testMessage, setTestMessage] = useState<string | null>(null);
+  // env dot hover 커스텀 tooltip — 네이티브 title= 대신 (브라우저 기본 tooltip 회피).
+  const [hoverEnv, setHoverEnv] = useState<string | null>(null);
+  // 환경별 실시간 도달성 — 카드(=Site Settings 모달)가 열려 있는 동안만 poll.
+  // 미저장 사이트(생성 모달)에선 siteId 가 's-…' 가 아니라 자동 disabled.
+  const health = useTobeDbHealth(siteIdForTest);
 
   const tobeDb: SiteDbConnection = { ...emptyDbConnection(), ...(value[stage] ?? {}) };
   const stageLocked = !!locks[stage];
@@ -140,6 +146,15 @@ export function TobeDbCard({
             const isActive = stage === env;
             const configured = isDbConfigured(value[env]);
             const isLocked = !!locks[env];
+            // dot: 미설정=grey, 설정+도달=green, 설정+단절=red, 설정+(아직 미확인)=green(낙관).
+            // health 는 카드 열린 동안 polling — 중간에 TO-BE 가 내려가면 그 env dot 이 red 로.
+            const eh = health?.[env];
+            const dotColor = !configured ? 'var(--text-4)'
+              : eh && !eh.reachable ? 'var(--red)'
+              : 'var(--green)';
+            const dotTitle = !configured ? t('siteSettings.dbStatus.notConfigured')
+              : eh ? (eh.reachable ? t('siteSettings.dbStatus.configured') : eh.message)
+              : t('siteSettings.dbStatus.configured');
             return (
               <button
                 key={env}
@@ -150,12 +165,21 @@ export function TobeDbCard({
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                   {t(PROJECT_ENV_LABEL[env])}
                   <span
-                    style={{
-                      width: 6, height: 6, borderRadius: '50%',
-                      background: configured ? 'var(--green)' : 'var(--red)',
-                      display: 'inline-block',
-                    }}
-                  />
+                    style={{ position: 'relative', display: 'inline-flex' }}
+                    onMouseEnter={() => setHoverEnv(env)}
+                    onMouseLeave={() => setHoverEnv((cur) => (cur === env ? null : cur))}
+                  >
+                    <span
+                      style={{
+                        width: 6, height: 6, borderRadius: '50%',
+                        background: dotColor,
+                        display: 'inline-block',
+                      }}
+                    />
+                    {hoverEnv === env && (
+                      <span style={styles.dotTooltip}>{dotTitle}</span>
+                    )}
+                  </span>
                   {isLocked && <LockIcon open={false} color="var(--text-3)" size={10} />}
                 </span>
               </button>
@@ -244,6 +268,27 @@ const styles: Record<string, CSSProperties> = {
   pillRow: { display: 'inline-flex', gap: 4, flexWrap: 'wrap' },
   pill: { padding: '4px 10px', fontSize: 12, border: '1px solid var(--border)', background: 'var(--panel)', cursor: 'pointer', borderRadius: 4 },
   pillActive: { background: 'var(--navy-50)', borderColor: 'var(--navy)', color: 'var(--navy)' },
+  dotTooltip: {
+    position: 'absolute',
+    bottom: 'calc(100% + 6px)',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    background: 'var(--text)',
+    color: 'var(--panel)',
+    padding: '4px 8px',
+    borderRadius: 4,
+    fontSize: 10.5,
+    fontFamily: 'var(--mono)',
+    lineHeight: 1.35,
+    whiteSpace: 'normal',
+    maxWidth: 240,
+    width: 'max-content',
+    wordBreak: 'break-word',
+    textAlign: 'center',
+    zIndex: 50,
+    pointerEvents: 'none',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
+  },
   dbCard: { background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 4, padding: 12, display: 'flex', flexDirection: 'column', gap: 8 },
   dbHeader: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontWeight: 600 },
   dbStatusOk: { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--green)' },

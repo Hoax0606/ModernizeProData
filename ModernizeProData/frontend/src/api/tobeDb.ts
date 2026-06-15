@@ -15,6 +15,20 @@ export interface TestConnectionResult {
   sqlState?: string | null;
 }
 
+/** 환경별 TO-BE DB 실시간 도달성 (GET .../tobe-db/health). */
+export interface EnvHealth {
+  env: string;
+  /** 설정(type/host/database/username)이 충분한지. */
+  configured: boolean;
+  /** 실제 JDBC 연결 성공 여부. */
+  reachable: boolean;
+  message: string;
+  checkedAt: string | null;
+}
+
+/** env → EnvHealth (test/dev/staging/production). */
+export type TobeDbHealth = Record<string, EnvHealth>;
+
 export const tobeDbApi = {
   testConnection: (siteId: string, req: TestConnectionRequest) =>
     unwrap(
@@ -32,4 +46,8 @@ export const tobeDbApi = {
         req,
       ),
     ),
+
+  /** 환경별 실시간 도달성 — FE 가 주기적으로 polling (서버측 5s 캐시). */
+  health: (siteId: string) =>
+    unwrap(api.get<ApiResponse<TobeDbHealth>>(`/api/v1/sites/${siteId}/tobe-db/health`)),
 };
