@@ -23,6 +23,24 @@ export interface MappingStatus {
   codeMapCount: number;
 }
 
+/** 사이트 일괄 import 의 프로젝트 1건 결과. BE SiteMappingImportService.ProjectOutcome 와 1:1. */
+export interface SiteMappingImportOutcome {
+  projectId: string;
+  projectName: string;
+  status: 'success' | 'failed';
+  ruleCount: number;
+  codeMapCount: number;
+  error: string | null;
+}
+
+/** 사이트 일괄 import 집계. BE SiteMappingImportService.SiteImportResult 와 1:1. */
+export interface SiteMappingImportResult {
+  siteId: string;
+  total: number;
+  succeeded: number;
+  projects: SiteMappingImportOutcome[];
+}
+
 export type MappingReportErrorKind = 'EXPRESSION_FAILED' | 'FROM_FAILED' | 'NO_RULES' | 'NO_RULES_LINKED' | 'UNKNOWN';
 export type MappingReportErrorType = 'SYNTAX' | 'BINDER' | 'CATALOG' | 'CONVERSION' | 'IO' | 'UNKNOWN';
 
@@ -160,6 +178,31 @@ export const mappingImportApi = {
         // 대형 매핑정의서 (수만 row, DuckDB read_csv + JDBC batch persist) 가 axios
         // global 30s timeout 초과. 10 분 으로 늘림 — runReport 와 동일 정책.
         timeout: 600_000,
+      },
+    ));
+  },
+
+  /**
+   * 사이트 단위 일괄 import — 하나의 column/code CSV 를 사이트의 프로젝트들에 분배.
+   * projectIds 미지정(빈 배열) = 사이트 전체. 각 프로젝트는 자기 DDL 슬라이스만 가져감.
+   */
+  importSite: (
+    siteId: string,
+    projectIds: string[],
+    columnMapping?: File | null,
+    codeMapping?: File | null,
+  ): Promise<SiteMappingImportResult> => {
+    const fd = new FormData();
+    if (columnMapping) fd.append('columnMapping', columnMapping);
+    if (codeMapping) fd.append('codeMapping', codeMapping);
+    for (const pid of projectIds) fd.append('projectIds', pid);
+    return unwrap(api.post<ApiResponse<SiteMappingImportResult>>(
+      `/api/v1/sites/${encodeURIComponent(siteId)}/mapping/import`,
+      fd,
+      {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        // 사이트 전체 프로젝트 × 대형 매핑정의서 — per-project import 보다 더 길 수 있어 여유.
+        timeout: 1_200_000,
       },
     ));
   },

@@ -7,10 +7,11 @@ import { useUsersStore } from '../store/users';
 import { useAuthStore } from '../store/auth';
 import { useSnapshotsStore } from '../store/snapshots';
 import { useMappingEditsStore, type RowEdit, type TableBindingEdit } from '../store/mappingEdits';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { runsApi, type RunHistoryDto } from '../api/runs';
 import { CreateSiteModal } from '../components/CreateSiteModal';
 import { CreateProjectModal } from '../components/CreateProjectModal';
+import { SiteMappingImportModal } from '../components/SiteMappingImportModal';
 import { DdlImportButton } from '../components/DdlImportButton';
 import { HourglassHalfIcon } from '../components/HourglassHalfIcon';
 import { csvPreviewApi } from '../api/csvPreview';
@@ -641,6 +642,8 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
   const users = useUsersStore((s) => s.users);
+  const queryClient = useQueryClient();
+  const [siteMapOpen, setSiteMapOpen] = useState(false);
   // Coordinator(master) 만 dropdown 으로 변경 가능. 그 외 사용자는 본인 row 도 text 로 표시.
   const canEditRow = (_p: Project) => isMaster;
 
@@ -816,6 +819,16 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
               </select>
             </label>
             <div style={{ flex: 1 }} />
+            {isMaster && projects.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setSiteMapOpen(true)}
+                style={styles.btnGhost}
+                title={t('siteMapping.desc')}
+              >
+                Site Mapping Import
+              </button>
+            )}
             {dirtyAssigneeIds.length > 0 && (
               <>
                 <button
@@ -956,6 +969,16 @@ function SiteOverview({ siteName, projects }: { siteName: string; projects: Proj
           </Panel>
         </div>
       </div>
+
+      <SiteMappingImportModal
+        open={siteMapOpen}
+        onClose={() => setSiteMapOpen(false)}
+        siteId={activeSiteId ?? ''}
+        projects={projects.map((p) => ({ id: p.id, name: p.name }))}
+        onImported={() => {
+          void queryClient.invalidateQueries({ queryKey: ['site-mapping-progress', activeSiteId] });
+        }}
+      />
     </div>
   );
 }

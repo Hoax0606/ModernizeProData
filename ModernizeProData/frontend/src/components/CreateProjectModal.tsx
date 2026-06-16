@@ -4,6 +4,7 @@ import { useWorkspaceStore } from '../store/workspace';
 import { useAuthStore } from '../store/auth';
 import { asisDdlApi } from '../api/asisDdl';
 import { tobeDdlApi } from '../api/tobeDdl';
+import { mappingImportApi } from '../api/mappingImport';
 import { ApiError } from '../api/client';
 import { useT } from '../i18n';
 import { detectDialectOfFile } from '../lib/detectDialect';
@@ -50,6 +51,13 @@ export function CreateProjectModal({ open, onClose }: Props) {
   const [matchNote, setMatchNote] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  // 사이트 매핑정의서 (선택) — 생성된 프로젝트들에 일괄 분배. per-project import 재사용.
+  const [smCol, setSmCol] = useState<File | null>(null);
+  const [smCode, setSmCode] = useState<File | null>(null);
+  const [smNote, setSmNote] = useState<string | null>(null);
+  const smColRef = useRef<HTMLInputElement | null>(null);
+  const smCodeRef = useRef<HTMLInputElement | null>(null);
+
   // AS-IS 자동생성 폴더 input + TO-BE 매칭 폴더 input. webkitdirectory 지원(Chromium)→폴더,
   // 미지원→multiple 파일 선택으로 자동 폴백.
   const asisFolderRef = useRef<HTMLInputElement | null>(null);
@@ -60,6 +68,9 @@ export function CreateProjectModal({ open, onClose }: Props) {
     setRows([newRow()]);
     setError(null);
     setMatchNote(null);
+    setSmCol(null);
+    setSmCode(null);
+    setSmNote(null);
     setSubmitting(false);
   };
 
@@ -138,8 +149,8 @@ export function CreateProjectModal({ open, onClose }: Props) {
       : t('createProject.matchTobeNone'));
   };
 
-  /** 프로젝트 1개 생성 + DDL import. 성공=null, 실패=사유 키. */
-  const createOne = async (row: ProjectRow): Promise<string | null> => {
+  /** 프로젝트 1개 생성 + DDL import. 성공={ id }, 실패={ reason }. */
+  const createOne = async (row: ProjectRow): Promise<{ id: string } | { reason: string }> => {
     let projectId: string;
     try {
       const project = await createProject({
@@ -152,18 +163,18 @@ export function CreateProjectModal({ open, onClose }: Props) {
       });
       projectId = project.id;
     } catch (err) {
-      if (err instanceof ApiError && err.code === 'PROJECT_NAME_DUPLICATE') return 'duplicate';
-      return 'generic';
+      if (err instanceof ApiError && err.code === 'PROJECT_NAME_DUPLICATE') return { reason: 'duplicate' };
+      return { reason: 'generic' };
     }
     if (row.asis) {
       try { await asisDdlApi.import(projectId, row.asis); }
-      catch (err) { console.error('[createProject] AS-IS import failed', err); return 'asisDdl'; }
+      catch (err) { console.error('[createProject] AS-IS import failed', err); return { reason: 'asisDdl' }; }
     }
     if (row.tobe) {
       try { await tobeDdlApi.import(projectId, row.tobe); }
-      catch (err) { console.error('[createProject] TO-BE import failed', err); return 'tobeDdl'; }
+      catch (err) { console.error('[createProject] TO-BE import failed', err); return { reason: 'tobeDdl' }; }
     }
-    return null;
+    return { id: projectId };
   };
 
   const reasonText = (key: string): string => {
@@ -185,12 +196,39 @@ export function CreateProjectModal({ open, onClose }: Props) {
     if (namedRows.length === 0) { setError(t('createProject.error.empty')); return; }
 
     setSubmitting(true);
+    setSmNote(null);
     const reasons = new Map<number, string>();
+    const createdIds: string[] = [];
     for (const r of namedRows) {
-      const reason = await createOne(r);
-      if (reason) reasons.set(r.id, reason);
+      const res = await createOne(r);
+      if ('id' in res) createdIds.push(res.id);
+      else reasons.set(r.id, res.reason);
     }
-    if (reasons.size === 0) { reset(); onClose(); return; }
+
+    // 사이트 매핑정의서 분배 (선택) — 생성 성공한 프로젝트들에만 적용.
+    const hasSpec = !!smCol || !!smCode;
+    if (hasSpec && createdIds.length > 0 && activeSite) {
+      try {
+        const res = await mappingImportApi.importSite(activeSite.id, createdIds, smCol, smCode);
+        setSmNote(t('siteMapping.summary', { ok: res.succeeded, total: res.total }));
+      } catch (err) {
+        setSmNote(err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    if (reasons.size === 0) {
+      // 매핑정의서를 첨부한 경우엔 분배 결과(smNote)를 보여주려고 모달을 닫지 않는다.
+      // 생성된 행은 비워 재생성을 막는다.
+      if (hasSpec) {
+        rowSeq.current = 0;
+        setRows([newRow()]);
+        setSmCol(null);
+        setSmCode(null);
+        setSubmitting(false);
+        return;
+      }
+      reset(); onClose(); return;
+    }
     // 성공 행 제거, 실패 행만 사유와 함께 남겨 재시도 가능하게 (#67 — 왜 안 됐는지 행별 표시).
     setRows((cur) => cur
       .filter((r) => reasons.has(r.id) || r.name.trim() === '')
@@ -281,6 +319,31 @@ export function CreateProjectModal({ open, onClose }: Props) {
           + {t('createProject.addRow')}
         </button>
 
+        {/* 사이트 매핑정의서 (선택) — 생성된 전 프로젝트에 일괄 분배 */}
+        <div style={styles.smBox}>
+          <div style={styles.smHead}>
+            <span style={styles.smTitle}>Site Mapping Import</span>
+          </div>
+          <p style={styles.smDesc}>{t('siteMapping.desc')}</p>
+          <div style={styles.smFiles}>
+            <SmFile
+              label={t('siteMapping.columnFile')}
+              file={smCol}
+              inputRef={smColRef}
+              onPick={setSmCol}
+              disabled={submitting}
+            />
+            <SmFile
+              label={t('siteMapping.codeFile')}
+              file={smCode}
+              inputRef={smCodeRef}
+              onPick={setSmCode}
+              disabled={submitting}
+            />
+          </div>
+          {smNote && <div style={styles.smNote}>{smNote}</div>}
+        </div>
+
         {error && <div style={styles.errorBox}>{error}</div>}
 
         <div style={styles.actions}>
@@ -366,6 +429,49 @@ function CompactDdlPicker({ labelText, file, dialect, onPick, disabled }: Compac
           <span>{labelText}</span>
         </button>
       )}
+    </div>
+  );
+}
+
+/** 사이트 매핑정의서 파일 1개 picker (Create 모달용). */
+function SmFile({
+  label, file, inputRef, onPick, disabled,
+}: {
+  label: string;
+  file: File | null;
+  inputRef: React.MutableRefObject<HTMLInputElement | null>;
+  onPick: (f: File | null) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div style={styles.smRow}>
+      <div style={styles.smFieldLabel}>{label}</div>
+      <div style={styles.smFileBox}>
+        <div style={file ? styles.smFileName : styles.smFilePlaceholder}>{file ? file.name : '—'}</div>
+        <button
+          type="button"
+          onClick={() => { onPick(null); if (inputRef.current) inputRef.current.value = ''; }}
+          style={{ ...styles.smIconBtn, ...(file ? {} : styles.smIconBtnDisabled) }}
+          disabled={disabled || !file}
+        >
+          <i className="fa-solid fa-trash" />
+        </button>
+        <button
+          type="button"
+          onClick={() => inputRef.current?.click()}
+          style={styles.smIconBtn}
+          disabled={disabled}
+        >
+          <i className="fa-solid fa-folder" />
+        </button>
+      </div>
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".csv"
+        style={{ display: 'none' }}
+        onChange={(e) => onPick(e.target.files?.[0] ?? null)}
+      />
     </div>
   );
 }
@@ -544,6 +650,44 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12,
     fontWeight: 500,
   },
+
+  /* 사이트 매핑정의서 (선택) 섹션 */
+  smBox: {
+    border: '1px dashed var(--border-strong)',
+    borderRadius: 6,
+    padding: '10px 12px',
+    background: 'var(--panel-2)',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+  },
+  smHead: { display: 'flex', alignItems: 'center', gap: 8 },
+  smTitle: { fontSize: 12, fontWeight: 700, color: 'var(--text)' },
+  smDesc: { fontSize: 11, color: 'var(--text-3)', margin: 0, lineHeight: 1.45 },
+  smFiles: { display: 'flex', flexDirection: 'column', gap: 8, marginTop: 2 },
+  smRow: { display: 'flex', alignItems: 'center', gap: 10 },
+  smFieldLabel: { width: 150, flexShrink: 0, fontSize: 11.5, color: 'var(--text-2)' },
+  smFileBox: {
+    flex: 1, minWidth: 0,
+    display: 'flex', alignItems: 'center', gap: 4,
+    padding: '6px 10px',
+    background: 'var(--panel)',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 4,
+    minHeight: 30,
+  },
+  smFileName: {
+    flex: 1, minWidth: 0, fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text)',
+    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  },
+  smFilePlaceholder: { flex: 1, minWidth: 0, fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text-4)' },
+  smIconBtn: {
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+    width: 22, height: 22, background: 'transparent', border: 'none', borderRadius: 3,
+    cursor: 'pointer', color: 'var(--text-3)', fontSize: 12,
+  },
+  smIconBtnDisabled: { color: 'var(--text-4)', opacity: 0.45, cursor: 'not-allowed' },
+  smNote: { fontSize: 11.5, fontWeight: 600, color: 'var(--text)', marginTop: 2 },
 
   actions: { display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 4 },
   btnGhost: {
