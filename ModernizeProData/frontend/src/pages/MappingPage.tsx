@@ -176,6 +176,13 @@ function ddlToAsisColumns(schema: DdlSchema | undefined | null): Record<string, 
  * exact 키 조회가 miss 하면 컬럼 드롭다운/자동매핑이 빈다. TO-BE 매칭(qualifiedName 주석 참조)이
  * 이미 하는 physical 이름 fallback 을 source 쪽에도 적용한다. (대소문자 무시)
  */
+/** 테이블 식별자의 physical(bare) 이름 — schema 한정(BANKSYS.X) 든 bare(X) 든 소문자 X 반환. */
+function bareTable(name: string | undefined | null): string {
+  if (!name) return '';
+  const s = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : name;
+  return s.toLowerCase();
+}
+
 function lookupAsisCols(key: string | undefined | null): AsisColumn[] {
   if (!key) return [];
   const exact = ASIS_COLUMNS[key];
@@ -747,14 +754,17 @@ export function MappingPage() {
     [tableBindingEdits, hydrationTick, parentTableKeys]);
 
   const effectiveAsis = useMemo(() => {
+    // schema-lenient — binding source 가 schema 한정(BANKSYS.CUSTOMERS)인데 AS-IS DDL 은
+    // bare(CUSTOMERS)면(또는 반대) exact 매칭이 miss 해 AS-IS 테이블이 unrouted 로 잘못 표시.
+    // physical(bare) 테이블명으로 매칭(lookupAsisCols/computeUncovered 와 동일 원칙).
     const routedByAsis: Record<string, string[]> = {};
     for (const t of effectiveTobe) {
       for (const s of t.sources) {
-        (routedByAsis[s.table] ||= []).push(t.internalName);
+        (routedByAsis[bareTable(s.table)] ||= []).push(t.internalName);
       }
     }
     return ASIS_TABLES.map((at) => {
-      const r = routedByAsis[at.name] || [];
+      const r = routedByAsis[bareTable(at.name)] || [];
       const isUnrouted = r.length === 0;
       // unrouted 인데 모든 컬럼이 explicit skip 이면 'skipped' (회색) 표시.
       // asisSkippedCols[table][col] === true 인 컬럼만 skip 으로 카운트.
@@ -1813,7 +1823,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
   const active = visibleRows[activeIdx] ?? visibleRows[0];
 
   const missingImports = bindingSources
-    .map((s) => ASIS_TABLES.find((a) => a.name === s.table))
+    .map((s) => ASIS_TABLES.find((a) => bareTable(a.name) === bareTable(s.table)))
     .filter((a): a is AsisTable => !!a && !a.imported);
   // TO-BE Target DB 가 Site Settings 에서 "configured" 상태인지 검사 — Site Settings 의
   // Trial 은 in-memory 미리보기라 TO-BE DB 연결 여부와 무관 — 매핑 정합성만 검사.
@@ -5126,7 +5136,8 @@ function computeAsisMappings(
 ): Record<string, AsisColMapping[]> {
   const out: Record<string, AsisColMapping[]> = {};
   for (const tobe of effectiveTobe) {
-    const aliases = new Set(tobe.sources.filter((s) => s.table === asisTableName).map((s) => s.alias));
+    // schema-lenient — binding source 와 AS-IS DDL 의 schema 유무가 달라도 physical 이름으로 매칭.
+    const aliases = new Set(tobe.sources.filter((s) => bareTable(s.table) === bareTable(asisTableName)).map((s) => s.alias));
     if (aliases.size === 0) continue;
     const rows = MAPPING_BY_TOBE[tobe.internalName] || [];
     const edits = rowEditsByTobe[tobe.internalName] || {};
@@ -5194,7 +5205,7 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
   const readOnly = useActiveProjectReadOnly();
   const cols = lookupAsisCols(table.name);
   const [colFilter, setColFilter] = useState<AsisColFilter>('all');
-  const routedTobe = effectiveTobe.filter((t) => t.sources.some((s) => s.table === table.name));
+  const routedTobe = effectiveTobe.filter((t) => t.sources.some((s) => bareTable(s.table) === bareTable(table.name)));
 
   const activeProjectIdForAsis = useWorkspaceStore((s) => s.activeProjectId);
   const navigate = useNavigate();
