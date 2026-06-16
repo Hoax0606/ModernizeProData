@@ -227,6 +227,12 @@ export function AppShell() {
 
   const activeSite = useMemo(() => sites.find((s) => s.id === activeSiteId) ?? null, [sites, activeSiteId]);
   const activeProject = useMemo(() => allProjects.find((p) => p.id === activeProjectId) ?? null, [allProjects, activeProjectId]);
+  // 활성 사이트의 프로젝트 수 — 0 이면 "All Projects" 개념이 무의미(보여줄 프로젝트 없음).
+  // 그 상태는 "첫 프로젝트 만들기" 온보딩 컨텍스트라 All Projects 하이라이트/헤더를 끈다.
+  const siteProjectCount = useMemo(
+    () => allProjects.filter((p) => p.siteId === activeSiteId).length,
+    [allProjects, activeSiteId]);
+  const hasSiteProjects = siteProjectCount > 0;
 
   // ── Global keyboard shortcuts ──
   // Ctrl+B = sidebar toggle, Ctrl+1~7 = project tab nav, Ctrl+, = Solution Settings.
@@ -560,7 +566,7 @@ export function AppShell() {
           </div>
 
           {/* All projects */}
-          <div style={{ ...styles.allProjects, ...(activeProjectId === null && activeSiteId ? styles.allProjectsActive : {}) }} onClick={() => { setActiveProject(null); navigate('/'); }}>
+          <div style={{ ...styles.allProjects, ...(activeProjectId === null && activeSiteId && hasSiteProjects ? styles.allProjectsActive : {}) }} onClick={() => { setActiveProject(null); navigate('/'); }}>
             <div style={styles.allProjectsIcon}>
               <svg width="9" height="9" viewBox="0 0 10 10" fill="currentColor">
                 <rect x="0" y="0" width="4" height="4" />
@@ -787,8 +793,11 @@ export function AppShell() {
                   <span>{activeProject.tableCount} tables</span>
                 </div>
               </>
-            ) : activeSite ? (
+            ) : activeSite && hasSiteProjects ? (
               <div style={styles.topTitleMain}>{t('shell.allProjects')}</div>
+            ) : activeSite ? (
+              // 프로젝트 0개 사이트 — "All projects" 가 아니라 사이트명(첫 프로젝트 만들기 컨텍스트).
+              <div style={styles.topTitleMain}>{activeSite.name}</div>
             ) : (
               <>
                 <div style={styles.topTitleMain}><BrandName /></div>
