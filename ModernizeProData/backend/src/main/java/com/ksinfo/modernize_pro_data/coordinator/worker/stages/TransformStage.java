@@ -18,6 +18,10 @@ import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableResultRepos
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableStatus;
 import com.ksinfo.modernize_pro_data.coordinator.runlog.RunLogIngestService;
 import com.ksinfo.modernize_pro_data.coordinator.worker.SqlComposer;
+import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlColumn;
+import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlColumnRepository;
+import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTable;
+import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageContext;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageHelpers;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageProgressBroadcaster;
@@ -62,12 +66,16 @@ import java.util.Map;
 public class TransformStage implements StageRunner {
 
     private static final String STAGE_KEY = "transform";
+    /** 시각손실 WARN quarantine 의 sample row 상한 (AuditStage 와 동일 정책). */
+    private static final int SAMPLE_LIMIT = 1000;
 
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
     private final MappingRuleRepository mappingRuleRepo;
     private final MappingTableBindingRepository bindingRepo;
     private final MappingCodeMapRepository mappingCodeMapRepo;
+    private final DdlTableRepository ddlTableRepo;
+    private final DdlColumnRepository ddlColumnRepo;
     private final DuckDbService duckDbService;
     private final QuarantineService quarantineService;
     private final RunLogIngestService runLogIngest;
@@ -95,6 +103,16 @@ public class TransformStage implements StageRunner {
         Map<String, List<MappingCodeMap>> codeMapsByDomain = new HashMap<>();
         for (MappingCodeMap m : mappingCodeMapRepo.findByProjectIdOrderByDomainAscOrdinalAsc(projectId)) {
             codeMapsByDomain.computeIfAbsent(m.getDomain(), k -> new java.util.ArrayList<>()).add(m);
+        }
+
+        // TO-BE DDL 컬럼 타입 (tobeTable → colName → dataType) — DATE 시각손실 검출용.
+        Map<String, Map<String, String>> tobeColTypes = new HashMap<>();
+        for (DdlTable t : ddlTableRepo.findByProjectIdAndSideOrderByOrdinalAsc(projectId, "tobe")) {
+            Map<String, String> byCol = new HashMap<>();
+            for (DdlColumn col : ddlColumnRepo.findByTableIdOrderByOrdinalAsc(t.getId())) {
+                byCol.put(col.getPhysicalName(), col.getDataType());
+            }
+            tobeColTypes.put(t.getPhysicalName(), byCol);
         }
 
         int successCount = 0;
@@ -168,6 +186,16 @@ public class TransformStage implements StageRunner {
                 result.setFinishedAt(tableEnd);
                 result.setDurationMs(Duration.between(tableStart, tableEnd).toMillis());
                 stageTableResultRepo.save(result);
+
+                // DATE 시각 silent 손실 진단 — AS-IS 시각(시·분·초)이 TO-BE date 컬럼으로 잘리는
+                // 행을 WARN Quarantine 으로 표면화. Load 차단 X, 행은 정상 적재. probe 실패는 transform
+                // 을 깨지 않게 격리.
+                try {
+                    checkDateTimeLoss(ctx, stage, childBinding, binding, rules, codeMapsByDomain, schema, tableLabel,
+                            tobeColTypes.getOrDefault(tobeTable, java.util.Map.of()));
+                } catch (Exception probeEx) {
+                    log.warn("date time-loss probe failed for {} : {}", tobeTable, probeEx.toString());
+                }
 
                 ingest(ctx, "Transformed " + tobeTable + ": " + rowCount + " rows", true);
                 successCount++;
@@ -245,6 +273,17 @@ public class TransformStage implements StageRunner {
         }
         sb.append(String.join(",\n", colLines));
 
+        sb.append(sourceClause(schema, binding));
+        return sb.toString();
+    }
+
+    /**
+     * FROM [JOIN] [expand] [WHERE] [GROUP BY] 절 — SELECT 뒤에 붙는 source 부분.
+     * buildTransformSql 과 시각손실 probe(checkDateTimeLoss)가 동일 source 컨텍스트를 쓰도록 공유.
+     * sources 가 없으면 "" (FROM-less SELECT).
+     */
+    private String sourceClause(String schema, MappingTableBinding binding) {
+        StringBuilder sb = new StringBuilder();
         // composition_kind 별 FROM 절. sources 없으면 (none) FROM 생략 — DuckDB FROM-less SELECT.
         String fromClause = SqlComposer.fromClause(schema, binding);
         if (fromClause != null) {
@@ -336,6 +375,75 @@ public class TransformStage implements StageRunner {
             }
         }
         return "NULL";
+    }
+
+    /**
+     * DATE 시각 silent 손실 진단. 각 TO-BE date(date-only) 컬럼의 변환식을 AS-IS source 에 대고
+     * TIMESTAMP 로 평가 → 시·분·초가 0 이 아닌 행(= PG date 적재 시 시각 절삭 예정)을 센다.
+     * count>0 면 severity=warning Quarantine + sample. Load 는 차단하지 않는다.
+     *
+     * 직접 매핑·transform_rule 식 모두 커버(변환식 그대로 평가). 식이 안에서 명시적으로
+     * CAST(x AS DATE) 하면 이미 절삭돼 못 잡음(작성자 의도) — 알려진 한계.
+     */
+    private void checkDateTimeLoss(StageContext ctx, StageInstance stage,
+                                   MappingTableBinding childBinding, MappingTableBinding binding,
+                                   List<MappingRule> rules,
+                                   Map<String, List<MappingCodeMap>> codeMapsByDomain,
+                                   String schema, String tableLabel,
+                                   Map<String, String> colTypeByName) throws Exception {
+        String src = sourceClause(schema, binding);
+        if (src.isBlank()) return;   // source 없음(defaults only) — 시각 손실 무관.
+
+        for (MappingRule rule : rules) {
+            if ("skip".equals(rule.getStrategy())) continue;
+            if (!isDateOnly(colTypeByName.get(rule.getTobeColumn()))) continue;   // TO-BE date-only 컬럼만
+
+            String expr = buildColumnExpr(rule, binding, codeMapsByDomain);
+            String col  = rule.getTobeColumn();
+            // 변환식 값을 TIMESTAMP 로 평가. TRY_CAST 라 타임스탬프로 못 읽는 값은 NULL(무시).
+            String inner = "SELECT TRY_CAST((" + expr + ") AS TIMESTAMP) AS __ts" + src;
+            String cond  = "__ts IS NOT NULL AND (EXTRACT(hour FROM __ts) <> 0"
+                    + " OR EXTRACT(minute FROM __ts) <> 0 OR EXTRACT(second FROM __ts) <> 0)";
+
+            long count;
+            try (Statement st = duckDbService.statement();
+                 ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM (" + inner + ") _t WHERE " + cond)) {
+                rs.next();
+                count = rs.getLong(1);
+            }
+            if (count <= 0) continue;
+
+            java.util.List<java.util.List<Object>> sampleRows = new java.util.ArrayList<>();
+            try (Statement st = duckDbService.statement();
+                 ResultSet rs = st.executeQuery("SELECT CAST(__ts AS VARCHAR) FROM (" + inner + ") _t WHERE "
+                         + cond + " LIMIT " + SAMPLE_LIMIT)) {
+                while (rs.next()) {
+                    Object v = rs.getObject(1);
+                    sampleRows.add(java.util.List.of(v == null ? "" : v));
+                }
+            }
+
+            String reason = "Time component truncated by DATE mapping";
+            Map<String, Object> data = new HashMap<>();
+            data.put("reason", reason);
+            data.put("detail", tableLabel + "." + col + " — AS-IS 시각(시·분·초)이 date 변환으로 절삭됨");
+            data.put("severity", "warning");
+            data.put("stageLabel", "Transform");
+            data.put("table", tableLabel);
+            data.put("columns", List.of(col));
+            data.put("columnRoles", List.of("violated"));
+            data.put("sampleRows", sampleRows);
+
+            quarantineService.record(ctx.getRunHistory().getId(), stage.getId(), childBinding.getId(),
+                    null, reason + " — " + col, QuarantineSeverity.warning, data, count,
+                    ctx.getLogLineSeqCursor());
+            ingest(ctx, "Time-loss WARN in " + tableLabel + "." + col + " (" + count + " rows)", true);
+        }
+    }
+
+    /** TO-BE 타입이 date-only(PG date)인가 — timestamp/timestamptz/datetime 은 시각 보존이라 제외. */
+    static boolean isDateOnly(String tobeType) {
+        return tobeType != null && tobeType.trim().toLowerCase().equals("date");
     }
 
     private void ingest(StageContext ctx, String message, boolean info) {

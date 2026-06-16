@@ -234,7 +234,9 @@ export const useWorkspaceStore = create<WorkspaceState>()(
 
       createSite: async (data) => {
         const site = await siteApi.create(data);
-        set((s) => ({ sites: [...s.sites, site], activeSiteId: site.id }));
+        // 새 사이트로 전환 시 이전 사이트의 선택 프로젝트 상태를 리셋 (setActiveSite 와 동일).
+        // 누락 시 새 사이트인데 이전 프로젝트 탭/선택이 잔존 → All Projects 눌러야 사라지던 버그.
+        set((s) => ({ sites: [...s.sites, site], activeSiteId: site.id, activeProjectId: null }));
         return site;
       },
 

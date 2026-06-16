@@ -15,6 +15,7 @@ import com.ksinfo.modernize_pro_data.coordinator.load.PgCopyManager;
 import com.ksinfo.modernize_pro_data.coordinator.load.PgDdlGenerator;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
+import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
@@ -71,6 +72,8 @@ import java.util.stream.Collectors;
 public class LoadStage implements StageRunner {
 
     private static final String STAGE_KEY = "load";
+    /** FK orphan / CHECK 위반 WARN quarantine 의 sample row 상한 (AuditStage 와 동일). */
+    private static final int CONSTRAINT_SAMPLE_LIMIT = 1000;
 
     /** Load 병렬도. 1 = 순차(기본). >1 이면 테이블(binding) 단위로 동시 적재. */
     @Value("${modernize.run.load-parallelism:1}")
@@ -179,6 +182,15 @@ public class LoadStage implements StageRunner {
             } finally {
                 pool.shutdown();
             }
+        }
+
+        // ── FINAL PASS — FK / CHECK 부착 + 위반 감지 (모든 테이블 적재 후라 부모 present) ──
+        // orphan(부모 없는 자식)·CHECK 위반은 삭제하지 않고 WARN quarantine 으로 표면화,
+        // 깨끗하면 VALIDATE 로 제약 확정, 위반 있으면 NOT VALID 유지(운영자/비즈니스 판단).
+        try {
+            applyDeferredConstraints(ctx, stage, dbConfig, bindings, fksByTable, checksByTable);
+        } catch (Exception e) {
+            log.warn("applyDeferredConstraints failed runId={}: {}", runId, e.getMessage());
         }
 
         int successCount = success.get();
@@ -295,12 +307,11 @@ public class LoadStage implements StageRunner {
                 } finally {
                     if (fkDisabled) pgCopyManager.restoreConstraints(conn);
                 }
-                /* 적재 후 UK / FK 부착. PG 의 PRIMARY KEY 제약은 createTableIfNotExists 단계에서
-                   이미 inline 으로 들어가 있고 PG 가 자동으로 <table>_pkey unique index 를 만든다 —
-                   별도 PK 인덱스는 redundant 라 만들지 않는다. */
+                /* 적재 후 UK 부착 (테이블 단위, cross-table 의존 없음). PG PRIMARY KEY 는
+                   createTableIfNotExists 에 inline — PG 가 <table>_pkey unique index 자동 생성.
+                   FK / CHECK 는 모든 테이블 적재 후 final pass(applyDeferredConstraints)에서 부착·검증.
+                   per-binding 이면 자식이 부모보다 먼저 적재돼 가짜 orphan 이 날 수 있어서. */
                 ensureUniqueConstraints(ctx, conn, tobeSchema, tobeTable, uniqueByTable);
-                ensureForeignKeys(ctx, conn, tobeSchema, tobeTable, fksByTable);
-                ensureCheckConstraints(ctx, conn, tobeSchema, tobeTable, checksByTable);
             }
 
             result.setStatus(StageTableStatus.success);
@@ -565,6 +576,146 @@ public class LoadStage implements StageRunner {
         } finally {
             try { conn.setAutoCommit(prevAutoCommit); } catch (Exception ignored) {}
         }
+    }
+
+    /**
+     * 모든 테이블 적재 후 FK / CHECK 부착 + 위반 감지 (final pass).
+     * 부모가 다 적재된 상태라 FK orphan / CHECK 위반은 진짜 신호. 위반 행은 삭제하지 않고
+     * WARN quarantine 으로 표면화. ensureForeignKeys/ensureCheckConstraints 가 ADD NOT VALID +
+     * VALIDATE 를 수행 — 깨끗하면 제약 확정, 위반이면 VALIDATE 실패로 NOT VALID 유지(기존 동작).
+     */
+    private void applyDeferredConstraints(StageContext ctx, StageInstance stage, Map<String, Object> dbConfig,
+                                          List<MappingTableBinding> bindings,
+                                          Map<String, List<ForeignKeyMeta>> fksByTable,
+                                          Map<String, List<CheckConstraintMeta>> checksByTable) throws Exception {
+        String runId = ctx.getRunHistory().getId();
+        if (runControlRegistry.isCancelled(runId)) return;
+        boolean any = fksByTable.values().stream().anyMatch(l -> !l.isEmpty())
+                || checksByTable.values().stream().anyMatch(l -> !l.isEmpty());
+        if (!any) return;
+
+        boolean cutover = ctx.getRunHistory().getRunType()
+                == com.ksinfo.modernize_pro_data.coordinator.run.RunType.cutover;
+        try (Connection conn = pgCopyManager.openConnection(dbConfig, !cutover)) {
+            try { conn.setAutoCommit(true); } catch (Exception ignore) { /* best effort */ }
+            for (MappingTableBinding b : bindings) {
+                boolean loaded = stageTableResultRepo
+                        .findByStageInstanceIdAndBindingId(stage.getId(), b.getId())
+                        .map(r -> r.getStatus() == StageTableStatus.success)
+                        .orElse(false);
+                if (!loaded) continue;   // 적재 실패 테이블엔 제약 부착 안 함.
+                String tobeSchema = b.getTobeSchema() == null ? "" : b.getTobeSchema();
+                String tobeTable  = b.getTobeTable();
+                String tableLabel = tobeSchema.isBlank() ? tobeTable : tobeSchema + "." + tobeTable;
+
+                // FK — 부착 전에 orphan 감지 → WARN. 그다음 기존 ensureForeignKeys 가 ADD+VALIDATE.
+                for (ForeignKeyMeta fk : fksByTable.getOrDefault(tobeTable, List.of())) {
+                    try {
+                        long orphans = countFkOrphans(conn, tobeSchema, tobeTable, fk);
+                        if (orphans > 0) {
+                            List<List<Object>> sample = sampleFkOrphans(conn, tobeSchema, tobeTable, fk);
+                            recordConstraintWarn(ctx, stage, b, tableLabel,
+                                    "Referential integrity — " + orphans + " child rows reference missing parent in "
+                                            + fk.refTable(),
+                                    fk.columns(), sample, orphans);
+                        }
+                    } catch (Exception e) {
+                        log.warn("FK orphan probe failed {} ({}): {}", tobeTable, fk.name(), e.getMessage());
+                    }
+                }
+                ensureForeignKeys(ctx, conn, tobeSchema, tobeTable, fksByTable);
+
+                // CHECK — 부착 전에 위반 감지 → WARN. 그다음 ensureCheckConstraints 가 ADD+VALIDATE.
+                for (CheckConstraintMeta ck : checksByTable.getOrDefault(tobeTable, List.of())) {
+                    try {
+                        long bad = countCheckViolations(conn, tobeSchema, tobeTable, ck);
+                        if (bad > 0) {
+                            recordConstraintWarn(ctx, stage, b, tableLabel,
+                                    "CHECK violation (" + ck.name() + ") — " + bad + " rows fail: " + ck.checkExpression(),
+                                    List.of(), List.of(), bad);
+                        }
+                    } catch (Exception e) {
+                        log.warn("CHECK probe failed {} ({}): {}", tobeTable, ck.name(), e.getMessage());
+                    }
+                }
+                ensureCheckConstraints(ctx, conn, tobeSchema, tobeTable, checksByTable);
+            }
+        }
+    }
+
+    /** 자식 FK 값이 부모에 없는 행 수 (NULL FK 값은 미적용=skip). */
+    private long countFkOrphans(Connection conn, String schema, String table, ForeignKeyMeta fk) throws Exception {
+        String sql = "SELECT count(*) FROM " + pgTableName(schema, table) + " c WHERE "
+                + fkNotNullClause(fk) + " AND NOT EXISTS (SELECT 1 FROM "
+                + pgTableName(fk.refSchema(), fk.refTable()) + " p WHERE " + fkJoinClause(fk) + ")";
+        try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            rs.next();
+            return rs.getLong(1);
+        }
+    }
+
+    private List<List<Object>> sampleFkOrphans(Connection conn, String schema, String table, ForeignKeyMeta fk)
+            throws Exception {
+        String cols = fk.columns().stream().map(c -> "c." + quoteIdent(c)).collect(Collectors.joining(", "));
+        String sql = "SELECT " + cols + " FROM " + pgTableName(schema, table) + " c WHERE "
+                + fkNotNullClause(fk) + " AND NOT EXISTS (SELECT 1 FROM "
+                + pgTableName(fk.refSchema(), fk.refTable()) + " p WHERE " + fkJoinClause(fk) + ") LIMIT "
+                + CONSTRAINT_SAMPLE_LIMIT;
+        List<List<Object>> rows = new ArrayList<>();
+        try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            int n = rs.getMetaData().getColumnCount();
+            while (rs.next()) {
+                List<Object> row = new ArrayList<>(n);
+                for (int i = 1; i <= n; i++) row.add(rs.getObject(i));
+                rows.add(row);
+            }
+        }
+        return rows;
+    }
+
+    private String fkNotNullClause(ForeignKeyMeta fk) {
+        return fk.columns().stream().map(c -> "c." + quoteIdent(c) + " IS NOT NULL")
+                .collect(Collectors.joining(" AND "));
+    }
+
+    private String fkJoinClause(ForeignKeyMeta fk) {
+        List<String> cols = fk.columns();
+        List<String> ref = fk.refColumns();
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < cols.size(); i++) {
+            if (i > 0) sb.append(" AND ");
+            sb.append("p.").append(quoteIdent(ref.get(i))).append(" = c.").append(quoteIdent(cols.get(i)));
+        }
+        return sb.toString();
+    }
+
+    /** CHECK 식이 FALSE 인 행 수. NULL(unknown)은 CHECK 통과라 NOT (expr) 에서 자연히 제외. */
+    private long countCheckViolations(Connection conn, String schema, String table, CheckConstraintMeta ck)
+            throws Exception {
+        String sql = "SELECT count(*) FROM " + pgTableName(schema, table)
+                + " WHERE NOT (" + ck.checkExpression() + ")";
+        try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
+            rs.next();
+            return rs.getLong(1);
+        }
+    }
+
+    /** 제약 위반을 severity=warning Quarantine 으로 기록 (Load 차단 안 함). */
+    private void recordConstraintWarn(StageContext ctx, StageInstance stage, MappingTableBinding binding,
+                                      String tableLabel, String reason,
+                                      List<String> columns, List<List<Object>> sampleRows, long count) {
+        Map<String, Object> data = new HashMap<>();
+        data.put("reason", reason);
+        data.put("detail", tableLabel + " — " + reason);
+        data.put("severity", "warning");
+        data.put("stageLabel", "Load");
+        data.put("table", tableLabel);
+        data.put("columns", columns);
+        data.put("columnRoles", columns.stream().map(c -> "violated").toList());
+        data.put("sampleRows", sampleRows);
+        quarantineService.record(ctx.getRunHistory().getId(), stage.getId(), binding.getId(),
+                null, reason, QuarantineSeverity.warning, data, count, ctx.getLogLineSeqCursor());
+        ingest(ctx, "Load WARN — " + reason + " (" + tableLabel + ")", true);
     }
 
     record UniqueConstraintMeta(String name, List<String> columns) {}

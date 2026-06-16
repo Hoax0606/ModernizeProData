@@ -42,9 +42,11 @@ public final class UdfRegistry {
             HashSha256Udf.register(conn);
             // 문자열 정규화
             NormalizeCorpUdf.register(conn);
-            log.info("DuckDB UDFs registered (12): apply_scale, unpack_zone_decimal, "
+            NfkcNormalizeUdf.register(conn);
+            log.info("DuckDB UDFs registered (13): apply_scale, unpack_zone_decimal, "
                     + "unpack_comp, unpack_comp_float, unpack_signed_separate, unpack_overpunch, "
-                    + "convert_era, assign_seq, validate_bizno, mask_phone, hash_sha256, normalize_corp");
+                    + "convert_era, assign_seq, validate_bizno, mask_phone, hash_sha256, normalize_corp, "
+                    + "nfkc_normalize");
         } catch (SQLException e) {
             log.error("DuckDB UDF registration failed", e);
             throw new RuntimeException("UDF registration failed", e);

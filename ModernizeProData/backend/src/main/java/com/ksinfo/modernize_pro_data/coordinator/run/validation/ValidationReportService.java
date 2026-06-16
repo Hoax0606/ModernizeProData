@@ -702,6 +702,7 @@ public class ValidationReportService implements StageRunner {
                         .map(c -> {
                             if (isDate(c))    return "COALESCE(" + canonicalDateSql(c, false) + ", '')";
                             if (isBoolean(c)) return "COALESCE(" + canonicalBooleanSql(c)     + ", '')";
+                            if (isText(c))    return "COALESCE(" + canonicalTextSql(c, false) + ", '')";
                             return "COALESCE(" + quote(c.getPhysicalName()) + "::text, '')";
                         })
                         .collect(Collectors.joining(", '|', "));
@@ -709,6 +710,7 @@ public class ValidationReportService implements StageRunner {
                         .map(c -> {
                             if (isDate(c))    return "COALESCE(" + canonicalDateSql(c, true) + ", '')";
                             if (isBoolean(c)) return "COALESCE(" + canonicalBooleanSql(c)    + ", '')";
+                            if (isText(c))    return "COALESCE(" + canonicalTextSql(c, true) + ", '')";
                             return "COALESCE(" + quote(c.getPhysicalName()) + "::text, '')";
                         })
                         .collect(Collectors.joining(", '|', "));
@@ -1055,6 +1057,25 @@ public class ValidationReportService implements StageRunner {
     private static String canonicalBooleanSql(DdlColumn c) {
         String col = quote(c.getPhysicalName());
         return "LOWER(NULLIF(" + col + "::text, ''))";
+    }
+
+    /** 텍스트(char/varchar/text/clob) 컬럼 — 유니코드 정규화 비교 대상. */
+    private static boolean isText(DdlColumn c) {
+        if (c.getDataType() == null) return false;
+        String dt = c.getDataType().toLowerCase();
+        return dt.contains("char") || dt.contains("text") || dt.contains("clob") || dt.contains("string");
+    }
+
+    /**
+     * 텍스트 canonical — 양쪽 NFKC 로 통일. AS-IS(DuckDB)와 TO-BE(PG) 가 화면상 같지만 코드포인트가
+     * 다른 경우(NFD vs NFC, ① vs 1, ㈱ vs (株))를 흡수해 checksum 이 FAIL 대신 WARN 으로 떨어지게.
+     * DuckDB: nfkc_normalize UDF(NfkcNormalizeUdf), PG: native normalize(text, NFKC).
+     */
+    private static String canonicalTextSql(DdlColumn c, boolean pg) {
+        String col = quote(c.getPhysicalName());
+        return pg
+                ? "normalize(" + col + "::text, NFKC)"
+                : "nfkc_normalize(" + col + "::text)";
     }
 
     private static String displayType(DdlColumn c) {
