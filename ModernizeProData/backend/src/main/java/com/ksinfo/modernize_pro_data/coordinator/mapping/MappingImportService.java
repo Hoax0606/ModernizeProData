@@ -118,6 +118,14 @@ public class MappingImportService {
         boolean hasColumn = columnCsv != null && columnCsv.length > 0;
         boolean hasCode   = codeCsv   != null && codeCsv.length   > 0;
 
+        // ── 인코딩 정규화 (2026-06-16) ──────────────────────────────────
+        // 맵핑정의서는 사람이 Excel 로 만들어 한/일 Windows 에선 ANSI(CP949/Shift-JIS)로
+        // 저장되기 쉽다. DuckDB read_csv 는 기본 UTF-8 + ignore_errors=true 라, 비 UTF-8
+        // 멀티바이트(예: notes 의 한글)가 든 row 를 invalid 로 보고 통째로 silent skip 했다
+        // → 일부 컬럼만 매핑되는 원인. read_csv 전에 UTF-8 로 정규화해 모든 row 를 보존한다.
+        if (hasColumn) columnCsv = toUtf8(columnCsv);
+        if (hasCode)   codeCsv   = toUtf8(codeCsv);
+
         // ── 파싱 단계 (2026-06-04: 트랜잭션 밖으로 분리) ──────────────────
         // DuckDB CSV 파싱은 대형 매핑정의서에서 느린데, 이전엔 이게 @Transactional 안에서
         // 돌아 메타 DB connection + 그 project 의 mapping 테이블 lock 을 파싱 내내 점유 →
@@ -1454,6 +1462,37 @@ public class MappingImportService {
         Path tmp = Files.createTempFile("mpd_" + prefix + "_", ".csv");
         Files.write(tmp, data);
         return tmp;
+    }
+
+    /**
+     * CSV 바이트를 UTF-8 로 정규화. read_csv 가 UTF-8 만 안전히 다루므로, 비 UTF-8 정의서
+     * (한/일 Excel 의 CP949·Shift_JIS ANSI 저장)를 그대로 넘기면 멀티바이트 row 가 invalid 로
+     * 통째로 drop 된다. UTF-8 strict → 실패 시 MS949(한글)·Shift_JIS(일어) strict 순으로 시도해
+     * 성공한 charset 으로 디코드 후 UTF-8 재인코딩한다. 모두 실패하면 UTF-8 lossy(replace)로
+     * 최소 row 보존. BOM(EF BB BF)은 제거.
+     */
+    static byte[] toUtf8(byte[] raw) {
+        if (raw == null || raw.length == 0) return raw;
+        // UTF-8 BOM 제거.
+        int off = 0;
+        if (raw.length >= 3 && (raw[0] & 0xFF) == 0xEF && (raw[1] & 0xFF) == 0xBB && (raw[2] & 0xFF) == 0xBF) {
+            off = 3;
+        }
+        java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(raw, off, raw.length - off);
+        for (String cs : new String[] { "UTF-8", "MS949", "Shift_JIS" }) {
+            try {
+                java.nio.charset.CharsetDecoder dec = java.nio.charset.Charset.forName(cs).newDecoder()
+                        .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT);
+                String s = dec.decode(bb.duplicate()).toString();
+                return s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            } catch (java.nio.charset.CharacterCodingException ignore) {
+                // 다음 charset 시도
+            }
+        }
+        // 모든 strict 디코드 실패 — UTF-8 lossy 로 최소 보존 (깨진 글자는 replacement).
+        String s = new String(raw, off, raw.length - off, java.nio.charset.StandardCharsets.UTF_8);
+        return s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }
 
     private static void deleteQuiet(Path p) {

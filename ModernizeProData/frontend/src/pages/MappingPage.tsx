@@ -171,6 +171,25 @@ function ddlToAsisColumns(schema: DdlSchema | undefined | null): Record<string, 
 }
 
 /**
+ * ASIS_COLUMNS 조회 — schema-lenient. binding 의 source table 은 schema 한정
+ * (BANKSYS.CUSTOMERS) 인데 AS-IS DDL 은 schema 빈값(CUSTOMERS)일 수 있어(또는 반대),
+ * exact 키 조회가 miss 하면 컬럼 드롭다운/자동매핑이 빈다. TO-BE 매칭(qualifiedName 주석 참조)이
+ * 이미 하는 physical 이름 fallback 을 source 쪽에도 적용한다. (대소문자 무시)
+ */
+function lookupAsisCols(key: string | undefined | null): AsisColumn[] {
+  if (!key) return [];
+  const exact = ASIS_COLUMNS[key];
+  if (exact) return exact;
+  const bare = key.includes('.') ? key.slice(key.lastIndexOf('.') + 1) : key;
+  const bl = bare.toLowerCase();
+  for (const k of Object.keys(ASIS_COLUMNS)) {
+    const kb = k.includes('.') ? k.slice(k.lastIndexOf('.') + 1) : k;
+    if (kb.toLowerCase() === bl) return ASIS_COLUMNS[k];
+  }
+  return [];
+}
+
+/**
  * Initial mapping rows for each TO-BE table — all columns start as unmapped
  * (no mapping snapshot in backend yet). User edits accumulate in rowEdits.
  */
@@ -740,7 +759,7 @@ export function MappingPage() {
       // unrouted 인데 모든 컬럼이 explicit skip 이면 'skipped' (회색) 표시.
       // asisSkippedCols[table][col] === true 인 컬럼만 skip 으로 카운트.
       const skipMap = asisSkippedCols[at.name] || {};
-      const cols = ASIS_COLUMNS[at.name] || [];
+      const cols = lookupAsisCols(at.name);
       const allColsSkipped = isUnrouted
         && cols.length > 0
         && cols.every((c) => skipMap[c.name] === true);
@@ -1209,16 +1228,24 @@ async function findUncoveredDdlColumns(projectId: string, tableFilter: string | 
       mappingImportApi.listRules(projectId),
       mappingImportApi.listBindings(projectId).catch(() => []),
     ]);
-    const ruleCols = new Map<string, Set<string>>();  // `${schema}|${table}` → Set<column>
+    // schema-lenient — rule.tobeSchema 가 DDL schema 와 유무/대소문자가 달라도(예: 정의서는
+    // bare `transaction_reissued`, DDL 은 `bigassignseq.transaction_reissued`) 매칭되도록
+    // exact (schema|table) 와 bare (table) 두 키를 모두 만든다. 컬럼명도 대소문자 무시.
+    const ruleCols = new Map<string, Set<string>>();        // `${schema}|${table}` (lowercase) → Set<column lower>
+    const ruleColsByTable = new Map<string, Set<string>>(); // bare `${table}` (lowercase) → Set<column lower>
+    const addCol = (m: Map<string, Set<string>>, key: string, col: string) => {
+      if (!m.has(key)) m.set(key, new Set());
+      m.get(key)!.add(col);
+    };
     for (const r of rules) {
-      const key = (r.tobeSchema || '') + '|' + r.tobeTable;
-      if (!ruleCols.has(key)) ruleCols.set(key, new Set());
-      ruleCols.get(key)!.add(r.tobeColumn);
+      const tbl = (r.tobeTable || '').toLowerCase();
+      addCol(ruleCols, (r.tobeSchema || '').toLowerCase() + '|' + tbl, r.tobeColumn.toLowerCase());
+      addCol(ruleColsByTable, tbl, r.tobeColumn.toLowerCase());
     }
-    // 자식 link 테이블은 master 에서 정의되므로 임포트 검증에서 제외.
-    const linkedKeys = new Set<string>();
+    // 자식 link 테이블은 master 에서 정의되므로 임포트 검증에서 제외 (bare table 기준).
+    const linkedTables = new Set<string>();
     for (const b of bindings) {
-      if (b.sharedFromProjectId) linkedKeys.add((b.tobeSchema || '') + '|' + b.tobeTable);
+      if (b.sharedFromProjectId) linkedTables.add((b.tobeTable || '').toLowerCase());
     }
     const targets = tableFilter
       ? TOBE_TABLES.filter((t) => (t.name.split('.').pop() || t.name) === tableFilter)
@@ -1226,13 +1253,17 @@ async function findUncoveredDdlColumns(projectId: string, tableFilter: string | 
     const uncovered: string[] = [];
     for (const tobe of targets) {
       const i = tobe.name.indexOf('.');
-      const schema = i > 0 ? tobe.name.slice(0, i) : '';
-      const table = i > 0 ? tobe.name.slice(i + 1) : tobe.name;
-      if (linkedKeys.has(schema + '|' + table)) continue;  // 자식 link 테이블 — skip
-      const haveCols = ruleCols.get(schema + '|' + table) || new Set();
+      const schema = (i > 0 ? tobe.name.slice(0, i) : '').toLowerCase();
+      const table = (i > 0 ? tobe.name.slice(i + 1) : tobe.name).toLowerCase();
+      if (linkedTables.has(table)) continue;  // 자식 link 테이블 — skip
+      // exact (schema|table) + bare (table) 합집합 — schema 유무가 행마다 달라도 누락 없이 매칭.
+      const haveCols = new Set<string>([
+        ...(ruleCols.get(schema + '|' + table) ?? []),
+        ...(ruleColsByTable.get(table) ?? []),
+      ]);
       const ddlCols = MAPPING_BY_TOBE[tobe.internalName] || [];
       for (const c of ddlCols) {
-        if (!haveCols.has(c.tgt)) uncovered.push(`${tobe.name}.${c.tgt}`);
+        if (!haveCols.has(c.tgt.toLowerCase())) uncovered.push(`${tobe.name}.${c.tgt}`);
       }
     }
     return uncovered;
@@ -2464,7 +2495,7 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
   const aliasColumnOptions = useMemo(() => {
     const opts: string[] = [];
     for (const s of sources) {
-      const cols = ASIS_COLUMNS[s.table] || [];
+      const cols = lookupAsisCols(s.table);
       for (const c of cols) opts.push(`${s.alias}.${c.name}`);
     }
     for (const e of parseExpandAliases(expandExpr)) {
@@ -3116,7 +3147,7 @@ function resolveSrcType(s: string, sources: TobeTable['sources'], expandExpr?: s
   if (di < 0) {
     // No alias prefix — search every bound source table for the first matching column.
     for (const src of sources) {
-      const col = (ASIS_COLUMNS[src.table] || []).find((c) => c.name === s);
+      const col = lookupAsisCols(src.table).find((c) => c.name === s);
       if (col) return col.type;
     }
     return '—';
@@ -3125,7 +3156,7 @@ function resolveSrcType(s: string, sources: TobeTable['sources'], expandExpr?: s
   const col = s.slice(di + 1);
   const entry = sources.find((e) => e.alias === alias);
   if (entry) {
-    return (ASIS_COLUMNS[entry.table] || []).find((c) => c.name === col)?.type ?? '—';
+    return lookupAsisCols(entry.table).find((c) => c.name === col)?.type ?? '—';
   }
   // expand_expr 의 AS u(col1, col2) 같은 펼침 alias 면 type = VARCHAR fallback
   // (expand 의 값은 SQL fragment 라 정확한 type 추론 불가; all_varchar input 의 일관 fallback).
@@ -3757,7 +3788,7 @@ function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, 
                   >
                     <option value="">— unassigned —</option>
                     {sources.flatMap((src) =>
-                      (ASIS_COLUMNS[src.table] || []).map((c) => (
+                      lookupAsisCols(src.table).map((c) => (
                         <option key={`${src.alias}.${c.name}`} value={`${src.alias}.${c.name}`}>
                           [{src.alias}] {c.name}  ({c.type})
                         </option>
@@ -4863,7 +4894,7 @@ function ReportView({ table, rows, sources, prefetched, onClose, onPickColumn }:
               )) : (asisPreview?.headers ?? []).map((h) => {
                 // AS-IS DDL 의 컬럼 type lookup (대소문자 무관 매칭).
                 const asisType = firstSource
-                  ? (ASIS_COLUMNS[firstSource.table] || []).find((c) => c.name.toLowerCase() === h.toLowerCase())?.type
+                  ? lookupAsisCols(firstSource.table).find((c) => c.name.toLowerCase() === h.toLowerCase())?.type
                   : undefined;
                 const typeLabel = asisType || 'VARCHAR';
                 return (
@@ -5136,7 +5167,7 @@ function computeAsisMappings(
       // alias 가 있으면 그 alias 가 현재 AS-IS 테이블의 alias 중 하나여야 함
       if (sourceAlias && !aliases.has(sourceAlias)) continue;
       // alias 가 없으면, srcCol 이 현재 AS-IS 테이블에 실제로 존재해야 함
-      if (!sourceAlias && !(ASIS_COLUMNS[asisTableName] || []).some((c) => c.name === srcCol)) continue;
+      if (!sourceAlias && !lookupAsisCols(asisTableName).some((c) => c.name === srcCol)) continue;
 
       (out[srcCol] ||= []).push({
         tobeInternalName: tobe.internalName,
@@ -5161,7 +5192,7 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
   onJumpTobe: (internalName: string, name: string) => void;
 }) {
   const readOnly = useActiveProjectReadOnly();
-  const cols = ASIS_COLUMNS[table.name] || [];
+  const cols = lookupAsisCols(table.name);
   const [colFilter, setColFilter] = useState<AsisColFilter>('all');
   const routedTobe = effectiveTobe.filter((t) => t.sources.some((s) => s.table === table.name));
 

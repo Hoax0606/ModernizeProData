@@ -207,19 +207,22 @@ export function CreateProjectModal({ open, onClose }: Props) {
 
     // 사이트 매핑정의서 분배 (선택) — 생성 성공한 프로젝트들에만 적용.
     const hasSpec = !!smCol || !!smCode;
+    let smFailed = false;
     if (hasSpec && createdIds.length > 0 && activeSite) {
       try {
         const res = await mappingImportApi.importSite(activeSite.id, createdIds, smCol, smCode);
         setSmNote(t('siteMapping.summary', { ok: res.succeeded, total: res.total }));
+        smFailed = res.succeeded !== res.total;
       } catch (err) {
         setSmNote(err instanceof Error ? err.message : String(err));
+        smFailed = true;
       }
     }
 
     if (reasons.size === 0) {
-      // 매핑정의서를 첨부한 경우엔 분배 결과(smNote)를 보여주려고 모달을 닫지 않는다.
-      // 생성된 행은 비워 재생성을 막는다.
-      if (hasSpec) {
+      // 프로젝트 생성 + 매핑 분배 모두 성공 → 모달 닫기.
+      // 매핑 분배에 일부 실패가 있을 때만 결과(smNote)를 보여주려 열어둔다(생성행은 비움).
+      if (hasSpec && smFailed) {
         rowSeq.current = 0;
         setRows([newRow()]);
         setSmCol(null);

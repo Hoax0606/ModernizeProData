@@ -26,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
+import com.ksinfo.modernize_pro_data.common.util.CsvEncoding;
 
 /**
  * Mapping Report — TO-BE 테이블의 매핑 룰 + 바인딩을 SQL 한 방으로 묶어 DuckDB 로 실행.
@@ -134,7 +135,7 @@ public class MappingReportService {
                     kind, masterIdSlot, null, null, null);
         }
 
-        String sql = buildSql(binding, rules, baseDir, effLimit);
+        String sql = buildSql(binding, rules, baseDir, effLimit, site.getAsisEncoding());
 
         List<String> headers = new ArrayList<>();
         List<List<String>> outRows = new ArrayList<>();
@@ -160,7 +161,7 @@ public class MappingReportService {
             }
         } catch (SQLException e) {
             log.warn("Report SQL failed: {}", e.getMessage());
-            return identifyFailingRule(schema, tobeTable, headers, sql, binding, rules, baseDir, e.getMessage());
+            return identifyFailingRule(schema, tobeTable, headers, sql, binding, rules, baseDir, e.getMessage(), site.getAsisEncoding());
         }
         return new ReportResult(schema, tobeTable, headers, outRows, outRows.size(), truncated, sql, null,
                 null, null, null, null, null);
@@ -178,14 +179,15 @@ public class MappingReportService {
      */
     private ReportResult identifyFailingRule(String schema, String tobeTable, List<String> headers,
                                              String sql, MappingTableBinding binding,
-                                             List<MappingRule> rules, Path baseDir, String origMessage) {
+                                             List<MappingRule> rules, Path baseDir, String origMessage,
+                                             String asisEncoding) {
         String origType = classifyDuckDbErrorCode(origMessage);
         String origHint = extractHint(origMessage);
         if (binding == null || binding.getSources().isEmpty()) {
             return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType, origHint,
                     "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
         }
-        String fromClause = buildFromClause(binding, rules, baseDir);
+        String fromClause = buildFromClause(binding, rules, baseDir, asisEncoding);
         if (fromClause.isEmpty()) {
             return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType, origHint,
                     "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
@@ -286,7 +288,7 @@ public class MappingReportService {
      * 룰들의 transform_sql (없으면 transform_rule) 을 그대로 SELECT 식으로 인젝션 + AS tobeColumn.
      * 바인딩이 있으면 read_csv FROM + JOIN + WHERE 까지 붙임 (FROM 구성은 buildFromClause 에 위임).
      */
-    private String buildSql(MappingTableBinding binding, List<MappingRule> rules, Path baseDir, int limit) {
+    private String buildSql(MappingTableBinding binding, List<MappingRule> rules, Path baseDir, int limit, String asisEncoding) {
         StringBuilder select = new StringBuilder("SELECT ");
         boolean first = true;
         for (MappingRule r : rules) {
@@ -300,7 +302,7 @@ public class MappingReportService {
             return "SELECT NULL LIMIT 0";
         }
 
-        String fromClause = buildFromClause(binding, rules, baseDir);
+        String fromClause = buildFromClause(binding, rules, baseDir, asisEncoding);
         if (fromClause.isEmpty()) {
             // No source → defaults only. 한 row 짜리 SELECT.
             return select.append(" LIMIT 1").toString();
@@ -319,7 +321,7 @@ public class MappingReportService {
      * binding 이 없거나 sources 가 비면 빈 문자열 반환.
      * identifyFailingRule 의 probe 쿼리도 이걸 재사용.
      */
-    private String buildFromClause(MappingTableBinding binding, List<MappingRule> rules, Path baseDir) {
+    private String buildFromClause(MappingTableBinding binding, List<MappingRule> rules, Path baseDir, String asisEncoding) {
         if (binding == null || binding.getSources().isEmpty()) return "";
         var sources = binding.getSources().stream()
                 .sorted(Comparator.comparingInt(MappingTableBindingSource::getOrdinal))
@@ -343,6 +345,7 @@ public class MappingReportService {
             // (1000만 row CSV 의 schema 추론 default = 20480 row sample → 수십초 추가 비용 제거.)
             String readCsv = "(SELECT * FROM read_csv('" + escPath
                     + "', header=true, delim=',', null_padding=true, all_varchar=true, sample_size=100"
+                    + CsvEncoding.clause(asisEncoding)
                     + ") LIMIT " + TRIAL_SOURCE_SAMPLE + ") " + aliasQ;
             if (i == 0) {
                 from.append(readCsv);

@@ -67,6 +67,8 @@ export function SiteMappingImportModal({ open, onClose, siteId, projects, onImpo
       const res = await mappingImportApi.importSite(siteId, ids, columnFile, codeFile);
       setResult(res);
       onImported?.(res);
+      // 전 프로젝트 성공이면 모달 닫기. 일부 실패 시엔 결과(실패 사유)를 보여주려 열어둔다.
+      if (res.succeeded === res.total) onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

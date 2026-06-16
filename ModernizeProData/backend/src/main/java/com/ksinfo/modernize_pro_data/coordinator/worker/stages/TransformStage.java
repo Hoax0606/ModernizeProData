@@ -38,8 +38,8 @@ import java.util.Map;
 /**
  * Transform stage — mapping_rules + mapping_code_maps 로부터 DuckDB SQL 생성 + 실행.
  *
- * PoC 1차 단순화:
- *   - composition_kind = 'single' 만 (다중 source join/union 은 추후)
+ * 단순화 범위:
+ *   - composition_kind = single / join / union 모두 실행 (FROM 절은 SqlComposer 가 생성 — 아래 참조)
  *   - asis_column 다중 = NULL-safe CONCAT combine (날짜 조립 등 복잡 결합은 transform_rule 로)
  *   - transform_sql multiline 은 skip (transform_rule 짧은 expression 만)
  *   - strategy='expression' + transform_rule + code_domain 만

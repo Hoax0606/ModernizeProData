@@ -5,6 +5,7 @@ import com.ksinfo.modernize_pro_data.common.duckdb.DuckDbService;
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
 import com.ksinfo.modernize_pro_data.coordinator.site.Site;
 import com.ksinfo.modernize_pro_data.coordinator.site.SiteRepository;
+import com.ksinfo.modernize_pro_data.common.util.CsvEncoding;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -125,7 +126,7 @@ public class SiteCsvPreviewController {
 
         int effectiveLimit = limit == null ? DEFAULT_LIMIT : Math.min(Math.max(limit, 1), MAX_LIMIT);
 
-        CsvPreview preview = readWithDuckDb(csvFile, tableName, effectiveLimit);
+        CsvPreview preview = readWithDuckDb(csvFile, tableName, effectiveLimit, site.getAsisEncoding());
         return ApiResponse.ok(preview);
     }
 
@@ -318,15 +319,18 @@ public class SiteCsvPreviewController {
      * Read up to {limit} rows via DuckDB. {limit+1} rows are queried so we can
      * flag truncation. CSV dialect (delimiter / quote / encoding) is auto-detected.
      */
-    private CsvPreview readWithDuckDb(Path csvFile, String tableName, int limit) {
+    private CsvPreview readWithDuckDb(Path csvFile, String tableName, int limit, String asisEncoding) {
         // csvFile is already validated to live under the site's csvPath; only the
         // single-quote needs escaping for the SQL string literal.
         String escapedPath = csvFile.toString().replace("'", "''");
         // sample_size=1024 — schema detection 용. limit 가 작아 전체 scan 안 함.
         // 옛 -1 은 1GB+ file 에서 schema detect 시간/메모리 폭주 (preflight csv-arrived 호출이
         // 그것 못 견뎌 csv 미도착으로 잘못 판정). all_varchar=true 라 type 추론 무관 — 작은 sample 충분.
+        // encoding= : site.asisEncoding 적용 (Shift-JIS 등). 누락 시 UTF-8 로 읽혀 비 UTF-8 CSV 의
+        // 헤더가 깨지거나 read 가 실패 → Mapping 소스 컬럼 드롭다운/자동매핑이 빈다.
         String sql = "SELECT * FROM read_csv_auto('" + escapedPath
-                + "', header=true, sample_size=1024, all_varchar=true) LIMIT " + (limit + 1);
+                + "', header=true, sample_size=1024, all_varchar=true"
+                + CsvEncoding.clause(asisEncoding) + ") LIMIT " + (limit + 1);
 
         List<String> headers = new ArrayList<>();
         List<List<String>> rows = new ArrayList<>();
