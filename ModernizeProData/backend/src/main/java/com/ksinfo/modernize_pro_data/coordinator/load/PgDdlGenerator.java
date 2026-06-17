@@ -49,22 +49,29 @@ public final class PgDdlGenerator {
             sb.append("\n");
         }
 
-        // PRIMARY KEY (pk_order 가 있는 컬럼들, 순서대로)
-        List<String> pkCols = cols.stream()
-                .filter(c -> c.getPkOrder() != null)
-                .sorted(Comparator.comparing(DdlColumn::getPkOrder))
-                .map(c -> ident(c.getPhysicalName()))
-                .toList();
-        if (!pkCols.isEmpty()) {
-            // 위 마지막 컬럼 라인에 trailing newline 만 들어가있고 comma 없음 → 추가 comma 필요
-            // 위 loop 의 i<size-1 분기로 마지막 컬럼 뒤 comma 가 없어서, 여기 직전에 comma 삽입.
-            int last = sb.lastIndexOf("\n");
-            sb.insert(last, ",");
-            sb.append("  PRIMARY KEY (").append(String.join(", ", pkCols)).append(")\n");
-        }
-
+        // PRIMARY KEY 는 inline 으로 넣지 않는다 (2026-06-16, index 후행).
+        // inline PK 면 COPY 적재 중 PG 가 PK unique index 를 매 row 유지 → 대용량 느림.
+        // 적재 후 LoadStage.ensurePrimaryKey 가 ALTER TABLE ADD PRIMARY KEY 로 일괄 빌드.
         sb.append(")");
         return sb.toString();
+    }
+
+    /** PK 컬럼 physical 이름 (pk_order 순). 없으면 빈 list. */
+    public static List<String> primaryKeyColumns(List<DdlColumn> cols) {
+        return cols.stream()
+                .filter(c -> c.getPkOrder() != null)
+                .sorted(Comparator.comparing(DdlColumn::getPkOrder))
+                .map(DdlColumn::getPhysicalName)
+                .toList();
+    }
+
+    /**
+     * 적재 후 PK 부착 SQL. {@code ALTER TABLE ... ADD PRIMARY KEY (cols)}.
+     * PG 가 {@code <table>_pkey} unique index 를 bulk 생성. 이미 존재 시 에러 → 호출 측 try/catch 멱등.
+     */
+    public static String addPrimaryKeySql(String schema, String table, List<String> pkColumns) {
+        String quotedCols = pkColumns.stream().map(PgDdlGenerator::ident).collect(Collectors.joining(", "));
+        return "ALTER TABLE " + qualifiedTable(schema, table) + " ADD PRIMARY KEY (" + quotedCols + ")";
     }
 
     /** Oracle → PG 타입 매핑. length/precision/scale 동봉. 알 수 없는 타입은 pass-through. */

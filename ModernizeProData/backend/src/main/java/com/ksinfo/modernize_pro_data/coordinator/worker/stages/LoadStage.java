@@ -311,6 +311,9 @@ public class LoadStage implements StageRunner {
                    createTableIfNotExists 에 inline — PG 가 <table>_pkey unique index 자동 생성.
                    FK / CHECK 는 모든 테이블 적재 후 final pass(applyDeferredConstraints)에서 부착·검증.
                    per-binding 이면 자식이 부모보다 먼저 적재돼 가짜 orphan 이 날 수 있어서. */
+                // PK 후행 — bare 테이블에 COPY 끝난 뒤 ADD PRIMARY KEY 로 인덱스 일괄 빌드
+                // (createTableIfNotExists 가 inline PK 를 안 넣음 → COPY 중 PK 인덱스 미유지 = 빠름).
+                ensurePrimaryKey(ctx, conn, tobeSchema, tobeTable, columnsByTable.get(tobeTable));
                 ensureUniqueConstraints(ctx, conn, tobeSchema, tobeTable, uniqueByTable);
             }
 
@@ -395,6 +398,39 @@ public class LoadStage implements StageRunner {
      * 적재 후 UK 부착. {@code ALTER TABLE ... ADD CONSTRAINT name UNIQUE (...)}.
      * 이미 존재 시 PG 에러 → catch 후 log 만 (멱등). 실패는 적재 자체엔 영향 없음.
      */
+    /**
+     * 적재 후 PK 부착 — bare 테이블에 COPY 끝난 뒤 ADD PRIMARY KEY 로 인덱스 일괄 빌드.
+     * 이미 존재(DBA 사전생성/재실행) 또는 중복키 시 에러 → log 만 (멱등). 중복키는 AuditStage 의
+     * pk_unique 검증이 적재 전 quarantine 했어야 하므로 정상 흐름에선 발생 안 함.
+     */
+    void ensurePrimaryKey(StageContext ctx, Connection conn, String tobeSchema, String tobeTable,
+                          List<DdlColumn> cols) {
+        if (cols == null) return;
+        List<String> pkCols = PgDdlGenerator.primaryKeyColumns(cols);
+        if (pkCols.isEmpty()) return;
+
+        boolean prevAutoCommit;
+        try { prevAutoCommit = conn.getAutoCommit(); }
+        catch (Exception e) {
+            log.warn("ensurePrimaryKey getAutoCommit failed for {}: {}", tobeTable, e.getMessage());
+            return;
+        }
+        try {
+            if (!prevAutoCommit) conn.setAutoCommit(true);
+            String sql = PgDdlGenerator.addPrimaryKeySql(tobeSchema, tobeTable, pkCols);
+            try (Statement st = conn.createStatement()) {
+                st.execute(sql);
+                ingest(ctx, "Ensured PK on " + tobeTable + " (" + String.join(",", pkCols) + ")", true);
+            } catch (Exception e) {
+                log.warn("ensurePrimaryKey skip {}: {}", tobeTable, e.getMessage());
+            }
+        } catch (Exception e) {
+            log.warn("ensurePrimaryKey failed for {}: {}", tobeTable, e.getMessage());
+        } finally {
+            try { conn.setAutoCommit(prevAutoCommit); } catch (Exception ignored) {}
+        }
+    }
+
     void ensureUniqueConstraints(StageContext ctx, Connection conn, String tobeSchema, String tobeTable,
                                  Map<String, List<UniqueConstraintMeta>> uniqueByTable) {
         List<UniqueConstraintMeta> uks = uniqueByTable.getOrDefault(tobeTable, List.of());
