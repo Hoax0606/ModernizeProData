@@ -466,6 +466,18 @@ That said, keep 12-factor habits so a future move is cheap:
 4. **`compile-preview` endpoint (DuckDB `EXPLAIN` for design-time check)** — include in PoC scope?
 5. **`drop` / `ignore` strategies vs. `unmapped`** — keep them distinct?
 6. **PG version mismatch across docs** — `CLAUDE.md` says "PG 18 bundled", memory and `compose.yaml` say PG 16. Current guess: dev local = PG 18, installer-bundled = PG 16 (stability). Needs cleanup.
+7. **`mapping_table_bindings` orphan integrity** (added 2026-05-29) — TO-BE side has
+   no FK to `ddl_tables`, so bindings can drift from current DDL. Mitigations layered:
+   (a) **DDL re-import / delete wipes mapping** (`DdlImportService`, commit `cb67d45`);
+   (b) **MappingImportService TO-BE validation** — skip rows whose `tobe_table` is
+   absent in current TO-BE DDL (current PR);
+   (c) **`SnapshotController.setBaseline` current-DDL compat guard** — DEFERRED.
+   Restored bindings whose `tobe_table` no longer exists in DDL can re-introduce orphans;
+   (d) **FK + cascade on `mapping_table_bindings.tobe_ddl_table_id` (and the two
+   sibling tables)** — DEFERRED. The only structural fix that makes orphans impossible
+   at DB level. ~2–3 days; should also constrain `mapping_table_binding_sources.
+   asis_ddl_table_id` and `mapping_rules.tobe_ddl_column_id`. See
+   `docs/handoff/2026-05-29-execution2-bundle.md` for the layer table.
 
 ---
 
@@ -679,20 +691,29 @@ them via UI paste. The tool never generates tokens.
 - 3-segment dotted (`x.y.z`) → defer to `JwtAuthFilter` (heuristic)
 - Otherwise: SHA-256 the token, look up by hash. Hit → `ROLE_API_CLIENT`.
 
-### 17.4 Phase semantics for runs
+### 17.4 Phase semantics for runs (tightened 2026-05-29)
 
-`RunService.resolveRunTypeFromPhase()` maps phase → runType:
+`RunService.resolveRunTypeFromPhase()` is used by the **scheduler / auto-trigger
+paths** (Quartz nightly, `/runs/all`, and `/runs` when `runType` is omitted).
+Manual UI runs through `/runs` with an explicit `runType` are not affected.
 
 | Phase | runType | Notes |
 |---|---|---|
-| `test` | `test` | dry-run test |
-| `rehearsal` | `rehearsal` | dry-run rehearsal |
-| `ready` | `cutover` | **production cut-over fires here** |
-| `cutover` | _(empty)_ | already running — new runs rejected |
-| others | _(empty)_ | not eligible |
+| `sign-off` | `rehearsal` | mapping snapshot approved → dry-run rehearsal. `maybeAdvancePhase` then auto-advances `sign-off → rehearsal`. |
+| `ready` | `cutover` | cutover snapshot approved → production cut-over fires here. |
+| all others (`planning` / `analysis` / `test` / `rehearsal` / `cutover` / `hypercare` / `done`) | _(empty)_ | not eligible — REJECTED with `phase 'xxx' is not eligible for scheduled run`. |
+
+Rationale: both `sign-off` and `ready` are reached **only after** a snapshot
+Request Review approval, so the mapping is verified at the phase transition.
+This makes preflight pass an implicit guarantee of the phase itself — no
+separate preflight persistence is needed for scheduler/auto-trigger gating.
+The pre-2026-05-29 design used a `default → RunType.test` fallback that let
+`planning` / `analysis` projects fire scheduled runs even before their mapping
+was prepared; that hole is now closed.
 
 The `cutover` phase represents an **in-progress** cut-over (not a
 "ready-to-cut" state). On completion, the project transitions to `hypercare`.
+Auto-transition `cutover → hypercare` is still a TODO.
 
 ### 17.5 Trigger source enum
 
@@ -879,86 +900,198 @@ download trigger) does **not** need to change.
 
 ---
 
-## 18. Pre-flight Gate — Execution Readiness Checks (added 2026-05-22)
+## 18. Pre-flight Gate — Execution Readiness Checks (rewritten 2026-05-27)
 
-The check panel that guards Start run on the Execution page. A run can only be
-started when every applicable check is in pass state.
+Readiness gate before Execution Start run AND before Versions Request Review.
+The two gates share the same check engine but apply different thresholds.
 
-### 18.1 Check status model
+### 18.1 Two gate contexts
 
-- `pass | fail | skip` — three-state. `skip` ("n/a") means the check is not
-  applicable to the current table selection (today: only `approved-snapshot`).
-- `fail` blocks Start run; the hint switches to "resolve the failing items
-  above first."
-- `RunHeader`'s `canStart` AND-gates `preflightPassed` on top of the existing
-  mapping-complete and phase gates.
-
-### 18.2 The eight checks
-
-| id | Title | Status when |
+| Gate | Where | Threshold |
 |---|---|---|
-| `csv-arrived` | AS-IS extract data arrived | pass: customer's CSV received |
-| `ddl-asis` | AS-IS DDL import | pass: N tables registered / fail: not yet |
-| `ddl-tobe` | TO-BE DDL import | pass: N tables registered / fail: not yet |
-| `conn-tobe` | TO-BE DB reachable | pass: latency ok / fail: slow / fail: unreachable |
-| `tobe-bindings` | All TO-BE tables source-bound | pass: every TO-BE column has a source / fail: N unbound |
-| `asis-unmapped` | Selected AS-IS columns unmapped check | pass: all selected AS-IS columns mapped / fail: N unmapped |
-| `unmapped-cols` | All TO-BE columns unmapped check | pass: all TO-BE columns have a source / fail: N unmapped |
-| `approved-snapshot` | Snapshot approval check | pass: approved snapshot in place / fail: no snapshot / **skip: partial table selection** |
+| **Start run** | `ExecutionPage` → RunHeader | pin pinned snapshot + selected tables × every check pass + `runMode !== null`. Uses `executionPreflight.bySnapshot` cache (FE localStorage). |
+| **Request Review** (rewritten 2026-05-28) | `VersionsPage` → SnapshotDetailView | every TO-BE table of the project has its latest `stage_table_results` row = `success`. Evaluated by BE `ProjectRunReadinessService` via `GET /api/v1/projects/{id}/run-readiness`. **No longer uses the FE preflight cache.** |
 
-`approved-snapshot` is the only check that uses `skip`: it is only meaningful
-when the user runs against all tables — partial selections cannot validate
-against a project-wide approved snapshot.
+Selection can be a subset (partial migration is a real requirement). Start run
+allows running that subset. Request Review used to demand "preflight pass on
+every DDL TO-BE table"; the new model demands "every TO-BE table actually
+finished running successfully", which is a strictly stronger guarantee (the
+table truly produced output, not just that the preflight checks passed). The
+gate is per-binding (`stage_table_results.status`) not per-run — so a partial-
+failure run leaves the successful tables in `success` state, and only the
+failed tables need to be re-run.
 
-### 18.3 Table selection
+### 18.2 The seven checks
 
-- `TableSelector` lists TO-BE tables with a "select all" checkbox + per-table
-  checkboxes.
-- Empty state ("Register TO-BE DDL first") shown when `ddl-tobe` has not been
-  imported yet — the Pre-flight check button is disabled in that state.
-- Selection drives which AS-IS columns are inspected by `asis-unmapped`, and
-  whether `approved-snapshot` runs (all) or is skipped (subset).
+| id | scope | Data source | Pass when |
+|---|---|---|---|
+| `csv-arrived` | per-table | `site.csvPath` + per-AS-IS file probe (`csv-preview/{name}?limit=1`) | path set + every needed `{asisTable}.csv` (or `{schema}.{table}.csv`) present |
+| `ddl-asis` | project | live DDL store | AS-IS DDL imported |
+| `ddl-tobe` | project | live DDL store | TO-BE DDL imported |
+| `conn-tobe` | project | live BE `tobeDbApi.testConnection` | fields filled + BE returns success |
+| `tobe-bindings` | per-table | snapshot.bindings | every selected TO-BE table has ≥1 binding with sources |
+| `unmapped-cols` | per-table | snapshot.rules + TO-BE DDL | every column has a rule (`null` / `default` / producing `expression`) or an explicit `skip` rule |
+| `asis-unmapped` | **per-AS-IS-table** | snapshot.rules + AS-IS DDL | every column in the AS-IS table is referenced by some rule |
 
-### 18.4 Trigger + mock simulation
+- `project` rows show one inline detail (no expand).
+- `per-table` rows are expandable, showing the per-table breakdown.
+- `asis-unmapped` keys per-table rows by AS-IS physical name (not TO-BE) so
+  the Fix button can navigate to the AS-IS side of MappingPage.
+- **`asis-unmapped` scope is project-wide (2026-05-30):** every AS-IS DDL
+  table is checked, not just AS-IS tables referenced by the currently
+  selected TO-BE tables' bindings. Rationale: unused AS-IS columns are a
+  project-level concern (mapping coverage), independent of which subset of
+  TO-BE tables the user happens to run this time.
 
-- "Pre-flight check" button starts the run. Each check resolves at a 600 ms
-  interval (mock `setTimeout`); the panel transitions `idle → checking → done`.
-- `?demo=preflight` URL param renders an instant preview state (4 pass + 3
-  fail + 1 skip) — used to verify the design without selecting tables. A
-  "Back to real data" link exits the preview.
+### 18.3 Pin requirement
 
-### 18.5 Fix → wiring (deferred)
+Execution requires a pinned snapshot. Without one the SnapshotDisplay panel
+shows an amber banner, and TableSelector / Pre-flight / Start are all
+disabled. Pin eligibility (`isPinEligible`) is enforced per phase — see
+`store/snapshots.ts`.
 
-Each `fail` row carries a `Fix →` affordance pointing at the page that
-resolves it (Mapping for unbound TO-BE columns, Snapshots for missing
-approval, Settings for DDL import). The onClick wiring + a one-second teal
-pulse on the affected MappingPage column is **P3** — a new `fixTarget`
-zustand store will carry `{ tableId, columnId }` across navigation.
+### 18.4 RunMode derivation (`deriveRunMode(phase, env)`)
 
-### 18.6 Decision history
+Mirrors BE `RunService.resolveRunTypeFromPhase`:
 
-- `CheckStatus` shipped as 4-state → 2-state → settled at 3-state. The third
-  value (`skip`) was introduced for the "snapshot only when ALL is selected"
-  requirement — needed a value distinct from `fail` for the not-applicable
-  case.
-- `snapshotApproved` initially missed `'sign-off'`. The truth lives in
-  `ApprovalsPage.tsx` ("Approve transitions phase: mapping → sign-off"), so a
-  sign-off phase project must read as pass for `approved-snapshot`.
-- `RunHistory` panel was removed (it duplicated `AuditLogPage` semantically).
-  Run history lives in the audit log.
+| env | phase | runMode |
+|---|---|---|
+| production | ready | cutover |
+| production | other | null (blocked) |
+| non-prod | rehearsal | rehearsal |
+| non-prod | ready / cutover / hypercare / done | null (blocked — ready run は production 限定) |
+| non-prod | planning / analysis / test / sign-off | test |
 
-### 18.7 Out of scope (deferred)
+Phase auto-advance on Start is **forward-only** (e.g., starting a test run
+from `planning` advances to `test`; starting a test from `sign-off` does
+**not** regress to `test`).
 
-- **P2** — backend `POST /api/v1/projects/{id}/preflight/run` and each
-  check's real verification logic. Today the panel runs entirely on mocked
-  store data.
-- **P3** — Fix-button onClick wiring + MappingPage column pulse highlight via
-  the new `fixTarget` store.
-- `ExecutionPage.tsx` L578 `StartRunDialog` Confirm — backend wiring (today
-  `/* backend wiring TBD */`).
-- L202 Abort button onClick wiring.
-- Quarantine / Worker-pool side panels — intentionally excluded from the
-  initial Execution layout.
+### 18.5 Result cache (per-snapshot)
+
+`store/executionPreflight.byProject[projectId].bySnapshot[snapshotId]` holds
+`{ runAt, selectedTables, results }`. This is the **single source of truth**
+for both the Execution display and the Versions Request Review gate. The
+old project-wide `preflightResults` field has been removed (persist v5).
+
+When the pinned snapshot changes on Execution, the display automatically
+switches to that snapshot's cached result (or empty = "not run yet"). No
+separate state reset needed.
+
+**Live i18n (persist v7, 2026-05-30):** `TableCheckResult` no longer carries
+a pre-resolved `detail: string`. Instead it stores `detailKey: TranslationKey`
++ `detailVars?: Record<string, string|number>`, and `PreflightResultPanel`
+calls `t(detailKey, detailVars)` at render. The check title is likewise
+resolved via `titleKeyForId(check.id)` (exported from `preflightValidation`).
+Result: changing an i18n label or switching language reflects on cached
+results immediately, no re-run required. Persist `v6 → v7` migration drops
+the old-shape `bySnapshot` (forces one re-run on upgrade).
+
+### 18.6 Fix routing
+
+| Check id | Destination |
+|---|---|
+| `csv-arrived` | SiteSettings → CSV section (aggregate-only Fix — `fixIsProjectWide: true`) |
+| `ddl-asis` / `ddl-tobe` | `/settings` with `state.highlightSide` |
+| `conn-tobe` | SiteSettings → TO-BE DB section |
+| `tobe-bindings` / `unmapped-cols` | `/mapping` with `state.fixTarget = { kind, table }`. MappingPage matches by qualified name / internalName / physicalName (`tt.short`). |
+| `asis-unmapped` | same as above but `kind: 'unmapped-asis'`, table = AS-IS physical name |
+
+**Aggregate Fix visibility (2026-05-30):** the Fix button on the aggregate
+row is shown only when `scope === 'project'` OR `fixIsProjectWide` is true.
+For per-table checks where per-table Fix buttons are already visible
+(`tobe-bindings` / `unmapped-cols` / `asis-unmapped`) the aggregate Fix is
+hidden as redundant — the per-table Fix already routes each failing row to
+the right destination with the correct `table` argument.
+
+### 18.7 Demo modes
+
+- `?demo=preflight` — 7 fail fixture (worst case).
+- `?demo=run-fail` — 7 pass fixture, then user can `⚡ Simulate failure` mid-run.
+
+### 18.8 BE concurrency note (workaround in place)
+
+`SiteCsvPreviewController` reads via DuckDB through a shared `DuckDbService`.
+Concurrent requests collide with `"Invalid Input Error: Attempting to execute
+an unsuccessful or closed pending query result"`. Workaround: FE calls
+`csv-preview` **sequentially** (`for...of await`) in `startPreflight` instead
+of `Promise.all`. See handoff `2026-05-27-execution-preflight-real.md`.
+
+### 18.9 Decision history
+
+- 8 checks → 7 (`approved-snapshot` removed; snapshot integrity is now
+  enforced via the pin-required model + Versions Request Review gate).
+- `TableSelector` is intentionally kept to support partial-migration
+  scenarios — it limits the run scope (Execution) but does NOT relax the
+  Request Review gate.
+- `unmapped-cols` covers all columns, not just NOT-NULL no-default ones.
+  Rationale: aligns with `DashboardPage` `isMappingRuleMapped` semantics.
+- `asis-unmapped` rows are keyed by AS-IS table, contrary to the other
+  per-table checks which are keyed by TO-BE table. Required so the Fix
+  button can pass the correct table to MappingPage AS-IS side.
+
+### 18.10 Out of scope (deferred)
+
+- BE `POST /api/v1/projects/{id}/preflight/run` — preflight still runs on
+  the frontend; only `csv-preview` and `tobe-db/test-connection` call BE.
+  Note: the **scheduler / auto-trigger paths no longer need this** (they are
+  gated by phase eligibility per §17.4, which implicitly guarantees a
+  Request Review approval — see also §18A). BE preflight persistence is now a
+  P2 cleanup item, not a blocker.
+- `CheckStage` / `ExtractStage` (in dev merge but stubs) — once they write
+  to `stage_instances`, preflight can read authoritative completion flags.
+- BE `DuckDbService` concurrency safety / connection pool — required to
+  drop the FE sequential workaround.
+- React style warning (`border` / `borderColor` shorthand mix) in the
+  Preflight panel — cosmetic.
+
+---
+
+## 18A. Run History — table summary + per-table drill-down (added 2026-05-29)
+
+Run History UI (`LogViewerPage` history tab and `SchedulerPage` run history
+section) shows one row per run, with an inline **table summary badge**
+(`{total} {success}✓ {failed}✗ {running}…`) and an expandable per-table
+drill-down (▸/▾).
+
+### 18A.1 Data model
+
+- `RunHistoryViewDto.tableSummary` (`{ total, success, failed, running }`) —
+  aggregated from `stage_table_results` grouped by `tobe_table` for each run.
+  Computed in batch via `RunTableResultsService.summariesForRuns(runIds)` to
+  avoid N+1 over the history list.
+- `RunHistoryViewDto.tables` — the typed mirror of `metadata.selectedTables`
+  (null = full-binding run, e.g. scheduler / `/runs/all`; non-null = partial
+  run from UI).
+
+### 18A.2 Drill-down endpoint
+
+`GET /api/v1/runs/{id}/table-results` returns
+`List<RunTableResultsService.TableResultDto>`:
+
+```
+tobeSchema, tobeTable, status (success/failed/running),
+rows (= load-stage rowCount),
+startedAt (min stage start), finishedAt (max stage finish),
+durationMs (wall-clock = finishedAt - startedAt; can be null while running)
+```
+
+Timestamps are returned at millisecond precision; the FE renders them via
+`formatTimeMs(iso)` (`HH:mm:ss.SSS`) inside the drill-down so that
+`finishedAt − startedAt == durationMs` is visibly consistent.
+
+### 18A.3 Why per-table wall-clock != sum
+
+A run's `durationMs` (= `run.finishedAt − run.startedAt`) is wall-clock for
+the whole run. Per-table `durationMs` is wall-clock per table (first stage
+start to last stage finish). When tables run in parallel within a stage, the
+sum of per-table durations overshoots the run wall-clock; the run-level
+Duration cell carries a tooltip explaining this.
+
+### 18A.4 Error info intentionally omitted
+
+The drill-down does **not** include error message or failed stage. Quarantine
+tab already surfaces per-row violations + stage failure context with deeper
+detail; duplicating it here was visual noise.
 
 ---
 
@@ -1279,7 +1412,216 @@ will turn this into an interactive setup.
 
 ---
 
-## 20. Further Reading
+## 20. Cutover Gate Policy — unified continue-on-error (decided 2026-05-29)
+
+### Decision
+
+`cutover` runType is treated **the same as `test` / `rehearsal`** by the stage gate:
+
+- **Within a stage**: continue-on-error (binding-level try/catch). Unchanged.
+- **Between stages**: only structural failure (`throw`) skips downstream. Per-table
+  `tables_failed > 0` does **not** trigger a gate anymore.
+- **AuditStage row-level Quarantine separation** also applies to cutover — violating
+  rows are removed from DuckDB `tobe_xxx` before Load. Sample 5 rows + full parquet
+  archive remain available.
+
+This removes the previous *strict cutover gate* (introduced when the model
+assumed in-place live-DB swap).
+
+### Why we changed it
+
+The first deployment target operates **green-field**:
+
+```
+1. Empty target PG  ──┐
+2. Run cutover ───────┤  (data lands in NEW PG)
+3. Verify & sign-off  │
+4. Swap app conn str ─┘  (old PG keeps serving until step 4)
+```
+
+- The old PG is **still serving live traffic** until the swap moment in step 4.
+- If cutover step 2 partially fails: just `TRUNCATE` the new PG and rerun. The
+  rollback cost is effectively zero because no consumer reads the new PG yet.
+
+Under that model, the *strict gate* (stop on first failed table, skip rest) loses
+its protective value:
+
+| Policy | Outcome on first failed table in 10-table cutover |
+|---|---|
+| **Strict (removed)** | Stop at Audit. Load / Verify skipped. Operator only knows the 1 failure. Fixes it. Re-runs. Discovers a 2nd failure. Iterates serially. |
+| **Continue (current)** | Audit separates violating rows. Load / Verify run all 10 tables. Operator sees the **full failure landscape** in one run, fixes all at once, re-runs once for sign-off. |
+
+### Scope — what was changed, what was not
+
+Two cutover-specific branches were unified:
+
+| Location | Before | After |
+|---|---|---|
+| `LocalWorkerExecutor.execute` — between-stage gate | `if (threw \|\| (isCutover && stageFailed))` | `if (threw)` |
+| `AuditStage.run` — `separateViolations` | `runType != cutover` | always `true` |
+
+Three other cutover-specific branches were **left as-is** (different concerns,
+not gate policy):
+
+| Location | Behavior | Why kept |
+|---|---|---|
+| `StageCatalog.stagesFor` | cutover uses 6 stages (no Audit) | Sprint 0 decision — separate question. Audit re-inclusion is its own discussion. |
+| `TransformStage` parquet2 dump | skipped on cutover | storage efficiency, one-shot run, not a safety policy |
+| `RunExecutionListener` stage-cache | skipped on cutover | re-execution safety for one-shot runs |
+| `RunService.validateForCutover` | production env + snapshotId required | trigger condition, not gate behavior |
+
+### When we would re-introduce strict (and how)
+
+If a future site uses **live-swap (in-place)** model where bad rows reaching the
+live PG would damage downstream consumers, the recommended approach is
+**site-level policy**, not a global runType branch:
+
+```sql
+ALTER TABLE sites ADD COLUMN cutover_policy VARCHAR(16)
+    NOT NULL DEFAULT 'green_field'
+    CHECK (cutover_policy IN ('green_field', 'live_swap'));
+```
+
+```java
+// LocalWorkerExecutor
+boolean strictGate = "live_swap".equals(site.getCutoverPolicy())
+                  && runType == RunType.cutover;
+if (threw || (strictGate && stageFailed)) { ... }
+```
+
+This stays per-site so the tool can serve both deployment models from the same
+build. Estimated work: ~1 hour. Not in PoC1 scope.
+
+### Related files
+
+- `backend/.../coordinator/worker/LocalWorkerExecutor.java`
+- `backend/.../coordinator/worker/stages/AuditStage.java`
+- (future) `backend/.../coordinator/site/Site.java` — if `cutover_policy` column is added
+
+### Conversation history (for context if this comes up later)
+
+The original strict-gate was put in by analogy to traditional in-place migrations
+where mid-flight failure is dangerous. The shift to continue-on-error was
+prompted by the first deployment site's green-field model. The team discussed
+three options (per-site policy / global config flag / full runType-vs-policy
+separation) and chose **unified continue-on-error now + per-site policy later if
+needed** — see commit history around 2026-05-29.
+
+---
+
+## 22. Execution Overview — pin-centric data source (decided 2026-05-31)
+
+### Decision
+
+The Execution screen (per-project, live polling of `stage_instances`) and the
+Execution Overview screen (per-site, summary of latest run per project) must
+see **the same run and the same stage_instances**. Without this they drift:
+when a user stops a run mid-stage, the polling view shows the post-completion
+state while the overview shows a snapshot frozen at the abort instant.
+
+The agreement:
+
+- **Overview reads from the live `stage_instances` of the latest run that was
+  started with the pinned (baseline) snapshot.** Not from
+  `snapshots.execution_context` (which is frozen at `finishRun` and therefore
+  always at least one update behind).
+- **Execution screen reads from the live `stage_instances` of `activeRunId`.**
+  `activeRunId` is initialized from `pinnedSnapshot.executionContext.runId`
+  (frozen value just used as an id), but the screen never reads the frozen
+  stages — it always polls `runsApi.stages(runId)`.
+
+The frozen `executionContext` payload is still maintained (Versions / Artifacts
+screens look at it for "what was this snapshot's run state at finish time"),
+but is no longer the source of truth for live progress display.
+
+### Backend implementation
+
+`ExecutionOverviewService.metricsFor(Project p)`:
+
+```java
+Optional<Snapshot> baseline = snapshotRepo.findByProjectIdAndBaselineTrue(p.getId());
+RunHistory latest = baseline
+        .map(b -> runHistoryRepo.findFirstByProjectIdAndSnapshotIdOrderByStartedAtDesc(p.getId(), b.getId()))
+        .orElse(null);
+if (latest == null) {
+    latest = runHistoryRepo.findFirstByProjectIdOrderByStartedAtDesc(p.getId());
+}
+```
+
+- If a baseline snapshot exists, return the latest run **started with that
+  snapshot id** (any status — running, success, failed, aborted, timed_out).
+- Otherwise fall back to the project's latest run across all snapshots.
+- `RunHistoryRepository.findFirstByProjectIdAndSnapshotIdOrderByStartedAtDesc`
+  is a derived Spring Data query (no @Query needed).
+
+Time travel: when the user moves the pin to an older snapshot, BE automatically
+returns that snapshot's latest run, so the Overview row switches accordingly.
+No FE branching needed.
+
+### Frontend implementation
+
+`ExecutionOverviewPage.metrics` is a one-liner:
+
+```typescript
+const metrics = apiMetrics;
+```
+
+The previous logic, which overlaid `apiMetrics` with values computed from
+`pinnedSnapshot.executionContext.stages`, is gone. Reasons:
+
+1. Redundant — BE now returns the pin's latest run directly.
+2. Frozen `executionContext` is stale by one update step after Stop. Letting it
+   overwrite the live `apiMetrics` made the screen flicker on reload
+   (correct-then-wrong: the apiMetrics fetch finished first → correct render →
+   the snapshots fetch finished second → frozen overwrite → one gauge fewer).
+
+### Stop semantics interaction
+
+`LocalWorkerExecutor` only checks `runControlRegistry.isCancelled(runId)` at
+**stage boundaries** (`:73`), not inside the per-table loop of individual
+`StageRunner`s. So:
+
+1. Stage N is running, user presses Stop.
+2. Stage N runs to completion — `stage_instances.N.status` becomes `success`.
+3. Executor enters the loop header for stage N+1, sees `isCancelled() = true`,
+   breaks. Stages N+1..8 stay `pending`.
+4. `RunService.abortRun → finishRun → recordExecutionContext` runs immediately,
+   but at this point stage N may still be `running` in the DB (the runner has
+   not yet written its terminal status). So the frozen
+   `executionContext.stages[N]` is `running` even though by the next polling
+   tick `stage_instances.N` will be `success`.
+
+That one-tick drift is harmless under the new model — the Overview reads the
+live `stage_instances` (which converge to the correct final state), not the
+frozen payload. The frozen payload remains stale; Versions / Artifacts screens
+that read it accept that limitation.
+
+Decision: do **not** add an in-loop cancel check inside StageRunners. The
+trade-off (immediate termination vs. partial-commit safety + simplicity) is
+left as-is for now. If immediate termination becomes needed, the minimum
+change is to add `if (runControlRegistry.isCancelled(runId)) break;` inside
+the per-table loops of the heavy stages (Load most importantly).
+
+### Related files
+
+- `coordinator/run/ExecutionOverviewService.java`
+- `coordinator/run/RunHistoryRepository.java`
+- `frontend/src/pages/ExecutionOverviewPage.tsx`
+- `frontend/src/pages/ExecutionPage.tsx` (pin-switch effect & activeRunId rules)
+- `coordinator/worker/LocalWorkerExecutor.java` (stage-boundary cancel check)
+
+### What we did NOT do
+
+- Backfill frozen `executionContext` for legacy snapshots (re-running once
+  refreshes them; cost outweighs benefit).
+- Per-table cancel check in StageRunners.
+- Move the time-travel use case to a separate URL/screen.
+- Quarantine warning count automatic generation (enum / schema / UI all
+  ready, but no rule yet decides which event becomes a `warning`).
+
+---
+
+## 23. Further Reading
 
 - `CLAUDE.md` — stack, conventions, domain glossary, local run.
 - `docs/handoff/` — time-stamped handoff notes (read the most recent first).

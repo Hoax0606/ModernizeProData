@@ -11,10 +11,15 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Oracle DDL ファイルを解析してテーブル/カラム情報を抽出する.
+ * Oracle DDL ファイルを解析してテーブル/カラム/インデックス/制約情報を抽出する.
  *
- * 対応構文: CREATE TABLE / COMMENT ON TABLE / COMMENT ON COLUMN / 行・ブロックコメント.
- * 無視: FK / INDEX / SEQUENCE / TRIGGER / VIEW / STORAGE / TABLESPACE / PARTITION 句.
+ * 対応構文:
+ *   - CREATE TABLE (inline UK / FK / CHECK 含む)
+ *   - CREATE [UNIQUE | BITMAP] INDEX
+ *   - ALTER TABLE ... ADD CONSTRAINT (UK / FK / CHECK)
+ *   - COMMENT ON TABLE / COMMENT ON COLUMN
+ *   - 行・ブロックコメント
+ * 無視: SEQUENCE / TRIGGER / VIEW / STORAGE / TABLESPACE / PARTITION 句, PK の ALTER TABLE (column.pkOrder で表現済).
  * 論理名の優先順位: COMMENT ON COLUMN > CREATE TABLE 内のインラインコメント.
  */
 @Component
@@ -24,6 +29,29 @@ public class OracleDdlParser {
             "^\\s*CREATE\\s+(?:GLOBAL\\s+TEMPORARY\\s+|TEMPORARY\\s+)?TABLE\\s+"
                     + "(?:\"?([\\w$#]+)\"?\\s*\\.\\s*)?\"?([\\w$#]+)\"?\\s*\\(",
             Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern CREATE_INDEX_HEADER = Pattern.compile(
+            "^\\s*CREATE\\s+(UNIQUE\\s+|BITMAP\\s+)?INDEX\\s+"
+                    + "(?:\"?([\\w$#]+)\"?\\s*\\.\\s*)?\"?([\\w$#]+)\"?\\s+"
+                    + "ON\\s+(?:\"?([\\w$#]+)\"?\\s*\\.\\s*)?\"?([\\w$#]+)\"?\\s*\\(",
+            Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern ALTER_TABLE_HEADER = Pattern.compile(
+            "^\\s*ALTER\\s+TABLE\\s+"
+                    + "(?:\"?([\\w$#]+)\"?\\s*\\.\\s*)?\"?([\\w$#]+)\"?\\s+",
+            Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern ALTER_ADD_CONSTRAINT = Pattern.compile(
+            "(?i)ADD\\s*\\(?\\s*CONSTRAINT\\s+\"?([\\w$#]+)\"?\\s+(.+)$",
+            Pattern.DOTALL);
+
+    private static final Pattern INLINE_NAMED_CONSTRAINT = Pattern.compile(
+            "(?i)^CONSTRAINT\\s+\"?([\\w$#]+)\"?\\s+(.+)$",
+            Pattern.DOTALL);
+
+    private static final Pattern REFERENCES_CLAUSE = Pattern.compile(
+            "(?i)REFERENCES\\s+(?:\"?([\\w$#]+)\"?\\s*\\.\\s*)?\"?([\\w$#]+)\"?\\s*\\(([^)]*)\\)",
+            Pattern.DOTALL);
 
     private static final Pattern COMMENT_ON_TABLE = Pattern.compile(
             "^\\s*COMMENT\\s+ON\\s+TABLE\\s+"
@@ -47,6 +75,8 @@ public class OracleDdlParser {
 
         List<String> statements = splitStatements(sql);
         List<ParsedTable> tables = new ArrayList<>();
+        List<ParsedIndex> indexes = new ArrayList<>();
+        List<ParsedConstraint> constraints = new ArrayList<>();
         Map<String, String> tableComments = new HashMap<>();
         Map<String, String> columnComments = new HashMap<>();
         int tableOrdinal = 0;
@@ -55,12 +85,18 @@ public class OracleDdlParser {
             String stripped = stripLeadingCommentsAndWhitespace(stmt);
             if (stripped.isEmpty()) continue;
             String upper = stripped.toUpperCase(Locale.ROOT);
-            if (upper.startsWith("CREATE") && upper.contains("TABLE")) {
-                ParsedTable t = parseCreateTable(stripped, tableOrdinal);
+            if (upper.startsWith("CREATE") && upper.contains("TABLE") && !upper.contains("INDEX")) {
+                ParsedTable t = parseCreateTable(stripped, tableOrdinal, constraints);
                 if (t != null) {
                     tables.add(t);
                     tableOrdinal++;
                 }
+            } else if (upper.startsWith("CREATE") && upper.contains("INDEX")) {
+                ParsedIndex idx = parseCreateIndex(stripped);
+                if (idx != null) indexes.add(idx);
+            } else if (upper.startsWith("ALTER TABLE")) {
+                ParsedConstraint c = parseAlterTableAddConstraint(stripped);
+                if (c != null) constraints.add(c);
             } else if (upper.startsWith("COMMENT ON TABLE")) {
                 Matcher m = COMMENT_ON_TABLE.matcher(stripped);
                 if (m.find()) {
@@ -94,7 +130,10 @@ public class OracleDdlParser {
             }
         }
 
-        return new ParsedDdl(tables);
+        ParsedDdl result = new ParsedDdl(tables);
+        result.setIndexes(indexes);
+        result.setConstraints(constraints);
+        return result;
     }
 
     /** ステートメント先頭の空白/行コメント/ブロックコメントを除去. */
@@ -171,7 +210,7 @@ public class OracleDdlParser {
         return out;
     }
 
-    private ParsedTable parseCreateTable(String stmt, int ordinal) {
+    private ParsedTable parseCreateTable(String stmt, int ordinal, List<ParsedConstraint> outConstraints) {
         Matcher m = CREATE_TABLE_HEADER.matcher(stmt);
         if (!m.find()) return null;
 
@@ -190,15 +229,30 @@ public class OracleDdlParser {
 
         List<String> pkColumns = new ArrayList<>();
         int colOrdinal = 1;
+        int inlineConstraintCounter = 0;
         for (String part : parts) {
             String trimmed = part.trim();
             if (trimmed.isEmpty()) continue;
             String upper = trimmed.toUpperCase(Locale.ROOT);
 
             if (upper.startsWith("CONSTRAINT ")) {
-                String afterName = trimmed.replaceFirst("(?i)^CONSTRAINT\\s+\"?[\\w$#]+\"?\\s*", "");
-                if (afterName.toUpperCase(Locale.ROOT).startsWith("PRIMARY KEY")) {
-                    extractPkColumns(afterName, pkColumns);
+                Matcher nm = INLINE_NAMED_CONSTRAINT.matcher(trimmed);
+                if (nm.find()) {
+                    String constraintName = nm.group(1);
+                    String afterName = nm.group(2).trim();
+                    String afterUpper = afterName.toUpperCase(Locale.ROOT);
+                    if (afterUpper.startsWith("PRIMARY KEY")) {
+                        extractPkColumns(afterName, pkColumns);
+                    } else if (afterUpper.startsWith("UNIQUE")) {
+                        ParsedConstraint pc = parseUniqueBody(constraintName, schemaName, physicalName, afterName);
+                        if (pc != null) outConstraints.add(pc);
+                    } else if (afterUpper.startsWith("FOREIGN KEY")) {
+                        ParsedConstraint pc = parseForeignKeyBody(constraintName, schemaName, physicalName, afterName);
+                        if (pc != null) outConstraints.add(pc);
+                    } else if (afterUpper.startsWith("CHECK")) {
+                        ParsedConstraint pc = parseCheckBody(constraintName, schemaName, physicalName, afterName);
+                        if (pc != null) outConstraints.add(pc);
+                    }
                 }
                 continue;
             }
@@ -206,10 +260,28 @@ public class OracleDdlParser {
                 extractPkColumns(trimmed, pkColumns);
                 continue;
             }
-            if (upper.startsWith("UNIQUE") || upper.startsWith("FOREIGN KEY")
-                    || upper.startsWith("CHECK") || upper.startsWith("PARTITION ")) {
+            if (upper.startsWith("UNIQUE")) {
+                inlineConstraintCounter++;
+                String autoName = "uq_" + physicalName.toLowerCase(Locale.ROOT) + "_" + inlineConstraintCounter;
+                ParsedConstraint pc = parseUniqueBody(autoName, schemaName, physicalName, trimmed);
+                if (pc != null) outConstraints.add(pc);
                 continue;
             }
+            if (upper.startsWith("FOREIGN KEY")) {
+                inlineConstraintCounter++;
+                String autoName = "fk_" + physicalName.toLowerCase(Locale.ROOT) + "_" + inlineConstraintCounter;
+                ParsedConstraint pc = parseForeignKeyBody(autoName, schemaName, physicalName, trimmed);
+                if (pc != null) outConstraints.add(pc);
+                continue;
+            }
+            if (upper.startsWith("CHECK")) {
+                inlineConstraintCounter++;
+                String autoName = "ck_" + physicalName.toLowerCase(Locale.ROOT) + "_" + inlineConstraintCounter;
+                ParsedConstraint pc = parseCheckBody(autoName, schemaName, physicalName, trimmed);
+                if (pc != null) outConstraints.add(pc);
+                continue;
+            }
+            if (upper.startsWith("PARTITION ")) continue;
 
             ParsedColumn col = parseColumnDef(trimmed, colOrdinal);
             if (col != null) {
@@ -230,6 +302,190 @@ public class OracleDdlParser {
             }
         }
         return table;
+    }
+
+    /** {@code UNIQUE (col, ...)} 형식 fragment 를 파싱. */
+    private ParsedConstraint parseUniqueBody(String name, String schema, String table, String fragment) {
+        int open = fragment.indexOf('(');
+        if (open < 0) return null;
+        int close = findMatchingParen(fragment, open + 1);
+        if (close < 0) return null;
+        String inside = fragment.substring(open + 1, close);
+
+        ParsedConstraint pc = new ParsedConstraint();
+        pc.setName(name);
+        pc.setSchemaName(schema);
+        pc.setTableName(table);
+        pc.setType(ParsedConstraint.TYPE_UK);
+
+        int ord = 1;
+        for (String s : inside.split(",")) {
+            String col = s.trim().replaceAll("^\"|\"$", "");
+            if (col.isEmpty()) continue;
+            ParsedConstraintColumn cc = new ParsedConstraintColumn();
+            cc.setOrdinal(ord++);
+            cc.setColumnName(col);
+            pc.getColumns().add(cc);
+        }
+        return pc.getColumns().isEmpty() ? null : pc;
+    }
+
+    /** {@code FOREIGN KEY (cols) REFERENCES ref(cols) [ON DELETE ...] [DEFERRABLE ...]} 형식 파싱. */
+    private ParsedConstraint parseForeignKeyBody(String name, String schema, String table, String fragment) {
+        int open = fragment.indexOf('(');
+        if (open < 0) return null;
+        int close = findMatchingParen(fragment, open + 1);
+        if (close < 0) return null;
+        String childCols = fragment.substring(open + 1, close);
+        String afterCols = fragment.substring(close + 1);
+
+        Matcher rm = REFERENCES_CLAUSE.matcher(afterCols);
+        if (!rm.find()) return null;
+        String refSchema = rm.group(1) == null ? "" : rm.group(1);
+        String refTable = rm.group(2);
+        String refCols = rm.group(3);
+        String afterRef = afterCols.substring(rm.end()).toUpperCase(Locale.ROOT);
+
+        ParsedConstraint pc = new ParsedConstraint();
+        pc.setName(name);
+        pc.setSchemaName(schema);
+        pc.setTableName(table);
+        pc.setType(ParsedConstraint.TYPE_FK);
+
+        ParsedForeignKey fk = new ParsedForeignKey();
+        fk.setRefSchemaName(refSchema);
+        fk.setRefTableName(refTable);
+        fk.setOnDelete(extractAction(afterRef, "ON\\s+DELETE"));
+        fk.setOnUpdate(extractAction(afterRef, "ON\\s+UPDATE"));
+        if (afterRef.matches("(?s).*\\bDEFERRABLE\\b.*")) {
+            String def = afterRef.contains("INITIALLY DEFERRED")
+                    ? "DEFERRABLE INITIALLY DEFERRED"
+                    : (afterRef.contains("INITIALLY IMMEDIATE")
+                        ? "DEFERRABLE INITIALLY IMMEDIATE"
+                        : "DEFERRABLE");
+            fk.setDeferrableInfo(def);
+        }
+        pc.setForeignKey(fk);
+
+        String[] childArr = childCols.split(",");
+        String[] refArr = refCols.split(",");
+        for (int i = 0; i < childArr.length; i++) {
+            String childCol = childArr[i].trim().replaceAll("^\"|\"$", "");
+            String refCol = i < refArr.length ? refArr[i].trim().replaceAll("^\"|\"$", "") : null;
+            if (childCol.isEmpty()) continue;
+            ParsedConstraintColumn cc = new ParsedConstraintColumn();
+            cc.setOrdinal(i + 1);
+            cc.setColumnName(childCol);
+            cc.setRefColumnName(refCol);
+            pc.getColumns().add(cc);
+        }
+        return pc.getColumns().isEmpty() ? null : pc;
+    }
+
+    /** {@code CHECK (expr)} fragment 파싱. */
+    private ParsedConstraint parseCheckBody(String name, String schema, String table, String fragment) {
+        int open = fragment.indexOf('(');
+        if (open < 0) return null;
+        int close = findMatchingParen(fragment, open + 1);
+        if (close < 0) return null;
+        String expr = fragment.substring(open + 1, close).trim();
+
+        ParsedConstraint pc = new ParsedConstraint();
+        pc.setName(name);
+        pc.setSchemaName(schema);
+        pc.setTableName(table);
+        pc.setType(ParsedConstraint.TYPE_CHECK);
+        pc.setCheckExpression(expr);
+        return pc;
+    }
+
+    private String extractAction(String afterUpper, String prefix) {
+        Matcher am = Pattern.compile("(?i)" + prefix + "\\s+(CASCADE|SET\\s+NULL|SET\\s+DEFAULT|RESTRICT|NO\\s+ACTION)").matcher(afterUpper);
+        if (am.find()) {
+            String raw = am.group(1).toUpperCase(Locale.ROOT).replaceAll("\\s+", " ");
+            return raw;
+        }
+        return "NO ACTION";
+    }
+
+    /** {@code CREATE [UNIQUE | BITMAP] INDEX} 구문 파싱. */
+    private ParsedIndex parseCreateIndex(String stmt) {
+        Matcher m = CREATE_INDEX_HEADER.matcher(stmt);
+        if (!m.find()) return null;
+
+        String modifier = m.group(1) == null ? "" : m.group(1).trim().toUpperCase(Locale.ROOT);
+        String indexName = m.group(3);
+        String tableSchema = m.group(4) == null ? "" : m.group(4);
+        String tableName = m.group(5);
+        int bodyStart = m.end();
+        int closeIdx = findMatchingParen(stmt, bodyStart);
+        if (closeIdx < 0) return null;
+        String columnsBody = stmt.substring(bodyStart, closeIdx);
+
+        ParsedIndex pi = new ParsedIndex();
+        pi.setName(indexName);
+        pi.setSchemaName(tableSchema);
+        pi.setTableName(tableName);
+        pi.setUnique(modifier.startsWith("UNIQUE"));
+        if (modifier.startsWith("BITMAP")) pi.setType("bitmap");
+        else pi.setType("btree");
+
+        List<String> cols = splitTopLevel(columnsBody, ',');
+        int ord = 1;
+        boolean hasExpression = false;
+        StringBuilder exprBuilder = new StringBuilder();
+        for (String c : cols) {
+            String t = c.trim();
+            if (t.isEmpty()) continue;
+            if (t.contains("(")) {
+                hasExpression = true;
+                if (exprBuilder.length() > 0) exprBuilder.append(", ");
+                exprBuilder.append(t);
+                continue;
+            }
+            String[] tokens = t.split("\\s+");
+            ParsedIndexColumn ic = new ParsedIndexColumn();
+            ic.setOrdinal(ord++);
+            ic.setColumnName(tokens[0].replaceAll("^\"|\"$", ""));
+            if (tokens.length > 1) {
+                String dir = tokens[1].toUpperCase(Locale.ROOT);
+                if (dir.equals("ASC") || dir.equals("DESC")) ic.setSortOrder(dir);
+            }
+            pi.getColumns().add(ic);
+        }
+        if (hasExpression) {
+            pi.setType("functional");
+            pi.setExpression(exprBuilder.toString());
+        }
+
+        String after = stmt.substring(closeIdx + 1).toUpperCase(Locale.ROOT);
+        if (after.matches("(?s).*\\bREVERSE\\b.*")) pi.setType("reverse");
+
+        return pi;
+    }
+
+    /** {@code ALTER TABLE ... ADD CONSTRAINT ...} 구문 파싱. PK 는 무시 (column.pk_order 가 표현). */
+    private ParsedConstraint parseAlterTableAddConstraint(String stmt) {
+        Matcher m = ALTER_TABLE_HEADER.matcher(stmt);
+        if (!m.find()) return null;
+        String tableSchema = m.group(1) == null ? "" : m.group(1);
+        String tableName = m.group(2);
+        String rest = stmt.substring(m.end()).trim();
+
+        Matcher addM = ALTER_ADD_CONSTRAINT.matcher(rest);
+        if (!addM.find()) return null;
+        String constraintName = addM.group(1);
+        String body = addM.group(2).trim();
+
+        String upperBody = body.toUpperCase(Locale.ROOT);
+        if (upperBody.startsWith("UNIQUE")) {
+            return parseUniqueBody(constraintName, tableSchema, tableName, body);
+        } else if (upperBody.startsWith("FOREIGN KEY")) {
+            return parseForeignKeyBody(constraintName, tableSchema, tableName, body);
+        } else if (upperBody.startsWith("CHECK")) {
+            return parseCheckBody(constraintName, tableSchema, tableName, body);
+        }
+        return null;
     }
 
     private int findMatchingParen(String s, int afterOpenIdx) {
@@ -298,7 +554,6 @@ public class OracleDdlParser {
                 sb.append(c);
                 i++;
             } else if (c == sep && depth == 0) {
-                // `,` 直後の同一行コメント (`-- xxx`) は前のカラムの行末コメントとみなし, sb に取り込んでから分割.
                 int j = i + 1;
                 while (j < len && (body.charAt(j) == ' ' || body.charAt(j) == '\t')) j++;
                 if (j + 1 < len && body.charAt(j) == '-' && body.charAt(j + 1) == '-') {
@@ -336,7 +591,6 @@ public class OracleDdlParser {
     }
 
     private ParsedColumn parseColumnDef(String def, int ordinal) {
-        // コメントを分離し、論理名候補として保持
         StringBuilder cleaned = new StringBuilder();
         StringBuilder comments = new StringBuilder();
         int i = 0, len = def.length();
@@ -408,6 +662,7 @@ public class OracleDdlParser {
                     if (!v.equals("*") && !v.isEmpty()) {
                         int n = Integer.parseInt(v);
                         if (isNumericType(dataType)) precision = n;
+                        else if (isDateTimeType(dataType)) precision = n;
                         else length = n;
                     }
                 } else if (argParts.length == 2) {
@@ -462,6 +717,12 @@ public class OracleDdlParser {
                 || dataType.equals("INTEGER") || dataType.equals("INT")
                 || dataType.equals("DECIMAL") || dataType.equals("NUMERIC")
                 || dataType.equals("SMALLINT") || dataType.equals("BIGINT");
+    }
+
+    /** TIMESTAMP(n) / TIME(n) 류 — (n) 은 fractional-second precision 으로 저장. */
+    private boolean isDateTimeType(String dataType) {
+        return dataType.startsWith("TIMESTAMP") || dataType.equals("TIME")
+                || dataType.startsWith("INTERVAL");
     }
 
     private void appendComment(StringBuilder sb, String comment) {

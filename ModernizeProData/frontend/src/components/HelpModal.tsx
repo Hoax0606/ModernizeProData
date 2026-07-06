@@ -15,9 +15,28 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
   {
     titleKey: 'help.group.projectWindows',
     shortcuts: [
-      { keys: ['Ctrl', 'B'], labelKey: 'help.kb.sidebar' },
-      { keys: ['Esc'],       labelKey: 'help.kb.closeDialog' },
-      { keys: ['Ctrl', 'K'], labelKey: 'help.kb.searchColumns' },
+      { keys: ['Ctrl', 'B'],     labelKey: 'help.kb.sidebar' },
+      { keys: ['Ctrl', ','],     labelKey: 'help.kb.solutionSettings' },
+      { keys: ['Esc'],           labelKey: 'help.kb.closeDialog' },
+      { keys: ['Ctrl', 'K'],     labelKey: 'help.kb.searchColumns' },
+    ],
+  },
+  {
+    titleKey: 'help.group.navigation',
+    shortcuts: [
+      { keys: ['Ctrl', '1'], labelKey: 'help.kb.gotoDashboard' },
+      { keys: ['Ctrl', '2'], labelKey: 'help.kb.gotoMapping' },
+      { keys: ['Ctrl', '3'], labelKey: 'help.kb.gotoVersions' },
+      { keys: ['Ctrl', '4'], labelKey: 'help.kb.gotoExecution' },
+      { keys: ['Ctrl', '5'], labelKey: 'help.kb.gotoArtifacts' },
+      { keys: ['Ctrl', '6'], labelKey: 'help.kb.gotoLogs' },
+      { keys: ['Ctrl', '7'], labelKey: 'help.kb.gotoSettings' },
+    ],
+  },
+  {
+    titleKey: 'help.group.editing',
+    shortcuts: [
+      { keys: ['Ctrl', 'Space'], labelKey: 'help.kb.autocomplete' },
     ],
   },
 ];

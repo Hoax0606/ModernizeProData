@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { useWorkspaceStore, type ProjectPhase } from '../store/workspace';
+import { snapshotApi } from '../api/workspace';
 import { useSnapshotsStore, usePinnedSnapshotsStore, isPinEligible, type SnapshotStatus, type SnapshotType } from '../store/snapshots';
 import { useAuthStore } from '../store/auth';
 import { useActiveProjectReadOnly } from '../store/readOnly';
 import { useAuditLogStore } from '../store/auditLog';
+import { runsApi, type ProjectRunReadinessDto } from '../api/runs';
 import { useT, type TranslationKey } from '../i18n';
 
 /**
@@ -24,6 +27,19 @@ export function VersionsPage() {
     () => projects.find((p) => p.id === activeProjectId) ?? null,
     [projects, activeProjectId],
   );
+
+  /* Request Review ゲート: project の全 TO-BE テーブルの最新 run が success なら通る.
+     2026-05-28 仕様変更で「snapshot 別 preflight cache pass」から差し替え.
+     BE が判定材料 (allReady / completedTables / failedTables / notRunTables) を集約して返す.
+     polling は不要 — run 完了時に FE 側で invalidate (usePipelineProgress の WS 또는
+     refreshOnMount 程度で良い). 5 秒 stale で充分新鮮. */
+  const { data: runReadiness } = useQuery<ProjectRunReadinessDto>({
+    queryKey: ['run-readiness', activeProjectId],
+    enabled: !!activeProjectId,
+    queryFn: () => runsApi.runReadiness(activeProjectId!),
+    refetchInterval: 5_000,
+    staleTime: 2_000,
+  });
 
   const allSnapshots = useSnapshotsStore((s) => s.snapshots);
   const fetchByProject = useSnapshotsStore((s) => s.fetchByProject);
@@ -51,6 +67,24 @@ export function VersionsPage() {
       void fetchByProject(activeProjectId);
     }
   }, [activeProjectId, fetchByProject]);
+
+  /* 버튼 활성화 — backend has-changes 응답.
+     - hasChanges: + New (mapping) snapshot 활성 기준 (mapping 변경 여부).
+     - hasRun:     + Cutover snapshot 활성 기준 (run 이력 있으면 mapping 변경 무관 활성). */
+  const [hasChanges, setHasChanges] = useState<boolean>(true);
+  const [hasRun, setHasRun] = useState<boolean>(false);
+  useEffect(() => {
+    if (!activeProjectId) { setHasChanges(true); setHasRun(false); return; }
+    let alive = true;
+    snapshotApi.hasChanges(activeProjectId)
+      .then((r) => {
+        if (!alive) return;
+        setHasChanges(r.hasChanges);
+        setHasRun(r.hasRun);
+      })
+      .catch(() => { if (alive) { setHasChanges(true); setHasRun(false); } });
+    return () => { alive = false; };
+  }, [activeProjectId, snapshots.length]);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createType, setCreateType] = useState<SnapshotType>('mapping');
@@ -97,6 +131,26 @@ export function VersionsPage() {
     [snapshots, selectedSnapshotId],
   );
 
+  /* Request Review ゲート: BE が返す readiness 集計を flag に展開.
+     - hasData       : readiness データが取得済 (loading 初回は false)
+     - allReady      : 全テーブルの最新 run が success
+     - completedCount/total : Approval Status カードの表示用
+     - failedTables / notRunTables : ブロック理由のテキスト組立用 */
+  const requestReviewGate = useMemo(() => {
+    if (!runReadiness) {
+      return { hasData: false, allReady: false, total: 0, completed: 0,
+               failedTables: [] as string[], notRunTables: [] as string[] };
+    }
+    return {
+      hasData: true,
+      allReady: runReadiness.allReady,
+      total: runReadiness.totalTables,
+      completed: runReadiness.completedTables,
+      failedTables: runReadiness.failedTables,
+      notRunTables: runReadiness.notRunTables,
+    };
+  }, [runReadiness]);
+
   // 페이지 첫 진입 시 한 번만 최신 snapshot 자동 선택.
   // polling / 외부 변경으로 snapshots 가 갱신돼도 사용자가 보고 있던 화면을 강제 전환하지 않음
   // (사용자가 row 를 누르거나 새 스냅샷 생성 시에만 selectedSnapshotId 변경).
@@ -137,10 +191,8 @@ export function VersionsPage() {
   // AUDIT LOG 접기/펼치기 상태
   const [auditLogExpanded, setAuditLogExpanded] = useState(true);
 
-  // Audit Log — store 에서 가져옴 (localStorage 영속, 페이지 이동에도 보존)
+  // Audit Log — store 에서 가져옴 (backend audit_log 가 source of truth)
   const allAuditLogs = useAuditLogStore((s) => s.logs);
-  const addAuditLogEntry = useAuditLogStore((s) => s.add);
-  const clearAuditLogByProject = useAuditLogStore((s) => s.clearByProject);
   const auditLogs = useMemo(
     () => allAuditLogs.filter((l) => l.projectId === activeProjectId),
     [allAuditLogs, activeProjectId],
@@ -149,26 +201,6 @@ export function VersionsPage() {
   // rehearsal 이후 phase 에서만 cutover snapshot 생성 가능
   const POST_REHEARSAL: ProjectPhase[] = ['rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
   const canCreateCutover = project ? POST_REHEARSAL.includes(project.phase) : false;
-
-  // Audit Log 추가 함수
-  const addAuditLog = (
-    action: string,
-    description: string,
-    snapshotName?: string,
-    snapshotId?: string,
-    snapshotType?: 'mapping' | 'cutover',
-  ) => {
-    if (!activeProjectId) return;
-    addAuditLogEntry({
-      projectId: activeProjectId,
-      user: user?.username || 'Unknown',
-      action,
-      description,
-      snapshotName,
-      snapshotId,
-      snapshotType,
-    });
-  };
 
   if (!project) {
     return (
@@ -218,40 +250,19 @@ export function VersionsPage() {
       // 방금 만든 snapshot 을 자동 선택
       setSelectedSnapshotId(newSnapshot.id);
 
-      // Audit log 기록 (description 이 있으면 전체 포함)
-      const actionLabel = createType === 'cutover' ? 'Cutover Snapshot created' : 'Snapshot created';
-      const desc = newDesc.trim();
-      const auditDesc = desc
-        ? `Created new ${createType} snapshot: ${name}\n${desc}`
-        : `Created new ${createType} snapshot: ${name}`;
-      addAuditLog(actionLabel, auditDesc, newSnapshot.version || 'v1.0', newSnapshot.id, createType);
-
+      // audit log 는 backend (createSnapshot controller) 가 자동 기록.
       resetCreate();
     } catch (error) {
       console.error('Failed to create snapshot:', error);
-      const failLabel = createType === 'cutover' ? 'Cutover Snapshot creation failed' : 'Snapshot creation failed';
-      addAuditLog(failLabel, `Failed to create snapshot: ${name}`);
     }
   };
 
   const handleRequest = async (id: string) => {
     try {
       await requestSnapshot(id);
-
-      // Audit log 기록
-      const snapshot = snapshots.find(s => s.id === id);
-      addAuditLog(
-        'approval requested',
-        `Requested approval for snapshot: ${snapshot?.name}`,
-        snapshot?.version,
-        snapshot?.id,
-        snapshot?.type ?? 'mapping',
-      );
-
-      // Phase 전환은 approve 시점에 처리 (ApprovalsPage)
+      // audit log + phase 전환은 backend (requestSnapshot / approve) 가 처리.
     } catch (error) {
       console.error('Failed to request approval:', error);
-      addAuditLog('request failed', `Failed to request approval for snapshot: ${snapshots.find(s => s.id === id)?.name}`);
     }
   };
 
@@ -263,31 +274,20 @@ export function VersionsPage() {
           <>
             <button
               onClick={() => openCreate('mapping')}
-              style={{ ...styles.btnPrimary, ...(readOnly ? styles.btnDisabled : {}) }}
-              disabled={readOnly}
+              style={{ ...styles.btnPrimary, ...((readOnly || !hasChanges) ? styles.btnDisabled : {}) }}
+              disabled={readOnly || !hasChanges}
+              title={!hasChanges ? t('versions.noChangesHint') : undefined}
             >
               {t('versions.create')}
             </button>
             <button
               onClick={() => openCreate('cutover')}
-              style={{ ...styles.btnCutover, ...(readOnly ? styles.btnDisabled : {}) }}
-              disabled={readOnly}
+              style={{ ...styles.btnCutover, ...((readOnly || !hasRun) ? styles.btnDisabled : {}) }}
+              disabled={readOnly || !hasRun}
+              title={!hasRun ? t('versions.noRunHint') : undefined}
             >
               {t('versions.createCutover')}
             </button>
-            {snapshots.length > 0 && (
-              <button
-                onClick={async () => {
-                  if (!confirm('Delete all snapshots in this project?')) return;
-                  for (const s of snapshots) await deleteSnapshot(s.id);
-                  if (activeProjectId) clearAuditLogByProject(activeProjectId);
-                }}
-                style={{ ...styles.btnGhost, color: 'var(--red)', borderColor: 'var(--red)', ...(readOnly ? styles.btnDisabled : {}) }}
-                disabled={readOnly}
-              >
-                Delete all ({snapshots.length})
-              </button>
-            )}
           </>
         )}
       </div>
@@ -435,6 +435,12 @@ export function VersionsPage() {
               isPinned={pinnedIds.includes(selectedSnapshot.id)}
               pinEligible={isPinEligible(selectedSnapshot, project.phase)}
               onTogglePin={() => togglePin(selectedSnapshot.id)}
+              runReadinessLoaded={requestReviewGate.hasData}
+              runReadinessAllReady={requestReviewGate.allReady}
+              runReadinessTotal={requestReviewGate.total}
+              runReadinessCompleted={requestReviewGate.completed}
+              runReadinessFailedTables={requestReviewGate.failedTables}
+              runReadinessNotRunTables={requestReviewGate.notRunTables}
             />
           ) : (
             <div style={styles.noSelectionMessage}>
@@ -463,13 +469,6 @@ export function VersionsPage() {
     </div>
   );
 }
-
-const STATUS_KEY: Record<SnapshotStatus, TranslationKey> = {
-  draft:    'versions.status.draft',
-  pending:  'versions.status.pending',
-  approved: 'versions.status.approved',
-  rejected: 'versions.status.rejected',
-};
 
 function statusTone(s: SnapshotStatus): React.CSSProperties {
   switch (s) {
@@ -513,11 +512,16 @@ function ChangeRow({ kind, category, rawKey, detail, fieldChanges }: {
   // 헤더에 표시할 이름 — rule 은 schema.table.column 풀 경로 그대로.
   const displayName = rawKey;
 
-  // 표시 대상은 asisColumn / transformSql 두 필드만.
-  // 옛 snapshot 의 changes JSON 이 4 필드(asisSchema/Table 포함) 로 박제돼 있을 수도 있어
-  // frontend 에서 필터링 — 옛/새 snapshot 무관하게 동일한 화면.
-  const fields = (fieldChanges ?? []).filter(
-    (fc) => fc.field === 'asisColumn' || fc.field === 'transformSql'
+  // 표시 필드는 category 별로 다르다.
+  //  - rule    : asisColumn / transformSql 만 (옛 snapshot 의 asisSchema/asisTable 4필드는 숨김).
+  //  - binding : sources / compositionKind / whereFilter / groupByExpr / expandExpr / sharedFromProjectId.
+  //  - codeMap : targetValue,  asisSkip : asisSkip.
+  // 과거엔 rule 용 화이트리스트(asisColumn/transformSql)를 전 category 에 적용해
+  // binding/codeMap/asisSkip 의 변경 필드가 전부 걸러져 "무엇이 변경됐는지" 가 안 보였다 (2026-06-01 fix).
+  const fields = (fieldChanges ?? []).filter((fc) =>
+    category === 'rule'
+      ? (fc.field === 'asisColumn' || fc.field === 'transformSql')
+      : true
   );
 
   // "사실상 삭제" detect — mapping page 에서 초기화하면 row 는 남고 값만 비워짐.
@@ -541,9 +545,17 @@ function ChangeRow({ kind, category, rawKey, detail, fieldChanges }: {
   // backend 의 field 식별자 → 사용자에게 보여줄 라벨 (i18n)
   const fieldLabel = (f: string): string => {
     switch (f) {
-      case 'asisColumn':   return t('versions.changes.field.asisColumn');
-      case 'transformSql': return t('versions.changes.field.rule');
-      default:             return f;
+      case 'asisColumn':          return t('versions.changes.field.asisColumn');
+      case 'transformSql':        return t('versions.changes.field.rule');
+      case 'sources':             return t('versions.changes.field.sources');
+      case 'compositionKind':     return t('versions.changes.field.compositionKind');
+      case 'whereFilter':         return t('versions.changes.field.whereFilter');
+      case 'groupByExpr':         return t('versions.changes.field.groupByExpr');
+      case 'expandExpr':          return t('versions.changes.field.expandExpr');
+      case 'sharedFromProjectId': return t('versions.changes.field.sharedFromProjectId');
+      case 'targetValue':         return t('versions.changes.field.targetValue');
+      case 'asisSkip':            return t('versions.changes.field.asisSkip');
+      default:                    return f;
     }
   };
 
@@ -553,6 +565,9 @@ function ChangeRow({ kind, category, rawKey, detail, fieldChanges }: {
 
   // 헤더 우측 라벨 — backend detail 을 신뢰하지 않고 client-side 재계산.
   // ADDED/DELETED 는 라벨 없음 (화살표만). MODIFIED 는 변경 항목에 따라.
+  // BE detail 리터럴(영문)을 현재 언어로 매핑. 미매핑 값은 그대로 (최소한 영문이라도 표시).
+  const mapDetail = (d: string): string =>
+    d === 'binding changed' ? t('versions.changes.label.binding') : d;
   const headerLabel = (() => {
     if (effectiveKind === 'added' || effectiveKind === 'removed') return '';
     if (effectiveKind === 'modified') {
@@ -561,9 +576,9 @@ function ChangeRow({ kind, category, rawKey, detail, fieldChanges }: {
       if (hasCol && hasSql) return t('versions.changes.label.both');
       if (hasCol)           return t('versions.changes.label.column');
       if (hasSql)           return t('versions.changes.label.rule');
-      return detail; // fallback
+      return mapDetail(detail); // fallback
     }
-    return detail;
+    return mapDetail(detail);
   })();
 
   // 기본은 접힌 상태. 헤더 클릭 시 토글.
@@ -672,7 +687,11 @@ function ChangeRow({ kind, category, rawKey, detail, fieldChanges }: {
   );
 }
 
-function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligible, onTogglePin }: {
+function SnapshotDetailView({
+  snapshot, onRequest, readOnly, isPinned, pinEligible, onTogglePin,
+  runReadinessLoaded, runReadinessAllReady, runReadinessTotal, runReadinessCompleted,
+  runReadinessFailedTables, runReadinessNotRunTables,
+}: {
   snapshot: {
     id: string;
     name: string;
@@ -695,10 +714,42 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
   isPinned: boolean;
   pinEligible: boolean;
   onTogglePin: () => void;
+  /** /run-readiness API のレスポンスが取得済み. false = 初回 loading 中. */
+  runReadinessLoaded: boolean;
+  /** 全 TO-BE テーブルで最新 run が success. true なら Request Review 可. */
+  runReadinessAllReady: boolean;
+  /** project の TO-BE テーブル数. 0 なら DDL 未取込. */
+  runReadinessTotal: number;
+  /** 最新 run が success の TO-BE テーブル数. */
+  runReadinessCompleted: number;
+  /** 最新 run が失敗状態の TO-BE テーブル (failed/aborted/timed_out). */
+  runReadinessFailedTables: string[];
+  /** まだ一度も run に含まれた事のない TO-BE テーブル. */
+  runReadinessNotRunTables: string[];
 }) {
   const t = useT();
   const user = useAuthStore((s) => s.user);
   const [confirmingRequest, setConfirmingRequest] = useState(false);
+
+  /* Request Review ゲート: 「全 TO-BE テーブルの最新 run が success」が条件.
+     失敗 / 中断 / 未実行 はゲート的に全部「完了していない」と同列なので、
+     1 つのリストに統合して 1 種類の文言で表示 (詳細を見たい時は Run History で確認).
+     ブロック理由の優先度: loading > DDL 未取込 > 未完了あり. */
+  const notCompletedTables = useMemo(
+    () => [...runReadinessFailedTables, ...runReadinessNotRunTables],
+    [runReadinessFailedTables, runReadinessNotRunTables],
+  );
+  const requestBlockedReason = !runReadinessLoaded
+    ? t('versions.runReadiness.loading')
+    : runReadinessTotal === 0
+      ? t('versions.runReadiness.noTables')
+      : notCompletedTables.length > 0
+        ? t('versions.runReadiness.notCompleted', {
+            count: String(notCompletedTables.length),
+            tables: notCompletedTables.slice(0, 3).join(', '),
+          })
+        : '';
+  const canRequest = !readOnly && runReadinessAllReady;
 
   return (
     <div style={styles.detailContent}>
@@ -733,7 +784,7 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
             <span style={styles.detailValue}>{new Date(snapshot.createdAt).toLocaleString()}</span>
           </div>
           <div style={styles.detailGridItem}>
-            <span style={styles.detailLabel}>Tables</span>
+            <span style={styles.detailLabel}>Bindings</span>
             <span style={styles.detailValue}>{snapshot.tableCount}</span>
           </div>
           <div style={styles.detailGridItem}>
@@ -766,11 +817,24 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
               } : {}),
             }}>
               <div style={styles.statusContent}>
-                <div style={styles.statusDesc}>
-                  {confirmingRequest
-                    ? <>{t('versions.confirmRequestPre')}<b>{snapshot.name}</b>{t('versions.confirmRequestPost')}</>
-                    : t('versions.statusDesc.draftReady')}
-                </div>
+                {/* 確認中はそのまま confirm prompt. 通常時は canRequest で
+                    「準備完了 (緑)」と「ブロック理由 (amber)」を排他表示. */}
+                {confirmingRequest ? (
+                  <div style={styles.statusDesc}>
+                    {t('versions.confirmRequestPre')}<b>{snapshot.name}</b>{t('versions.confirmRequestPost')}
+                  </div>
+                ) : canRequest ? (
+                  <div style={styles.statusDesc}>
+                    {t('versions.statusDesc.draftRunReady', {
+                      completed: String(runReadinessCompleted),
+                      total: String(runReadinessTotal),
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ ...styles.statusDesc, color: 'var(--amber)' }}>
+                    ⚠ {requestBlockedReason}
+                  </div>
+                )}
               </div>
               {confirmingRequest ? (
                 <div style={{ display: 'flex', gap: 8 }}>
@@ -779,8 +843,9 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
                       setConfirmingRequest(false);
                       onRequest();
                     }}
-                    style={{ ...styles.btnPrimary, ...(readOnly ? styles.btnDisabled : {}) }}
-                    disabled={readOnly}
+                    style={{ ...styles.btnPrimary, ...(canRequest ? {} : styles.btnDisabled) }}
+                    disabled={!canRequest}
+                    title={requestBlockedReason}
                   >
                     Confirm
                   </button>
@@ -789,7 +854,12 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
                   </button>
                 </div>
               ) : (
-                <button onClick={() => setConfirmingRequest(true)} style={{ ...styles.btnPrimary, ...(readOnly ? styles.btnDisabled : {}) }} disabled={readOnly}>
+                <button
+                  onClick={() => setConfirmingRequest(true)}
+                  style={{ ...styles.btnPrimary, ...(canRequest ? {} : styles.btnDisabled) }}
+                  disabled={!canRequest}
+                  title={requestBlockedReason}
+                >
                   Request Review
                 </button>
               )}
@@ -861,20 +931,24 @@ function SnapshotDetailView({ snapshot, onRequest, readOnly, isPinned, pinEligib
                 type="button"
                 role="switch"
                 onClick={onTogglePin}
-                disabled={!isPinned && !pinEligible}
+                /* read-only 사용자는 pin 변경 불가 (2026-06-03) — setBaseline 이 live
+                   mapping_* 을 wipe+replace 하는 쓰기 작업이므로. */
+                disabled={readOnly || (!isPinned && !pinEligible)}
                 style={{
                   ...styles.pinToggle,
                   ...(isPinned ? styles.pinToggleOn : {}),
-                  ...(!isPinned && !pinEligible ? styles.pinToggleDisabled : {}),
+                  ...((readOnly || (!isPinned && !pinEligible)) ? styles.pinToggleDisabled : {}),
                 }}
                 aria-checked={isPinned}
                 aria-label={isPinned ? t('versions.pin.toggleTitleUnpin') : t('versions.pin.toggleTitlePin')}
                 title={
-                  !isPinned && !pinEligible
-                    ? t('versions.pin.toggleTitleIneligible')
-                    : isPinned
-                      ? t('versions.pin.toggleTitleUnpin')
-                      : t('versions.pin.toggleTitlePin')
+                  readOnly
+                    ? t('versions.pin.toggleTitleReadOnly')
+                    : !isPinned && !pinEligible
+                      ? t('versions.pin.toggleTitleIneligible')
+                      : isPinned
+                        ? t('versions.pin.toggleTitleUnpin')
+                        : t('versions.pin.toggleTitlePin')
                 }
               >
                 <span
@@ -1366,7 +1440,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   statusCard: {
     display: 'flex',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: 10,
     padding: '11px 12px',
     background: 'var(--panel-2)',

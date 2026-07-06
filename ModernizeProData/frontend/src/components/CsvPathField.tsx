@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { useT } from '../i18n';
 import { fileDialogApi } from '../api/fileDialog';
-import { ApiError } from '../api/client';
 
 interface Props {
   value: string;
@@ -15,25 +14,13 @@ interface Props {
  * OS 네이티브 폴더 다이얼로그 (macOS Cocoa / Windows Explorer / Linux GTK)
  * 를 띄우고, 사용자가 고른 절대경로를 그대로 받아 input 에 채운다.
  *
- * 백엔드가 headless 모드이거나 (서버 배포 등) 다이얼로그가 안 뜨는 환경에서는
- * 자동으로 window.prompt 로 폴백.
+ * 다이얼로그가 안 뜨는 환경(backend headless 등)에서는 조용히 실패하고
+ * 사용자가 input 에 직접 타이핑하는 흐름으로 둔다. 브라우저 네이티브 prompt
+ * 는 안 쓴다.
  */
 export function CsvPathField({ value, onChange }: Props) {
   const t = useT();
   const [busy, setBusy] = useState(false);
-
-  const fallbackPrompt = () => {
-    const isMac = navigator.platform.toLowerCase().includes('mac');
-    const hint = isMac
-      ? '예: /Users/me/migration/csv'
-      : '예: D:\\migration\\csv 또는 \\\\server\\share\\csv';
-    const seed = value && value.trim() ? value : (isMac ? '/Users/' : 'D:\\');
-    const result = window.prompt(`AS-IS CSV 디렉터리의 절대경로를 입력하세요.\n${hint}`, seed);
-    if (result !== null) {
-      const trimmed = result.trim();
-      if (trimmed) onChange(trimmed);
-    }
-  };
 
   const handleBrowse = async () => {
     if (busy) return;
@@ -42,13 +29,8 @@ export function CsvPathField({ value, onChange }: Props) {
       const res = await fileDialogApi.pickDirectory(value || undefined, t('siteSettings.csvPathDialogTitle'));
       if (!res.cancelled && res.path) onChange(res.path);
     } catch (e) {
-      // Backend가 headless 거나 다이얼로그를 못 띄우면 prompt 로 폴백.
-      if (e instanceof ApiError && (e.code === 'HEADLESS_BACKEND' || e.code === 'DIALOG_FAILED')) {
-        fallbackPrompt();
-      } else {
-        console.warn('[CsvPathField] pickDirectory failed, falling back to prompt', e);
-        fallbackPrompt();
-      }
+      // 사용자 요청: 브라우저 prompt 폴백 안 씀. 실패 시 input 직접 타이핑.
+      console.warn('[CsvPathField] pickDirectory failed', e);
     } finally {
       setBusy(false);
     }
@@ -69,7 +51,7 @@ export function CsvPathField({ value, onChange }: Props) {
         disabled={busy}
         style={busy ? { ...styles.btnGhost, opacity: 0.5, cursor: 'wait' } : styles.btnGhost}
       >
-        {busy ? '…' : t('siteSettings.csvPathBrowse')}
+        {busy ? '' : t('siteSettings.csvPathBrowse')}
       </button>
     </div>
   );

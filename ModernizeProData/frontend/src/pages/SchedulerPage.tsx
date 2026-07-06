@@ -4,8 +4,8 @@
  * セクション:
  *   - Internal scheduler card  — Quartz Nightly の ON/OFF + mode (common/individual) + 時刻
  *   - External integrations    — token 登録 + 外部 URL + curl 実行例
- *   - Run history              — 全 project 横断, 最新 50, abort action
  *
+ * Run History は "Run Results" ページ(構 Site Quarantine)のタブへ移動 (#5, 2026-06-05).
  * Internal/External は mutex (BE の CHECK constraint + service 自動 flip で二重強制).
  */
 import { useEffect, useMemo, useState } from 'react';
@@ -14,14 +14,13 @@ import { useAuthStore } from '../store/auth';
 import { useWorkspaceStore } from '../store/workspace';
 import { useSettingsStore } from '../store/settings';
 import { ApiError } from '../api/client';
-import { runsApi, type RunHistoryDto } from '../api/runs';
 import { credentialsApi, type CurrentCredentialDto } from '../api/credentials';
 import { solutionSettingsApi, type SolutionSettingsDto, type InternalMode } from '../api/solutionSettings';
 import { scheduleApi } from '../api/schedule';
 import { Toggle } from '../components/Toggle';
 import { Radio } from '../components/Checkbox';
 import { useT } from '../i18n';
-import { toHHmm, toHHmmss, formatTimestamp, formatDuration } from '../lib/formatters';
+import { toHHmm, toHHmmss } from '../lib/formatters';
 
 export function SchedulerPage() {
   const t = useT();
@@ -29,20 +28,28 @@ export function SchedulerPage() {
   const user = useAuthStore((s) => s.user);
   const isMaster = user?.role === 'master';
 
-  const projects = useWorkspaceStore((s) => s.projects);
-  const sites = useWorkspaceStore((s) => s.sites);
+  const allProjects = useWorkspaceStore((s) => s.projects);
+  const allSites = useWorkspaceStore((s) => s.sites);
+  const activeSiteId = useWorkspaceStore((s) => s.activeSiteId);
   const fetchSites = useWorkspaceStore((s) => s.fetchSites);
   const fetchProjects = useWorkspaceStore((s) => s.fetchProjects);
+  /* SchedulerPage は active site の context で開かれる前提.
+     trigger curl 例 / project schedule 設定 / project 一覧 などはすべて active site
+     に絞る. activeSiteId が null の時は空 list (= site が選ばれていない、サイドバーで
+     site を選択するように促す形). */
+  const sites = useMemo(
+    () => allSites.filter((s) => s.id === activeSiteId),
+    [allSites, activeSiteId],
+  );
+  const projects = useMemo(
+    () => allProjects.filter((p) => p.siteId === activeSiteId),
+    [allProjects, activeSiteId],
+  );
 
   // settings store の externalIntegrations toggle は BE と optimistic mirror.
   const setStoreExternalIntegrations = useSettingsStore((s) => s.setExternalIntegrations);
 
   const [error, setError] = useState<string | null>(null);
-  const [history, setHistory] = useState<RunHistoryDto[]>([]);
-  /** Run history 行絞り込み. 空文字 = All. */
-  const [historyStatusFilter, setHistoryStatusFilter] = useState<string>('');
-  const [historyTypeFilter, setHistoryTypeFilter] = useState<string>('');
-  const [historyTriggerFilter, setHistoryTriggerFilter] = useState<string>('');
 
   const [credential, setCredential] = useState<CurrentCredentialDto | null>(null);
   const [settings, setSettings] = useState<SolutionSettingsDto | null>(null);
@@ -102,24 +109,13 @@ export function SchedulerPage() {
     });
   }, [projects]);
 
-  const refreshHistory = async () => {
-    try {
-      const h = await runsApi.listAll();
-      setHistory(h);
-    } catch (e) {
-      setError(formatError(e));
-    }
-  };
-
   const refreshAll = async () => {
     setError(null);
     try {
-      const [h, c, s] = await Promise.all([
-        runsApi.listAll(),
+      const [c, s] = await Promise.all([
         credentialsApi.getCurrent().catch(() => null),
         solutionSettingsApi.get().catch(() => null),
       ]);
-      setHistory(h);
       if (c) setCredential(c);
       if (s) {
         setSettings(s);
@@ -313,51 +309,6 @@ export function SchedulerPage() {
       extEndpoint, extEndpointBaseline,
       projects, projectTimes, projectTimesBaseline]);
 
-  const handleAbort = async (runId: string) => {
-    try { await runsApi.devAbort(runId, 'aborted from dev test page (manual reset)'); await refreshHistory(); }
-    catch (e) { setError(formatError(e)); }
-  };
-
-  /** Run history dropdown 選択肢 — 現データに存在する値だけ derive. */
-  const historyStatusOptions = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const r of history) m.set(r.status, (m.get(r.status) ?? 0) + 1);
-    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [history]);
-  const historyTypeOptions = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const r of history) m.set(r.runType, (m.get(r.runType) ?? 0) + 1);
-    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [history]);
-  const historyTriggerOptions = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const r of history) m.set(r.triggerSource, (m.get(r.triggerSource) ?? 0) + 1);
-    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [history]);
-  const filteredHistory = useMemo(() => history.filter((r) => {
-    if (historyStatusFilter && r.status !== historyStatusFilter) return false;
-    if (historyTypeFilter && r.runType !== historyTypeFilter) return false;
-    if (historyTriggerFilter && r.triggerSource !== historyTriggerFilter) return false;
-    return true;
-  }), [history, historyStatusFilter, historyTypeFilter, historyTriggerFilter]);
-
-  /* データから消えた値を選んでた場合は filter をリセット. */
-  useEffect(() => {
-    if (historyStatusFilter && !historyStatusOptions.some(([v]) => v === historyStatusFilter)) {
-      setHistoryStatusFilter('');
-    }
-  }, [historyStatusOptions, historyStatusFilter]);
-  useEffect(() => {
-    if (historyTypeFilter && !historyTypeOptions.some(([v]) => v === historyTypeFilter)) {
-      setHistoryTypeFilter('');
-    }
-  }, [historyTypeOptions, historyTypeFilter]);
-  useEffect(() => {
-    if (historyTriggerFilter && !historyTriggerOptions.some(([v]) => v === historyTriggerFilter)) {
-      setHistoryTriggerFilter('');
-    }
-  }, [historyTriggerOptions, historyTriggerFilter]);
-
   if (!isMaster) {
     return (
       <div style={styles.page}>
@@ -385,15 +336,26 @@ export function SchedulerPage() {
   //   windows      : curl ... -d "{\"...\"}"
   //   powershell   : curl.exe --% ... -d "{\"...\"}"   (--% で PowerShell の引数加工を停止)
   const curlCmd = shellMode === 'powershell' ? 'curl.exe --%' : 'curl';
-  const bulkCommand = `${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs/all -H "Authorization: Bearer ${tokenForDocs}"`;
-  const singleProjectCommands = projects.length === 0
-    ? '# (project 未作成 — All Projects 画面で project を作成すると単発実行コマンドがここに表示されます)'
-    : projects.map((p) => {
-        const body = shellMode === 'bash'
-          ? `'{"projectId":"${p.id}"}'`
-          : `"{\\"projectId\\":\\"${p.id}\\"}"`;
-        return `# ${p.name} (phase=${p.phase})\n${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs -H "Authorization: Bearer ${tokenForDocs}" -H "Content-Type: application/json" -d ${body}`;
-      }).join('\n\n');
+  const quoteBody = (obj: Record<string, string>) => {
+    const json = JSON.stringify(obj);
+    return shellMode === 'bash' ? `'${json}'` : `"${json.replace(/"/g, '\\"')}"`;
+  };
+  /* /runs/all は siteId 必須 (2026-05-29 改). このページは active site scope なので
+     その site の bulk + その site の project の single だけを表示. */
+  const activeSite = sites[0] ?? null;
+  const triggerExamplesText = (() => {
+    if (!activeSite) {
+      return '# (サイドバーで site を選んでください)';
+    }
+    const bulkCmd = `${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs/all -H "Authorization: Bearer ${tokenForDocs}" -H "Content-Type: application/json" -d ${quoteBody({ siteId: activeSite.id })}`;
+    const singleCmds = projects.length === 0
+      ? '# (この site にはまだ project がありません)'
+      : projects.map((p) => {
+          const body = quoteBody({ projectId: p.id });
+          return `# ${p.name} (phase=${p.phase})\n${curlCmd} -X POST ${coordinatorUrl}/api/v1/runs -H "Authorization: Bearer ${tokenForDocs}" -H "Content-Type: application/json" -d ${body}`;
+        }).join('\n\n');
+    return `${t('scheduler.external.docs.bulkComment')}\n${bulkCmd}\n\n${t('scheduler.external.docs.singleComment')}\n${singleCmds}`;
+  })();
 
   return (
     <div style={styles.page}>
@@ -408,7 +370,7 @@ export function SchedulerPage() {
           }}
           title={dirty && !canSave ? t('scheduler.save.tooltip.invalidInternal') : ''}
         >
-          {saving ? '…' : t('common.save')}
+          {saving ? '' : t('common.save')}
         </button>
       </div>
 
@@ -586,7 +548,7 @@ export function SchedulerPage() {
                   whiteSpace: 'nowrap',
                 }}
               >
-                {registering ? '…' : (credential?.maskedDisplay ? t('scheduler.external.tokenReplace') : t('scheduler.external.tokenRegister'))}
+                {registering ? '' : (credential?.maskedDisplay ? t('scheduler.external.tokenReplace') : t('scheduler.external.tokenRegister'))}
               </button>
             </div>
             {credential?.maskedDisplay && (
@@ -651,11 +613,7 @@ export function SchedulerPage() {
               borderRadius: 3, lineHeight: 1.6,
               whiteSpace: 'pre-wrap',
             }}>
-{`${t('scheduler.external.docs.bulkComment')}
-${bulkCommand}
-
-${t('scheduler.external.docs.singleComment')}
-${singleProjectCommands}`}
+{triggerExamplesText}
             </pre>
           </div>
 
@@ -664,126 +622,7 @@ ${singleProjectCommands}`}
 
       {error && <div style={styles.errorBox}>Error: {error}</div>}
 
-      {/* Run history */}
-      <section style={styles.section}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8, flexWrap: 'wrap' }}>
-          <h3 style={{ ...styles.h3, margin: 0 }}>
-            {t('scheduler.section.history')}
-            {(historyStatusFilter || historyTypeFilter || historyTriggerFilter) && (
-              <span style={styles.historyFilterCount}>
-                {filteredHistory.length} / {history.length}
-              </span>
-            )}
-          </h3>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <label style={styles.historyFilterLabel}>
-              <span style={styles.historyFilterLabelText}>Status</span>
-              <select
-                value={historyStatusFilter}
-                onChange={(e) => setHistoryStatusFilter(e.target.value)}
-                style={styles.historyFilterSelect}
-                disabled={historyStatusOptions.length === 0}
-              >
-                <option value="">All ({history.length})</option>
-                {historyStatusOptions.map(([v, n]) => (
-                  <option key={v} value={v}>{v} ({n})</option>
-                ))}
-              </select>
-            </label>
-            <label style={styles.historyFilterLabel}>
-              <span style={styles.historyFilterLabelText}>Type</span>
-              <select
-                value={historyTypeFilter}
-                onChange={(e) => setHistoryTypeFilter(e.target.value)}
-                style={styles.historyFilterSelect}
-                disabled={historyTypeOptions.length === 0}
-              >
-                <option value="">All ({history.length})</option>
-                {historyTypeOptions.map(([v, n]) => (
-                  <option key={v} value={v}>{v} ({n})</option>
-                ))}
-              </select>
-            </label>
-            <label style={styles.historyFilterLabel}>
-              <span style={styles.historyFilterLabelText}>Trigger</span>
-              <select
-                value={historyTriggerFilter}
-                onChange={(e) => setHistoryTriggerFilter(e.target.value)}
-                style={styles.historyFilterSelect}
-                disabled={historyTriggerOptions.length === 0}
-              >
-                <option value="">All ({history.length})</option>
-                {historyTriggerOptions.map(([v, n]) => (
-                  <option key={v} value={v}>{v} ({n})</option>
-                ))}
-              </select>
-            </label>
-            <button
-              onClick={refreshHistory}
-              style={{
-                padding: '4px 10px', fontSize: 11,
-                border: '1px solid var(--border)', borderRadius: 3,
-                background: 'var(--panel)', color: 'var(--text-2)',
-                cursor: 'pointer',
-              }}
-            >
-              {t('scheduler.button.refresh')}
-            </button>
-          </div>
-        </div>
-        {filteredHistory.length === 0 ? (
-          <div style={{ color: 'var(--text-3)' }}>{t('scheduler.history.empty')}</div>
-        ) : (
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>{t('scheduler.history.col.runId')}</th>
-                <th style={styles.th}>{t('scheduler.history.col.project')}</th>
-                <th style={styles.th}>{t('scheduler.history.col.type')}</th>
-                <th style={styles.th}>{t('scheduler.history.col.trigger')}</th>
-                <th style={styles.th}>{t('scheduler.history.col.worker')}</th>
-                <th style={styles.th}>{t('scheduler.history.col.status')}</th>
-                <th style={styles.th}>{t('scheduler.history.col.started')}</th>
-                <th style={styles.th}>{t('scheduler.history.col.finished')}</th>
-                <th style={styles.th}>{t('scheduler.history.col.duration')}</th>
-                <th style={styles.th}>{t('scheduler.history.col.actions')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredHistory.map((h) => (
-                <tr key={h.id}>
-                  <td style={styles.td}><code>{h.id}</code></td>
-                  <td style={styles.td}>
-                    <div>{h.projectName}</div>
-                    <div style={{ fontSize: 9, color: 'var(--text-4)' }}><code>{h.projectId}</code></div>
-                  </td>
-                  <td style={styles.td}>{h.runType}</td>
-                  <td style={styles.td}>{h.triggerSource}</td>
-                  <td style={styles.td}>{h.workerId ?? '-'}</td>
-                  <td style={styles.td}>
-                    <span style={statusStyle(h.status)}>{h.status}</span>
-                  </td>
-                  <td style={styles.td}>{formatTimestamp(h.startedAt)}</td>
-                  <td style={styles.td}>{h.finishedAt ? formatTimestamp(h.finishedAt) : '-'}</td>
-                  <td style={styles.td}>{formatDuration(h.durationMs)}</td>
-                  <td style={styles.td}>
-                    {h.status === 'running' && (
-                      <button
-                        onClick={() => handleAbort(h.id)}
-                        style={styles.iconBtn}
-                        title={t('scheduler.tooltip.abort')}
-                        aria-label={t('scheduler.action.abort')}
-                      >
-                        ⏹
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
+      {/* Run History 는 "Run Results" 페이지(구 Site Quarantine)의 탭으로 이동 (#5). */}
 
     </div>
   );
@@ -794,22 +633,6 @@ function formatError(e: unknown): string {
   if (e instanceof Error) return e.message;
   return String(e);
 }
-function statusStyle(status: string): React.CSSProperties {
-  const base: React.CSSProperties = { padding: '2px 6px', borderRadius: 3, fontSize: 11 };
-  switch (status) {
-    case 'running': return { ...base, background: '#fef3c7', color: '#92400e' };
-    case 'success':
-    case 'STARTED': return { ...base, background: '#dcfce7', color: '#166534' };
-    case 'failed':
-    case 'aborted':
-    case 'timed_out':
-    case 'rejected':
-    case 'locked':
-    case 'REJECTED':
-    case 'LOCKED': return { ...base, background: '#fee2e2', color: '#991b1b' };
-    default: return { ...base, background: 'var(--panel-2)', color: 'var(--text-2)' };
-  }
-}
 
 const styles: Record<string, React.CSSProperties> = {
   page: { padding: 20, maxWidth: 1100, margin: '0 auto' },
@@ -817,15 +640,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '10px 14px', background: '#fee2e2', border: '1px solid #dc2626',
     color: '#991b1b', fontSize: 12, marginBottom: 20, lineHeight: 1.6,
   },
-  iconBtn: {
-    padding: '2px 8px', fontSize: 14, lineHeight: 1,
-    border: '1px solid var(--border)', borderRadius: 3,
-    background: 'var(--panel-2)', color: 'var(--text-2)',
-    cursor: 'pointer',
-  },
   h2: { fontSize: 20, marginTop: 0, marginBottom: 16 },
-  h3: { fontSize: 14, marginTop: 0, marginBottom: 8 },
-  section: { padding: 14, background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 4, marginBottom: 16 },
   /* Card section (Internal / External). cardHeader 부분이 toggle 行, cardBody 가 입력 행. */
   cardSection: {
     background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 6,
@@ -881,19 +696,4 @@ const styles: Record<string, React.CSSProperties> = {
   table: { width: '100%', borderCollapse: 'collapse', fontSize: 11 },
   th: { textAlign: 'left', padding: '6px 8px', borderBottom: '1px solid var(--border)', color: 'var(--text-2)' },
   td: { padding: '6px 8px', borderBottom: '1px solid var(--border)' },
-  historyFilterLabel: { display: 'inline-flex', alignItems: 'center', gap: 5 },
-  historyFilterLabelText: {
-    fontSize: 10, fontWeight: 700, color: 'var(--text-3)', fontFamily: 'var(--mono)',
-    letterSpacing: 0.8, textTransform: 'uppercase',
-  },
-  historyFilterSelect: {
-    padding: '4px 8px', border: '1px solid var(--border-strong)', borderRadius: 3,
-    background: 'var(--panel)', color: 'var(--text)',
-    fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer',
-    minWidth: 130,
-  },
-  historyFilterCount: {
-    marginLeft: 8, fontSize: 11, fontWeight: 500,
-    color: 'var(--text-3)', fontFamily: 'var(--mono)',
-  },
 };

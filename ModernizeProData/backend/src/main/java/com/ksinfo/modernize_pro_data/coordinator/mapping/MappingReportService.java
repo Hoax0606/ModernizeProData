@@ -26,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
+import com.ksinfo.modernize_pro_data.common.util.CsvEncoding;
 
 /**
  * Mapping Report — TO-BE 테이블의 매핑 룰 + 바인딩을 SQL 한 방으로 묶어 DuckDB 로 실행.
@@ -41,6 +42,9 @@ import java.util.stream.Stream;
 public class MappingReportService {
 
     private static final int MAX_LIMIT = 1000;
+    /** Trial preview 용 — 각 AS-IS source 의 read_csv 에서 sample row 수.
+     *  1GB+ csv 의 GROUP BY / JOIN 가 분 단위 걸리는 것 방지. Cutover 는 별도 path (ExtractStage 의 parquet). */
+    private static final int TRIAL_SOURCE_SAMPLE = 100;
 
     private final DuckDbService duckDbService;
     private final ProjectRepository projectRepository;
@@ -97,23 +101,49 @@ public class MappingReportService {
         MappingTableBinding binding = bindingRepo
                 .findByProjectIdAndTobeSchemaAndTobeTable(projectId, schema, tobeTable)
                 .orElse(null);
-        List<MappingRule> rules = ruleRepo.findByProjectIdAndTobeTable(projectId, tobeTable).stream()
+
+        // 자식 link 라면 master 의 binding + rules 로 swap. 자식 측의 site csvPath 그대로 사용
+        // (자식 의 데이터에 master 의 변환 룰 적용).
+        String ruleSourceProjectId = projectId;
+        if (binding != null && binding.getSharedFromProjectId() != null) {
+            String masterProjectId = binding.getSharedFromProjectId();
+            MappingTableBinding masterBinding = bindingRepo
+                    .findByProjectIdAndTobeSchemaAndTobeTable(masterProjectId, schema, tobeTable)
+                    .orElse(null);
+            if (masterBinding != null) {
+                binding = masterBinding;
+                ruleSourceProjectId = masterProjectId;
+            }
+        }
+
+        final String effRuleSourceProjectId = ruleSourceProjectId;
+        List<MappingRule> rules = ruleRepo.findByProjectIdAndTobeTable(effRuleSourceProjectId, tobeTable).stream()
                 .filter(r -> (r.getTobeSchema() == null ? "" : r.getTobeSchema()).equals(schema))
                 .sorted(Comparator.comparing(MappingRule::getTobeColumn))
                 .toList();
 
         if (rules.isEmpty()) {
-            return new ReportResult(schema, tobeTable, List.of(), List.of(), 0, false, null,
-                    "이 TO-BE 테이블에 적용된 mapping_rules 가 없습니다. Mapping definition 임포트 후 다시 시도하세요.",
-                    "NO_RULES", null, null, null, null);
+            boolean linkedChild = !projectId.equals(effRuleSourceProjectId);
+            // errorColumn 자리에 master project_id 를 실어보냄 (i18n 합성 시 frontend 가 project 이름 lookup).
+            String kind = linkedChild ? "NO_RULES_LINKED" : "NO_RULES";
+            String msg = linkedChild
+                    ? "Master project '" + effRuleSourceProjectId
+                      + "' has not defined rules for this table yet."
+                    : "이 TO-BE 테이블에 적용된 mapping_rules 가 없습니다. Mapping definition 임포트 후 다시 시도하세요.";
+            String masterIdSlot = linkedChild ? effRuleSourceProjectId : null;
+            return new ReportResult(schema, tobeTable, List.of(), List.of(), 0, false, null, msg,
+                    kind, masterIdSlot, null, null, null);
         }
 
-        String sql = buildSql(binding, rules, baseDir, effLimit);
+        String sql = buildSql(binding, rules, baseDir, effLimit, site.getAsisEncoding());
 
         List<String> headers = new ArrayList<>();
         List<List<String>> outRows = new ArrayList<>();
         boolean truncated = false;
-        try (Statement st = duckDbService.statement();
+        // 요청별 격리 connection — 공유 connection 동시 사용 시 pending result 무효화
+        // ("Attempting to execute an unsuccessful or closed pending query result") 회피.
+        try (java.sql.Connection conn = duckDbService.requestConnection();
+             Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(sql)) {
             ResultSetMetaData md = rs.getMetaData();
             int colCount = md.getColumnCount();
@@ -131,7 +161,7 @@ public class MappingReportService {
             }
         } catch (SQLException e) {
             log.warn("Report SQL failed: {}", e.getMessage());
-            return identifyFailingRule(schema, tobeTable, headers, sql, binding, rules, baseDir, e.getMessage());
+            return identifyFailingRule(schema, tobeTable, headers, sql, binding, rules, baseDir, e.getMessage(), site.getAsisEncoding());
         }
         return new ReportResult(schema, tobeTable, headers, outRows, outRows.size(), truncated, sql, null,
                 null, null, null, null, null);
@@ -149,53 +179,59 @@ public class MappingReportService {
      */
     private ReportResult identifyFailingRule(String schema, String tobeTable, List<String> headers,
                                              String sql, MappingTableBinding binding,
-                                             List<MappingRule> rules, Path baseDir, String origMessage) {
+                                             List<MappingRule> rules, Path baseDir, String origMessage,
+                                             String asisEncoding) {
         String origType = classifyDuckDbErrorCode(origMessage);
         String origHint = extractHint(origMessage);
         if (binding == null || binding.getSources().isEmpty()) {
             return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType, origHint,
                     "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
         }
-        String fromClause = buildFromClause(binding, rules, baseDir);
+        String fromClause = buildFromClause(binding, rules, baseDir, asisEncoding);
         if (fromClause.isEmpty()) {
             return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType, origHint,
                     "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
         }
-        // 1. FROM 자체 검증
-        String fromProbe = "SELECT 1 " + fromClause + " LIMIT 0";
-        try (Statement st = duckDbService.statement();
-             ResultSet rs = st.executeQuery(fromProbe)) {
-            // OK — FROM 은 문제 없음
-        } catch (SQLException e) {
-            log.warn("Report FROM-clause probe failed: {}", e.getMessage());
-            String t = classifyDuckDbErrorCode(e.getMessage());
-            return errorResult(schema, tobeTable, headers, sql, "FROM_FAILED", null, null, t, extractHint(e.getMessage()),
-                    "AS-IS 데이터 로드 또는 JOIN/WHERE 절에서 오류가 발생했습니다.\n"
-                            + "오류 종류: " + classifyDuckDbErrorMessage(e.getMessage()));
-        }
-        // 2. expression 별 검증.
-        // LIMIT 0 은 parsing/binding 만 본다 — CAST/STRPTIME 같은 runtime conversion 실패는
-        // 데이터를 실제로 흘려야 잡힌다. PROBE_LIMIT rows 만큼 실제 변환을 시도하면
-        // "어느 컬럼" 까지 식별 가능. 컬럼 N 개 × PROBE_LIMIT rows 라 비용 미미.
-        final int PROBE_LIMIT = 20;
-        for (MappingRule r : rules) {
-            if ("skip".equals(r.getStrategy())) continue;
-            String expr = exprForRule(r);
-            if ("NULL".equals(expr)) continue;  // 상수 NULL 은 검증 의미 없음
-            String probe = "SELECT " + expr + " AS probe " + fromClause + " LIMIT " + PROBE_LIMIT;
-            try (Statement st = duckDbService.statement();
-                 ResultSet rs = st.executeQuery(probe)) {
-                // 데이터 실제로 끝까지 흘려서 row-level conversion 도 trigger.
-                while (rs.next()) { rs.getObject(1); }
+        // probe 들도 요청별 격리 connection — 한 connection 으로 전체 probe 수행.
+        try (java.sql.Connection probeConn = duckDbService.requestConnection()) {
+            // 1. FROM 자체 검증
+            String fromProbe = "SELECT 1 " + fromClause + " LIMIT 0";
+            try (Statement st = probeConn.createStatement();
+                 ResultSet rs = st.executeQuery(fromProbe)) {
+                // OK — FROM 은 문제 없음
             } catch (SQLException e) {
-                log.warn("Report expression probe failed for column {}: {}", r.getTobeColumn(), e.getMessage());
+                log.warn("Report FROM-clause probe failed: {}", e.getMessage());
                 String t = classifyDuckDbErrorCode(e.getMessage());
-                return errorResult(schema, tobeTable, headers, sql,
-                        "EXPRESSION_FAILED", r.getTobeColumn(), expr, t, extractHint(e.getMessage()),
-                        "컬럼 \"" + r.getTobeColumn() + "\" 의 변환식에서 오류가 발생했습니다.\n"
-                                + "표현식: " + expr + "\n"
+                return errorResult(schema, tobeTable, headers, sql, "FROM_FAILED", null, null, t, extractHint(e.getMessage()),
+                        "AS-IS 데이터 로드 또는 JOIN/WHERE 절에서 오류가 발생했습니다.\n"
                                 + "오류 종류: " + classifyDuckDbErrorMessage(e.getMessage()));
             }
+            // 2. expression 별 검증.
+            // LIMIT 0 은 parsing/binding 만 본다 — CAST/STRPTIME 같은 runtime conversion 실패는
+            // 데이터를 실제로 흘려야 잡힌다. PROBE_LIMIT rows 만큼 실제 변환을 시도하면
+            // "어느 컬럼" 까지 식별 가능. 컬럼 N 개 × PROBE_LIMIT rows 라 비용 미미.
+            final int PROBE_LIMIT = 20;
+            for (MappingRule r : rules) {
+                if ("skip".equals(r.getStrategy())) continue;
+                String expr = exprForRule(r);
+                if ("NULL".equals(expr)) continue;  // 상수 NULL 은 검증 의미 없음
+                String probe = "SELECT " + expr + " AS probe " + fromClause + " LIMIT " + PROBE_LIMIT;
+                try (Statement st = probeConn.createStatement();
+                     ResultSet rs = st.executeQuery(probe)) {
+                    // 데이터 실제로 끝까지 흘려서 row-level conversion 도 trigger.
+                    while (rs.next()) { rs.getObject(1); }
+                } catch (SQLException e) {
+                    log.warn("Report expression probe failed for column {}: {}", r.getTobeColumn(), e.getMessage());
+                    String t = classifyDuckDbErrorCode(e.getMessage());
+                    return errorResult(schema, tobeTable, headers, sql,
+                            "EXPRESSION_FAILED", r.getTobeColumn(), expr, t, extractHint(e.getMessage()),
+                            "컬럼 \"" + r.getTobeColumn() + "\" 의 변환식에서 오류가 발생했습니다.\n"
+                                    + "표현식: " + expr + "\n"
+                                    + "오류 종류: " + classifyDuckDbErrorMessage(e.getMessage()));
+                }
+            }
+        } catch (SQLException e) {
+            log.warn("Report probe connection failed: {}", e.getMessage());
         }
         // 식별 실패 — UNKNOWN
         return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType, origHint,
@@ -252,7 +288,7 @@ public class MappingReportService {
      * 룰들의 transform_sql (없으면 transform_rule) 을 그대로 SELECT 식으로 인젝션 + AS tobeColumn.
      * 바인딩이 있으면 read_csv FROM + JOIN + WHERE 까지 붙임 (FROM 구성은 buildFromClause 에 위임).
      */
-    private String buildSql(MappingTableBinding binding, List<MappingRule> rules, Path baseDir, int limit) {
+    private String buildSql(MappingTableBinding binding, List<MappingRule> rules, Path baseDir, int limit, String asisEncoding) {
         StringBuilder select = new StringBuilder("SELECT ");
         boolean first = true;
         for (MappingRule r : rules) {
@@ -266,12 +302,18 @@ public class MappingReportService {
             return "SELECT NULL LIMIT 0";
         }
 
-        String fromClause = buildFromClause(binding, rules, baseDir);
+        String fromClause = buildFromClause(binding, rules, baseDir, asisEncoding);
         if (fromClause.isEmpty()) {
             // No source → defaults only. 한 row 짜리 SELECT.
             return select.append(" LIMIT 1").toString();
         }
-        return select.toString() + fromClause + " LIMIT " + limit;
+        StringBuilder sql = new StringBuilder(select.toString()).append(fromClause);
+        // Row N:1 집계 — binding 의 group_by_expr 이 있으면 WHERE 뒤 LIMIT 앞에 그대로 인젝션.
+        if (binding != null && binding.getGroupByExpr() != null && !binding.getGroupByExpr().isBlank()) {
+            sql.append(" GROUP BY ").append(stripLeadingKeyword(binding.getGroupByExpr(), "GROUP BY"));
+        }
+        sql.append(" LIMIT ").append(limit);
+        return sql.toString();
     }
 
     /**
@@ -279,7 +321,7 @@ public class MappingReportService {
      * binding 이 없거나 sources 가 비면 빈 문자열 반환.
      * identifyFailingRule 의 probe 쿼리도 이걸 재사용.
      */
-    private String buildFromClause(MappingTableBinding binding, List<MappingRule> rules, Path baseDir) {
+    private String buildFromClause(MappingTableBinding binding, List<MappingRule> rules, Path baseDir, String asisEncoding) {
         if (binding == null || binding.getSources().isEmpty()) return "";
         var sources = binding.getSources().stream()
                 .sorted(Comparator.comparingInt(MappingTableBindingSource::getOrdinal))
@@ -290,11 +332,21 @@ public class MappingReportService {
             String csvPath = resolveCsvFile(baseDir, s.getAsisSchema(), s.getAsisTable());
             String escPath = csvPath.replace("'", "''");
             String aliasQ = quoteIdent(s.getAlias());
-            String typesClause = buildTypesClause(s.getAsisTable(), rules);
-            String readCsv = "read_csv('" + escPath
-                    + "', header=true, delim=',', null_padding=true"
-                    + (typesClause.isEmpty() ? "" : ", " + typesClause)
-                    + ") " + aliasQ;
+            // all_varchar=true — ExtractStage 의 parquet1 생성과 동일한 input 형태 (모든 컬럼 VARCHAR).
+            // 이렇게 해야 Trial / Cutover 두 path 의 데이터 타입이 일관되어 룰이 양쪽에서 똑같이 동작.
+            // 산술 / 비교가 필요한 transform_sql 은 명시적 CAST 가 필수 (사용자 컨벤션).
+            //
+            // Trial preview 라 각 source 를 sample (TRIAL_SOURCE_SAMPLE row) 로 제한 — 1GB+ csv 의
+            // GROUP BY / JOIN 이 분 단위 걸리는 것 방지. group / join 결과는 sample 기반이라
+            // 의미적 정확성보다 룰 동작 확인 용도. Cutover 는 ExtractStage 의 parquet 사용 (전체).
+            //
+            // sample_size=100 — DuckDB 의 schema auto-detect 가 큰 file 의 일부만 sample 하도록 강제.
+            // all_varchar=true 와 결합 시 schema infer overhead 거의 사라지고 첫 LIMIT row 만 stream.
+            // (1000만 row CSV 의 schema 추론 default = 20480 row sample → 수십초 추가 비용 제거.)
+            String readCsv = "(SELECT * FROM read_csv('" + escPath
+                    + "', header=true, delim=',', null_padding=true, all_varchar=true, sample_size=100"
+                    + CsvEncoding.clause(asisEncoding)
+                    + ") LIMIT " + TRIAL_SOURCE_SAMPLE + ") " + aliasQ;
             if (i == 0) {
                 from.append(readCsv);
             } else if ("union".equals(s.getRole())) {
@@ -312,10 +364,29 @@ public class MappingReportService {
                 }
             }
         }
+        // Row 1:N 펼침 — sources/JOIN 뒤, WHERE 앞에 그대로 인젝션 (CROSS JOIN LATERAL / UNNEST 등).
+        if (binding.getExpandExpr() != null && !binding.getExpandExpr().isBlank()) {
+            from.append(" ").append(binding.getExpandExpr());
+        }
         if (binding.getWhereFilter() != null && !binding.getWhereFilter().isBlank()) {
-            from.append(" WHERE ").append(binding.getWhereFilter());
+            from.append(" WHERE ").append(stripLeadingKeyword(binding.getWhereFilter(), "WHERE"));
         }
         return from.toString();
+    }
+
+    /**
+     * 사용자가 binding 입력 칸에 "WHERE col = 'x'" / "GROUP BY col" 처럼 키워드 포함해서 적어도
+     * 도구가 중복 키워드 박지 않게 strip. 키워드는 case-insensitive 매칭.
+     */
+    private static String stripLeadingKeyword(String expr, String keyword) {
+        if (expr == null) return null;
+        String trimmed = expr.trim();
+        String upper = trimmed.toUpperCase();
+        String kwUp = keyword.toUpperCase();
+        if (upper.startsWith(kwUp + " ") || upper.startsWith(kwUp + "\t") || upper.startsWith(kwUp + "\n")) {
+            return trimmed.substring(keyword.length()).trim();
+        }
+        return trimmed;
     }
 
     private String exprForRule(MappingRule r) {
@@ -338,75 +409,6 @@ public class MappingReportService {
 
     private static String quoteIdent(String name) {
         return "\"" + name.replace("\"", "\"\"") + "\"";
-    }
-
-    /**
-     * 한 AS-IS 테이블의 컬럼별 타입을 모아서 read_csv 의 types= 구조체 만듦.
-     * asis_column / asis_type 은 PG TEXT[] 매핑 String[] — combine 시 여러 원소.
-     * 같은 index 끼리 짝지어 types 맵에 등록.
-     */
-    private static String buildTypesClause(String asisTable, List<MappingRule> rules) {
-        if (asisTable == null) return "";
-        Map<String, String> types = new LinkedHashMap<>();
-        for (MappingRule r : rules) {
-            if (!asisTable.equals(r.getAsisTable())) continue;
-            String[] cols = r.getAsisColumn();
-            if (cols == null || cols.length == 0) continue;
-            String[] typs = r.getAsisType() == null ? new String[0] : r.getAsisType();
-            for (int i = 0; i < cols.length; i++) {
-                String col = cols[i] == null ? "" : cols[i].trim();
-                if (col.isEmpty()) continue;
-                String typ = i < typs.length && typs[i] != null ? typs[i].trim() : "";
-                if (typ.isEmpty()) continue;  // 타입 미명시 — 자동 추론에 맡김
-                String duck = oracleToDuckDbType(typ);
-                if (duck != null) types.putIfAbsent(col, duck);
-            }
-        }
-        if (types.isEmpty()) return "";
-        StringBuilder sb = new StringBuilder("types={");
-        boolean first = true;
-        for (var e : types.entrySet()) {
-            if (!first) sb.append(", ");
-            first = false;
-            sb.append("'").append(e.getKey().replace("'", "''")).append("': '")
-              .append(e.getValue()).append("'");
-        }
-        sb.append("}");
-        return sb.toString();
-    }
-
-    /** Oracle 타입을 DuckDB 타입으로 매핑. 못 맞히면 VARCHAR. */
-    private static String oracleToDuckDbType(String oracleType) {
-        if (oracleType == null) return null;
-        String t = oracleType.toUpperCase().trim();
-        // TIMESTAMP first (more specific)
-        if (t.startsWith("TIMESTAMP")) {
-            return t.contains("TIME ZONE") ? "TIMESTAMPTZ" : "TIMESTAMP";
-        }
-        if (t.equals("DATE")) return "TIMESTAMP"; // Oracle DATE 는 시간 포함
-        if (t.startsWith("NUMBER")) {
-            // NUMBER(p,s) 형태에서 s>0 이면 DECIMAL
-            int lp = t.indexOf('('), rp = t.indexOf(')');
-            if (lp > 0 && rp > lp) {
-                String inside = t.substring(lp + 1, rp);
-                if (inside.contains(",")) {
-                    String[] parts = inside.split(",");
-                    try {
-                        int prec = Integer.parseInt(parts[0].trim());
-                        int scale = Integer.parseInt(parts[1].trim());
-                        return scale > 0 ? "DECIMAL(" + prec + "," + scale + ")" : "BIGINT";
-                    } catch (NumberFormatException e) { return "BIGINT"; }
-                }
-            }
-            return "BIGINT";
-        }
-        if (t.startsWith("VARCHAR") || t.startsWith("CHAR") || t.equals("CLOB") || t.startsWith("NVARCHAR")) {
-            return "VARCHAR";
-        }
-        if (t.startsWith("BLOB") || t.startsWith("RAW")) return "BLOB";
-        if (t.equals("FLOAT") || t.equals("REAL")) return "DOUBLE";
-        if (t.startsWith("BINARY_DOUBLE") || t.startsWith("BINARY_FLOAT")) return "DOUBLE";
-        return "VARCHAR"; // safest fallback
     }
 
     /**

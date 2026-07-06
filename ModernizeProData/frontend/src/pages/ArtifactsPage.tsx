@@ -2,11 +2,14 @@ import { useState, useMemo, useEffect } from 'react';
 import ExcelJS from 'exceljs';
 import { useWorkspaceStore } from '../store/workspace';
 import { snapshotApi } from '../api/workspace';
-import { useSnapshotsStore, type FrozenRule } from '../store/snapshots';
+import { useSnapshotsStore, usePinnedSnapshotsStore, type FrozenRule, type SnapshotData, type MappingSnapshot } from '../store/snapshots';
 import { asisDdlApi, type DdlSchema, type DdlColumn } from '../api/asisDdl';
 import { tobeDdlApi } from '../api/tobeDdl';
 import { mappingImportApi } from '../api/mappingImport';
+import { validationApi, type ValidationReportDto } from '../api/validation';
+import { ValidationDiffModal } from '../components/ValidationDiffModal';
 import { useT, type TranslationKey } from '../i18n';
+import { useActiveProjectReadOnly } from '../store/readOnly';
 
 /**
  * Artifacts tab — 매핑 스냅샷·DDL·검증 리포트 등의 산출물 미리보기·다운로드.
@@ -40,10 +43,10 @@ export interface Category {
 export const CATEGORIES: Category[] = [
   { key: 'dashboard',  labelKey: 'artifacts.cat.dashboard',  suffix: '.dashboard.xlsx', icon: '▣', single: true, downloadType: 'xlsx' },
   /* 구 'Schema diff' — 사용자 노출 라벨은 'Mapping', 파일 확장자도 .map.xlsx 로 통일.
-     내부 key 는 'diff' 그대로 유지 (코드 전반의 SHEETS.diff / MOCK_ROWS.diff / 등이 참조). */
+     내부 key 는 'diff' 그대로 유지 (코드 전반의 SHEETS.diff / buildDiff 등이 참조). */
   { key: 'diff',       labelKey: 'artifacts.cat.mapping',    suffix: '.map.xlsx',       icon: '◨', downloadType: 'xlsx' },
   { key: 'ddl',        labelKey: 'artifacts.cat.ddl',        suffix: '.ddl.sql',        icon: '▤', single: true, viewType: 'sql' },
-  { key: 'sql',        labelKey: 'artifacts.cat.sql',        suffix: '.migrate.xlsx',   icon: '↦', downloadType: 'xlsx' },
+  { key: 'sql',        labelKey: 'artifacts.cat.sql',        suffix: '.migrate.sql',    icon: '↦', viewType: 'sql' },
   { key: 'validation', labelKey: 'artifacts.cat.validation', suffix: '.report.xlsx',    icon: '✓', downloadType: 'xlsx' },
 ];
 
@@ -60,7 +63,7 @@ const SUMMARY_PLACEHOLDER: Record<CategoryKey, string> = {
 /* 카테고리 × 시트 별 placeholder 스키마.
    시트 탭을 클릭하면 ExcelWorkbook 이 해당 시트의 columns 로 그리드를 다시 렌더한다.
    실제 산출물 데이터가 들어오면 columns 옆에 rows 데이터만 추가하면 된다. */
-interface SheetSchema {
+export interface SheetSchema {
   name: string;
   columns: { name: string; type: string }[];
   /** true 면 컬럼명/타입 헤더 행 (1행/2행) 을 생략하고 데이터를 row 1 부터 시작.
@@ -68,29 +71,26 @@ interface SheetSchema {
   freeForm?: boolean;
 }
 
-const SHEETS: Record<CategoryKey, SheetSchema[]> = {
+export const SHEETS: Record<CategoryKey, SheetSchema[]> = {
   dashboard: [
-    { name: 'Overview', columns: [
+    /* Overview 는 free-form — 컬럼명/타입 헤더 생략. row 1 부터 'Dashboard snapshot' 제목,
+       Captured/Run/Author 메타 행, blank, 그 다음 inline 'Metric/Value/Unit/Note' 헤더 + 값 행. */
+    { name: 'Overview', freeForm: true, columns: [
       { name: 'Item',  type: 'TEXT' },
       { name: 'Value', type: 'TEXT' },
       { name: 'Unit',  type: 'TEXT' },
       { name: 'Note',  type: 'TEXT' },
     ]},
     { name: 'Tables', columns: [
-      { name: 'Table',      type: 'VARCHAR' },
-      { name: 'Schema',     type: 'VARCHAR' },
-      { name: 'Columns',    type: 'INT' },
-      { name: 'Mapped',     type: 'INT' },
-      { name: 'Mapping %',  type: 'DECIMAL' },
-      { name: 'Rules',      type: 'INT' },
-      { name: 'Status',     type: 'ENUM' },
+      { name: 'Table',       type: 'VARCHAR' },
+      { name: 'Schema',      type: 'VARCHAR' },
+      { name: 'Rules',       type: 'INT' },
+      { name: 'Issues',      type: 'INT' },
+      { name: 'Status',      type: 'ENUM' },
+      { name: 'Last update', type: 'TIMESTAMP' },
     ]},
-    { name: 'Issues', columns: [
-      { name: 'Table',    type: 'VARCHAR' },
-      { name: 'Status',   type: 'ENUM' },
-      { name: 'Unmapped', type: 'INT' },
-      { name: 'Note',     type: 'TEXT' },
-    ]},
+    /* Issues 시트는 의도적으로 없음 — Overview Issues/Errors 카운트 + Tables Issues column 으로
+       수만 노출하고, 상세 진단/수정은 Mapping 페이지에서 진행. */
   ],
   diff: [
     { name: 'Diff', columns: [
@@ -135,6 +135,7 @@ const SHEETS: Record<CategoryKey, SheetSchema[]> = {
       { name: 'ASIS',    type: 'TEXT' },
       { name: 'TOBE',    type: 'TEXT' },
       { name: 'Verdict', type: 'TEXT' },
+      { name: 'Note',    type: 'TEXT' },
     ]},
     { name: 'Sum recon', columns: [
       { name: 'Column',    type: 'VARCHAR' },
@@ -152,6 +153,15 @@ const SHEETS: Record<CategoryKey, SheetSchema[]> = {
       { name: 'Δ',          type: 'BIGINT' },
       { name: 'Verdict',    type: 'TEXT' },
     ]},
+    { name: 'Min Max', columns: [
+      { name: 'Column',   type: 'VARCHAR' },
+      { name: 'Type',     type: 'VARCHAR' },
+      { name: 'MIN ASIS', type: 'TEXT' },
+      { name: 'MAX ASIS', type: 'TEXT' },
+      { name: 'MIN TOBE', type: 'TEXT' },
+      { name: 'MAX TOBE', type: 'TEXT' },
+      { name: 'Verdict',  type: 'TEXT' },
+    ]},
     { name: 'Range', columns: [
       { name: 'Column',        type: 'VARCHAR' },
       { name: 'Type',          type: 'VARCHAR' },
@@ -160,448 +170,19 @@ const SHEETS: Record<CategoryKey, SheetSchema[]> = {
       { name: 'Overflow rows', type: 'INT' },
       { name: 'Verdict',       type: 'TEXT' },
     ]},
+    /* Quarantine 통계 시트 — binding 의 stageLabel × (entries, rows) 집계 (2026-05-31). */
+    { name: 'Quarantine', columns: [
+      { name: 'Check',             type: 'VARCHAR' },
+      { name: 'Entries',           type: 'INT' },
+      { name: 'Rows Quarantined',  type: 'BIGINT' },
+      { name: 'Severity',          type: 'TEXT' },
+    ]},
   ],
 };
 
-/* ───────────────────────────────────────────────────────────────
-   Mock data — 실제 산출물 데이터가 없을 때 데모용으로 사용.
-   실데이터 wiring 이 완료되면 MOCK_ROWS / MOCK_FORMULA_CTX 와
-   ExcelWorkbook 안의 mock 참조를 제거하면 된다.
-   ─────────────────────────────────────────────────────────────── */
 
-type Cell = string | number | boolean | null;
+export type Cell = string | number | boolean | null;
 
-const MOCK_ROWS: Record<CategoryKey, Record<string, Cell[][]>> = {
-  dashboard: {
-    Overview: [
-      ['Dashboard snapshot', null, null, null],
-      ['Captured', '2026-04-21 09:41 JST', null, null],
-      ['Run',      'run-2026-0421-0914',  null, null],
-      ['Author',   'KS Info System',       null, null],
-      ['Metric',           'Value',         'Unit',    'Note'],
-      ['Tables',           18,              'count',   '10 complete / 5 active'],
-      ['Rows total',       '1,555,760,862', 'rows',    'all selected tables'],
-      ['Rows migrated',    '509,883,778',   'rows',    '32.77% overall'],
-      ['Overall progress', '32.77%',        'percent', 'sum of done ÷ sum of rows'],
-      ['Mapping rules',    574,             'count',   'applied across tables'],
-      ['Open issues',      7,               'count',   'see Issues sheet'],
-    ],
-    Tables: [
-      ['ACCT_MASTER',       'PROD_LEG', 38_400_000,  38_400_000,  '100%',   42, 0, 'done',    '2026-04-20 22:14'],
-      ['TXN_JOURNAL_2023',  'PROD_LEG', 220_510_000, 120_400_000, '54.60%', 68, 2, 'running', '2026-04-21 09:30'],
-      ['TXN_JOURNAL_2024',  'PROD_LEG', 185_300_000, 120_400_000, '64.97%', 68, 0, 'running', '2026-04-21 09:30'],
-      ['CUST_PROFILE',      'PROD_LEG', 4_250_000,   4_250_000,   '100%',   35, 0, 'done',    '2026-04-20 22:14'],
-      ['KYC_DOCUMENT',      'PROD_LEG', 890_000,     0,           '0%',     24, 1, 'blocked', '2026-04-19 14:00'],
-      ['LOAN_APPLICATION',  'PROD_LEG', 2_300_000,   2_300_000,   '100%',   48, 0, 'done',    '2026-04-20 22:14'],
-      ['LOAN_DISBURSEMENT', 'PROD_LEG', 1_800_000,   1_100_000,   '61.11%', 41, 0, 'running', '2026-04-21 09:35'],
-      ['LOAN_REPAYMENT',    'PROD_LEG', 15_400_000,  8_900_000,   '57.79%', 56, 0, 'running', '2026-04-21 09:35'],
-      ['CARD_MASTER',       'PROD_LEG', 3_200_000,   3_200_000,   '100%',   32, 0, 'done',    '2026-04-20 22:14'],
-      ['CARD_AUTH_LOG',     'PROD_LEG', 450_000_000, 280_500_000, '62.33%', 29, 0, 'running', '2026-04-21 09:30'],
-      ['FX_RATE_DAILY',     'PROD_LEG', 450_000,     450_000,     '100%',   18, 0, 'done',    '2026-04-20 22:14'],
-      ['FX_POSITION',       'PROD_LEG', 120_000,     120_000,     '100%',   25, 0, 'done',    '2026-04-20 22:14'],
-      ['GL_ENTRY',          'PROD_LEG', 608_220_862, 140_393_778, '23.08%', 88, 4, 'warn',    '2026-04-21 09:35'],
-    ],
-    Issues: [
-      ['TXN_JOURNAL_2023', 'running', 2, 'see logs for detail'],
-      ['KYC_DOCUMENT',     'blocked', 1, 'migration halted — needs triage'],
-      ['GL_ENTRY',         'warn',    4, 'encoded with warnings'],
-    ],
-  },
-  /* diff/validation 은 child 테이블 별로 다른 데이터를 가져야 해서 별도 상수 MOCK_ROWS_BY_TABLE 로 분리.
-     여기서는 비워둠 — lookup 이 MOCK_ROWS_BY_TABLE 를 먼저 본다. */
-  diff: {},
-  /* ddl 은 SQL 뷰 — grid 데이터가 아니라 reconstructDdl 로 만든 SQL 문자열을 사용. */
-  ddl: {},
-  sql: {
-    'Migration SQL': [
-      [1, 'CREATE',       'm_user',  'CREATE TABLE m_user (id BIGINT PRIMARY KEY, ...)',  true,  '2026-05-23 14:30:00'],
-      [2, 'INSERT',       'm_user',  'INSERT INTO m_user SELECT ... FROM legacy_user',    true,  '2026-05-23 14:30:15'],
-      [3, 'ALTER',        'm_order', 'ALTER TABLE m_order ADD COLUMN status VARCHAR(20)', true,  '2026-05-23 14:31:02'],
-      [4, 'INSERT',       'm_order', 'INSERT INTO m_order SELECT ... FROM legacy_order',  false, null],
-      [5, 'CREATE INDEX', 'm_user',  'CREATE INDEX idx_user_email ON m_user(email)',      false, null],
-    ],
-  },
-  /* validation 은 child 테이블 별로 다른 데이터 — MOCK_ROWS_BY_TABLE 로 분리. */
-  validation: {},
-};
-
-/* ───────────────────────────────────────────────────────────────
-   MOCK_ROWS_BY_TABLE — diff/validation 의 child 테이블별 mock 데이터.
-   사이드바에서 테이블을 바꾸면 각 sheet 의 행이 바뀌어서, 어떤 항목이 변하는지
-   바로 보인다. 실데이터 wiring 시 이 자리를 백엔드 응답으로 교체.
-   ─────────────────────────────────────────────────────────────── */
-const MOCK_ROWS_BY_TABLE: Record<'diff' | 'validation', Record<string, Record<string, Cell[][]>>> = {
-  diff: {
-    acct_master: {
-      Diff: [
-        ['typed',     'ACCT_MASTER', 'ACCT_ID',     'VARCHAR2(20)',  'NO',  'account_id',     'VARCHAR(20)',   'NO',  'rename + lower'],
-        ['typed',     'ACCT_MASTER', 'BAL_AMT',     'NUMBER(15,2)',  'NO',  'balance_amount', 'NUMERIC(15,2)', 'NO',  'cast NUMBER → NUMERIC'],
-        ['typed',     'ACCT_MASTER', 'KYC_LV',      'NUMBER(2)',     'NO',  'kyc_level',      'SMALLINT',      'NO',  'cast NUMBER(2) → SMALLINT'],
-        ['typed',     'ACCT_MASTER', 'AML_FLG',     'CHAR(1)',       'NO',  'aml_flag',       'BOOLEAN',       'NO',  "case 'Y'/'N' → BOOLEAN"],
-        ['unchanged', 'ACCT_MASTER', 'CUST_ID',     'VARCHAR2(20)',  'NO',  'customer_id',    'VARCHAR(20)',   'NO',  'rename'],
-        ['unchanged', 'ACCT_MASTER', 'BRANCH_CD',   'CHAR(3)',       'NO',  'branch_code',    'CHAR(3)',       'NO',  'rename'],
-        ['unchanged', 'ACCT_MASTER', 'STATUS',      'VARCHAR2(8)',   'NO',  'status',         'VARCHAR(8)',    'NO',  'rename'],
-        ['added',     'ACCT_MASTER', null,          null,            null,  'tenant_id',      'VARCHAR(8)',    'NO',  "default 'T01'"],
-      ],
-      Summary: [
-        ['Schema diff summary', null, null, null],
-        ['ASIS table',     'CORE_ACCT_MASTER', null, null],
-        ['TOBE table',     'public.account',   null, null],
-        ['ASIS columns',   17,                 null, null],
-        ['TOBE columns',   18,                 null, null],
-        ['Kind',           'Count', '% of TOBE', 'Note'],
-        ['+ added',        1,       '5.56%',     'tenant_id'],
-        ['→ renamed',      4,       '22.22%',    'ACCT_ID, CUST_ID, BRANCH_CD, STATUS'],
-        ['~ typed',        2,       '11.11%',    'BAL_AMT, KYC_LV (cast)'],
-        ['unchanged',      13,      '72.22%',    null],
-      ],
-    },
-    cust_profile: {
-      Diff: [
-        ['renamed',   'CUST_PROFILE', 'CUST_NM',    'VARCHAR2(120)', 'NO',  'customer_name', 'VARCHAR(120)', 'NO',  'rename'],
-        ['renamed',   'CUST_PROFILE', 'BIRTH_DT',   'DATE',          'YES', 'birth_date',    'DATE',         'YES', 'rename'],
-        ['renamed',   'CUST_PROFILE', 'EMAIL',      'VARCHAR2(120)', 'YES', 'email',         'VARCHAR(120)', 'YES', 'rename'],
-        ['renamed',   'CUST_PROFILE', 'ADDR_LINE1', 'VARCHAR2(200)', 'YES', 'address_line1', 'VARCHAR(200)', 'YES', 'rename'],
-        ['renamed',   'CUST_PROFILE', 'ADDR_LINE2', 'VARCHAR2(200)', 'YES', 'address_line2', 'VARCHAR(200)', 'YES', 'rename'],
-        ['renamed',   'CUST_PROFILE', 'CITY_CD',    'VARCHAR2(8)',   'YES', 'city_code',     'VARCHAR(8)',   'YES', 'rename'],
-        ['unchanged', 'CUST_PROFILE', 'CUST_ID',    'VARCHAR2(20)',  'NO',  'CUST_ID',       'VARCHAR(20)',  'NO',  ''],
-        ['unchanged', 'CUST_PROFILE', 'GENDER',     'CHAR(1)',       'YES', 'GENDER',        'CHAR(1)',      'YES', ''],
-        ['unchanged', 'CUST_PROFILE', 'PHONE',      'VARCHAR2(20)',  'YES', 'PHONE',         'VARCHAR(20)',  'YES', ''],
-        ['unchanged', 'CUST_PROFILE', 'STATUS',     'VARCHAR2(8)',   'NO',  'STATUS',        'VARCHAR(8)',   'NO',  ''],
-        ['unchanged', 'CUST_PROFILE', 'CREATED_AT', 'TIMESTAMP',     'NO',  'CREATED_AT',    'TIMESTAMP',    'NO',  ''],
-      ],
-      Summary: [
-        ['Schema diff summary', null, null, null],
-        ['ASIS table',     'CORE_CUST_PROFILE', null, null],
-        ['TOBE table',     'public.customer',   null, null],
-        ['ASIS columns',   11,                  null, null],
-        ['TOBE columns',   11,                  null, null],
-        ['Kind',           'Count', '% of TOBE', 'Note'],
-        ['→ renamed',      6,       '54.55%',    'CUST_NM, BIRTH_DT, EMAIL, ADDR_LINE1, ADDR_LINE2, CITY_CD'],
-        ['unchanged',      5,       '45.45%',    'CUST_ID, GENDER, PHONE, STATUS, CREATED_AT'],
-      ],
-    },
-    txn_journal_2024: {
-      Diff: [
-        ['unchanged', 'TXN_JOURNAL_2024', 'TXN_ID',       'VARCHAR(32)',    'NO',  'TXN_ID',        'VARCHAR(32)',    'NO',  ''],
-        ['typed',     'TXN_JOURNAL_2024', 'ACCT_ID',      'VARCHAR(20)',    'NO',  'account_id',    'VARCHAR(20)',    'NO',  'rename + lower'],
-        ['typed',     'TXN_JOURNAL_2024', 'AMT',          'NUMBER(15,2)',   'NO',  'amount',        'NUMERIC(18,2)',  'NO',  'cast NUMBER → NUMERIC'],
-        ['removed',   'TXN_JOURNAL_2024', 'BAL_AMT',      'NUMBER(15,2)',   'NO',  null,            null,             null,  'DROP'],
-        ['typed',     'TXN_JOURNAL_2024', 'EXEC_TM',      'DATE',           'NO',  'executed_at',   'TIMESTAMP',      'NO',  'cast DATE → TIMESTAMP'],
-        ['typed',     'TXN_JOURNAL_2024', 'BR_ID',        'VARCHAR(8)',     'NO',  'branch_id',     'VARCHAR(8)',     'NO',  'rename'],
-        ['unchanged', 'TXN_JOURNAL_2024', 'OPR_ID',       'VARCHAR(12)',    'YES', 'OPR_ID',        'VARCHAR(12)',    'YES', ''],
-        ['typed',     'TXN_JOURNAL_2024', 'CHANNEL_CD',   'CHAR(3)',        'NO',  'channel_code',  'VARCHAR(8)',     'NO',  'widen + rename'],
-        ['unchanged', 'TXN_JOURNAL_2024', 'MEMO',         'VARCHAR(255)',   'YES', 'MEMO',          'VARCHAR(255)',   'YES', ''],
-        ['unchanged', 'TXN_JOURNAL_2024', 'REF_NO',       'VARCHAR(40)',    'YES', 'reference_no',  'VARCHAR(40)',    'YES', 'rename'],
-        ['unchanged', 'TXN_JOURNAL_2024', 'CURRENCY_CD',  'CHAR(3)',        'NO',  'currency_code', 'CHAR(3)',        'NO',  'rename'],
-        ['unchanged', 'TXN_JOURNAL_2024', 'STATUS',       'VARCHAR(8)',     'NO',  'status',        'VARCHAR(8)',     'NO',  'rename'],
-        ['added',     'TXN_JOURNAL_2024', null,           null,             null,  'tenant_id',     'VARCHAR(8)',     'NO',  "default 'T01'"],
-      ],
-      Summary: [
-        ['Schema diff summary', null, null, null],
-        ['ASIS table',     'CORE_TXN_JOURNAL_2024',   null, null],
-        ['TOBE table',     'public.transaction_2024', null, null],
-        ['ASIS columns',   11,                        null, null],
-        ['TOBE columns',   12,                        null, null],
-        ['Kind',           'Count', '% of TOBE', 'Note'],
-        ['+ added',        1,       '8.33%',     'tenant_id'],
-        ['- removed',      1,       '',          'BAL_AMT'],
-        ['~ typed',        5,       '41.67%',    'ACCT_ID, AMT, EXEC_TM, BR_ID, CHANNEL_CD'],
-        ['unchanged',      6,       '50%',       null],
-      ],
-    },
-    transaction_unified: {
-      Diff: [
-        ['typed',     'TRANSACTION_UNIFIED', 'TXN_ID',    'VARCHAR(32)',   'NO',  'transaction_id', 'VARCHAR(32)',   'NO',  'union 2023∪2024 + rename'],
-        ['typed',     'TRANSACTION_UNIFIED', 'ACCT_ID',   'VARCHAR(20)',   'NO',  'account_id',     'VARCHAR(20)',   'NO',  'rename'],
-        ['typed',     'TRANSACTION_UNIFIED', 'AMT',       'NUMBER(18,2)',  'NO',  'amount',         'NUMERIC(18,2)', 'NO',  'cast NUMBER → NUMERIC'],
-        ['removed',   'TRANSACTION_UNIFIED', 'BAL_AMT',   'NUMBER(15,2)',  'NO',  null,             null,            null,  'DROP (not in 2024 schema)'],
-        ['typed',     'TRANSACTION_UNIFIED', 'EXEC_TM',   'DATE',          'NO',  'transaction_at', 'TIMESTAMP',     'NO',  'cast DATE → TIMESTAMP'],
-        ['typed',     'TRANSACTION_UNIFIED', 'BR_ID',     'VARCHAR(8)',    'NO',  'branch_id',      'VARCHAR(8)',    'NO',  'rename'],
-        ['unchanged', 'TRANSACTION_UNIFIED', 'REF_NO',    'VARCHAR(40)',   'YES', 'reference_no',   'VARCHAR(40)',   'YES', 'rename'],
-        ['unchanged', 'TRANSACTION_UNIFIED', 'STATUS',    'VARCHAR(8)',    'NO',  'status',         'VARCHAR(8)',    'NO',  'rename'],
-        ['added',     'TRANSACTION_UNIFIED', null,        null,            null,  'source_year',    'SMALLINT',      'NO',  'from source table name (2023|2024)'],
-      ],
-      Summary: [
-        ['Schema diff summary', null, null, null],
-        ['ASIS table',     'CORE_TXN_JOURNAL_2023 ∪ CORE_TXN_JOURNAL_2024', null, null],
-        ['TOBE table',     'public.transaction',                            null, null],
-        ['ASIS columns',   9,    null, null],
-        ['TOBE columns',   10,   null, null],
-        ['Kind',           'Count', '% of TOBE', 'Note'],
-        ['+ added',        1,       '10.00%',    'source_year'],
-        ['- removed',      1,       '',          'BAL_AMT (2023 only)'],
-        ['~ typed',        5,       '50.00%',    'TXN_ID, ACCT_ID, AMT, EXEC_TM, BR_ID'],
-        ['unchanged',      4,       '40.00%',    null],
-      ],
-    },
-    loan: {
-      Diff: [
-        ['unchanged', 'LOAN', 'LOAN_ID',   'VARCHAR2(20)', 'NO',  'LOAN_ID',       'VARCHAR(20)',   'NO', ''],
-        ['renamed',   'LOAN', 'CUST_ID',   'VARCHAR2(20)', 'NO',  'customer_id',   'VARCHAR(20)',   'NO', 'rename'],
-        ['unchanged', 'LOAN', 'PRINCIPAL', 'NUMBER(15,2)', 'NO',  'principal',     'NUMERIC(15,2)', 'NO', 'rename'],
-        ['typed',     'LOAN', 'INT_RATE',  'NUMBER(5,3)',  'NO',  'interest_rate', 'NUMERIC(5,3)',  'NO', 'rename + cast'],
-        ['renamed',   'LOAN', 'TERM_M',    'NUMBER(3)',    'NO',  'term_months',   'SMALLINT',      'NO', 'rename + cast'],
-        ['renamed',   'LOAN', 'ISSUE_DT',  'DATE',         'NO',  'issued_at',     'DATE',          'NO', 'rename'],
-        ['unchanged', 'LOAN', 'STATUS',    'VARCHAR2(8)',  'NO',  'status',        'VARCHAR(8)',    'NO', 'rename'],
-      ],
-      Summary: [
-        ['Schema diff summary', null, null, null],
-        ['ASIS table',     'CORE_LOAN',   null, null],
-        ['TOBE table',     'public.loan', null, null],
-        ['ASIS columns',   7,             null, null],
-        ['TOBE columns',   7,             null, null],
-        ['Kind',           'Count', '% of TOBE', 'Note'],
-        ['→ renamed',      3,       '42.86%',    'CUST_ID, TERM_M, ISSUE_DT'],
-        ['~ typed',        1,       '14.29%',    'INT_RATE'],
-        ['unchanged',      3,       '42.86%',    'LOAN_ID, PRINCIPAL, STATUS'],
-      ],
-    },
-    card: {
-      Diff: [
-        ['renamed',   'CARD', 'CARD_NO',   'VARCHAR2(16)', 'NO', 'card_number', 'VARCHAR(16)', 'NO', 'rename'],
-        ['renamed',   'CARD', 'CUST_ID',   'VARCHAR2(20)', 'NO', 'customer_id', 'VARCHAR(20)', 'NO', 'rename'],
-        ['renamed',   'CARD', 'CARD_TYPE', 'VARCHAR2(8)',  'NO', 'card_type',   'VARCHAR(8)',  'NO', 'rename'],
-        ['unchanged', 'CARD', 'ISSUE_DT',  'DATE',         'NO', 'issued_at',   'DATE',        'NO', 'rename'],
-        ['unchanged', 'CARD', 'EXPIRE_DT', 'DATE',         'NO', 'expires_at',  'DATE',        'NO', 'rename'],
-        ['unchanged', 'CARD', 'STATUS',    'VARCHAR2(8)',  'NO', 'status',      'VARCHAR(8)',  'NO', 'rename'],
-      ],
-      Summary: [
-        ['Schema diff summary', null, null, null],
-        ['ASIS table',     'CORE_CARD',   null, null],
-        ['TOBE table',     'public.card', null, null],
-        ['ASIS columns',   6,             null, null],
-        ['TOBE columns',   6,             null, null],
-        ['Kind',           'Count', '% of TOBE', 'Note'],
-        ['→ renamed',      3,       '50.00%',    'CARD_NO, CUST_ID, CARD_TYPE'],
-        ['unchanged',      3,       '50.00%',    'ISSUE_DT, EXPIRE_DT, STATUS'],
-      ],
-    },
-    fx_position: {
-      Diff: [
-        ['renamed', 'FX_POSITION', 'POS_DT',       'DATE',         'NO', 'position_date',   'DATE',          'NO', 'rename'],
-        ['renamed', 'FX_POSITION', 'CCY_CD',       'CHAR(3)',      'NO', 'currency_code',   'CHAR(3)',       'NO', 'rename'],
-        ['renamed', 'FX_POSITION', 'POSITION_AMT', 'NUMBER(18,4)', 'NO', 'position_amount', 'NUMERIC(18,4)', 'NO', 'rename + cast'],
-      ],
-      Summary: [
-        ['Schema diff summary', null, null, null],
-        ['ASIS table',     'CORE_FX_POSITION',   null, null],
-        ['TOBE table',     'public.fx_position', null, null],
-        ['ASIS columns',   3,                    null, null],
-        ['TOBE columns',   3,                    null, null],
-        ['Kind',           'Count', '% of TOBE', 'Note'],
-        ['→ renamed',      3,       '100.00%',   'POS_DT, CCY_CD, POSITION_AMT'],
-      ],
-    },
-  },
-  validation: {
-    acct_master: {
-      Overview: [
-        ['Validation report · ACCT_MASTER', null, null, null],
-        ['ASIS table', 'legacy.acct_master',   null, null],
-        ['TOBE table', 'public.account',       null, null],
-        ['Generated',  '2026-04-21 09:41 JST', null, null],
-        ['Check',                       'ASIS',             'TOBE',             'Verdict'],
-        ['Row count',                   '38,400,000',       '38,400,000',       '✓ PASS'],
-        ['SHA-256 checksum',            'sha256:9b1d…2c01', 'sha256:9b1d…2c01', '✓ PASS'],
-        ['Sum reconciliation (2 cols)', '—',                '—',                '✓ PASS'],
-        ['NULL count parity (5 cols)',  '—',                '—',                '✓ PASS'],
-        ['Range/overflow (1 cols)',     '—',                '—',                '✓ PASS'],
-        ['Total',                       '7',                '7 pass',           '0 fail'],
-      ],
-      'Sum recon': [
-        ['balance_amount', 'NUMERIC(15,2)', '4,580,219,402,150', '4,580,219,402,150', '0.000000%', '✓ PASS'],
-        ['risk_score',     'SMALLINT',      '47,329,008',        '47,329,008',        '0.000000%', '✓ PASS'],
-      ],
-      'NULL parity': [
-        ['account_id',        'VARCHAR(20)',  0,      0,      0, '✓ PASS'],
-        ['account_name',      'VARCHAR(80)',  12_400, 12_400, 0, '✓ PASS'],
-        ['account_name_kana', 'VARCHAR(120)', 18_200, 18_200, 0, '✓ PASS'],
-        ['risk_score',        'SMALLINT',     5_002,  5_002,  0, '✓ PASS'],
-        ['updated_by',        'VARCHAR(20)',  812,    812,    0, '✓ PASS'],
-      ],
-      Range: [
-        ['kyc_level', 'SMALLINT', '±32767', '12', 0, '✓ PASS'],
-      ],
-    },
-    cust_profile: {
-      Overview: [
-        ['Validation report · CUST_PROFILE', null, null, null],
-        ['ASIS table', 'CORE.CUST_PROFILE ⋈ CORE.CUST_CONTACT', null, null],
-        ['TOBE table', 'public.customer',                       null, null],
-        ['Generated',  '2026-04-21 09:41 JST',                  null, null],
-        ['Check',                        'ASIS',             'TOBE',             'Verdict'],
-        ['Row count',                    '22,488,541',       '22,488,541',       '✓ PASS'],
-        ['SHA-256 checksum',             'sha256:8a2c…e109', 'sha256:8a2c…e109', '✓ PASS'],
-        ['Sum reconciliation (1 cols)',  '—',                '—',                '✓ PASS'],
-        ['NULL count parity (14 cols)',  '—',                '—',                '✓ PASS'],
-        ['Range/overflow (1 cols)',      '—',                '—',                '✓ PASS'],
-        ['Total',                        '18',               '18 pass',          '0 fail'],
-      ],
-      'Sum recon': [
-        ['risk_tier', 'SMALLINT', '741,312,166,603', '741,312,166,603', '0.000000%', '✓ PASS'],
-      ],
-      'NULL parity': [
-        ['customer_id',       'VARCHAR(20)',  0,       0,       0, '✓ PASS'],
-        ['customer_name',     'VARCHAR(120)', 0,       0,       0, '✓ PASS'],
-        ['birth_date',        'DATE',         1_502,   1_502,   0, '✓ PASS'],
-        ['gender',            'CHAR(1)',      5_124,   5_124,   0, '✓ PASS'],
-        ['email',             'VARCHAR(120)', 1_290,   1_290,   0, '✓ PASS'],
-        ['phone',             'VARCHAR(20)',  830,     830,     0, '✓ PASS'],
-        ['nationality',       'CHAR(3)',      500,     500,     0, '✓ PASS'],
-        ['city_code',         'VARCHAR(8)',   215,     215,     0, '✓ PASS'],
-        ['open_branch',       'VARCHAR(8)',   0,       0,       0, '✓ PASS'],
-        ['risk_tier',         'SMALLINT',     1_018,   1_018,   0, '✓ PASS'],
-        ['preferred_channel', 'VARCHAR(8)',   2_560,   2_560,   0, '✓ PASS'],
-        ['marketing_opt_in',  'BOOLEAN',      0,       0,       0, '✓ PASS'],
-        ['created_at',        'TIMESTAMP',    0,       0,       0, '✓ PASS'],
-        ['updated_at',        'TIMESTAMP',    0,       0,       0, '✓ PASS'],
-        ['status',            'VARCHAR(8)',   0,       0,       0, '✓ PASS'],
-      ],
-      Range: [
-        ['risk_tier', 'SMALLINT', '±32767', '4', 0, '✓ PASS'],
-      ],
-    },
-    txn_journal_2024: {
-      Overview: [
-        ['Validation report · TXN_JOURNAL_2024', null, null, null],
-        ['ASIS table', 'legacy.txn_journal_2024',  null, null],
-        ['TOBE table', 'public.transaction_2024',  null, null],
-        ['Generated',  '2026-04-21 09:41 JST',     null, null],
-        ['Check',                        'ASIS',             'TOBE',             'Verdict'],
-        ['Row count',                    '185,300,000',      '185,300,000',      '✓ PASS'],
-        ['SHA-256 checksum',             'sha256:1f8e…ca04', 'sha256:1f8e…ca04', '✓ PASS'],
-        ['Sum reconciliation (1 cols)',  '—',                '—',                '✓ PASS'],
-        ['NULL count parity (4 cols)',   '—',                '—',                '✓ PASS'],
-        ['Range/overflow (1 cols)',      '—',                '—',                '✓ PASS'],
-        ['Total',                        '6',                '6 pass',           '0 fail'],
-      ],
-      'Sum recon': [
-        ['amount', 'NUMERIC(18,2)', '6,809,238,400,158.32', '6,809,238,400,158.32', '0.000000%', '✓ PASS'],
-      ],
-      'NULL parity': [
-        ['transaction_id', 'VARCHAR(32)', 0,         0,         0, '✓ PASS'],
-        ['account_id',     'VARCHAR(20)', 0,         0,         0, '✓ PASS'],
-        ['OPR_ID',         'VARCHAR(12)', 2_840_182, 2_840_182, 0, '✓ PASS'],
-        ['reference_no',   'VARCHAR(40)', 510_038,   510_038,   0, '✓ PASS'],
-      ],
-      Range: [
-        ['amount', 'NUMERIC(18,2)', '±9999999999999999.99', '9.99e+9', 0, '✓ PASS'],
-      ],
-    },
-    transaction_unified: {
-      Overview: [
-        ['Validation report · TRANSACTION_UNIFIED', null, null, null],
-        ['ASIS table', 'legacy.txn_journal_2023 ∪ legacy.txn_journal_2024', null, null],
-        ['TOBE table', 'public.transaction',                                null, null],
-        ['Generated',  '2026-04-21 09:41 JST',                              null, null],
-        ['Check',                        'ASIS',             'TOBE',             'Verdict'],
-        ['Row count',                    '405,810,000',      '405,810,000',      '✓ PASS'],
-        ['SHA-256 checksum',             'sha256:c702…b14d', 'sha256:c702…b14d', '✓ PASS'],
-        ['Sum reconciliation (1 cols)',  '—',                '—',                '✓ PASS'],
-        ['NULL count parity (3 cols)',   '—',                '—',                '✓ PASS'],
-        ['Range/overflow (1 cols)',      '—',                '—',                '✓ PASS'],
-        ['Total',                        '6',                '6 pass',           '0 fail'],
-      ],
-      'Sum recon': [
-        ['amount', 'NUMERIC(18,2)', '14,802,310,558,200', '14,802,310,558,200', '0.000000%', '✓ PASS'],
-      ],
-      'NULL parity': [
-        ['reference_no', 'VARCHAR(40)', 920_412, 920_412, 0, '✓ PASS'],
-        ['status',       'VARCHAR(8)',  0,       0,       0, '✓ PASS'],
-        ['source_year',  'SMALLINT',    0,       0,       0, '✓ PASS'],
-      ],
-      Range: [
-        ['source_year', 'SMALLINT', '±32767', '2024', 0, '✓ PASS'],
-      ],
-    },
-    loan: {
-      Overview: [
-        ['Validation report · LOAN', null, null, null],
-        ['ASIS table', 'legacy.loan',          null, null],
-        ['TOBE table', 'public.loan',          null, null],
-        ['Generated',  '2026-04-21 09:41 JST', null, null],
-        ['Check',                        'ASIS',             'TOBE',             'Verdict'],
-        ['Row count',                    '2,300,000',        '2,300,000',        '✓ PASS'],
-        ['SHA-256 checksum',             'sha256:5f1e…a832', 'sha256:5f1e…a832', '✓ PASS'],
-        ['Sum reconciliation (2 cols)',  '—',                '—',                '✓ PASS'],
-        ['NULL count parity (1 cols)',   '—',                '—',                '✓ PASS'],
-        ['Range/overflow (1 cols)',      '—',                '—',                '✓ PASS'],
-        ['Total',                        '6',                '6 pass',           '0 fail'],
-      ],
-      'Sum recon': [
-        ['principal',     'NUMERIC(15,2)', '385,420,180,003', '385,420,180,003', '0.000000%', '✓ PASS'],
-        ['interest_rate', 'NUMERIC(5,3)',  '8,752.245',       '8,752.245',       '0.000000%', '✓ PASS'],
-      ],
-      'NULL parity': [
-        ['status', 'VARCHAR(8)', 0, 0, 0, '✓ PASS'],
-      ],
-      Range: [
-        ['term_months', 'SMALLINT', '±32767', '360', 0, '✓ PASS'],
-      ],
-    },
-    card: {
-      Overview: [
-        ['Validation report · CARD', null, null, null],
-        ['ASIS table', 'legacy.card',          null, null],
-        ['TOBE table', 'public.card',          null, null],
-        ['Generated',  '2026-04-21 09:41 JST', null, null],
-        ['Check',                        'ASIS',             'TOBE',             'Verdict'],
-        ['Row count',                    '3,200,000',        '3,200,000',        '✓ PASS'],
-        ['SHA-256 checksum',             'sha256:7d4a…f018', 'sha256:7d4a…f018', '✓ PASS'],
-        ['Sum reconciliation (0 cols)',  '—',                '—',                'n/a'],
-        ['NULL count parity (1 cols)',   '—',                '—',                '✓ PASS'],
-        ['Range/overflow (1 cols)',      '—',                '—',                '✓ PASS'],
-        ['Total',                        '4',                '4 pass',           '0 fail'],
-      ],
-      'Sum recon': [
-        ['(no numeric columns)', 'n/a', 'n/a', 'n/a', 'n/a', 'n/a'],
-      ],
-      'NULL parity': [
-        ['status', 'VARCHAR(8)', 0, 0, 0, '✓ PASS'],
-      ],
-      Range: [
-        ['expires_at', 'DATE', 'within issue+10y', '2049-12-31', 0, '✓ PASS'],
-      ],
-    },
-    fx_position: {
-      Overview: [
-        ['Validation report · FX_POSITION', null, null, null],
-        ['ASIS table', 'legacy.fx_position',   null, null],
-        ['TOBE table', 'public.fx_position',   null, null],
-        ['Generated',  '2026-04-21 09:41 JST', null, null],
-        ['Check',                        'ASIS',             'TOBE',             'Verdict'],
-        ['Row count',                    '120,000',          '120,000',          '✓ PASS'],
-        ['SHA-256 checksum',             'sha256:e201…7ab9', 'sha256:e201…7ab9', '✓ PASS'],
-        ['Sum reconciliation (1 cols)',  '—',                '—',                '✓ PASS'],
-        ['NULL count parity (1 cols)',   '—',                '—',                '✓ PASS'],
-        ['Range/overflow (1 cols)',      '—',                '—',                '✓ PASS'],
-        ['Total',                        '5',                '5 pass',           '0 fail'],
-      ],
-      'Sum recon': [
-        ['position_amount', 'NUMERIC(18,4)', '1,420,800,250.5400', '1,420,800,250.5400', '0.000000%', '✓ PASS'],
-      ],
-      'NULL parity': [
-        ['position_amount', 'NUMERIC(18,4)', 0, 0, 0, '✓ PASS'],
-      ],
-      Range: [
-        ['position_amount', 'NUMERIC(18,4)', '±9,999,999,999.9999', '4.8e+8', 0, '✓ PASS'],
-      ],
-    },
-  },
-};
-
-/* 사이드바 트리에서 카테고리 펼쳤을 때 보일 mock 테이블 목록.
-   실제로는 프로젝트의 ASIS/TOBE 테이블 목록을 백엔드에서 가져온다. */
-const MOCK_TABLES = [
-  'acct_master',
-  'cust_profile',
-  'txn_journal_2024',
-  'transaction_unified',
-  'loan',
-  'card',
-  'fx_position',
-];
 
 /* 프로젝트 이름을 파일명에 안전하게 쓸 수 있는 slug 로. 비-ASCII 는 보존하지 않고
    소문자/숫자/언더스코어 만 남긴다 (file-name 호환성 우선). */
@@ -615,23 +196,17 @@ function projectSlug(name: string): string {
    Dashboard / DDL Scripts 는 프로젝트 단위 단일 산출물 (child 1개).
    DDL Scripts 의 child 이름은 프로젝트명에서 파생 (projectname.ddl.sql 형태). */
 function childTablesFor(projectName: string): Record<CategoryKey, string[]> {
+  /* diff / sql / validation 의 child 테이블 목록은 호출부 (childTables useMemo)에서
+     실 데이터 (diff.tables / validationByTable) 로 override. 여기서는 빈 array 가 기본 — run
+     안 됐을 때 사이드바 비어있는 게 정확 (mock fake table 안 보임). */
   return {
     dashboard:  ['dashboard-snapshot'],
-    diff:       MOCK_TABLES,
+    diff:       [],
     ddl:        [projectSlug(projectName)],
-    sql:        MOCK_TABLES,
-    validation: MOCK_TABLES,
+    sql:        [],
+    validation: [],
   };
 }
-
-/* 카테고리별 fx 수식바 mock context — 시트 개수/카운트 등 상위 요약 값. */
-const MOCK_FORMULA_CTX: Record<CategoryKey, FormulaContext> = {
-  dashboard:  { n: 18, progress: 32.8 },
-  diff:       { ASIS: 'legacy_db', TOBE: 'new_db', added: 1, removed: 1, changed: 2 },
-  ddl:        { table: 'm_user', n: 6, pk: 1 },
-  sql:        { ASIS: 'legacy_db', TOBE: 'new_db', n: 5 },
-  validation: { table: 'CUST_PROFILE', n: 5 },
-};
 
 /** 데이터가 들어간 행만 렌더 — 데이터 아래쪽에 빈 padding 행을 두지 않는다.
  *  예전엔 EMPTY_ROWS=20 으로 padding 을 깔았는데, 빈 셀들의 1px borderBottom 이
@@ -648,8 +223,10 @@ function formatCell(v: Cell | undefined): string {
 type StrategyKind = 'rule' | 'default' | 'null' | 'passed';
 
 /** buildDiff 가 받는 rule 의 최소 형태 — FrozenRule(snapshot) 과 MappingRuleDto(live) 양쪽이 만족.
- *  데이터 소스가 snapshot 이든 live mapping_rules 든 같은 코드로 처리하기 위한 구조적 타입. */
-type DiffRule = Pick<
+ *  데이터 소스가 snapshot 이든 live mapping_rules 든 같은 코드로 처리하기 위한 구조적 타입.
+ *  codeDomain / notNullOverride / timestamps 는 Dashboard issue 검출 + Last update 산출에 사용 —
+ *  MappingRuleDto 가 안 가질 수도 있어서 optional. */
+export type DiffRule = Pick<
   FrozenRule,
   | 'strategy'
   | 'transformSql'
@@ -661,7 +238,12 @@ type DiffRule = Pick<
   | 'tobeTable'
   | 'tobeColumn'
   | 'defaultValue'
->;
+> & {
+  codeDomain?: string | null;
+  notNullOverride?: boolean;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
 
 function diffStatusKind(r: DiffRule): StrategyKind | null {
   if (r.strategy === 'skip') return null;
@@ -676,6 +258,19 @@ function diffStatusKind(r: DiffRule): StrategyKind | null {
   if (multiSource) return 'rule';
   if (expr === '' || /^[A-Za-z_][\w$]*(\.[A-Za-z_][\w$]*)?$/.test(expr)) return 'passed';
   return 'rule';
+}
+
+/** type 문자열을 거친 카테고리로 분류 — Summary 의 type-mismatch 카운트용.
+ *  VARCHAR2(50) 과 VARCHAR(100) 처럼 길이만 다른 건 같은 string 카테고리로 본다. */
+function typeCategory(t: string | null | undefined): string {
+  if (!t) return 'unknown';
+  const s = t.toLowerCase().trim();
+  if (/^(var)?char|^nchar|^nvarchar|^text|^clob/.test(s))                       return 'string';
+  if (/^(big|small|tiny)?int|^integer|^number|^numeric|^decimal|^float|^double|^real/.test(s)) return 'number';
+  if (/^date|^timestamp|^time/.test(s))                                         return 'date';
+  if (/^bool|^bit/.test(s))                                                     return 'boolean';
+  if (/^blob|^bytea|^binary|^raw/.test(s))                                      return 'binary';
+  return 'other';
 }
 
 /** DdlSchema 를 `${table}.${column}` (lowercase) → DdlColumn 맵으로. */
@@ -698,8 +293,17 @@ interface DiffBuild {
   tables: string[];
   /** 테이블별 Summary 시트 rows (Kind / Count / % of TOBE / Note). */
   summaryByTable: Record<string, Cell[][]>;
+  /** 전체(테이블 미선택) Summary — Total tables/columns + strategy 분포 + type mismatch. */
+  summaryAll: Cell[][];
   /** 테이블별 fx 수식바 컨텍스트. */
   fxByTable: Record<string, { asis: string; tobe: string; changed: number }>;
+  /** 전체 모드 fx 수식바 컨텍스트 — 사이드바 미선택 시 사용. */
+  fxAll: { asis: string; tobe: string; changed: number };
+  /** 사이드바에서 회색 disabled 로 표시할 테이블 (= latest run 에서 성공하지 못한 테이블).
+   *  Set 요소는 비교 일관성을 위해 lowercase. */
+  disabledTables: Set<string>;
+  /** latest run 자체가 없을 때 (= 아직 실행 안 됨). 사이드바 안내 메시지용. */
+  noRun: boolean;
 }
 
 /** mapping rules + ASIS/TOBE DDL → MAPPING(diff) 산출물.
@@ -710,11 +314,29 @@ interface DiffBuild {
  *  short-fallback 으로 TOBE DDL 테이블에 매칭하고, 못 찾은 rule 은 버린다.
  *
  *  Diff 9컬 순서: Status, Table, ASIS column, ASIS type, ASIS null, TOBE column, TOBE type, TOBE null, Mapping/default. */
-function buildDiff(
+export function buildDiff(
   rules: DiffRule[],
   asisSchema: DdlSchema | null,
   tobeSchema: DdlSchema | null,
+  /** snapshot.executionContext 의 성공 테이블 (lowercase). null = 그 snapshot 으로
+   *  한 번도 run 한 적 없음 → 모든 Artifacts 카테고리(MAPPING diff 포함) 빈 상태.
+   *  ("mapping 은 그대로 보여줘야" 는 사이드바 메뉴의 Mapping 탭 / `/mapping` 페이지 얘기로,
+   *  Artifacts 의 MAPPING(diff) 카테고리는 별개로 박제 기준 표시.) */
+  successTables: Set<string> | null,
 ): DiffBuild {
+  // run 박제가 없으면 Artifacts 의 어느 카테고리도 (diff 포함) 빈 상태 — sidebar 안내.
+  if (successTables === null) {
+    return {
+      rows: [],
+      tables: [],
+      summaryByTable: {},
+      summaryAll: [],
+      fxByTable: {},
+      fxAll: { asis: '—', tobe: '—', changed: 0 },
+      disabledTables: new Set(),
+      noRun: true,
+    };
+  }
   const asisMap = ddlColumnMap(asisSchema);
   const tobeMap = ddlColumnMap(tobeSchema);
 
@@ -737,6 +359,9 @@ function buildDiff(
   const rowsByTable = new Map<string, Cell[][]>();
   const asisByTable = new Map<string, Set<string>>();
   const colsByTable = new Map<string, number>();
+  const typeMismatchByTable = new Map<string, number>();
+  const asisAll = new Set<string>();
+  let typeMismatchAll = 0;
   for (const r of rules) {
     const kind = diffStatusKind(r);
     if (!kind) continue;
@@ -767,11 +392,27 @@ function buildDiff(
     if (r.asisTable) {
       if (!asisByTable.has(table)) asisByTable.set(table, new Set());
       asisByTable.get(table)!.add(r.asisTable);
+      asisAll.add(r.asisTable);
+    }
+
+    // type mismatch — ASIS / TOBE 둘 다 column 정보가 있고, 카테고리가 다른 경우만.
+    // (passed/rule 모두 포함 — 매핑된 컬럼 중 type kind 가 어긋난 것 카운트.)
+    if (aCol && tCol) {
+      if (typeCategory(aCol.dataTypeRaw) !== typeCategory(tCol.dataTypeRaw)) {
+        typeMismatchByTable.set(table, (typeMismatchByTable.get(table) ?? 0) + 1);
+        typeMismatchAll++;
+      }
     }
   }
 
   const tables = tableOrder.filter((t) => rowsByTable.has(t));
-  const rows: Cell[][] = tables.flatMap((t) => rowsByTable.get(t)!);
+  // 사이드바 회색 disabled 대상 — snapshot 에 있지만 latest run 에서 성공하지 못한 테이블.
+  const disabledTables = new Set(
+    tables.filter((t) => !successTables.has(t.toLowerCase())).map((t) => t.toLowerCase()),
+  );
+  // Diff 시트(전체 모드) rows / Summary all 은 latest run 성공 테이블만 집계.
+  const successOnly = tables.filter((t) => successTables.has(t.toLowerCase()));
+  const rows: Cell[][] = successOnly.flatMap((t) => rowsByTable.get(t)!);
 
   const summaryByTable: Record<string, Cell[][]> = {};
   const fxByTable: Record<string, { asis: string; tobe: string; changed: number }> = {};
@@ -783,6 +424,7 @@ function buildDiff(
     const asisList = [...(asisByTable.get(t) ?? [])].join(', ') || '—';
     const changed = trows.length - counts.passed;
     const pct = (n: number) => (tobeCols > 0 ? `${((n / tobeCols) * 100).toFixed(1)}%` : '—');
+    const tmCount = typeMismatchByTable.get(t) ?? 0;
     summaryByTable[t] = [
       ['TOBE table',     t,             '',                '' ],
       ['ASIS source',    asisList,      '',                '' ],
@@ -792,17 +434,52 @@ function buildDiff(
       ['default',        counts.default, pct(counts.default), 'constant default'],
       ['null',           counts.null,   pct(counts.null),    'set NULL'],
       ['passed',         counts.passed, pct(counts.passed),  'pass-through (no transform)'],
+      ['type mismatch',  tmCount,       pct(tmCount),        'ASIS / TOBE type kind differs'],
     ];
     fxByTable[t] = { asis: asisList, tobe: t, changed };
   }
 
-  return { rows, tables, summaryByTable, fxByTable };
+  // 전체(테이블 미선택) Summary — latest run 에서 성공한 테이블만 집계.
+  // snapshot 의 전체 rules 가 아니라 successOnly 의 rows 만 카운트한다 (사용자 요청).
+  const totalCountsAll: Record<StrategyKind, number> = { rule: 0, default: 0, null: 0, passed: 0 };
+  const asisSucc = new Set<string>();
+  let typeMismatchSucc = 0;
+  for (const t of successOnly) {
+    const trows = rowsByTable.get(t)!;
+    for (const rr of trows) totalCountsAll[rr[0] as StrategyKind]++;
+    for (const a of asisByTable.get(t) ?? []) asisSucc.add(a);
+    typeMismatchSucc += typeMismatchByTable.get(t) ?? 0;
+  }
+  const totalMapped = totalCountsAll.rule + totalCountsAll.default + totalCountsAll.null + totalCountsAll.passed;
+  // 전체 TOBE 컬럼 — 성공 테이블의 컬럼 합 (이게 매핑 진척률의 자연스러운 기준).
+  let totalTobeCols = 0;
+  for (const t of successOnly) totalTobeCols += colsByTable.get(t) ?? 0;
+  if (totalTobeCols === 0) totalTobeCols = totalMapped;
+  const pctAll = (n: number) => (totalTobeCols > 0 ? `${((n / totalTobeCols) * 100).toFixed(1)}%` : '—');
+  const asisListAll = [...asisSucc].sort().join(', ') || '—';
+  // asisAll 은 type mismatch 계산이 끝났으니 더 이상 안 쓴다 — 의도적으로 unused.
+  void asisAll;
+  void typeMismatchAll;
+  const summaryAll: Cell[][] = successOnly.length === 0 ? [] : [
+    ['TOBE tables',    successOnly.length,                  '',                              ''],
+    ['ASIS sources',   asisListAll,                          '',                              ''],
+    ['TOBE columns',   totalTobeCols,                        '',                              ''],
+    ['Mapped columns', totalMapped,                          pctAll(totalMapped),             ''],
+    ['rule',           totalCountsAll.rule,                  pctAll(totalCountsAll.rule),     'transform expression'],
+    ['default',        totalCountsAll.default,               pctAll(totalCountsAll.default),  'constant default'],
+    ['null',           totalCountsAll.null,                  pctAll(totalCountsAll.null),     'set NULL'],
+    ['passed',         totalCountsAll.passed,                pctAll(totalCountsAll.passed),   'pass-through (no transform)'],
+    ['type mismatch',  typeMismatchSucc,                     pctAll(typeMismatchSucc),        'ASIS / TOBE type kind differs'],
+  ];
+  const fxAll = { asis: asisListAll, tobe: `${successOnly.length} tables`, changed: totalMapped - totalCountsAll.passed };
+
+  return { rows, tables, summaryByTable, summaryAll, fxByTable, fxAll, disabledTables, noRun: false };
 }
 
 /** 파싱된 DdlSchema 를 CREATE TABLE 스크립트로 재구성.
  *  DDL 임포트는 원본 SQL 텍스트를 저장하지 않으므로(ddl_tables/ddl_columns 로 파싱됨),
  *  컬럼·타입(dataTypeRaw)·NULL·PK·default 로 CREATE TABLE 을 다시 만든다. */
-function reconstructDdl(schema: DdlSchema | null): string {
+export function reconstructDdl(schema: DdlSchema | null): string {
   if (!schema || schema.tables.length === 0) return '';
   const blocks: string[] = [];
   for (const tw of [...schema.tables].sort((a, b) => a.table.ordinal - b.table.ordinal)) {
@@ -827,9 +504,10 @@ function reconstructDdl(schema: DdlSchema | null): string {
   return blocks.join('\n\n-- ───────────────────────────────────────────────\n\n');
 }
 
-/** Dashboard(coverage) 산출물 — DDL + mapping 으로 계산. run 데이터 없음 → 이행 행 수는 N/A. */
+/** Dashboard 산출물 — DDL + mapping (+ snapshot 의 bindings/codeMaps 있으면 더 풍부한 issue 검출).
+ *  시트: Overview / Tables (Issues 별도 시트 없음 — 카운트만 노출, 상세는 Mapping 페이지). */
 interface DashboardBuild {
-  /** 시트명(Overview/Tables/Issues) → rows. */
+  /** 시트명(Overview/Tables) → rows. */
   sheets: Record<string, Cell[][]>;
   /** fx 수식바용 — TO-BE 테이블 수 + 전체 매핑 커버리지 %. */
   tableCount: number;
@@ -845,70 +523,283 @@ function dashRuleMapped(r: DiffRule): boolean {
   return hasSrc || hasRule;
 }
 
-function buildDashboard(tobeSchema: DdlSchema | null, rules: DiffRule[]): DashboardBuild {
+/** Issue 검출 신호 — Overview 의 Errors/Issues 카운트, Tables 의 Issues 컬럼에 반영.
+ *  blocker = 실행 막힘 (Errors), warning = 검토 권장 (Issues). */
+type DashIssueSignal =
+  | 'unmapped-table'              // blocker — 테이블 전체 rule 0
+  | 'unmapped-column'             // warning — 일부 컬럼 rule 없음
+  | 'not-null-conflict'           // blocker — notNullOverride + (null strategy or empty default)
+  | 'not-null-vs-nullable-ddl'    // warning — notNullOverride 인데 TOBE DDL 은 nullable
+  | 'unresolved-codeDomain'       // blocker — codeDomain 참조하는 데 snapshot 에 없음
+  | 'multi-source-missing-joinOn' // blocker — join binding 인데 joinOn 없음
+  | 'missing-pk-mapping'          // blocker — PK 컬럼 rule 없거나 skip
+  | 'type-shrinkage'              // warning — VARCHAR/NUMERIC 축소 → truncate 위험
+  | 'empty-mapping';              // warning — expression 인데 source/transform/default 모두 빈 룰
+
+interface DashIssue {
+  severity: 'blocker' | 'warning';
+  signal: DashIssueSignal;
+  table: string;     // TOBE table physical name
+  column: string;    // TOBE column physical name (없으면 '')
+}
+
+/* ddlColumnMap 은 buildDiff 영역에 이미 정의돼 있음 (line ~697) — 재사용. */
+
+function buildDashboard(
+  tobeSchema: DdlSchema | null,
+  asisSchema: DdlSchema | null,
+  rules: DiffRule[],
+  snapshotData: SnapshotData | null,
+  snapshot: MappingSnapshot | null,
+): DashboardBuild {
   const tables = tobeSchema
     ? [...tobeSchema.tables].sort((a, b) => a.table.ordinal - b.table.ordinal)
     : [];
-  // rule → TOBE DDL table 매칭 (qualified-first, short-fallback) — MAPPING/Dashboard 와 동일 규약.
+  // rule → TOBE DDL table 매칭 (qualified-first, short-fallback) — MAPPING/Dashboard 동일 규약.
   const byQualified = new Map<string, string>();
   const byShort = new Map<string, string>();
+  const ddlColByQ = new Map<string, DdlColumn>();
   for (const tw of tables) {
     const q = `${tw.table.schemaName ? tw.table.schemaName + '.' : ''}${tw.table.physicalName}`.toLowerCase();
     byQualified.set(q, tw.table.id);
     const s = tw.table.physicalName.toLowerCase();
     if (!byShort.has(s)) byShort.set(s, tw.table.id);
+    for (const col of tw.columns) {
+      ddlColByQ.set(`${tw.table.physicalName}.${col.physicalName}`.toLowerCase(), col);
+    }
   }
+
+  // matched rules / per-table 집계.
   const mappedByTable = new Map<string, number>();
   const rulesByTable = new Map<string, number>();
+  const tableRulesById = new Map<string, DiffRule[]>();
+  const matchedRules: DiffRule[] = [];
   for (const r of rules) {
     const q = `${r.tobeSchema ? r.tobeSchema + '.' : ''}${r.tobeTable}`.toLowerCase();
     const tid = byQualified.get(q) ?? byShort.get(r.tobeTable.toLowerCase());
-    if (!tid) continue; // 현재 TOBE DDL 에 없는 rule 은 제외.
+    if (!tid) continue;
+    matchedRules.push(r);
     if (r.strategy !== 'skip') rulesByTable.set(tid, (rulesByTable.get(tid) ?? 0) + 1);
     if (dashRuleMapped(r)) mappedByTable.set(tid, (mappedByTable.get(tid) ?? 0) + 1);
+    if (!tableRulesById.has(tid)) tableRulesById.set(tid, []);
+    tableRulesById.get(tid)!.push(r);
   }
-  let totalCols = 0, mappedCols = 0, readyTables = 0, totalRules = 0;
+
+  // bindings / codeMaps — snapshotData 있으면 사용. 없으면 빈 배열 (해당 issue 검출 skip).
+  const bindings = snapshotData?.bindings ?? [];
+  const codeMaps = snapshotData?.codeMaps ?? [];
+  const matchedBindings = bindings.filter((b) => {
+    const q = `${b.tobeSchema ? b.tobeSchema + '.' : ''}${b.tobeTable}`.toLowerCase();
+    return byQualified.has(q) || byShort.has(b.tobeTable.toLowerCase());
+  });
+  const domains = new Set(codeMaps.map((m) => m.domain));
+
+  // rule by tobe column — 'table.column' → rule.
+  const ruleByCol = new Map<string, DiffRule>();
+  for (const r of matchedRules) ruleByCol.set(`${r.tobeTable}.${r.tobeColumn}`.toLowerCase(), r);
+
+  // === Issue 검출 ===
+  const issues: DashIssue[] = [];
+
+  // unmapped-table / unmapped-column
+  for (const tw of tables) {
+    const unmappedCols = tw.columns.filter((c) =>
+      !ruleByCol.has(`${tw.table.physicalName}.${c.physicalName}`.toLowerCase()),
+    );
+    if (tw.columns.length > 0 && unmappedCols.length === tw.columns.length) {
+      issues.push({ severity: 'blocker', signal: 'unmapped-table', table: tw.table.physicalName, column: '' });
+    } else {
+      for (const c of unmappedCols) {
+        issues.push({ severity: 'warning', signal: 'unmapped-column', table: tw.table.physicalName, column: c.physicalName });
+      }
+    }
+  }
+
+  // not-null-conflict / not-null-vs-nullable-ddl
+  const isNotNullConflict = (r: DiffRule): boolean =>
+    !!r.notNullOverride && (r.strategy === 'null' || (r.strategy === 'default' && !r.defaultValue?.trim()));
+  for (const r of matchedRules) {
+    if (!r.notNullOverride) continue;
+    if (isNotNullConflict(r)) {
+      issues.push({ severity: 'blocker', signal: 'not-null-conflict', table: r.tobeTable, column: r.tobeColumn });
+      continue;
+    }
+    const ddlCol = ddlColByQ.get(`${r.tobeTable}.${r.tobeColumn}`.toLowerCase());
+    if (ddlCol?.nullable === true) {
+      issues.push({ severity: 'warning', signal: 'not-null-vs-nullable-ddl', table: r.tobeTable, column: r.tobeColumn });
+    }
+  }
+
+  // unresolved-codeDomain
+  for (const r of matchedRules) {
+    if (r.codeDomain && !domains.has(r.codeDomain)) {
+      issues.push({ severity: 'blocker', signal: 'unresolved-codeDomain', table: r.tobeTable, column: r.tobeColumn });
+    }
+  }
+
+  // multi-source-missing-joinOn
+  for (const b of matchedBindings) {
+    if (b.compositionKind !== 'join') continue;
+    for (const s of b.sources) {
+      if (s.role === 'join' && !s.joinOn?.trim()) {
+        issues.push({ severity: 'blocker', signal: 'multi-source-missing-joinOn', table: b.tobeTable, column: '' });
+      }
+    }
+  }
+
+  // missing-pk-mapping — TOBE PK 컬럼이 rule 없거나 skip
+  for (const tw of tables) {
+    const pkCols = tw.columns.filter((c) => c.pkOrder != null);
+    for (const c of pkCols) {
+      const key = `${tw.table.physicalName}.${c.physicalName}`.toLowerCase();
+      const rule = ruleByCol.get(key);
+      if (!rule || rule.strategy === 'skip') {
+        issues.push({ severity: 'blocker', signal: 'missing-pk-mapping', table: tw.table.physicalName, column: c.physicalName });
+      }
+    }
+  }
+
+  // type-shrinkage — AS-IS → TOBE 타입 축소 (length / precision)
+  const asisColMap = ddlColumnMap(asisSchema);
+  for (const r of matchedRules) {
+    if (r.strategy !== 'expression') continue;
+    const asisCols = (r.asisColumn ?? []).filter((c) => c && c.trim());
+    if (asisCols.length === 0) continue;
+    const asisTbl = r.asisTable ?? '';
+    const tobeCol = ddlColByQ.get(`${r.tobeTable}.${r.tobeColumn}`.toLowerCase());
+    if (!tobeCol) continue;
+    for (const ac of asisCols) {
+      const asisCol = asisColMap.get(`${asisTbl}.${ac}`.toLowerCase());
+      if (!asisCol) continue;
+      const aLen = asisCol.length ?? null;
+      const tLen = tobeCol.length ?? null;
+      if (aLen != null && tLen != null && tLen < aLen) {
+        issues.push({ severity: 'warning', signal: 'type-shrinkage', table: r.tobeTable, column: r.tobeColumn });
+        continue;
+      }
+      const aPrec = asisCol.precision ?? null;
+      const tPrec = tobeCol.precision ?? null;
+      if (aPrec != null && tPrec != null && tPrec < aPrec) {
+        issues.push({ severity: 'warning', signal: 'type-shrinkage', table: r.tobeTable, column: r.tobeColumn });
+      }
+    }
+  }
+
+  // empty-mapping — expression strategy 인데 source/transform/default 모두 빈 룰
+  for (const r of matchedRules) {
+    if (r.strategy !== 'expression') continue;
+    const hasSrc = (r.asisColumn ?? []).some((c) => c && c.trim() !== '');
+    const hasRule = !!(r.transformRule && r.transformRule.trim());
+    const hasSql = !!(r.transformSql && r.transformSql.trim());
+    if (!hasSrc && !hasRule && !hasSql) {
+      issues.push({ severity: 'warning', signal: 'empty-mapping', table: r.tobeTable, column: r.tobeColumn });
+    }
+  }
+
+  // === issue 카운트 per-table + total ===
+  const issueCountByTable = new Map<string, number>();
+  for (const it of issues) {
+    issueCountByTable.set(it.table, (issueCountByTable.get(it.table) ?? 0) + 1);
+  }
+  const blockerCount = issues.filter((it) => it.severity === 'blocker').length;
+  const warningCount = issues.filter((it) => it.severity === 'warning').length;
+
+  // === per-table rows ===
+  let totalCols = 0, mappedCols = 0;
   const tableRows: Cell[][] = [];
-  const issueRows: Cell[][] = [];
   for (const tw of tables) {
     const id = tw.table.id;
     const total = tw.columns.length;
     const mapped = Math.min(mappedByTable.get(id) ?? 0, total);
     const rcount = rulesByTable.get(id) ?? 0;
-    const pct = total > 0 ? Math.round((mapped / total) * 1000) / 10 : 0;
-    const status = total > 0 && mapped >= total ? 'done' : mapped > 0 ? 'running' : 'blocked';
-    totalCols += total; mappedCols += mapped; totalRules += rcount;
-    if (status === 'done') readyTables++;
-    tableRows.push([tw.table.physicalName, tw.table.schemaName || '—', total, mapped, `${pct}%`, rcount, status]);
-    const unmapped = total - mapped;
-    if (unmapped > 0) issueRows.push([tw.table.physicalName, status, unmapped, `${unmapped} column(s) not mapped`]);
+    const issueN = issueCountByTable.get(tw.table.physicalName) ?? 0;
+    let status: string;
+    if (total === 0 || mapped === 0) status = 'unmapped';
+    else if (mapped < total) status = 'partial';
+    else if (issueN > 0) status = 'review';
+    else status = 'ready';
+    totalCols += total; mappedCols += mapped;
+
+    // Last update — 이 테이블의 rule 들 중 max(updatedAt ?? createdAt). 0개면 '—'.
+    const tableRules = tableRulesById.get(id) ?? [];
+    let lastTs: string | null = null;
+    for (const r of tableRules) {
+      const ts = r.updatedAt ?? r.createdAt ?? null;
+      if (ts && (!lastTs || ts > lastTs)) lastTs = ts;
+    }
+    const lastUpdate = lastTs ? fmtJst(lastTs) : '—';
+
+    tableRows.push([
+      tw.table.physicalName,
+      tw.table.schemaName || '—',
+      rcount,
+      issueN,
+      status,
+      lastUpdate,
+    ]);
   }
   const overallPct = totalCols > 0 ? Math.round((mappedCols / totalCols) * 1000) / 10 : 0;
+
+  // === Overview header (title + Captured/Run/Author) + Metric 5 rows ===
+  // 사진 레이아웃: 'Dashboard snapshot' 제목 + Captured / Run / Author KV + blank + Metric 표.
+  // 값은 snapshot 실데이터 (snapshot 없으면 live view 안내).
+  const capturedLine = snapshot?.createdAt
+    ? fmtJst(snapshot.createdAt)
+    : `${fmtJst(new Date())} (live view — no snapshot)`;
+  const runLine = snapshot
+    ? `${snapshot.name} · ${snapshot.version}${snapshot.baseline ? ' · baseline' : ''}`
+    : '— (live view — mapping not yet frozen)';
   const overview: Cell[][] = [
-    ['Mapping coverage snapshot', null, null, null],
-    ['Source',   'TO-BE DDL + mapping rules',                    null, null],
-    ['Note',     'Migration run not executed — row counts N/A',  null, null],
-    ['Metric',           'Value',           'Unit',    'Note'],
-    ['TO-BE tables',     tables.length,     'count',   `${readyTables} fully mapped`],
-    ['TO-BE columns',    totalCols,         'count',   'across all tables'],
-    ['Mapped columns',   mappedCols,        'count',   `${overallPct}% of columns`],
-    ['Mapping coverage', `${overallPct}%`,  'percent', 'mapped ÷ total columns'],
-    ['Mapping rules',    totalRules,        'count',   'non-skip rules'],
-    ['Rows migrated',    '—',               'rows',    'requires a migration run'],
+    ['Dashboard snapshot', null, null, null],
+    ['', '', '', ''],
+    ['Captured', capturedLine, '', ''],
+    ['Run',      runLine,      '', ''],
+    ['Author',   'KS Info System', '', ''],
+    ['', '', '', ''],
+    ['Metric',  'Value', 'Unit', 'Note'],
+    ['Tables',  tables.length, 'count', 'in TO-BE schema'],
+    ['Columns', totalCols,     'count', 'across all tables'],
+    ['Mapped',  mappedCols,    'columns', totalCols > 0 ? `${overallPct}% of total` : '—'],
+    ['Errors',  blockerCount,  'count', blockerCount === 0 ? 'no errors — execution unblocked' : 'must fix before execution'],
+    ['Issues',  warningCount,  'count', warningCount === 0 ? 'no issues — mapping is clean' : 'should review (advisory)'],
   ];
+
   return {
-    sheets: { Overview: overview, Tables: tableRows, Issues: issueRows },
+    sheets: { Overview: overview, Tables: tableRows },
     tableCount: tables.length,
     mappingPct: overallPct,
   };
 }
 
-/** Status 컬럼 값별 배지 색상 — 프로토타입의 running/blocked/warn/done 매칭. */
+/** ISO 문자열 또는 Date → 'YYYY-MM-DD HH:mm JST' 포맷. Asia/Tokyo 변환. */
+function fmtJst(input: string | Date | null | undefined): string {
+  if (!input) return '—';
+  const d = typeof input === 'string' ? new Date(input) : input;
+  if (Number.isNaN(d.getTime())) return '—';
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(d);
+  const get = (t: string): string => parts.find((p) => p.type === t)?.value ?? '';
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')} JST`;
+}
+
+/** Status 컬럼 값별 배지 색상.
+ *  실행 컨텍스트 (Validation 등 다른 페이지) : running / blocked / warn / done
+ *  매핑 컨텍스트 (Dashboard snapshot Tables) : ready / review / partial / unmapped
+ *  같은 색 팔레트 재사용 — 실행 / 매핑 둘 다 비슷한 의미 매핑. */
 const STATUS_BADGE: Record<string, React.CSSProperties> = {
+  // 실행 컨텍스트
   running: { background: '#fff4d4', color: '#7a5a00' },
   blocked: { background: '#ffd9d9', color: '#a00000' },
   warn:    { background: '#ffe6c2', color: '#8a4c00' },
   done:    { background: '#dff5e1', color: '#0a5a1f' },
+  // 매핑 컨텍스트 (Dashboard snapshot 전용)
+  ready:    { background: '#dff5e1', color: '#0a5a1f' },     // = done
+  review:   { background: '#ffe6c2', color: '#8a4c00' },     // = warn
+  partial:  { background: '#fff4d4', color: '#7a5a00' },     // = running
+  unmapped: { background: '#ffd9d9', color: '#a00000' },     // = blocked
 };
 
 /** Rule 컬럼 값별 배지 색상 — Mapping(구 Schema diff) Rules 시트에서 사용.
@@ -921,18 +812,22 @@ const RULE_BADGE: Record<string, React.CSSProperties> = {
 
 /** MAPPING(diff) Status 컬럼 배지 — 매핑 strategy 분류. */
 const STRATEGY_BADGE: Record<string, React.CSSProperties> = {
-  rule:    { background: '#d4eedb', color: '#0a5a1f' },     // green
-  default: { background: '#d6e3f3', color: '#0a448a' },     // blue
-  null:    { background: '#fbe8c6', color: '#8a5500' },     // amber (의도적 NULL — 주의 환기)
-  passed:  { background: 'transparent', color: '#605e5c' }, // plain
+  rule:            { background: '#dcf0e4', color: '#2f8f63' },     // pastel green
+  default:         { background: '#dde9f7', color: '#3a6ea5' },     // pastel blue
+  null:            { background: '#fdeecd', color: '#b07a2e' },     // pastel amber
+  passed:          { background: 'transparent', color: '#605e5c' }, // plain
+  // Summary 시트 전용 — strategy 가 아니라 ASIS/TOBE type kind 가 어긋난 매핑 카운트 행.
+  // 주의 환기 의미로 warning red 계열 (null 의 amber 와 의미 구분).
+  'type mismatch': { background: '#f3d3d3', color: '#a00000' },     // red
 };
 
 /** strategy 별 행 전체 tint (배지보다 연하게). */
 const STRATEGY_ROW_TINT: Record<string, string> = {
-  rule:    '#eef7f1',
-  default: '#eef2fa',
-  null:    '#fbf4e6',
-  passed:  '#ffffff',
+  rule:            '#f1f9f4',
+  default:         '#f0f5fb',
+  null:            '#fdf6e8',
+  passed:          '#ffffff',
+  'type mismatch': '#fbeaea',
 };
 
 /** Verdict 컬럼 — Validation 시트의 검증 결과 배지. */
@@ -963,7 +858,7 @@ interface OverviewRowStyle {
 
 function classifyOverviewRow(row: Cell[]): OverviewRowStyle {
   const first = typeof row[0] === 'string' ? row[0] : '';
-  if (first.startsWith('Validation report')) {
+  if (first.startsWith('Validation report') || first === 'Dashboard snapshot') {
     return { titleStyle: { fontWeight: 700, fontSize: 14, color: '#1d4d2e' } };
   }
   if (first === 'Check' || first === 'Item' || first === 'Metric') {
@@ -1030,17 +925,160 @@ function highlightSqlLine(line: string, lineKey: number): React.ReactNode {
   return parts;
 }
 
-/* validation 카테고리의 fx 수식바 `{n}` 자리 — 테이블별 총 check 수 (Overview 시트의 Total 값과 동일).
-   사이드바에서 테이블 바꾸면 수식바의 'X checks' 가 따라서 바뀐다. */
-const VALIDATION_CHECK_COUNT: Record<string, number> = {
-  acct_master:         7,
-  cust_profile:        18,
-  txn_journal_2024:    6,
-  transaction_unified: 6,
-  loan:                6,
-  card:                4,
-  fx_position:         5,
-};
+/* Validation report DTO → 시트별 Cell[][] 변환. BE 의 ValidationReportService 가 만든 raw
+   shape 를 mock 과 동일한 헤더 + 행 구조의 ExcelJS-호환 Cell 표 로 펼친다.
+
+   Cell verdict 텍스트는 mock 과 동일하게 '✓ PASS' / '✗ FAIL' / '⚠ WARN' — ARGB_BY_VERDICT 가
+   이 텍스트를 보고 색상 배지를 매긴다. */
+function verdictText(v: 'PASS' | 'FAIL' | 'WARN' | 'SKIP' | string): string {
+  if (v === 'PASS') return '✓ PASS';
+  if (v === 'FAIL') return '✗ FAIL';
+  if (v === 'WARN') return '⚠ WARN';
+  if (v === 'SKIP') return '⏭ SKIP';
+  return String(v ?? '');
+}
+
+/** BE 의 overview item 라벨 → 화면 표시.
+ *  (2026-06-11 사용자 결정: 'Data Integrity Check' → 'SHA-256 Check' 로 명시. 단 실제 해시
+ *  구현은 현재 md5 — 명칭-구현 일치시키려면 별도로 sha256 교체 필요[TODO].) */
+function friendlyOverviewItem(item: string): string {
+  if (item === 'Checksum SHA-256') return 'SHA-256 Check';
+  return item;
+}
+
+function fmtCell(v: unknown): Cell {
+  if (v == null) return null;
+  if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'string') return v;
+  return String(v);
+}
+
+function validationOverviewRows(dto: ValidationReportDto): Cell[][] {
+  const meta: Cell[][] = [
+    [`Validation report · ${dto.tobeTable}`, null, null, null, null],
+    ['TOBE table', dto.tobeSchema ? `${dto.tobeSchema}.${dto.tobeTable}` : dto.tobeTable, null, null, null],
+    ['Generated', dto.generatedAt ?? '', null, null, null],
+    ['Check', 'ASIS', 'TOBE', 'Verdict', 'Note'],
+  ];
+  const items: Cell[][] = (dto.overview ?? []).map((r) => {
+    const itemRaw = String(r.item ?? '');
+    /* note 는 BE 가 보내준 텍스트 — SKIP 시 ack note (운영자 메모), WARN canonical-match 시 안내. */
+    const noteCell: Cell = r.note ?? '';
+    /* SHA-256 checksum row 의 ASIS/TOBE 는 BE 가 hash prefix (8자+…) 전송. 고객사 입장에서
+       hex string 은 의미 전달 X — verdict 기반으로 'Match' / 'Mismatch' 로 변환해 가독성 ↑.
+       단 '(no PK)' 같은 sentinel 값은 보존. (2026-05-31 친숙화) */
+    if (itemRaw === 'Checksum SHA-256') {
+      const asisRaw = String(r.asis ?? '');
+      const tobeRaw = String(r.tobe ?? '');
+      const isSentinel = asisRaw.startsWith('(') || tobeRaw.startsWith('(');
+      const matchLabel = isSentinel
+        ? fmtCell(r.asis)
+        : (r.verdict === 'PASS' ? '✓ Match'
+         : r.verdict === 'SKIP' ? '⏭ Match (acked)'
+         : r.verdict === 'WARN' ? '⚠ Match (display differs)'
+         : '✗ Mismatch');
+      const matchLabel2 = isSentinel ? fmtCell(r.tobe) : matchLabel;
+      return [friendlyOverviewItem(itemRaw), matchLabel, matchLabel2, verdictText(r.verdict), noteCell];
+    }
+    return [
+      friendlyOverviewItem(itemRaw),
+      fmtCell(r.asis), fmtCell(r.tobe), verdictText(r.verdict), noteCell,
+    ];
+  });
+  /* Total — pass / fail / skip 분리 카운트. skip 은 BE 가 verdict='SKIP' 보낸 행 합계. */
+  const skipCount = (dto.overview ?? []).filter((r) => r.verdict === 'SKIP').length;
+  const failCount = dto.totalChecks - dto.passedChecks - skipCount;
+  const total: Cell[][] = [
+    ['Total', String(dto.totalChecks),
+     `${dto.passedChecks} pass`,
+     `${failCount} fail`,
+     skipCount > 0 ? `${skipCount} skip` : ''],
+  ];
+  return [...meta, ...items, ...total];
+}
+
+function validationSumReconRows(dto: ValidationReportDto): Cell[][] {
+  return (dto.sumRecon ?? []).map((r) => [
+    fmtCell(r.column), fmtCell(r.type),
+    fmtCell(r.asisSum), fmtCell(r.tobeSum),
+    r.deltaPercent == null ? '' : `${fmtCell(r.deltaPercent)}%`,
+    verdictText(r.verdict),
+  ]);
+}
+
+function validationNullParityRows(dto: ValidationReportDto): Cell[][] {
+  return (dto.nullParity ?? []).map((r) => [
+    fmtCell(r.column), fmtCell(r.type),
+    r.asisNulls, r.tobeNulls, r.delta,
+    verdictText(r.verdict),
+  ]);
+}
+
+function validationMinMaxRows(dto: ValidationReportDto): Cell[][] {
+  return (dto.minMax ?? []).map((r) => [
+    fmtCell(r.column), fmtCell(r.type),
+    fmtCell(r.asisMin), fmtCell(r.asisMax),
+    fmtCell(r.tobeMin), fmtCell(r.tobeMax),
+    verdictText(r.verdict),
+  ]);
+}
+
+function validationRangeRows(dto: ValidationReportDto): Cell[][] {
+  return (dto.typeValid ?? []).map((r) => [
+    fmtCell(r.column), fmtCell(r.type),
+    fmtCell(r.bound), fmtCell(r.observedMax),
+    r.overflowRows ?? 0,
+    verdictText(r.verdict),
+  ]);
+}
+
+/** Quarantine 통계 시트 — stageLabel × (entries, rows, severity). 친숙화 라벨 적용. */
+function validationQuarantineRows(dto: ValidationReportDto): Cell[][] {
+  return (dto.quarantineStats ?? []).map((r) => [
+    friendlyStageLabel(r.stageLabel),
+    r.entries ?? 0,
+    r.rowsQuarantined ?? 0,
+    friendlySeverity(r.severity ?? ''),
+  ]);
+}
+
+/** quarantine severity → 화면 표시. error → "✗ Error", warning → "⚠ Warning", '' → ''. */
+function friendlySeverity(sev: string): string {
+  if (sev === 'error') return '✗ Error';
+  if (sev === 'warning') return '⚠ Warning';
+  return '';
+}
+
+/** BE 의 stageLabel (예: 'validate.range') → 고객사 친숙 라벨. */
+function friendlyStageLabel(label: string): string {
+  switch (label) {
+    case 'validate.range':       return 'Numeric Range Overflow';
+    case 'validate.type':        return 'Type Cast Failure';
+    case 'validate.length':      return 'String Length Overflow';
+    case 'validate.notnull':     return 'NOT NULL Violation';
+    case 'validate.pk_unique':   return 'Primary Key Duplicate';
+    case 'validate.fk':          return 'Foreign Key Violation';
+    case 'validate.sum_recon':   return 'Total Reconciliation Mismatch';
+    case 'validate.min_max':     return 'Min/Max Mismatch';
+    case 'validate.null_parity': return 'NULL Count Mismatch';
+    case 'validate.row_count':   return 'Record Count Mismatch';
+    case 'validate.checksum':    return 'Data Integrity Mismatch';
+    default: return label || '(unknown)';
+  }
+}
+
+/** Sheet 이름 → 해당 시트의 Cell[][] 행. dto null 또는 sheet 매칭 없으면 빈 배열. */
+export function validationRowsFor(dto: ValidationReportDto | null | undefined, sheetName: string): Cell[][] {
+  if (!dto) return [];
+  switch (sheetName) {
+    case 'Overview':    return validationOverviewRows(dto);
+    case 'Sum recon':   return validationSumReconRows(dto);
+    case 'NULL parity': return validationNullParityRows(dto);
+    case 'Min Max':     return validationMinMaxRows(dto);
+    case 'Range':       return validationRangeRows(dto);
+    case 'Quarantine':  return validationQuarantineRows(dto);
+    default: return [];
+  }
+}
 
 /* xlsx 셀 색상 팔레트 — 화면(in-app) 배지 색과 동일한 ARGB 형태.
    화면 CSS hex (#rrggbb) → ARGB (FFRRGGBB) 로 0xFF alpha prefix 만 붙임. */
@@ -1048,27 +1086,58 @@ const VALIDATION_CHECK_COUNT: Record<string, number> = {
 /* MAPPING(diff) Diff/Summary 시트의 strategy 색 — in-app STRATEGY_BADGE / STRATEGY_ROW_TINT 와 1:1.
    배지(col 0)는 진한 bg+fg, 나머지 행은 연한 tint. passed 는 흰색이라 칠하지 않는다. */
 const ARGB_STRATEGY_BADGE: Record<string, { bg: string; fg: string }> = {
-  rule:    { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
-  default: { bg: 'FFD6E3F3', fg: 'FF0A448A' },
-  null:    { bg: 'FFFBE8C6', fg: 'FF8A5500' },
-  passed:  { bg: 'FFFFFFFF', fg: 'FF605E5C' },
+  rule:            { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
+  default:         { bg: 'FFD6E3F3', fg: 'FF0A448A' },
+  null:            { bg: 'FFFBE8C6', fg: 'FF8A5500' },
+  passed:          { bg: 'FFFFFFFF', fg: 'FF605E5C' },
+  'type mismatch': { bg: 'FFF3D3D3', fg: 'FFA00000' },
 };
 const ARGB_STRATEGY_ROW_TINT: Record<string, string> = {
   rule: 'FFEEF7F1', default: 'FFEEF2FA', null: 'FFFBF4E6', passed: 'FFFFFFFF',
+  'type mismatch': 'FFFBEAEA',
 };
 const ARGB_BY_STATUS: Record<string, { bg: string; fg: string }> = {
+  // 실행 컨텍스트
   running: { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
   blocked: { bg: 'FFFFD9D9', fg: 'FFA00000' },
   warn:    { bg: 'FFFFE6C2', fg: 'FF8A4C00' },
   done:    { bg: 'FFDFF5E1', fg: 'FF0A5A1F' },
+  // 매핑 컨텍스트 (Dashboard snapshot Tables)
+  ready:    { bg: 'FFDFF5E1', fg: 'FF0A5A1F' },
+  review:   { bg: 'FFFFE6C2', fg: 'FF8A4C00' },
+  partial:  { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  unmapped: { bg: 'FFFFD9D9', fg: 'FFA00000' },
 };
 const ARGB_BY_VERDICT: Record<string, { bg: string; fg: string }> = {
+  /* 2026-05-31 친숙화 — 화면 표시 = 'Pass'/'Fail'/'Warning' (BE 의 'PASS'/'FAIL'/'WARN' 은
+     verdictText 에서 변환). 양쪽 키 모두 등록해 in-app preview / ExcelJS 둘 다 색칠. */
+  '✓ Pass': { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
   '✓ PASS': { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
   '✓':      { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
+  Pass:     { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
   PASS:     { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
+  '✗ Fail': { bg: 'FFF3D3D3', fg: 'FFA00000' },
   '✗ FAIL': { bg: 'FFF3D3D3', fg: 'FFA00000' },
   '✗':      { bg: 'FFF3D3D3', fg: 'FFA00000' },
+  Fail:     { bg: 'FFF3D3D3', fg: 'FFA00000' },
   FAIL:     { bg: 'FFF3D3D3', fg: 'FFA00000' },
+  /* WARN (Talend Data Stewardship 패턴) — 표현 차이로 인한 false-positive 또는 canonical
+     비교 일치인 row. 노란 amber tint. */
+  '⚠ Warning': { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  '⚠ WARN':    { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  '⚠':         { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  Warning:     { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  WARN:        { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  /* SKIP — 운영자가 명시 ack 한 WARN. 회색 — "처리됨" 표시. */
+  '⏭ SKIP':    { bg: 'FFE8EBEC', fg: 'FF555F6B' },
+  '⏭':         { bg: 'FFE8EBEC', fg: 'FF555F6B' },
+  SKIP:        { bg: 'FFE8EBEC', fg: 'FF555F6B' },
+  Skip:        { bg: 'FFE8EBEC', fg: 'FF555F6B' },
+  /* Checksum SHA-256 친숙화 — '✓ Match' / '⚠ Match (display differs)' / '✗ Mismatch'
+     (2026-05-31). hex string 노출 대신 사용자 친화 표현. */
+  '✓ Match':                     { bg: 'FFD4EEDB', fg: 'FF0A5A1F' },
+  '⚠ Match (display differs)':   { bg: 'FFFFF4D4', fg: 'FF7A5A00' },
+  '✗ Mismatch':                  { bg: 'FFF3D3D3', fg: 'FFA00000' },
 };
 
 /* ExcelJS 셀에 fill + font color 한번에 적용하는 헬퍼. */
@@ -1088,7 +1157,20 @@ async function downloadWorkbookAsXlsx(
   const wb = new ExcelJS.Workbook();
   wb.creator = 'KS Info System';
   wb.created = new Date();
+  await fillWorkbook(wb, categoryKey, sheets, getRows);
+  const blob = await xlsxBlobFromWorkbook(wb);
+  triggerBlobDownload(blob, filename);
+}
 
+/** 빈 workbook 에 한 카테고리의 모든 시트 + 행 + ARGB 배지 색을 채워 넣는다.
+ *  downloadWorkbookAsXlsx (단일 카테고리 다운로드) 와 buildXlsxBlob (bundle zip 용)
+ *  둘 다 이 함수를 통해 동일한 결과를 얻는다. */
+async function fillWorkbook(
+  wb: ExcelJS.Workbook,
+  categoryKey: CategoryKey,
+  sheets: SheetSchema[],
+  getRows: (sheetName: string) => Cell[][],
+): Promise<void> {
   for (const sheet of sheets) {
     /* Excel 시트명은 31 자 이하, \\ / ? : * [ ] 금지. 안전하게 잘라낸다. */
     const safeName = sheet.name.replace(/[\\/?:*[\]]/g, '_').slice(0, 31) || 'Sheet';
@@ -1199,23 +1281,22 @@ async function downloadWorkbookAsXlsx(
       });
     });
   }
+}
 
+/** ExcelJS Workbook → Blob. writeBuffer 가 Node Buffer(폴리필) 를 줄 수 있어
+ *  순수 ArrayBuffer 로 slice 한 뒤 Blob 으로 감싼다 (ZIP 헤더 깨짐 방지). */
+async function xlsxBlobFromWorkbook(wb: ExcelJS.Workbook): Promise<Blob> {
   const buf = await wb.xlsx.writeBuffer();
-  /* ExcelJS 3.x 의 browser 번들은 writeBuffer() 가 Node 스타일 Buffer(폴리필) 를
-     돌려준다. 이걸 그대로 new Blob([buf]) 에 넘기면 일부 번들 환경에서 Buffer.toString()
-     이 호출돼 텍스트로 직렬화 → ZIP 헤더가 깨져 Excel 에서 "파일 형식이 올바르지 않음"
-     오류가 난다.
-
-     해결책: 우리가 신뢰할 수 있는 raw ArrayBuffer 를 직접 잘라내서 Blob 에 넘긴다.
-       - ArrayBufferView (Buffer/Uint8Array) → underlying buffer 를 byteOffset/Length 만큼 slice
-       - 그 외 (ArrayBuffer) → 그대로 사용
-     이렇게 하면 Blob 은 Buffer wrapper 없이 순수 바이트만 본다. */
   const arrayBuffer: ArrayBuffer = ArrayBuffer.isView(buf)
     ? (buf.buffer as ArrayBuffer).slice(buf.byteOffset, buf.byteOffset + buf.byteLength)
     : (buf as ArrayBuffer);
-  const blob = new Blob([arrayBuffer], {
+  return new Blob([arrayBuffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
+}
+
+/** Blob 다운로드 — <a download> 트릭. */
+function triggerBlobDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -1224,6 +1305,26 @@ async function downloadWorkbookAsXlsx(
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+/** 한 카테고리 분의 ExcelJS workbook 을 만들어 Blob 으로 돌려준다.
+ *  downloadWorkbookAsXlsx 의 내부 로직과 동일 — bundle 다운로드에서 같은 결과를
+ *  blob 형태로 zip 에 넣기 위해 분리한 entry point. */
+export async function buildXlsxBlob(
+  categoryKey: CategoryKey,
+  sheets: SheetSchema[],
+  getRows: (sheetName: string) => Cell[][],
+): Promise<Blob> {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'KS Info System';
+  wb.created = new Date();
+  // downloadWorkbookAsXlsx 와 동일 sheet/row/스타일 처리를 거치도록 그 함수의 in-place
+  // 효과를 그대로 활용 — 임시로 호출하고 마지막 download 부분만 우회.
+  // (DRY 를 위해 downloadWorkbookAsXlsx 를 한 번 더 부르고 Blob 만 가로채는 대신,
+  // helper 가 받은 wb 를 호출자가 채우게 두면 단순하지만 시그니처가 커진다 — 그래서
+  // 동일 로직을 호출하는 시점에 writeBuffer 만 별도로 한다.)
+  await fillWorkbook(wb, categoryKey, sheets, getRows);
+  return xlsxBlobFromWorkbook(wb);
 }
 
 /* Clipboard 복사 — 최신 API 우선, 실패 시 fallback. */
@@ -1281,6 +1382,8 @@ function substitute(template: string, ctx: FormulaContext): string {
 
 export function ArtifactsPage() {
   const t = useT();
+  // read-only project = 산출물 download/copy 차단 (보기/미리보기는 허용).
+  const readOnly = useActiveProjectReadOnly();
   const projects = useWorkspaceStore((s) => s.projects);
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const project = useMemo(
@@ -1288,44 +1391,62 @@ export function ArtifactsPage() {
     [projects, activeProjectId],
   );
 
-  // MAPPING(diff) 산출물 — 최신 mapping snapshot rules + ASIS/TOBE DDL 조합.
+  // MAPPING(diff) 산출물 — 활성 snapshot 의 frozen rules + ASIS/TOBE DDL 조합.
+  // 활성 snapshot 우선순위: (1) 프로젝트의 pinned (baseline) snapshot, (2) 가장 최근 mapping snapshot.
+  // 사용자가 pin 을 옛 snapshot 으로 옮기면 그 시점의 executionContext/mapping 으로 자동 전환.
   const snapshots = useSnapshotsStore((s) => s.snapshots);
   const fetchSnapshots = useSnapshotsStore((s) => s.fetchByProject);
+  const pinnedIds = usePinnedSnapshotsStore((s) => s.pinnedIds);
   useEffect(() => {
     if (activeProjectId) fetchSnapshots(activeProjectId);
   }, [activeProjectId, fetchSnapshots]);
-  const latestMappingSnapshot = useMemo(
-    () =>
-      snapshots
-        .filter((s) => s.projectId === activeProjectId && s.type === 'mapping')
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null,
-    [snapshots, activeProjectId],
-  );
+  /* Artifacts 의 모든 source — pinned snapshot 이 있으면 type 무관 그것을 사용
+     (cutover snapshot pin 시 cutover run 의 박제 결과 표시), 없으면 latest mapping
+     snapshot 으로 fallback. 이전엔 type='mapping' 으로만 필터해서 cutover run 의
+     validation 이 ArtifactsPage 에서 절대 안 보이는 문제가 있었음 — cutover run 은
+     cutover snapshot 에만 박제되므로 mapping snapshot 의 executionContext 는
+     cutover 후에도 갱신되지 않기 때문. */
+  const activeSnapshot = useMemo(() => {
+    const projectSnaps = snapshots.filter((s) => s.projectId === activeProjectId);
+    const pinned = projectSnaps.find((s) => pinnedIds.includes(s.id));
+    if (pinned) return pinned;
+    const mapping = projectSnaps.filter((s) => s.type === 'mapping');
+    return [...mapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
+  }, [snapshots, activeProjectId, pinnedIds]);
   const [mappingRules, setMappingRules] = useState<DiffRule[]>([]);
+  const [snapshotData, setSnapshotData] = useState<SnapshotData | null>(null);
   const [asisSchema, setAsisSchema] = useState<DdlSchema | null>(null);
   const [tobeSchema, setTobeSchema] = useState<DdlSchema | null>(null);
   /* 데이터 소스: 최신 mapping snapshot 의 frozen rules 우선 (= 승인/동결된 산출물).
      스냅샷이 없는 프로젝트는 현재 live mapping_rules 로 폴백 — 그래야 스냅샷 전 단계에서도
-     매핑 산출물 미리보기가 가능. 어느 쪽이든 buildDiff 가 TOBE DDL 기준으로 필터한다. */
+     매핑 산출물 미리보기가 가능. 어느 쪽이든 buildDiff 가 TOBE DDL 기준으로 필터한다.
+     snapshotData (rules+bindings+codeMaps) 도 별도 보관 — Dashboard issue 검출에 사용. */
   useEffect(() => {
     if (!activeProjectId) {
       setMappingRules([]);
+      setSnapshotData(null);
       return;
     }
     let cancelled = false;
-    if (latestMappingSnapshot) {
+    if (activeSnapshot) {
       snapshotApi
-        .getMapping(latestMappingSnapshot.id)
-        .then((d) => { if (!cancelled) setMappingRules(d.rules); })
-        .catch(() => { if (!cancelled) setMappingRules([]); });
+        .getMapping(activeSnapshot.id)
+        .then((d) => {
+          if (cancelled) return;
+          setMappingRules(d.rules);
+          setSnapshotData(d);
+        })
+        .catch(() => {
+          if (!cancelled) { setMappingRules([]); setSnapshotData(null); }
+        });
     } else {
       mappingImportApi
         .listRules(activeProjectId)
-        .then((rs) => { if (!cancelled) setMappingRules(rs); })
-        .catch(() => { if (!cancelled) setMappingRules([]); });
+        .then((rs) => { if (!cancelled) { setMappingRules(rs); setSnapshotData(null); } })
+        .catch(() => { if (!cancelled) { setMappingRules([]); setSnapshotData(null); } });
     }
     return () => { cancelled = true; };
-  }, [activeProjectId, latestMappingSnapshot]);
+  }, [activeProjectId, activeSnapshot]);
   useEffect(() => {
     if (!activeProjectId) {
       setAsisSchema(null);
@@ -1337,19 +1458,69 @@ export function ArtifactsPage() {
     tobeDdlApi.get(activeProjectId).then((d) => { if (!cancelled) setTobeSchema(d); }).catch(() => { if (!cancelled) setTobeSchema(null); });
     return () => { cancelled = true; };
   }, [activeProjectId]);
+  // active snapshot 의 박제된 execution_context 가 source — runs API 폴링이 아니라
+  // "snapshot 시점" 의 상태를 보여준다 (사용자 결정 — phase 2). snapshot 의 executionContext
+  // 가 null (아직 한 번도 run 안 됨) 이면 diff 가 noRun=true 빈 상태.
+  const successTables = useMemo<Set<string> | null>(() => {
+    const ctx = activeSnapshot?.executionContext;
+    if (!ctx) return null;
+    const s = new Set<string>();
+    for (const st of ctx.stages) {
+      for (const tr of st.tables) {
+        if (tr.status === 'success') s.add(tr.tobeTable.toLowerCase());
+      }
+    }
+    return s;
+  }, [activeSnapshot]);
+  // MIGRATION SQL 은 load stage 의 합성 SQL 만 (Transform 의 박제는 backend 에 디버깅용으로
+  // 두지만 사용자에겐 노출 X — 사용자 의도: 실행되는 적재 SQL 만).
+  const compiledSqlByTable = useMemo<Record<string, string>>(() => {
+    const ctx = activeSnapshot?.executionContext;
+    if (!ctx) return {};
+    const map: Record<string, string> = {};
+    const loadStage = ctx.stages.find((s) => s.stageKey === 'load');
+    if (loadStage) {
+      for (const tr of loadStage.tables) {
+        if (tr.compiledSql) map[tr.tobeTable.toLowerCase()] = tr.compiledSql;
+      }
+    }
+    return map;
+  }, [activeSnapshot]);
+
   const diff = useMemo(
-    () => buildDiff(mappingRules, asisSchema, tobeSchema),
-    [mappingRules, asisSchema, tobeSchema],
+    () => buildDiff(mappingRules, asisSchema, tobeSchema, successTables),
+    [mappingRules, asisSchema, tobeSchema, successTables],
   );
+
+  /* VALIDATION — pinned snapshot 의 박제된 run 의 validation_reports 를 일괄 prefetch.
+     snapshot 의 executionContext.runId 가 source (= "그 시점의" 검증 결과). pin 변경 시 자동 swap.
+     키는 tobe_table. 값이 undefined = 그 테이블에 대한 report 없음 (run 안 됐거나 binding 미포함). */
+  const validationRunId = activeSnapshot?.executionContext?.runId ?? null;
+  const [validationByTable, setValidationByTable] =
+    useState<Record<string, ValidationReportDto>>({});
+  useEffect(() => {
+    if (!validationRunId) { setValidationByTable({}); return; }
+    let cancelled = false;
+    validationApi.listByRun(validationRunId)
+      .then((list) => {
+        if (cancelled) return;
+        const m: Record<string, ValidationReportDto> = {};
+        for (const r of list) m[r.tobeTable] = r;
+        setValidationByTable(m);
+      })
+      .catch(() => { if (!cancelled) setValidationByTable({}); });
+    return () => { cancelled = true; };
+  }, [validationRunId]);
   // DDL SCRIPTS — 임포트한 ASIS/TOBE DDL 을 CREATE TABLE 로 재구성 (AS-IS / TO-BE 탭).
   const ddlText = useMemo<Record<string, string>>(
     () => ({ 'AS-IS': reconstructDdl(asisSchema), 'TO-BE': reconstructDdl(tobeSchema) }),
     [asisSchema, tobeSchema],
   );
-  // DASHBOARD — TOBE DDL + mapping rules 로 커버리지 계산 (run 데이터 없음 → 이행 행 수는 N/A).
+  // DASHBOARD — TOBE/AS-IS DDL + mapping rules + snapshotData(bindings/codeMaps) 로 9 종 issue 검출.
+  //   snapshot 도 전달 → Overview header 의 Captured/Run 표시에 사용.
   const dashboard = useMemo(
-    () => buildDashboard(tobeSchema, mappingRules),
-    [tobeSchema, mappingRules],
+    () => buildDashboard(tobeSchema, asisSchema, mappingRules, snapshotData, activeSnapshot),
+    [tobeSchema, asisSchema, mappingRules, snapshotData, activeSnapshot],
   );
 
   const [openCats, setOpenCats] = useState<Record<CategoryKey, boolean>>({
@@ -1374,9 +1545,29 @@ export function ArtifactsPage() {
      "Rendered more hooks than during the previous render" 가 안 남. */
   const childTables = useMemo(() => {
     const base = childTablesFor(project?.name ?? '');
-    // MAPPING(diff) 테이블 목록 = 현재 TOBE DDL 에 있고 rule 이 매칭된 테이블 (DDL ordinal 순).
-    return { ...base, diff: diff.tables };
-  }, [project?.name, diff.tables]);
+    // MAPPING(diff) / MIGRATION SQL 둘 다 — 현재 TOBE DDL 에 있고 rule 이 매칭된 테이블.
+    // SQL 도 사이드바에 같은 list 가 뜨고 성공 외 테이블은 disabled.
+    // VALIDATION — pinned snapshot 의 박제 run 으로부터 prefetch 한 report 가 있는 테이블만.
+    //   report 없는 테이블은 트리에서도 안 보임 (run 안 됐거나 binding 미포함).
+    const validationTables = Object.keys(validationByTable).sort();
+    return {
+      ...base,
+      diff: diff.tables,
+      sql: diff.tables,
+      validation: validationTables.length > 0 ? validationTables : base.validation,
+    };
+  }, [project?.name, diff.tables, validationByTable]);
+
+  /* Bundle (zip) 다운로드 진행 중 상태 — 사이드바 버튼 disabled 처리용. */
+  const [bundleBusy, setBundleBusy] = useState(false);
+
+  /* diff / sql 의 default selected — early return 위에서 계산 (hooks 순서 보장).
+     latest run 미성공 테이블이 첫 번째일 수 있으니 첫 success 로 default.
+     두 카테고리 모두 같은 successTables/disabledTables 를 공유하므로 default 도 같다. */
+  const defaultSuccessTable = useMemo(() => {
+    if (!diff || diff.noRun) return undefined;
+    return diff.tables.find((t) => !diff.disabledTables.has(t.toLowerCase())) ?? undefined;
+  }, [diff]);
 
   if (!project) {
     return (
@@ -1395,12 +1586,77 @@ export function ArtifactsPage() {
     setActiveSheetByCat((prev) => ({ ...prev, [activeCategory.key]: name }));
 
   /* 사용자가 명시적으로 자식을 안 골라도 첫 번째 자식이 default 로 활성.
-     Dashboard / DDL 은 단일 산출물이라 항상 그 single child, 다른 카테고리면 MOCK_TABLES[0]. */
+     Dashboard / DDL 은 단일 산출물이라 항상 그 single child.
+     defaultDiffTable 은 early return 위에서 이미 계산함. */
   const selectedTable =
-    selectedTableByCat[activeCategory.key] ?? childTables[activeCategory.key][0];
+    selectedTableByCat[activeCategory.key]
+      ?? ((activeCategory.key === 'diff' || activeCategory.key === 'sql')
+          ? defaultSuccessTable
+          : childTables[activeCategory.key][0]);
   const handleSelectTable = (catKey: CategoryKey, tbl: string) => {
+    // diff / sql 의 disabled (latest run 미성공) 테이블은 선택 차단 — silently 무시.
+    if ((catKey === 'diff' || catKey === 'sql') && diff.disabledTables.has(tbl.toLowerCase())) return;
     setSelectedCat(catKey);
     setSelectedTableByCat((prev) => ({ ...prev, [catKey]: tbl }));
+  };
+
+  /* Artifacts 의 모든 다운로드 가능 산출물을 zip 한 묶음으로.
+     - Dashboard / MAPPING(diff) → .xlsx (in-app preview 와 동일 색상/스타일).
+     - DDL Scripts → asis/tobe 각 .sql.
+     - MIGRATION SQL → 성공 테이블 별 .migrate.sql.
+     - VALIDATION → prefetch 한 validation_reports 의 테이블 별 .report.xlsx. */
+  const handleDownloadBundle = async () => {
+    if (bundleBusy) return;
+    setBundleBusy(true);
+    try {
+      const JSZipMod = await import('jszip');
+      const JSZip = JSZipMod.default;
+      const zip = new JSZip();
+      const stem = projectSlug(project.name);
+
+      // 카테고리별 폴더 안에 배치 — 사용자가 압축 해제했을 때 카테고리별로 묶여 보이게.
+      // 1) Dashboard
+      if (dashboard) {
+        try {
+          const blob = await buildXlsxBlob('dashboard', SHEETS.dashboard,
+            (sheet) => dashboard.sheets[sheet] ?? []);
+          zip.file(`dashboard/${stem}.dashboard.xlsx`, await blob.arrayBuffer());
+        } catch (e) { console.warn('bundle: dashboard skipped', e); }
+      }
+      // 2) MAPPING (diff) — 박제 있을 때만.
+      if (!diff.noRun && diff.tables.length > 0) {
+        try {
+          const blob = await buildXlsxBlob('diff', SHEETS.diff, (sheet) => {
+            if (sheet === 'Diff') return diff.rows;
+            if (sheet === 'Summary') return diff.summaryAll;
+            return [];
+          });
+          zip.file(`mapping/${stem}.map.xlsx`, await blob.arrayBuffer());
+        } catch (e) { console.warn('bundle: mapping skipped', e); }
+      }
+      // 3) DDL Scripts
+      if (ddlText['AS-IS']) zip.file(`ddl/${stem}.asis.ddl.sql`, ddlText['AS-IS']);
+      if (ddlText['TO-BE']) zip.file(`ddl/${stem}.tobe.ddl.sql`, ddlText['TO-BE']);
+      // 4) MIGRATION SQL — table 별 합성 SQL.
+      for (const [tableLc, sql] of Object.entries(compiledSqlByTable)) {
+        if (sql) zip.file(`migration-sql/${tableLc}.migrate.sql`, sql);
+      }
+      // 5) VALIDATION — prefetch 한 report 별 .report.xlsx.
+      for (const [tableName, dto] of Object.entries(validationByTable)) {
+        try {
+          const blob = await buildXlsxBlob('validation', SHEETS.validation,
+            (sheet) => validationRowsFor(dto, sheet));
+          zip.file(`validation/${tableName}.report.xlsx`, await blob.arrayBuffer());
+        } catch (e) { console.warn('bundle: validation skipped', tableName, e); }
+      }
+
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      triggerBlobDownload(zipBlob, `${stem}.artifacts.zip`);
+    } catch (e) {
+      console.warn('bundle download failed', e);
+    } finally {
+      setBundleBusy(false);
+    }
   };
 
   return (
@@ -1420,16 +1676,21 @@ export function ArtifactsPage() {
             selectedTableByCat={selectedTableByCat}
             onSelectTable={handleSelectTable}
             childTables={childTables}
+            disabledDiffTables={diff.disabledTables}
+            diffNoRun={diff.noRun}
           />
         </div>
         <div style={styles.cta}>
           <button
-            disabled
-            title={t('artifacts.empty.hint')}
-            style={{ ...styles.btnPrimary, ...styles.btnPrimaryDisabled }}
+            onClick={() => { if (!readOnly) void handleDownloadBundle(); }}
+            disabled={bundleBusy || readOnly}
+            title={readOnly ? t('artifacts.workbook.readOnly') : (bundleBusy ? '' : t('siteExport.btn.download'))}
+            style={(bundleBusy || readOnly)
+              ? { ...styles.btnPrimary, ...styles.btnPrimaryDisabled }
+              : styles.btnPrimary}
           >
             <span style={styles.btnIcon}>↓</span>
-            {t('siteExport.btn.download')}
+            {bundleBusy ? '' : t('siteExport.btn.download')}
           </button>
         </div>
       </aside>
@@ -1445,6 +1706,8 @@ export function ArtifactsPage() {
           diff={diff}
           ddlText={ddlText}
           dashboard={dashboard}
+          compiledSqlByTable={compiledSqlByTable}
+          validationByTable={validationByTable}
         />
       </section>
     </div>
@@ -1463,6 +1726,10 @@ interface TreeProps {
   selectedTableByCat: Partial<Record<CategoryKey, string>>;
   onSelectTable: (cat: CategoryKey, tbl: string) => void;
   childTables: Record<CategoryKey, string[]>;
+  /** diff 카테고리에서 회색·비활성으로 보일 테이블 (lowercase). */
+  disabledDiffTables?: Set<string>;
+  /** diff 카테고리에 표시할 run 자체가 없을 때 = 안내 메시지로 대체. */
+  diffNoRun?: boolean;
 }
 
 function ArtifactTree({
@@ -1473,6 +1740,8 @@ function ArtifactTree({
   selectedTableByCat,
   onSelectTable,
   childTables,
+  disabledDiffTables,
+  diffNoRun,
 }: TreeProps) {
   const t = useT();
   return (
@@ -1502,22 +1771,30 @@ function ArtifactTree({
             </div>
             {open && (
               <div style={styles.tableList}>
-                {tables.map((tbl) => {
-                  const tblActive = active && selectedTable === tbl;
-                  return (
-                    <div
-                      key={tbl}
-                      onClick={() => onSelectTable(cat.key, tbl)}
-                      style={{
-                        ...styles.tableRow,
-                        ...(tblActive ? styles.tableRowActive : null),
-                      }}
-                      title={`${tbl}${cat.suffix}`}
-                    >
-                      {tbl}{cat.suffix}
-                    </div>
-                  );
-                })}
+                {(cat.key === 'diff' || cat.key === 'sql') && diffNoRun ? (
+                  <div style={styles.noRunHint}>{t('artifacts.diff.noRun')}</div>
+                ) : (
+                  tables.map((tbl) => {
+                    const disabled = (cat.key === 'diff' || cat.key === 'sql') && !!disabledDiffTables?.has(tbl.toLowerCase());
+                    const tblActive = active && selectedTable === tbl && !disabled;
+                    return (
+                      <div
+                        key={tbl}
+                        onClick={disabled ? undefined : () => onSelectTable(cat.key, tbl)}
+                        style={{
+                          ...styles.tableRow,
+                          ...(tblActive ? styles.tableRowActive : null),
+                          ...(disabled ? styles.tableRowDisabled : null),
+                        }}
+                        title={disabled
+                          ? `${tbl}${cat.suffix} — ${t('artifacts.diff.notInLatestRun')}`
+                          : `${tbl}${cat.suffix}`}
+                      >
+                        {tbl}{cat.suffix}
+                      </div>
+                    );
+                  })
+                )}
               </div>
             )}
           </div>
@@ -1543,6 +1820,13 @@ interface ExcelWorkbookProps {
   ddlText?: Record<string, string>;
   /** DASHBOARD — DDL + mapping 커버리지 시트(Overview/Tables/Issues) + fx 메타. */
   dashboard?: DashboardBuild;
+  /** MIGRATION SQL — latest run 의 transform stage 가 박제한 (테이블 → SQL 텍스트).
+   *  키는 lowercase tobeTable. selectedTable 의 lowercase 로 lookup. */
+  compiledSqlByTable?: Record<string, string>;
+  /** VALIDATION — pinned snapshot 의 박제 run 으로부터 prefetch 한 per-table report.
+   *  키는 tobe_table (case-sensitive — BE 의 binding.tobeTable 그대로). 값 미존재 = 그 테이블
+   *  에 대해 run 안 됐거나 binding 미포함. */
+  validationByTable?: Record<string, ValidationReportDto>;
 }
 
 function ExcelWorkbook({
@@ -1554,11 +1838,17 @@ function ExcelWorkbook({
   diff,
   ddlText,
   dashboard,
+  compiledSqlByTable,
+  validationByTable,
 }: ExcelWorkbookProps) {
   const t = useT();
+  const readOnly = useActiveProjectReadOnly();
   /* Copy 버튼 직후 짧은 "Copied" 토스트를 띄우기 위한 상태.
      true 로 세팅 후 ~1.6 초 뒤 자동으로 false. */
   const [copied, setCopied] = useState(false);
+  /* Validation drill-down 모달 — Data Integrity Check (SHA-256) FAIL 시 row-by-row 비교.
+     Validation 카테고리 + validationDto.checksum.verdict 가 'FAIL' 일 때만 트리거 버튼 표시. */
+  const [diffOpen, setDiffOpen] = useState(false);
   /* 트리에서 선택한 자식(예: dashboard-snapshot, m_user) 이 있으면 그 이름으로,
      없으면 placeholder 로 fallback. */
   const baseName = selectedTable ?? t('artifacts.workbook.placeholderName');
@@ -1575,56 +1865,77 @@ function ExcelWorkbook({
   /* 현재 시트에 그릴 행. 상태바 rows 카운트도 이 배열 길이를 사용.
      - DASHBOARD: DDL+mapping 커버리지(Overview/Tables/Issues) — 실데이터
      - MAPPING(diff): Diff = buildDiff rows(선택 테이블 필터), Summary = 테이블별 집계 — 실데이터
-     - VALIDATION: 아직 mock(MOCK_ROWS_BY_TABLE), MIGRATION SQL: MOCK_ROWS (의도적 mock) */
+     - VALIDATION: pinned snapshot 의 박제 run 의 validation_reports — 실데이터
+     - DDL / SQL: viewType='sql' 이라 grid 미사용 — dataRows 빈 array (sqlText path) */
+  const validationDto = (category.key === 'validation' && selectedTable)
+    ? validationByTable?.[selectedTable] ?? null
+    : null;
   const dataRows: Cell[][] =
     category.key === 'dashboard'
       ? (dashboard?.sheets[activeSheet] ?? [])
       : category.key === 'diff' && activeSheet === 'Diff'
         ? (diff?.rows ?? []).filter((r) => !selectedTable || String(r[1]) === selectedTable)
         : category.key === 'diff' && activeSheet === 'Summary'
-          ? (diff?.summaryByTable[selectedTable ?? ''] ?? [])
+          ? ((selectedTable ? (diff?.summaryByTable[selectedTable] ?? []) : (diff?.summaryAll ?? [])))
           : category.key === 'validation' && selectedTable
-            ? MOCK_ROWS_BY_TABLE.validation[selectedTable]?.[activeSheet] ?? []
-            : MOCK_ROWS[category.key]?.[activeSheet] ?? [];
+            ? validationRowsFor(validationDto, activeSheet)
+            : [];
 
-  /* DDL SCRIPTS (SQL 뷰) — 재구성한 AS-IS / TO-BE DDL 텍스트. activeSheet = 'AS-IS' | 'TO-BE'. */
+  /* viewType='sql' 인 두 카테고리:
+       - DDL SCRIPTS: ddlText[activeSheet] ('AS-IS' / 'TO-BE')
+       - MIGRATION SQL: compiledSqlByTable[selectedTable.toLowerCase()] — latest run 의 박제 SQL. */
   const isSqlView = category.viewType === 'sql';
-  const sqlText: string = isSqlView ? (ddlText?.[activeSheet] ?? '') : '';
+  const sqlText: string = !isSqlView
+    ? ''
+    : category.key === 'sql'
+      ? (selectedTable ? (compiledSqlByTable?.[selectedTable.toLowerCase()] ?? '') : '')
+      : (ddlText?.[activeSheet] ?? '');
   const sqlLines = sqlText ? sqlText.split('\n') : [];
 
-  /* Diff 카테고리 — 선택된 테이블의 ASIS source / TOBE 이름 & 변환 컬럼 수 (실데이터). */
+  /* Diff 카테고리 — fx 수식바 컨텍스트.
+     사이드바 테이블 선택 시: 그 테이블의 fxByTable, 미선택(전체) 시: fxAll (전체 카운트).
+     둘 다 실데이터. */
   const diffFx =
-    category.key === 'diff' && selectedTable ? diff?.fxByTable[selectedTable] : undefined;
+    category.key === 'diff'
+      ? (selectedTable ? diff?.fxByTable[selectedTable] : diff?.fxAll)
+      : undefined;
   /* Dashboard — fx 수식바의 {n} 테이블 수 / {progress} 매핑 커버리지 % (실데이터). */
   const dashFx = category.key === 'dashboard' ? dashboard : undefined;
 
   const handleCopy = () => {
+    if (readOnly) return;
     void copyToClipboard(sqlText).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1600);
     });
   };
   const handleDownload = () => {
-    /* 다운로드 파일명: <table>.<sheet>.sql — 예: acct_master.AS-IS.ddl.sql */
-    const dlName = `${baseName}.${activeSheet}${category.suffix}`;
+    if (readOnly) return;
+    /* 다운로드 파일명:
+         DDL          : <table>.<sheet>.sql — 예: acct_master.AS-IS.ddl.sql
+         MIGRATION SQL: <table>.migrate.sql — 시트 한 장이라 sheet 이름 생략. */
+    const dlName = category.key === 'sql'
+      ? `${baseName}${category.suffix}`
+      : `${baseName}.${activeSheet}${category.suffix}`;
     downloadText(dlName, sqlText, 'application/sql');
   };
   const handleDownloadXlsx = () => {
+    if (readOnly) return;
     /* 워크북 전체(현재 카테고리의 모든 시트)를 실제 xlsx 로 저장. */
     const dlName = `${baseName}${category.suffix}`;
-    /* 각 시트별 데이터 lookup — diff 는 실데이터(Diff/Summary), validation 은 테이블별 mock,
-       나머지는 카테고리 직접. in-app preview 와 동일 행을 그대로 xlsx 로 굽는다. */
+    /* 각 시트별 데이터 lookup — 다 실데이터. validation 은 prefetch 한 DTO 를 시트별 Cell[][]
+       로 변환. in-app preview 와 동일 행을 그대로 xlsx 로 굽는다. */
     const getRows = (sheetName: string): Cell[][] => {
       if (category.key === 'dashboard') return dashboard?.sheets[sheetName] ?? [];
       if (category.key === 'diff') {
         if (sheetName === 'Diff') return (diff?.rows ?? []).filter((r) => !selectedTable || String(r[1]) === selectedTable);
-        if (sheetName === 'Summary') return diff?.summaryByTable[selectedTable ?? ''] ?? [];
+        if (sheetName === 'Summary') return (selectedTable ? (diff?.summaryByTable[selectedTable] ?? []) : (diff?.summaryAll ?? []));
         return [];
       }
       if (category.key === 'validation' && selectedTable) {
-        return MOCK_ROWS_BY_TABLE.validation[selectedTable]?.[sheetName] ?? [];
+        return validationRowsFor(validationByTable?.[selectedTable] ?? null, sheetName);
       }
-      return MOCK_ROWS[category.key]?.[sheetName] ?? [];
+      return [];  // ddl / sql 은 viewType='sql' — xlsx grid 미사용
     };
     void downloadWorkbookAsXlsx(dlName, category.key, sheets, getRows);
   };
@@ -1632,14 +1943,13 @@ function ExcelWorkbook({
   /* fx 수식바 placeholder 치환 — projectName + 카테고리별 context.
      사이드바에서 테이블을 선택했으면 {table} 을 그 값으로 override.
      diff 카테고리면 선택 테이블의 fxByTable 로 ASIS/TOBE/changed override (실데이터).
-     validation 카테고리면 선택 테이블의 VALIDATION_CHECK_COUNT 로 {n} override (아직 mock). */
+     validation 카테고리면 prefetch 한 DTO 의 totalChecks 로 {n} override (실데이터). */
   const validationN: number | undefined =
-    category.key === 'validation' && selectedTable
-      ? VALIDATION_CHECK_COUNT[selectedTable]
+    category.key === 'validation' && validationDto
+      ? validationDto.totalChecks
       : undefined;
   const formulaText = substitute(SUMMARY_PLACEHOLDER[category.key], {
     project: projectName,
-    ...MOCK_FORMULA_CTX[category.key],
     ...(selectedTable ? { table: selectedTable } : {}),
     ...(validationN != null ? { n: validationN } : {}),
     ...(diffFx
@@ -1671,7 +1981,11 @@ function ExcelWorkbook({
         <div style={styles.vscodeTabBar}>
           {sheets.map((s) => {
             const isActive = s.name === activeSheet;
-            const tabFilename = `${baseName}.${s.name === 'AS-IS' ? 'asis' : 'tobe'}${category.suffix}`;
+            /* DDL 은 시트가 AS-IS/TO-BE 라 sheet 이름이 파일명에 들어가지만,
+               MIGRATION SQL 은 시트 한 장이라 selectedTable 만 들어간다. */
+            const tabFilename = category.key === 'sql'
+              ? `${baseName}${category.suffix}`
+              : `${baseName}.${s.name === 'AS-IS' ? 'asis' : 'tobe'}${category.suffix}`;
             return (
               <div
                 key={s.name}
@@ -1686,8 +2000,8 @@ function ExcelWorkbook({
           })}
           <div style={{ flex: 1 }} />
           <div style={styles.vscodeTabActions}>
-            <button onClick={handleCopy} style={styles.vscodeActionBtn}>Copy</button>
-            <button onClick={handleDownload} style={styles.vscodeActionBtn}>Download</button>
+            <button onClick={handleCopy} disabled={readOnly} style={readOnly ? { ...styles.vscodeActionBtn, opacity: 0.4, cursor: 'not-allowed' } : styles.vscodeActionBtn}>Copy</button>
+            <button onClick={handleDownload} disabled={readOnly} style={readOnly ? { ...styles.vscodeActionBtn, opacity: 0.4, cursor: 'not-allowed' } : styles.vscodeActionBtn}>Download</button>
           </div>
         </div>
 
@@ -1737,8 +2051,19 @@ function ExcelWorkbook({
           {filename} ({t('artifacts.workbook.readOnly')}) - Report
         </div>
         <div style={styles.titleBarRight}>
+          {category.key === 'validation'
+            && validationDto
+            && String(validationDto.checksum?.verdict ?? '') === 'FAIL' && (
+            <button
+              onClick={() => setDiffOpen(true)}
+              style={styles.titleBarActionBtn}
+              title="Open row-by-row Data Integrity diff"
+            >
+              View Row Diff
+            </button>
+          )}
           {category.downloadType === 'xlsx' ? (
-            <button onClick={handleDownloadXlsx} style={styles.titleBarActionBtn}>
+            <button onClick={handleDownloadXlsx} disabled={readOnly} style={readOnly ? { ...styles.titleBarActionBtn, opacity: 0.4, cursor: 'not-allowed' } : styles.titleBarActionBtn}>
               Download .xlsx
             </button>
           ) : (
@@ -1750,6 +2075,14 @@ function ExcelWorkbook({
           )}
         </div>
       </div>
+
+      <ValidationDiffModal
+        open={diffOpen}
+        runId={validationDto?.runId ?? null}
+        bindingId={validationDto?.bindingId ?? null}
+        tobeTable={validationDto?.tobeTable ?? selectedTable ?? ''}
+        onClose={() => setDiffOpen(false)}
+      />
 
       {/* 2) Ribbon — File 짙은 녹색, Home 활성 (밝은 회색) */}
       <div style={styles.ribbon}>
@@ -1821,9 +2154,11 @@ function ExcelWorkbook({
                   ? (row[0] as string)
                   : undefined;
               const mappingRowTint = mappingStatusKind ? STRATEGY_ROW_TINT[mappingStatusKind] : undefined;
-              /* freeForm Overview 행 분류 (validation Overview 만). */
+              /* freeForm Overview 행 분류 — validation / dashboard Overview 공용. */
               const isOverviewFreeForm =
-                currentSheet.freeForm === true && category.key === 'validation' && activeSheet === 'Overview';
+                currentSheet.freeForm === true
+                && (category.key === 'validation' || category.key === 'dashboard')
+                && activeSheet === 'Overview';
               const ovStyle: OverviewRowStyle | null = isOverviewFreeForm ? classifyOverviewRow(row) : null;
               const rowTint = ovStyle?.rowTint ?? mappingRowTint;
               /* row 번호 오프셋: freeForm = 헤더 0행 (데이터 row 1부터),
@@ -2021,15 +2356,15 @@ const styles: Record<string, React.CSSProperties> = {
   },
   btnIcon: { fontSize: 13, lineHeight: 1 },
 
-  tree: { fontFamily: 'var(--mono)', fontSize: 11, padding: '6px 0' },
+  tree: { fontFamily: 'var(--mono)', fontSize: 12, padding: '6px 0' },
   catRow: {
-    padding: '3px 10px',
+    padding: '5px 10px',
     display: 'flex',
     alignItems: 'center',
     gap: 6,
     cursor: 'pointer',
-    color: 'var(--text-2)',
-    fontSize: 10,
+    color: 'var(--text)',
+    fontSize: 12,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
@@ -2040,15 +2375,15 @@ const styles: Record<string, React.CSSProperties> = {
   },
   catCaret: { display: 'inline-block', width: 8, color: 'var(--text-4)' },
   catIcon: { color: 'var(--text-4)' },
-  catLabel: { flex: 1 },
+  catLabel: { flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   catCount: { color: 'var(--text-4)' },
 
   /* 트리 자식 — 카테고리 펼침 시 보이는 테이블 목록 */
   tableList: { paddingTop: 2, paddingBottom: 4 },
   tableRow: {
-    padding: '2px 10px 2px 32px',
-    fontSize: 11,
-    color: 'var(--text-3)',
+    padding: '4px 10px 4px 32px',
+    fontSize: 12.5,
+    color: 'var(--text-2)',
     fontFamily: 'var(--mono)',
     cursor: 'pointer',
     userSelect: 'none',
@@ -2061,6 +2396,21 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'var(--navy)',
     fontWeight: 600,
     borderLeft: '2px solid var(--navy)',
+  },
+  /* diff: latest run 에서 성공하지 못한 테이블 — 회색·dim, click 차단(컴포넌트에서 onClick 미부착). */
+  tableRowDisabled: {
+    color: 'var(--text-4)',
+    opacity: 0.55,
+    cursor: 'not-allowed',
+    fontStyle: 'italic',
+  },
+  /* diff: run 자체가 없을 때 사이드바 자리에 뜨는 안내 한 줄. */
+  noRunHint: {
+    padding: '6px 10px 6px 32px',
+    fontSize: 11.5,
+    color: 'var(--text-4)',
+    fontStyle: 'italic',
+    lineHeight: 1.4,
   },
 
   /* ===== Excel workbook chrome (fills right pane) ===== */
@@ -2261,7 +2611,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: EXCEL_TEXT_MUTED,
     borderRight: '1px solid #c8c8c8',
     borderBottom: `1px solid ${EXCEL_BORDER_STRONG}`,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: 400,
     textAlign: 'center',
   },
@@ -2275,7 +2625,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: EXCEL_TEXT_MUTED,
     borderRight: `1px solid ${EXCEL_BORDER_STRONG}`,
     borderBottom: '1px solid #d8d8d8',
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: 400,
     textAlign: 'center',
     padding: 0,
@@ -2300,7 +2650,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '3px 6px 0 6px',
     background: EXCEL_RIBBON_BG,
     color: EXCEL_GREEN,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: 700,
     textAlign: 'left',
     borderRight: '1px solid #c8c8c8',
@@ -2317,7 +2667,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '0 6px 3px 6px',
     background: EXCEL_RIBBON_BG,
     color: EXCEL_TEXT_DIM,
-    fontSize: 10.5,
+    fontSize: 11.5,
     fontWeight: 400,
     textAlign: 'left',
     borderRight: '1px solid #c8c8c8',
@@ -2330,10 +2680,10 @@ const styles: Record<string, React.CSSProperties> = {
     height: 20,
     padding: '0 6px',
     background: '#fff',
-    color: EXCEL_TEXT,
+    color: '#3b3a39',
     borderRight: `1px solid ${EXCEL_BORDER_CELL}`,
     borderBottom: `1px solid ${EXCEL_BORDER_CELL}`,
-    fontSize: 11,
+    fontSize: 12.5,
     verticalAlign: 'middle',
     /* 긴 텍스트는 한 줄에서 잘라서 ellipsis — 행 높이를 20px 로 유지 (Excel 와 동일). */
     whiteSpace: 'nowrap',

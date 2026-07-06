@@ -23,15 +23,14 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class WorkerDispatcher {
 
-    /** PoC 시점의 단일 Worker ID. worker_nodes 도입 시 動的 selection に置換. */
+    /** Worker username 미할당시 (assignee 없는 ad-hoc run 등) 사용하는 fallback workerId. */
     public static final String DEFAULT_WORKER_ID = "default";
 
     private final SimpMessagingTemplate messagingTemplate;
 
     /**
-     * RUN_START envelope を Worker トピックに publish.
-     *
-     * Worker は受信後 {@code GET /api/v1/internal/runs/{runId}/payload} で詳細 fetch.
+     * RUN_START envelope 을 assigned worker 의 토픽에 publish.
+     * rh.workerId 가 username (executionAssignee) 이고, destination 도 그 username 으로 라우팅.
      */
     public void dispatchRunStart(RunHistory rh) {
         Map<String, Object> payload = new LinkedHashMap<>();
@@ -39,36 +38,30 @@ public class WorkerDispatcher {
         payload.put("projectId", rh.getProjectId());
         payload.put("runType", rh.getRunType().name());
         payload.put("triggerSource", rh.getTriggerSource().name());
-
-        send("RUN_START", payload);
+        send(rh.getWorkerId(), "RUN_START", payload);
     }
 
-    /**
-     * RUN_CANCEL envelope を publish.
-     *
-     * @param reason "user_aborted" / "timed_out" / "system_shutdown" 等
-     */
-    public void dispatchRunCancel(String runId, String reason) {
+    /** RUN_CANCEL — 그 run 을 발사했던 worker 로 보낸다 (workerId 인자 명시). */
+    public void dispatchRunCancel(String workerId, String runId, String reason) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("runId", runId);
         payload.put("reason", reason);
-
-        send("RUN_CANCEL", payload);
+        send(workerId, "RUN_CANCEL", payload);
     }
 
-    /** PING — Coordinator 生存通知 (Worker heartbeat 의 逆方向). 任意. */
-    public void dispatchPing() {
-        send("PING", Map.of());
+    /** PING — Coordinator 생존 통지 (Worker heartbeat 의 역방향). 任意. */
+    public void dispatchPing(String workerId) {
+        send(workerId, "PING", Map.of());
     }
 
-    private void send(String type, Map<String, Object> payload) {
+    private void send(String workerId, String type, Map<String, Object> payload) {
         Map<String, Object> envelope = new LinkedHashMap<>();
         envelope.put("messageId", "msg-" + UUID.randomUUID().toString().substring(0, 8));
         envelope.put("timestamp", OffsetDateTime.now().toString());
         envelope.put("type", type);
         envelope.put("payload", payload);
 
-        String destination = "/topic/worker/" + DEFAULT_WORKER_ID + "/tasks";
-        messagingTemplate.convertAndSend(destination, envelope);
+        String dest = (workerId == null || workerId.isBlank()) ? DEFAULT_WORKER_ID : workerId;
+        messagingTemplate.convertAndSend("/topic/worker/" + dest + "/tasks", envelope);
     }
 }

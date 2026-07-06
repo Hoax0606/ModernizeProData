@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18
     container_name: mpd-meta-pg
     environment:
       POSTGRES_DB: mpd_meta
@@ -8,13 +8,36 @@ services:
       POSTGRES_PASSWORD: mpd
     ports:
       - "5432:5432"
+    # PG 18 부터 권장 mount path 변경 — /var/lib/postgresql 위에 mount 하면
+    # image 가 major-version-specific subdirectory 를 자동 생성. 옛 PG 16 의
+    # /var/lib/postgresql/data mount 와 비호환.
     volumes:
-      - mpd_pgdata:/var/lib/postgresql/data
+      - mpd_pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mpd -d mpd_meta"]
       interval: 5s
       timeout: 3s
       retries: 10
 
+  # TO-BE 데이터베이스 (이행 대상). Load stage 의 PgCopyManager 가 적재.
+  # 메타 DB 와 분리해 충돌 방지 + cutover 시뮬레이션 안전.
+  postgres-tobe:
+    image: postgres:16-alpine
+    container_name: mpd-tobe-pg
+    environment:
+      POSTGRES_DB: mpd_tobe
+      POSTGRES_USER: mpd
+      POSTGRES_PASSWORD: mpd
+    ports:
+      - "5434:5432"
+    volumes:
+      - mpd_tobe_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mpd -d mpd_tobe"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   mpd_pgdata:
+  mpd_tobe_pgdata:

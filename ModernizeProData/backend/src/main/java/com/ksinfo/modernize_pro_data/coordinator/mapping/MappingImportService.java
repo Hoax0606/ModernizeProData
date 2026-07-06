@@ -67,6 +67,14 @@ public class MappingImportService {
     private final MappingRuleRepository ruleRepo;
     private final MappingCodeMapRepository codeRepo;
     private final MappingTableBindingRepository bindingRepo;
+    private final com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository ddlTableRepo;
+    /** self proxy — CSV 파싱(트랜잭션 밖) 후 persistImport(@Transactional) 를 프록시 경유로
+     *  호출해 트랜잭션 advice 가 적용되게 한다. 직접 this.persistImport 호출은 self-invocation
+     *  이라 @Transactional 이 무시됨. ObjectProvider = lazy → 순환참조 없음. */
+    private final org.springframework.beans.factory.ObjectProvider<MappingImportService> selfProvider;
+    /** persistImport 의 project 단위 advisory lock 용 (동시 import / setBaseline 직렬화). */
+    @jakarta.persistence.PersistenceContext
+    private jakarta.persistence.EntityManager entityManager;
 
     /**
      * @param columnCsv    column_mapping.csv 의 원본 바이트
@@ -91,7 +99,6 @@ public class MappingImportService {
      * rule/binding 만 갱신하고(다른 테이블·수동 수정 보존), code 는 그 테이블이 참조하는
      * domain 만 갱신한다.
      */
-    @Transactional
     public MappingImport importFromCsv(
             String projectId,
             byte[] columnCsv,
@@ -111,13 +118,44 @@ public class MappingImportService {
         boolean hasColumn = columnCsv != null && columnCsv.length > 0;
         boolean hasCode   = codeCsv   != null && codeCsv.length   > 0;
 
+        // ── 인코딩 정규화 (2026-06-16) ──────────────────────────────────
+        // 맵핑정의서는 사람이 Excel 로 만들어 한/일 Windows 에선 ANSI(CP949/Shift-JIS)로
+        // 저장되기 쉽다. DuckDB read_csv 는 기본 UTF-8 + ignore_errors=true 라, 비 UTF-8
+        // 멀티바이트(예: notes 의 한글)가 든 row 를 invalid 로 보고 통째로 silent skip 했다
+        // → 일부 컬럼만 매핑되는 원인. read_csv 전에 UTF-8 로 정규화해 모든 row 를 보존한다.
+        if (hasColumn) columnCsv = toUtf8(columnCsv);
+        if (hasCode)   codeCsv   = toUtf8(codeCsv);
+
+        // ── 파싱 단계 (2026-06-04: 트랜잭션 밖으로 분리) ──────────────────
+        // DuckDB CSV 파싱은 대형 매핑정의서에서 느린데, 이전엔 이게 @Transactional 안에서
+        // 돌아 메타 DB connection + 그 project 의 mapping 테이블 lock 을 파싱 내내 점유 →
+        // 다중 사용자 import 시 병목. 파싱(읽기 only)을 밖으로 빼고, DB 쓰기만 짧은
+        // 트랜잭션(persistImport)으로 격리한다.
         Path columnTmp = null;
         Path codeTmp = null;
         try {
             ParsedRules parsed = new ParsedRules(List.of());
             if (hasColumn) {
                 columnTmp = writeTemp(columnCsv, "column_mapping");
-                parsed = parseColumnCsv(columnTmp);
+                // 이 project 의 AS-IS DDL 의 (schema, physical_name) set — site 통합 csv 에서
+                // 다른 project 용 row 가 잘못된 combine 으로 들어가는 사고 방지.
+                java.util.Set<String> projectAsisKeys = ddlTableRepo
+                        .findByProjectIdAndSideOrderByOrdinalAsc(projectId, "asis").stream()
+                        .map(t -> (t.getSchemaName() == null ? "" : t.getSchemaName().toLowerCase())
+                                + "|" + (t.getPhysicalName() == null ? "" : t.getPhysicalName().toLowerCase()))
+                        .collect(java.util.stream.Collectors.toSet());
+                // TO-BE 측도 같은 패턴으로 검증 — DDL 에 없는 tobe_table 행은 skip.
+                // 旧仕様은 unmatched 行도 그대로 binding 化되어 orphan binding 의 主源이었다
+                // (2026-05-29 발견. e.g. CSV 内 `public.orders` / `public.employees` 等).
+                // 이 검증 없으면 Load stage 에서 PG 에 그 table 이 없어서 통째로 fail.
+                // 안 그러면 Load stage 에서 PG 에 그 table 이 없어서 통째로 fail
+                // (UI 가 "N 중 X 실패" 로 표시).
+                java.util.Set<String> projectTobeKeys = ddlTableRepo
+                        .findByProjectIdAndSideOrderByOrdinalAsc(projectId, "tobe").stream()
+                        .map(t -> (t.getSchemaName() == null ? "" : t.getSchemaName().toLowerCase())
+                                + "|" + (t.getPhysicalName() == null ? "" : t.getPhysicalName().toLowerCase()))
+                        .collect(java.util.stream.Collectors.toSet());
+                parsed = parseColumnCsv(columnTmp, projectAsisKeys, projectTobeKeys);
                 // 테이블 단위 적용이면 그 TO-BE 테이블의 룰만 남긴다.
                 if (tobeTableFilter != null) {
                     List<RuleRow> only = new ArrayList<>();
@@ -133,6 +171,55 @@ public class MappingImportService {
                 codeTmp = writeTemp(codeCsv, "code_mapping");
                 codes = parseCodeCsv(codeTmp);
             }
+
+            // ── 영속 단계 (짧은 @Transactional) — self proxy 경유로 호출 ──
+            return selfProvider.getObject().persistImport(
+                    projectId, parsed, codes, columnCsv, codeCsv,
+                    columnFilename, codeFilename, userName, tobeTableFilter, hasColumn, hasCode);
+        } catch (ApiException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("Mapping import failed", e);
+            throw new ApiException(
+                    "MAPPING_IMPORT_FAILED",
+                    "임포트 실패: " + e.getMessage(),
+                    HttpStatus.INTERNAL_SERVER_ERROR);
+        } finally {
+            deleteQuiet(columnTmp);
+            deleteQuiet(codeTmp);
+        }
+    }
+
+    /**
+     * 영속 단계 — 파싱 결과(parsed/codes)를 메타 DB 에 기록. 파싱이 끝난 in-memory 데이터만
+     * 다루므로 트랜잭션이 짧다 (DuckDB 파싱은 호출자가 트랜잭션 밖에서 이미 수행).
+     * public + self proxy 호출이라 @Transactional advice 적용됨.
+     */
+    @Transactional
+    public MappingImport persistImport(
+            String projectId,
+            ParsedRules parsed,
+            ParsedCodes codes,
+            byte[] columnCsv,
+            byte[] codeCsv,
+            String columnFilename,
+            String codeFilename,
+            String userName,
+            String tobeTableFilter,
+            boolean hasColumn,
+            boolean hasCode
+    ) {
+        {
+            // project 단위 직렬화 — import 가 bindings/codes/rules 를 deleteAll + 재삽입하는데,
+            // 같은 project 에 동시 import (또는 setBaseline 의 restoreMapping) 가 겹치면 한쪽의
+            // cascade DELETE 가 다른 tx 가 이미 지운 MappingTableBindingSource 행을 건드려
+            // "Row was updated or deleted by another transaction" (StaleObjectStateException) → 500.
+            // SnapshotController.setBaselineTx 와 동일한 advisory xact lock 키(hashtext(projectId))를
+            // 잡아 같은 project 의 매핑 rewrite 를 직렬화 (다른 project 는 다른 키라 병렬 유지).
+            // transaction 종료 시 자동 해제. (2026-06-04)
+            entityManager.createNativeQuery("SELECT pg_advisory_xact_lock(hashtext(?1))")
+                    .setParameter(1, projectId)
+                    .getSingleResult();
 
             // 1) MappingImport 레코드 (업로드한 슬롯만 채움)
             MappingImport mi = new MappingImport();
@@ -209,6 +296,44 @@ public class MappingImportService {
 
             // (b) column rules
             if (hasColumn) {
+                // 자식 link 된 (schema, table) 은 csv re-import 로 덮어쓰지 않음 — master 가 진실의
+                // source. project 단위든 테이블 단위든 동일 — 자식 binding 사본 보존 + parsed.rules 의
+                // 그 키 row 제거.
+                Set<String> linkedKeys = new HashSet<>();
+                List<MappingTableBinding> linkedBindingsToPreserve = new ArrayList<>();
+                for (MappingTableBinding lb : bindingRepo.findByProjectId(projectId)) {
+                    if (lb.getSharedFromProjectId() == null) continue;
+                    // 테이블 단위 import 시 그 테이블 외에는 어차피 wipe 안 됨 — 보존 불필요.
+                    if (tobeTableFilter != null && !tobeTableFilter.equalsIgnoreCase(lb.getTobeTable())) continue;
+                    linkedKeys.add((lb.getTobeSchema() == null ? "" : lb.getTobeSchema()) + "|" + lb.getTobeTable());
+                    MappingTableBinding cp = new MappingTableBinding();
+                    // 새 UUID — 1차 캐시 충돌 / merge 회피. link 정보만 보존이 핵심.
+                    cp.setId("mb-" + UUID.randomUUID().toString().substring(0, 8));
+                    cp.setProjectId(lb.getProjectId());
+                    cp.setImportId(null);
+                    cp.setTobeSchema(lb.getTobeSchema());
+                    cp.setTobeTable(lb.getTobeTable());
+                    cp.setCompositionKind(lb.getCompositionKind());
+                    cp.setWhereFilter(lb.getWhereFilter());
+                    cp.setGroupByExpr(lb.getGroupByExpr());
+                    cp.setExpandExpr(lb.getExpandExpr());
+                    cp.setBindingOrigin(lb.getBindingOrigin());
+                    cp.setSharedFromProjectId(lb.getSharedFromProjectId());
+                    cp.setCreatedBy(lb.getCreatedBy());
+                    cp.setCreatedAt(lb.getCreatedAt());
+                    cp.setUpdatedBy(lb.getUpdatedBy());
+                    cp.setUpdatedAt(now);
+                    linkedBindingsToPreserve.add(cp);
+                }
+                if (!linkedKeys.isEmpty()) {
+                    List<RuleRow> filtered = new ArrayList<>();
+                    for (RuleRow r : parsed.rules) {
+                        String k = (r.tobeSchema == null ? "" : r.tobeSchema) + "|" + r.tobeTable;
+                        if (!linkedKeys.contains(k)) filtered.add(r);
+                    }
+                    parsed = new ParsedRules(filtered);
+                }
+
                 // alias 자동 할당 — (tobe_table 그룹 × asis_table) 마다 단일 alias.
                 Map<String, Map<String, String>> aliasMaps = buildAliasMaps(parsed.rules);
 
@@ -221,26 +346,45 @@ public class MappingImportService {
                         continue;
                     }
                     if (row.asisColumn == null || row.asisColumn.length == 0 || row.asisTable == null) continue;
-                    // multi-source (combine) — 자동 transform_sql 생성 불가. 사용자가 row editor 에서
-                    // MAKE_DATE / CONCAT 같은 식을 직접 입력하는 것을 기대.
-                    if (row.asisColumn.length > 1) continue;
                     String tobeKey = (row.tobeSchema == null ? "" : row.tobeSchema) + "|" + row.tobeTable;
                     Map<String, String> aliasMap = aliasMaps.getOrDefault(tobeKey, Map.of());
                     String alias = aliasMap.get(row.asisTable);
                     if (alias == null) continue;
-                    String onlyCol = row.asisColumn[0];
-                    String src = alias + "." + onlyCol;
                     String asisTypeFirst = (row.asisType != null && row.asisType.length > 0)
                             ? row.asisType[0] : null;
 
+                    // single source 면 alias.col, multi-source (combine) 면 alias.col1 || alias.col2 || ...
+                    // 사용자가 row editor 에서 의도에 맞게 수정 (MAKE_DATE / CONCAT with delimiter 등).
+                    String src;
+                    if (row.asisColumn.length == 1) {
+                        src = alias + "." + row.asisColumn[0];
+                    } else {
+                        StringBuilder concat = new StringBuilder();
+                        for (int i = 0; i < row.asisColumn.length; i++) {
+                            String c = row.asisColumn[i] == null ? "" : row.asisColumn[i].trim();
+                            if (c.isEmpty()) continue;
+                            if (concat.length() > 0) concat.append(" || ");
+                            concat.append(alias).append(".").append(c);
+                        }
+                        if (concat.length() == 0) continue;
+                        src = concat.toString();
+                    }
+
                     // code_domain 이 지정돼있고 해당 domain 의 entries 가 있으면 CASE 자동 생성
-                    if (row.codeDomain != null && codeByDomain.containsKey(row.codeDomain)) {
+                    // (multi-source 에는 code_domain 의도가 보통 없지만 single source 일 때만 동작)
+                    if (row.codeDomain != null && codeByDomain.containsKey(row.codeDomain)
+                            && row.asisColumn.length == 1) {
                         row.transformSql = buildCaseFromCodeMap(src, codeByDomain.get(row.codeDomain));
-                    } else if (typeCategoriesMatch(asisTypeFirst, row.tobeType)) {
+                    } else if (row.tobeType == null || row.tobeType.isBlank()
+                            || "string".equals(typeCategory(row.tobeType))) {
+                        // tobe 가 string 또는 미명시 — ExtractStage 의 all_varchar input 그대로 통과.
                         row.transformSql = src;
                     } else {
-                        // CHAR(8) YYYYMMDD / CHAR(14) YYYYMMDDHH24MISS 같은 Oracle 컨벤션 패턴 우선
-                        String strDateSql = tryStringToDateSql(src, asisTypeFirst, row.tobeType);
+                        // tobe 가 non-string — 실제 input 은 VARCHAR (all_varchar) 이므로 항상 변환 필요.
+                        // CHAR(8) YYYYMMDD 같은 컨벤션 hint 가 있으면 STRPTIME (single source 일 때만),
+                        // 아니면 명시적 CAST.
+                        String strDateSql = row.asisColumn.length == 1
+                                ? tryStringToDateSql(src, asisTypeFirst, row.tobeType) : null;
                         row.transformSql = strDateSql != null ? strDateSql
                                 : "CAST(" + src + " AS " + (row.tobeType != null ? row.tobeType : "VARCHAR") + ")";
                     }
@@ -261,23 +405,14 @@ public class MappingImportService {
                 else bindingRepo.deleteByProjectIdAndTobeTable(projectId, tobeTableFilter);
                 bindingRepo.flush();
                 List<MappingTableBinding> bindings = deriveBindings(parsed.rules, projectId, mi.getId(), userName, now);
+                // 자식 link binding 은 csv 와 무관하게 보존 (link 정보 + master inherit 유지)
+                bindings.addAll(linkedBindingsToPreserve);
                 bindingRepo.saveAll(bindings);
             }
 
             log.info("Mapping import done — project={} rules={} codeMaps={} (column={}, code={})",
                     projectId, parsed.rules.size(), codes.codes.size(), hasColumn, hasCode);
             return mi;
-        } catch (ApiException e) {
-            throw e;
-        } catch (Exception e) {
-            log.warn("Mapping import failed", e);
-            throw new ApiException(
-                    "MAPPING_IMPORT_FAILED",
-                    "임포트 실패: " + e.getMessage(),
-                    HttpStatus.INTERNAL_SERVER_ERROR);
-        } finally {
-            deleteQuiet(columnTmp);
-            deleteQuiet(codeTmp);
         }
     }
 
@@ -297,15 +432,39 @@ public class MappingImportService {
      * 그룹의 변환 ロジック / default / code_domain / notes 등 메타는 **첫 row 의 값만** 사용한다.
      */
     private ParsedRules parseColumnCsv(Path csv) {
+        return parseColumnCsv(csv, null, null);
+    }
+
+    /**
+     * @param projectAsisKeys 이 project 의 AS-IS DDL 에 등록된 (schema_lower|table_lower) set.
+     *                       null 이면 검증 안 함 (모든 row 통과). 값 있으면 그 set 의 asis_table 만
+     *                       parsed.rules 에 포함 — site 통합 csv 에서 다른 project row 의 잘못된
+     *                       combine 방지.
+     * @param projectTobeKeys 이 project 의 TO-BE DDL 에 등록된 (schema_lower|table_lower) set.
+     *                       null 이면 검증 안 함. 값 있으면 그 set 에 없는 tobe_table 행은 skip + warn.
+     *                       2026-05-29 추가: CSV 内 DDL 不在 table 行이 orphan binding 의 주원인
+     *                       이었던 problem 의 대책. Load stage 통째 fail 방지도 부수효과.
+     *                       이었던 problem 의 대책 — Load 단계에서 통째로 fail 되는 케이스 방지.
+     */
+    private ParsedRules parseColumnCsv(Path csv,
+                                       java.util.Set<String> projectAsisKeys,
+                                       java.util.Set<String> projectTobeKeys) {
         Map<String, Integer> headers = new HashMap<>();
         // LinkedHashMap — 입력 순서 보존 (셀결합 흉내가 의미 있으려면 순서가 중요).
         LinkedHashMap<String, RuleRow> grouped = new LinkedHashMap<>();
 
         // read_csv (not _auto) 으로 delimiter / quote / escape 모두 명시.
+        // RFC 4180 dialect 명시 + 관대한 옵션 — sniffer 가 셀 안의 따옴표/콤마 (SQL fragment
+        // 같은 복잡한 notes) 로 실패하지 않도록. strict_mode=false / ignore_errors=true /
+        // max_line_size 확장으로 RFC 외 변종도 수용.
         String sql = "SELECT * FROM read_csv('" + escape(csv.toString())
-                + "', header=true, delim=',', all_varchar=true, null_padding=true)";
+                + "', header=true, delim=',', quote='\"', escape='\"', all_varchar=true, "
+                + "null_padding=true, strict_mode=false, ignore_errors=true, "
+                + "max_line_size=10000000)";
 
-        try (Statement st = duckDbService.statement();
+        // 요청별 격리 connection — 공유 connection 동시 사용 시 pending result 무효화 회피.
+        try (java.sql.Connection conn = duckDbService.requestConnection();
+             Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(sql)) {
             ResultSetMetaData md = rs.getMetaData();
             for (int i = 1; i <= md.getColumnCount(); i++) {
@@ -314,6 +473,12 @@ public class MappingImportService {
                 headers.put(clean, i);
             }
             validateRequired("column_mapping.csv", REQUIRED_RULE_COLUMNS, headers.keySet());
+
+            // schema-lenient 매칭 — 맵핑정의서가 schema 한정(예: BANKSYS.TRANSACTIONS)인데 AS-IS/TO-BE
+            // DDL 은 schema 없이(TRANSACTIONS) 임포트되면(또는 반대) exact "schema|table" 키가 안 맞아
+            // 유효 row 가 통째로 silent drop 되던 버그(2026-06-11). 테이블명만으로도 매칭되게 fallback.
+            java.util.Set<String> asisTableOnly = projectAsisKeys == null ? java.util.Set.of() : tableNamesOf(projectAsisKeys);
+            java.util.Set<String> tobeTableOnly = projectTobeKeys == null ? java.util.Set.of() : tableNamesOf(projectTobeKeys);
 
             String lastTobeTableRaw = null;
             String lastTobeColumn   = null;
@@ -341,9 +506,49 @@ public class MappingImportService {
                     tobeTable  = tobeTableRaw;
                 }
 
+                // project TO-BE DDL 検証: DDL 에 없는 tobe_table 의 row 는 skip + warn.
+                // CSV 内의 余分 行 (다른 customer / 旧 PoC 의 fixture) 이 orphan binding 의
+                // 主源 이었던 problem 의 대책 (2026-05-29 추가).
+                if (projectTobeKeys != null) {
+                    String tobeCheckKey = tobeSchema.toLowerCase() + "|" + tobeTable.toLowerCase();
+                    if (!projectTobeKeys.contains(tobeCheckKey)
+                            && !tobeTableOnly.contains(tobeTable.toLowerCase())) {
+                        log.warn("[mapping-import] skipping row — tobe_table '{}.{}' not in project's TO-BE DDL",
+                                tobeSchema, tobeTable);
+                        continue;
+                    }
+                }
+
                 String dedupKey = tobeSchema + "|" + tobeTable + "|" + tobeColumn;
                 String asisColumnCell = trimToNull(get(rs, headers, "asis_column"));
                 String asisTypeCell   = trimToNull(get(rs, headers, "asis_type"));
+
+                // project AS-IS DDL 검증: site 통합 csv 에서 다른 project row 가 들어와도
+                // 이 project 의 AS-IS DDL 에 없는 asis_table 의 row 는 skip — 잘못된 combine 방지.
+                if (projectAsisKeys != null) {
+                    String asisTableRawCheck = trimToNull(get(rs, headers, "asis_table"));
+                    if (asisTableRawCheck != null) {
+                        int adot2 = asisTableRawCheck.indexOf('.');
+                        String aSchema = adot2 > 0 ? asisTableRawCheck.substring(0, adot2) : "";
+                        String aTable  = adot2 > 0 ? asisTableRawCheck.substring(adot2 + 1) : asisTableRawCheck;
+                        String checkKey = aSchema.toLowerCase() + "|" + aTable.toLowerCase();
+                        if (!projectAsisKeys.contains(checkKey)
+                                && !asisTableOnly.contains(aTable.toLowerCase())) {
+                            log.warn("[mapping-import] skipping row — asis_table '{}' not in project's AS-IS DDL",
+                                    asisTableRawCheck);
+                            continue;
+                        }
+                    }
+                }
+                // project TO-BE DDL 검증: DDL 에 없는 TO-BE table 의 row 는 skip — 그렇지
+                // 않으면 mapping 만 만들어지고 Load 단계에서 PG 에 그 table 이 없어 통째로 fail.
+                if (projectTobeKeys != null) {
+                    String checkKey = tobeSchema.toLowerCase() + "|" + tobeTable.toLowerCase();
+                    if (!projectTobeKeys.contains(checkKey)
+                            && !tobeTableOnly.contains(tobeTable.toLowerCase())) {
+                        continue;
+                    }
+                }
 
                 RuleRow existing = grouped.get(dedupKey);
                 if (existing != null) {
@@ -408,10 +613,17 @@ public class MappingImportService {
         List<CodeRow> out = new ArrayList<>();
         Set<String> seen = new HashSet<>();
 
+        // RFC 4180 dialect 명시 + 관대한 옵션 — sniffer 가 셀 안의 따옴표/콤마 (SQL fragment
+        // 같은 복잡한 notes) 로 실패하지 않도록. strict_mode=false / ignore_errors=true /
+        // max_line_size 확장으로 RFC 외 변종도 수용.
         String sql = "SELECT * FROM read_csv('" + escape(csv.toString())
-                + "', header=true, delim=',', all_varchar=true, null_padding=true)";
+                + "', header=true, delim=',', quote='\"', escape='\"', all_varchar=true, "
+                + "null_padding=true, strict_mode=false, ignore_errors=true, "
+                + "max_line_size=10000000)";
 
-        try (Statement st = duckDbService.statement();
+        // 요청별 격리 connection — 공유 connection 동시 사용 시 pending result 무효화 회피.
+        try (java.sql.Connection conn = duckDbService.requestConnection();
+             Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(sql)) {
             ResultSetMetaData md = rs.getMetaData();
             for (int i = 1; i <= md.getColumnCount(); i++) {
@@ -566,12 +778,43 @@ public class MappingImportService {
     @Transactional
     public int rebuildBindings(String projectId, String userName) {
         List<MappingRule> existing = ruleRepo.findByProjectId(projectId);
+
+        // 자식 link binding 은 csv re-import / rebuild 로 덮어쓰지 않음. 사전 사본 + wipe 후
+        // 다시 insert. 자식 binding 의 mapping_rules 는 이미 link 시점에 wipe 되었으므로
+        // existing 에서 자식 키 row 가 있다면 그건 stale — filter.
+        OffsetDateTime now = OffsetDateTime.now();
+        Set<String> linkedKeys = new HashSet<>();
+        List<MappingTableBinding> linkedBindingsToPreserve = new ArrayList<>();
+        for (MappingTableBinding lb : bindingRepo.findByProjectId(projectId)) {
+            if (lb.getSharedFromProjectId() == null) continue;
+            linkedKeys.add((lb.getTobeSchema() == null ? "" : lb.getTobeSchema()) + "|" + lb.getTobeTable());
+            MappingTableBinding cp = new MappingTableBinding();
+            cp.setId("mb-" + UUID.randomUUID().toString().substring(0, 8));
+            cp.setProjectId(lb.getProjectId());
+            cp.setImportId(null);
+            cp.setTobeSchema(lb.getTobeSchema());
+            cp.setTobeTable(lb.getTobeTable());
+            cp.setCompositionKind(lb.getCompositionKind());
+            cp.setWhereFilter(lb.getWhereFilter());
+            cp.setGroupByExpr(lb.getGroupByExpr());
+            cp.setExpandExpr(lb.getExpandExpr());
+            cp.setBindingOrigin(lb.getBindingOrigin());
+            cp.setSharedFromProjectId(lb.getSharedFromProjectId());
+            cp.setCreatedBy(lb.getCreatedBy());
+            cp.setCreatedAt(lb.getCreatedAt());
+            cp.setUpdatedBy(lb.getUpdatedBy());
+            cp.setUpdatedAt(now);
+            linkedBindingsToPreserve.add(cp);
+        }
+
         bindingRepo.deleteAllByProjectId(projectId);
         bindingRepo.flush();
-        if (existing.isEmpty()) return 0;
+        if (existing.isEmpty() && linkedBindingsToPreserve.isEmpty()) return 0;
 
         List<RuleRow> rows = new ArrayList<>(existing.size());
         for (MappingRule e : existing) {
+            String k = (e.getTobeSchema() == null ? "" : e.getTobeSchema()) + "|" + e.getTobeTable();
+            if (linkedKeys.contains(k)) continue;  // 자식 키는 deriveBindings 가 만들지 않음
             RuleRow r = new RuleRow();
             r.tobeSchema   = e.getTobeSchema() == null ? "" : e.getTobeSchema();
             r.tobeTable    = e.getTobeTable();
@@ -589,7 +832,8 @@ public class MappingImportService {
             rows.add(r);
         }
         List<MappingTableBinding> bindings = deriveBindings(
-                rows, projectId, /* importId */ null, userName, OffsetDateTime.now());
+                rows, projectId, /* importId */ null, userName, now);
+        bindings.addAll(linkedBindingsToPreserve);
         bindingRepo.saveAll(bindings);
         return bindings.size();
     }
@@ -622,6 +866,15 @@ public class MappingImportService {
         }
         String schema = req.tobeSchema() == null ? "" : req.tobeSchema();
         OffsetDateTime now = OffsetDateTime.now();
+
+        // 자식 link 된 테이블은 mapping_rules 작성 차단. master 에서 수정해야.
+        bindingRepo.findByProjectIdAndTobeSchemaAndTobeTable(projectId, schema, req.tobeTable())
+                .filter(b -> b.getSharedFromProjectId() != null)
+                .ifPresent(b -> {
+                    throw new ApiException("LOCKED_BY_LINK",
+                            "이 테이블은 " + b.getSharedFromProjectId() + " project 의 자식으로 link 되어 있습니다. master 에서 수정하세요.",
+                            HttpStatus.CONFLICT);
+                });
 
         MappingRule r = ruleRepo
                 .findByProjectIdAndTobeSchemaAndTobeTableAndTobeColumn(
@@ -668,7 +921,16 @@ public class MappingImportService {
             String tobeTable,
             String compositionKind,
             String whereFilter,
-            List<UpsertSourceDto> sources
+            List<UpsertSourceDto> sources,
+            /**
+             * 자식 link 마킹용 master project_id. null 또는 비우면 자체 정의 (기본).
+             * 값 있을 때는 sources 는 무시됨 (master 의 sources 를 read 시점에 inherit).
+             */
+            String sharedFromProjectId,
+            /** Row N:1 집계 GROUP BY 표현식 — null / blank 이면 GROUP BY 없음. */
+            String groupByExpr,
+            /** Row 1:N 펼침 free SQL fragment — null / blank 이면 펼침 없음. */
+            String expandExpr
     ) {}
 
     public record UpsertSourceDto(
@@ -710,11 +972,39 @@ public class MappingImportService {
         b.setTobeTable(req.tobeTable());
         b.setCompositionKind(req.compositionKind() != null ? req.compositionKind() : "single");
         b.setWhereFilter(req.whereFilter());
+        b.setGroupByExpr(req.groupByExpr());
+        b.setExpandExpr(req.expandExpr());
         b.setBindingOrigin("manual");
         b.setCreatedBy(createdBy);
         b.setCreatedAt(createdAt);
         b.setUpdatedBy(userName);
         b.setUpdatedAt(now);
+
+        // 자식 link 마킹. 값 있으면 sources 도 자식 측의 mapping_rules 도 모두 무시 — master 의
+        // 것을 read 시점에 inherit. 자식 mapping_rules 가 남아 있으면 wipe.
+        String sharedFrom = req.sharedFromProjectId();
+        if (sharedFrom != null && sharedFrom.isBlank()) sharedFrom = null;
+
+        // 자기 자신이 이미 다른 project 의 자식들의 master 로 쓰이고 있으면 link 거부 —
+        // 부모가 다시 자식이 되는 chain 방지.
+        if (sharedFrom != null) {
+            boolean iAmMasterToSomeone = !bindingRepo.findAll().stream()
+                    .filter(other -> projectId.equals(other.getSharedFromProjectId())
+                            && schema.equalsIgnoreCase(other.getTobeSchema() == null ? "" : other.getTobeSchema())
+                            && req.tobeTable().equalsIgnoreCase(other.getTobeTable()))
+                    .toList()
+                    .isEmpty();
+            if (iAmMasterToSomeone) {
+                throw new ApiException("CANNOT_LINK_PARENT",
+                        "이 테이블은 이미 다른 project 의 master 입니다. 먼저 자식 link 를 모두 해제하세요.",
+                        HttpStatus.CONFLICT);
+            }
+        }
+        b.setSharedFromProjectId(sharedFrom);
+        if (sharedFrom != null) {
+            ruleRepo.deleteByProjectIdAndTobeTable(projectId, req.tobeTable());
+            return bindingRepo.save(b);  // sources 추가 없이 저장
+        }
 
         List<UpsertSourceDto> srcDtos = req.sources() == null ? List.of() : req.sources();
         for (UpsertSourceDto s : srcDtos) {
@@ -854,34 +1144,93 @@ public class MappingImportService {
     }
 
     /**
-     * AS-IS 가 string 인데 TO-BE 가 DATE/TIMESTAMP 인 경우 — 단순 CAST 로는 변환 안 됨
-     * (DuckDB 가 'YYYYMMDD' 같은 임의 포맷 캐스트 못 함). 컬럼 길이로 Oracle 의 흔한
-     * 포맷 추론해서 STRPTIME 사용.
-     *  - CHAR(8)  → 'YYYYMMDD'
-     *  - CHAR(14) → 'YYYYMMDDHH24MISS'
-     *  - CHAR(10) → 'YYYY-MM-DD'
-     *  - CHAR(19) → 'YYYY-MM-DD HH:MI:SS'
-     * 매칭 안 되면 null 리턴 → 호출부가 일반 CAST 로 폴백.
+     * AS-IS column → TO-BE DATE/TIMESTAMP 변환 SQL 생성.
+     *
+     * <p><b>Architecture 가정</b>: ExtractStage 가 {@code read_csv(all_varchar=true)} 로 CSV 적재
+     * — DuckDB asis_X 의 모든 컬럼은 실제로는 VARCHAR. asisType (DDL 선언) 은 문서/메타.
+     * 따라서 CAST 보다 STRPTIME 으로 명시 파싱이 안전.
+     *
+     * <p><b>asisType 분기</b> (2026-05-30, 가드 제거 후):
+     * <ul>
+     *   <li>TIMESTAMP WITH TIME ZONE — Oracle/SQLserver export 의 offset 포함 형식
+     *       ("YYYY-MM-DD HH:MM:SS.ffffff +HH:MM"). DuckDB CAST 가 '+09:00' 같은 offset 못 파싱 →
+     *       STRPTIME '%z' 직접 적용</li>
+     *   <li>TIMESTAMP (naive) — "YYYY-MM-DD HH:MM:SS[.ffffff]" 형식. STRPTIME 후 필요시 TIMESTAMPTZ cast</li>
+     *   <li>DATE — "YYYY-MM-DD" 형식</li>
+     *   <li>VARCHAR/CHAR — 길이 기반 추측 (기존 로직 유지)</li>
+     *   <li>기타 (numeric/boolean) — null 리턴 → CAST 폴백</li>
+     * </ul>
+     *
+     * <p><b>tobeType 가드</b>: target 이 DATE/TIMESTAMP/TIMESTAMPTZ 아니면 null (strptime 무의미).
+     *
+     * <p>매칭 안 되면 null 리턴 → 호출부가 일반 CAST 로 폴백.
      */
     private static String tryStringToDateSql(String src, String asisType, String tobeType) {
         if (asisType == null || tobeType == null) return null;
-        if (!"string".equals(typeCategory(asisType))) return null;
-        String t = tobeType.toUpperCase().trim();
-        boolean isDate = t.equals("DATE");
-        boolean isTimestamp = t.startsWith("TIMESTAMP");
-        if (!isDate && !isTimestamp) return null;
+        String aT = asisType.toUpperCase().trim();
+        String bT = tobeType.toUpperCase().trim();
 
-        int len = extractCharLength(asisType);
-        String fmt;
-        switch (len) {
-            case 8:  fmt = "%Y%m%d"; break;
-            case 14: fmt = "%Y%m%d%H%M%S"; break;
-            case 10: fmt = "%Y-%m-%d"; break;
-            case 19: fmt = "%Y-%m-%d %H:%M:%S"; break;
-            default: return null;  // unknown — fallback to CAST
+        boolean targetIsDate = bT.equals("DATE");
+        boolean targetIsTimestampTz = bT.contains("WITH TIME ZONE") || bT.equals("TIMESTAMPTZ");
+        boolean targetIsTimestamp = bT.startsWith("TIMESTAMP");
+        if (!targetIsDate && !targetIsTimestamp) return null;
+
+        boolean asisIsString = "string".equals(typeCategory(asisType));
+        boolean asisIsTimestampTz = aT.contains("WITH TIME ZONE") || aT.contains("TIMESTAMPTZ");
+        boolean asisIsTimestamp = aT.startsWith("TIMESTAMP");
+        boolean asisIsDate = aT.equals("DATE");
+
+        /* DuckDB STRPTIME 은 list 형식 받아 첫 매칭 fmt 사용 — 같은 컬럼 내 변종 row 흡수.
+           예: Oracle DATE (DDL) 가 실제로는 시간 포함 export, 또는 microsec 유/무, offset 공백 유/무 등. */
+        String fmts;
+        boolean fmtHasTz;
+        if (asisIsTimestampTz) {
+            // 4 변종 — microsec ± offset 공백
+            fmts = "['%Y-%m-%d %H:%M:%S.%f %z', '%Y-%m-%d %H:%M:%S.%f%z', "
+                 + "'%Y-%m-%d %H:%M:%S %z', '%Y-%m-%d %H:%M:%S%z']";
+            fmtHasTz = true;
+        } else if (asisIsTimestamp) {
+            // Naive TIMESTAMP — microsec 유/무
+            fmts = "['%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S']";
+            fmtHasTz = false;
+        } else if (asisIsDate) {
+            // Oracle DATE = 실제로 timestamp (시간 포함) — date-only / date+time 둘 다 흡수.
+            // ::DATE 가 truncate 하므로 time 부분은 무시됨.
+            fmts = "['%Y-%m-%d', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M:%S.%f']";
+            fmtHasTz = false;
+        } else if (asisIsString) {
+            // 기존 length-based hint (VARCHAR(N) 의 N) — 단일 fmt.
+            int len = extractCharLength(asisType);
+            String fmt;
+            switch (len) {
+                case 8:  fmt = "%Y%m%d"; break;
+                case 14: fmt = "%Y%m%d%H%M%S"; break;
+                case 10: fmt = "%Y-%m-%d"; break;
+                case 19: fmt = "%Y-%m-%d %H:%M:%S"; break;
+                default:
+                    if (targetIsTimestampTz && len >= 25) {
+                        fmt = "%Y-%m-%d %H:%M:%S.%f %z";
+                        break;
+                    }
+                    return null;
+            }
+            fmts = "'" + fmt + "'";
+            fmtHasTz = fmt.contains("%z");
+        } else {
+            // numeric / boolean / etc. — strptime 의미 없음
+            return null;
         }
-        String parsed = "STRPTIME(" + src + ", '" + fmt + "')";
-        return isDate ? parsed + "::DATE" : parsed;
+
+        String parsed = "STRPTIME(" + src + ", " + fmts + ")";
+        if (targetIsDate) {
+            return parsed + "::DATE";
+        }
+        // TIMESTAMPTZ target with naive source (no %z) — 세션 TZ 가정으로 cast. 사용자가 다른 TZ
+        // 의도면 row editor 에서 명시 (예: STRPTIME(...) AT TIME ZONE 'Asia/Tokyo').
+        if (targetIsTimestampTz && !fmtHasTz) {
+            return parsed + "::TIMESTAMPTZ";
+        }
+        return parsed;
     }
 
     /** "CHAR(8)" / "VARCHAR2(60 CHAR)" 같은 형식에서 숫자 부분만 추출. */
@@ -897,12 +1246,6 @@ public class MappingImportService {
     }
 
     /** AS-IS / TO-BE 타입이 같은 카테고리면 cast 불필요. */
-    private static boolean typeCategoriesMatch(String asisType, String tobeType) {
-        String a = typeCategory(asisType);
-        String t = typeCategory(tobeType);
-        if (a == null || t == null) return true; // 모르면 일단 passthrough
-        return a.equals(t);
-    }
 
     /** 거친 타입 카테고리 — string/integer/decimal/boolean/date/timestamp/timestamptz/binary. */
     private static String typeCategory(String type) {
@@ -1076,6 +1419,16 @@ public class MappingImportService {
         return s.replace("'", "''");
     }
 
+    /** "schema|table" 키 set 에서 table 부분만 추출 (schema-lenient 매칭 fallback 용). */
+    private static java.util.Set<String> tableNamesOf(java.util.Set<String> schemaTableKeys) {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        for (String k : schemaTableKeys) {
+            int p = k.indexOf('|');
+            out.add(p >= 0 ? k.substring(p + 1) : k);
+        }
+        return out;
+    }
+
     /**
      * CSV 헤더에서 BOM·zero-width space·NBSP 등 보이지 않는 문자를 제거하고
      * trim + lowercase. {@link String#trim()} 은 U+0020 이하만 잘라내서 U+FEFF
@@ -1109,6 +1462,37 @@ public class MappingImportService {
         Path tmp = Files.createTempFile("mpd_" + prefix + "_", ".csv");
         Files.write(tmp, data);
         return tmp;
+    }
+
+    /**
+     * CSV 바이트를 UTF-8 로 정규화. read_csv 가 UTF-8 만 안전히 다루므로, 비 UTF-8 정의서
+     * (한/일 Excel 의 CP949·Shift_JIS ANSI 저장)를 그대로 넘기면 멀티바이트 row 가 invalid 로
+     * 통째로 drop 된다. UTF-8 strict → 실패 시 MS949(한글)·Shift_JIS(일어) strict 순으로 시도해
+     * 성공한 charset 으로 디코드 후 UTF-8 재인코딩한다. 모두 실패하면 UTF-8 lossy(replace)로
+     * 최소 row 보존. BOM(EF BB BF)은 제거.
+     */
+    static byte[] toUtf8(byte[] raw) {
+        if (raw == null || raw.length == 0) return raw;
+        // UTF-8 BOM 제거.
+        int off = 0;
+        if (raw.length >= 3 && (raw[0] & 0xFF) == 0xEF && (raw[1] & 0xFF) == 0xBB && (raw[2] & 0xFF) == 0xBF) {
+            off = 3;
+        }
+        java.nio.ByteBuffer bb = java.nio.ByteBuffer.wrap(raw, off, raw.length - off);
+        for (String cs : new String[] { "UTF-8", "MS949", "Shift_JIS" }) {
+            try {
+                java.nio.charset.CharsetDecoder dec = java.nio.charset.Charset.forName(cs).newDecoder()
+                        .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT);
+                String s = dec.decode(bb.duplicate()).toString();
+                return s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            } catch (java.nio.charset.CharacterCodingException ignore) {
+                // 다음 charset 시도
+            }
+        }
+        // 모든 strict 디코드 실패 — UTF-8 lossy 로 최소 보존 (깨진 글자는 replacement).
+        String s = new String(raw, off, raw.length - off, java.nio.charset.StandardCharsets.UTF_8);
+        return s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
     }
 
     private static void deleteQuiet(Path p) {

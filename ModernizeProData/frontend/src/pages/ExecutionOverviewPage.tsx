@@ -1,17 +1,24 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useWorkspaceStore, type Project } from '../store/workspace';
 import { useUsersStore } from '../store/users';
 import { useAuthStore } from '../store/auth';
 import { useSnapshotsStore, usePinnedSnapshotsStore, type MappingSnapshot } from '../store/snapshots';
-import { useExecutionPreflightStore } from '../store/executionPreflight';
 import { Checkbox } from '../components/Checkbox';
 import {
-  TOTAL_RUN_MS,
   buildStages,
-  buildStagesFromActiveRun,
+  buildStagesFromStageViews,
+  stageFillColor,
+  successFillColor,
+  isPipelineComplete,
   type Stage,
+  type StageTone,
 } from '../lib/pipelineStages';
 import { useT } from '../i18n';
+import { overviewApi, type ProjectExecMetrics } from '../api/executionOverview';
+import { useExecutionPreflightStore } from '../store/executionPreflight';
+import { runsApi } from '../api/runs';
+import { workerApi, type WorkerSummaryDto } from '../api/worker';
+import { healthApi } from '../api/auth';
 
 const PHASES: Project['phase'][] = ['planning', 'analysis', 'test', 'sign-off', 'rehearsal', 'ready', 'cutover', 'hypercare', 'done'];
 
@@ -35,6 +42,7 @@ export function ExecutionOverviewPage() {
   const activeSiteId = useWorkspaceStore((s) => s.activeSiteId);
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const setProjectExecutionAssignee = useWorkspaceStore((s) => s.setProjectExecutionAssignee);
+  const fetchProjects = useWorkspaceStore((s) => s.fetchProjects);
 
   const site = useMemo(() => sites.find((s) => s.id === activeSiteId) ?? null, [sites, activeSiteId]);
   // assignee 변경에도 행 순서가 바뀌지 않도록 createdAt asc 로 명시 정렬.
@@ -60,24 +68,17 @@ export function ExecutionOverviewPage() {
     return map;
   }, [snapshots, pinnedIds]);
 
-  // activeRun lookup: projectId -> ActiveRunState. 走行中があれば 500ms tick で再描画。
-  const preflightByProject = useExecutionPreflightStore((s) => s.byProject);
-  const hasRunning = useMemo(
-    () => Object.values(preflightByProject).some((e) => e.activeRun?.runStatus === 'running' && e.activeRun.pausedAt === null),
-    [preflightByProject],
-  );
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    if (!hasRunning) return;
-    const id = window.setInterval(() => setTick((n) => n + 1), 500);
-    return () => window.clearInterval(id);
-  }, [hasRunning]);
+  // per-row pipeline 진행은 ProjectExecMetrics 의 progressPct + runStatus 로 그린다
+  // (이전 demo 모드: mock activeRun + 500ms tick — 이번 PoC1 real wiring 으로 교체).
+  // 자동 갱신은 안 함 (필요시 새로고침 / Execution 페이지로 가서 상세 보기).
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
   // 담당자 변경 draft — Save 누르기 전까지는 backend / store 에 반영 안 됨.
   // key = projectId, value = 새 executionAssignee ('' = unassigned).
   const [assigneeDraft, setAssigneeDraft] = useState<Record<string, string>>({});
   const [savingAssignees, setSavingAssignees] = useState(false);
+  // Run 거부(REJECTED/LOCKED) 사유 — 브라우저 alert 대신 인라인 배너로 표시.
+  const [rejectMsgs, setRejectMsgs] = useState<string[]>([]);
 
   const dirtyAssigneeIds = useMemo(() => Object.keys(assigneeDraft).filter((id) => {
     const p = projects.find((p) => p.id === id);
@@ -111,18 +112,128 @@ export function ExecutionOverviewPage() {
   const [errorFilter, setErrorFilter] = useState<'' | 'has' | 'none'>('');
   const [warningFilter, setWarningFilter] = useState<'' | 'has' | 'none'>('');
 
-  // placeholder — run engine 연결 전. 실제 값은 백엔드에서.
-  const errorCount = (_p: Project) => 0;
-  const warningCount = (_p: Project) => 0;
+  // execution overview 실데이터 — per-project 최신 run 집계 (BE: /sites/{id}/execution-overview).
+  // 5 秒 polling — Execution 画面の 2 秒 polling よりは緩いが、overview なので桁ずれが起きないように
+  // 定期更新する. running 中の project があると bar の進行が反映される.
+  const [apiMetrics, setApiMetrics] = useState<Record<string, ProjectExecMetrics>>({});
+  const loadMetrics = useCallback(() => {
+    if (!activeSiteId) { setApiMetrics({}); return; }
+    overviewApi.bySite(activeSiteId)
+      .then((list) => {
+        const m: Record<string, ProjectExecMetrics> = {};
+        for (const it of list) m[it.projectId] = it;
+        setApiMetrics(m);
+      })
+      .catch(() => setApiMetrics({}));
+  }, [activeSiteId]);
+  useEffect(() => { loadMetrics(); }, [loadMetrics]);
+  // (A) 자동 갱신 — Execution 단일 페이지와 동일한 5초 polling. 다른 페이지로 떠나면 cleanup.
+  // run 시작 / 종료 / abort 후 사용자가 Refresh 안 눌러도 화면이 따라온다.
+  // metrics 만이 아니라 projects 도 같이 refetch — finishRun 이 cutover→hypercare 로
+  // phase 를 advance 하므로 chip 색상도 같이 따라와야 한다.
+  useEffect(() => {
+    if (!activeSiteId) return;
+    const id = window.setInterval(() => {
+      loadMetrics();
+      fetchProjects(activeSiteId);
+    }, 5_000);
+    return () => window.clearInterval(id);
+  }, [activeSiteId, loadMetrics, fetchProjects]);
+
+  // Run 종료 시 그 행만 selected 에서 자동 해제 — 사용자가 매번 직접 체크 해제할 필요 없게.
+  // 2026-06-03 수정: 이전엔 「최신 run 이 terminal」 이기만 하면 해제해서, 과거에 끝난 run 이
+  // 있는 프로젝트는 체크해도 다음 polling (5s) 에 저절로 풀리는 버그.
+  // 이제 running → terminal 「전이」가 관측된 행만 해제 (= 이번에 돌리고 끝난 run 만).
+  const prevRunStatusRef = useRef<Record<string, string | null>>({});
+  useEffect(() => {
+    const prev = prevRunStatusRef.current;
+    setSelected((cur) => {
+      if (cur.size === 0) return cur;
+      const next = new Set(cur);
+      let changed = false;
+      for (const id of cur) {
+        const s = apiMetrics[id]?.runStatus;
+        const wasRunning = prev[id] === 'running';
+        if (wasRunning && (s === 'success' || s === 'failed' || s === 'aborted' || s === 'timed_out')) {
+          next.delete(id);
+          changed = true;
+        }
+      }
+      return changed ? next : cur;
+    });
+    const snapshot: Record<string, string | null> = {};
+    for (const [id, m] of Object.entries(apiMetrics)) snapshot[id] = m.runStatus ?? null;
+    prevRunStatusRef.current = snapshot;
+  }, [apiMetrics]);
+
+  // worker_nodes — master 만 fetch (endpoint 가 master only). assignee 별 online dot 용.
+  // 90s heartbeat timeout. 동일 5초 polling.
+  const [workers, setWorkers] = useState<WorkerSummaryDto[]>([]);
+  const loadWorkers = useCallback(() => {
+    if (!isMaster) { setWorkers([]); return; }
+    workerApi.list().then(setWorkers).catch(() => setWorkers([]));
+  }, [isMaster]);
+  useEffect(() => { loadWorkers(); }, [loadWorkers]);
+  useEffect(() => {
+    if (!isMaster) return;
+    const id = window.setInterval(() => loadWorkers(), 5000);
+    return () => window.clearInterval(id);
+  }, [isMaster, loadWorkers]);
+
+  // Coordinator self username — 이 username 의 run 은 Coordinator 안에서 local 실행이라
+  // worker_node heartbeat 가 없다. online dot 을 worker heartbeat 로만 판정하면 항상
+  // 빨강 (거짓 음성). self username 은 Coordinator 가 살아있는 한 = 지금 이 응답을 주는
+  // 노드라 정의상 online → 별도로 green 처리 (2026-06-04). mount 1회 fetch.
+  const [selfUsername, setSelfUsername] = useState<string | null>(null);
+  useEffect(() => {
+    healthApi.info().then((i) => setSelfUsername(i.coordinatorSelfUsername ?? null)).catch(() => {});
+  }, []);
+
+  // username -> 가장 최근 heartbeat 받은 worker. online 판정은 lastSeenAt 90s 기준.
+  const workerByUsername = useMemo(() => {
+    const map = new Map<string, WorkerSummaryDto>();
+    const sorted = [...workers].sort((a, b) =>
+      (b.lastSeenAt ?? '').localeCompare(a.lastSeenAt ?? ''));
+    for (const w of sorted) {
+      if (w.username && !map.has(w.username)) map.set(w.username, w);
+    }
+    return map;
+  }, [workers]);
+  const ONLINE_TIMEOUT_MS = 90_000;
+  const isWorkerOnline = (username: string | null | undefined): boolean => {
+    if (!username) return false;
+    // Coordinator self user 는 worker_node 없이도 항상 online (이 화면을 주는 노드 그 자체).
+    if (selfUsername && username === selfUsername) return true;
+    const w = workerByUsername.get(username);
+    if (!w || w.status !== 'REGISTERED' || !w.lastSeenAt) return false;
+    return Date.now() - new Date(w.lastSeenAt).getTime() <= ONLINE_TIMEOUT_MS;
+  };
+
+  // (D) Overview の data 源は BE の apiMetrics 一本 (2026-05-31 simplify).
+  // BE 側で「baseline (pinned) snapshot で起動された最新 run」を返すように変更済み
+  // (ExecutionOverviewService.metricsFor) なので, pin 切替時はそれ自体が新 pin の最新 run に
+  // 切り替わり, time travel ユースケースも自然にカバーされる.
+  // 旧仕様は pin.executionContext (= finishRun 時の박제) で上書きしていたが,
+  //   - 박제 시点に stage runner が走行中だと未完了 status のまま固定
+  //   - その後 stage_instances が完走で update されても박제は据え置き
+  // で Execution 画面 (stage_instances live polling) と Overview の表示が乖離していた.
+  const metrics = apiMetrics;
+
+  const errorCount = (p: Project) => metrics[p.id]?.errorCount ?? 0;
+  const warningCount = (p: Project) => metrics[p.id]?.warningCount ?? 0;
+  const warningAckedCount = (p: Project) => metrics[p.id]?.warningAckedCount ?? 0;
 
   // redirect 는 sidebar 프로젝트 클릭 핸들러가 직접 처리 (race 회피).
   if (activeProjectId || !site) return null;
 
+  // username 비교 정규화 — null / empty string / 대소문자 다른 표기 대응 (DashboardPage 와 동일).
+  const normExec = (s: string | null | undefined) => (s ?? '').trim().toLowerCase();
   const filteredProjects = siteProjects.filter((p) => {
     if (phaseFilter && p.phase !== phaseFilter) return false;
+    const pe = normExec(p.executionAssignee);
     if (userFilter === '__unassigned') {
-      if (p.executionAssignee) return false;
-    } else if (userFilter && p.executionAssignee !== userFilter) return false;
+      if (pe !== '') return false;
+    } else if (userFilter && pe !== normExec(userFilter)) return false;
     const ec = errorCount(p);
     if (errorFilter === 'has'  && ec === 0) return false;
     if (errorFilter === 'none' && ec >  0) return false;
@@ -132,14 +243,19 @@ export function ExecutionOverviewPage() {
     return true;
   });
 
-  // 체크박스 활성 기준: ready / sign-off 만 (test · rehearsal · cutover 는 실행 중 상태).
+  // 체크박스 활성 기준: (a) Run 대상 = ready / sign-off, (b) Abort 대상 = 지금 running 인 run.
+  // 이전엔 ready/sign-off 만 선택 가능해서, run 이 시작되어 phase 가 rehearsal/cutover/test 로
+  // 바뀌면 체크박스가 비활성 → 선택을 잃은 running run 을 다시 선택 못 해 Abort 가 불가능했다
+  // (2026-06-10 수정). running row 도 선택 가능하게 해 abort 경로를 연다.
   // 담당자 dropdown 은 Coordinator(master) 만 변경 가능. 그 외는 text 로만 표시 (본인 row 포함).
   // 단 체크박스(run/abort 대상 선택) 는 본인 row 도 가능.
   const isMine = (p: Project) => !!user?.username && p.executionAssignee === user.username;
   const canEditRow = (_p: Project) => isMaster;
+  const isRunningNow = (p: Project) => apiMetrics[p.id]?.runStatus === 'running';
+  const isRunnable = (p: Project) => p.phase === 'ready' || p.phase === 'sign-off';
   const isSelectable = (p: Project) => {
     if (!isMaster && !isMine(p)) return false;
-    return p.phase === 'ready' || p.phase === 'sign-off';
+    return isRunnable(p) || isRunningNow(p);
   };
 
   const toggleOne = (id: string) =>
@@ -168,48 +284,131 @@ export function ExecutionOverviewPage() {
     }
   };
 
-  const runningPhases: Project['phase'][] = ['cutover', 'rehearsal', 'hypercare', 'test'];
-  const selectedRunningCount = siteProjects.filter(
-    (p) => selected.has(p.id) && runningPhases.includes(p.phase),
-  ).length;
+  // 선택된 row 를 Run 대상 / Abort 대상으로 분리. running row 도 선택 가능해졌으므로
+  // Run 은 runnable(ready/sign-off) 만, Abort 는 지금 running 인 run 만 대상으로 한다.
+  const runnableSelectedIds = [...selected].filter((id) => {
+    const p = siteProjects.find((pp) => pp.id === id);
+    return !!p && isRunnable(p);
+  });
+  const abortableSelectedIds = [...selected].filter((id) => apiMetrics[id]?.runStatus === 'running');
+  const selectedRunningCount = abortableSelectedIds.length;
 
-  const runCount = selected.size;
-  const canRun = runCount > 0;
+  const runCount = runnableSelectedIds.length;
+  // Run 대상 중 executionAssignee 미할당 (또는 draft 변경도 unassigned) 이 하나라도 있으면
+  // Run 금지 — Worker delegate 대상이 없는 row 는 RunService 가 REJECTED 반환하므로 UI 에서
+  // 미리 차단해 혼란 방지. (Abort 대상에는 적용 안 함 — 이미 실행 중이라 assignee 무관.)
+  const hasUnassignedSelected = runnableSelectedIds.some((id) => {
+    const draft = assigneeDraft[id];
+    const effective = draft !== undefined ? draft : (siteProjects.find((p) => p.id === id)?.executionAssignee ?? '');
+    return !effective;
+  });
+  const canRun = runCount > 0 && !hasUnassignedSelected;
   const canAbort = selectedRunningCount > 0;
 
-  const handleRefresh = () => {
-    // placeholder — run engine 연결 후 실제 fetch.
+  const handleRefresh = () => { loadMetrics(); loadWorkers(); };
+  const handleRun = async () => {
+    if (!isMaster || !activeSiteId) return;
+    // Run 은 runnable(ready/sign-off) 선택분만 — running row 도 선택 가능해졌으므로 여기서 분리.
+    const ids = runnableSelectedIds;
+    if (ids.length === 0) return;
+    // 선택 project 일괄 실행 — /runs/all (startAll) 로 호출해 각 run 에 bulk marker 가
+    // 박힌다. 이것이 (1) 개별 ExecutionPage 의 site-level lock 감지 (2) abort 권한
+    // master 한정 분기의 근거. 개별 start 반복은 bulk marker 가 안 붙어 둘 다 안 됨.
+    const setActive = useExecutionPreflightStore.getState().setActiveRunId;
+    setRejectMsgs([]);
+    const rejected: string[] = [];
+    try {
+      const res = await runsApi.startAll(activeSiteId, ids);
+      res.results.forEach((r) => {
+        const projectName = r.projectName ?? r.projectId ?? '?';
+        if (r.status === 'REJECTED' || r.status === 'LOCKED') {
+          rejected.push(`${projectName}: ${r.reason ?? r.status.toLowerCase()}`);
+        } else if (r.status === 'STARTED' && r.runId && r.projectId) {
+          setActive(r.projectId, r.runId);
+        }
+      });
+    } catch (e) {
+      rejected.push((e as Error)?.message ?? 'bulk run failed');
+    }
+    if (rejected.length > 0) {
+      console.warn('[ExecutionOverview] run rejected', rejected);
+      // 브라우저 네이티브 alert 대신 인라인 배너로 표시 (2026-06-11).
+      setRejectMsgs(rejected);
+    }
+    // 선택 유지 — Run 직후 Abort 활성화를 위해 selectedRunningCount 가 살아 있어야 함.
+    loadMetrics();
+    // Run 起動と同時に backend が phase advance (sign-off→rehearsal, ready→cutover) +
+    // run_status='running' に変えるので、projects も refetch して chip / 行状態을 即反映.
+    if (activeSiteId) fetchProjects(activeSiteId);
   };
-  const handleRun = () => {
-    // placeholder — run engine 연결 후 백엔드 호출.
-  };
-  const handleAbort = () => {
-    // placeholder — run engine 연결 후 abort 호출.
+  const handleAbort = async () => {
+    if (!isMaster) return;
+    // Abort 대상은 항상 "지금 실행 중인 run". pinned snapshot 의 박제는 종료 상태라
+    // 그것을 abort 하려 들면 실패 — 그래서 apiMetrics (latest run) 만 본다.
+    const runIds = [...selected]
+      .map((id) => apiMetrics[id])
+      .filter((m): m is ProjectExecMetrics => !!m && m.runStatus === 'running' && !!m.latestRunId)
+      .map((m) => m.latestRunId!);
+    await Promise.allSettled(runIds.map((rid) => runsApi.abort(rid, 'aborted from overview')));
+    loadMetrics();
+    if (activeSiteId) fetchProjects(activeSiteId);
   };
 
-  // KPI 집계 — 현재는 placeholder.
-  const status = siteProjects.reduce(
-    (a, p) => {
-      if (p.phase === 'done') return { ...a, done: a.done + 1 };
-      if (runningPhases.includes(p.phase)) return { ...a, running: a.running + 1 };
-      return a;
-    },
-    { running: 0, done: 0 },
+  // (B) Overall progress / toolbar 상단 안내 — metrics 상태에 따라 동적.
+  const metricValues = Object.values(metrics);
+  const runningRuns = metricValues.filter((m) => m.runStatus === 'running').length;
+  const failedRuns = metricValues.filter(
+    (m) => m.runStatus === 'failed' || m.runStatus === 'timed_out' || m.runStatus === 'aborted',
+  ).length;
+  const successRuns = metricValues.filter((m) => m.runStatus === 'success').length;
+  // "Projects" KPI — 실행 batch 진행률. in-play = run 이 한 번이라도 잡힌 project 총수
+  // (running + terminal), terminal = 끝난(success/failed/aborted/timed_out) run. 실행이
+  // 진행될수록 분모는 고정, 분자가 끝난 것만큼 올라간다 (2026-06-10).
+  const terminalRuns = successRuns + failedRuns;
+  const runsInPlay = runningRuns + terminalRuns;
+  const anyRun = runningRuns + failedRuns + successRuns > 0;
+  const statusHint = !anyRun
+    ? t('executionOverview.noRunYet')
+    : runningRuns > 0
+      ? t('executionOverview.statusRunning', { n: runningRuns })
+      : failedRuns > 0
+        ? t('executionOverview.statusFailed', { n: failedRuns })
+        : t('executionOverview.statusAllDone');
+  /* "전체 tables" 는 그 project 가 run 에서 처리한 테이블 수 기준 (metric.tablesTotal).
+     run 박제가 없으면 project.tableCount (= DDL TO-BE 수) 로 fallback. DDL 에는 5 테이블이
+     있어도 mapping 이 3 만 정의돼있고 그 3 만 run 했다면 "3/3" 으로 보여야 자연스럽다. */
+  const totalTables = siteProjects.reduce(
+    (a, p) => a + (metrics[p.id]?.tablesTotal ?? p.tableCount ?? 0), 0,
   );
-  const totalTables = siteProjects.reduce((a, p) => a + p.tableCount, 0);
-  // 전체 실행 progress — placeholder (run engine 연결 전).
-  const overallProgressPct = 0;
+  const totalRows = siteProjects.reduce((a, p) => a + (metrics[p.id]?.rows ?? 0), 0);
+  const totalTablesDone = siteProjects.reduce((a, p) => a + (metrics[p.id]?.tablesDone ?? 0), 0);
+  const totalErrors = siteProjects.reduce((a, p) => a + (metrics[p.id]?.errorCount ?? 0), 0);
+  const totalWarnings = siteProjects.reduce((a, p) => a + (metrics[p.id]?.warningCount ?? 0), 0);
+  const totalWarningsAcked = siteProjects.reduce((a, p) => a + (metrics[p.id]?.warningAckedCount ?? 0), 0);
+  const overallProgressPct = siteProjects.length
+    ? siteProjects.reduce((a, p) => a + (metrics[p.id]?.progressPct ?? 0), 0) / siteProjects.length
+    : 0;
+  // 실패(failed/aborted/timed_out) 프로젝트의 "안 된 분"(100-progressPct) 평균 — Overall
+  // Progress 바에서 green(완료) 뒤 red 세그먼트로 표시 (2026-06-05).
+  const failedPortionPct = siteProjects.length
+    ? siteProjects.reduce((a, p) => {
+        const m = metrics[p.id];
+        const failed = m && (m.runStatus === 'failed' || m.runStatus === 'timed_out' || m.runStatus === 'aborted');
+        return a + (failed ? (100 - (m.progressPct ?? 0)) : 0);
+      }, 0) / siteProjects.length
+    : 0;
+  const redPct = Math.max(0, Math.min(failedPortionPct, 100 - overallProgressPct));
 
   return (
     <div>
       {/* KPI row — Phase Mix 없음 */}
       <div style={styles.kpiRow}>
-        <Kpi label={t('executionOverview.kpi.projects')} value={`${status.done} / ${siteProjects.length}`} tone="info" />
-        <Kpi label={t('executionOverview.kpi.running')}  value={status.running} tone={status.running > 0 ? 'warn' : undefined} />
-        <Kpi label={t('executionOverview.kpi.tables')}   value={`0 / ${totalTables}`} />
-        <Kpi label={t('executionOverview.kpi.rows')}     value="0 / 0" />
-        <Kpi label={t('executionOverview.kpi.errors')}   value={0} tone="err" />
-        <Kpi label={t('executionOverview.kpi.warnings')} value={0} tone="warn" />
+        <Kpi label={t('executionOverview.kpi.projects')} value={`${terminalRuns} / ${runsInPlay}`} tone="info" />
+        <Kpi label={t('executionOverview.kpi.running')}  value={runningRuns} tone={runningRuns > 0 ? 'warn' : undefined} />
+        <Kpi label={t('executionOverview.kpi.tables')}   value={`${totalTablesDone} / ${totalTables}`} />
+        <Kpi label={t('executionOverview.kpi.rows')}     value={totalRows.toLocaleString()} />
+        <Kpi label={t('executionOverview.kpi.errors')}   value={totalErrors}   tone="err" />
+        <Kpi label={t('executionOverview.kpi.warnings')} value={totalWarnings > 0 ? `${totalWarningsAcked} / ${totalWarnings}` : 0} tone="warn" />
       </div>
 
       {/* Overall progress bar */}
@@ -218,10 +417,15 @@ export function ExecutionOverviewPage() {
           <span style={styles.overallProgressLabel}>{t('executionOverview.overall')}</span>
           <span style={styles.overallProgressPct}>{overallProgressPct.toFixed(1)}%</span>
           <div style={{ flex: 1 }} />
-          <span style={styles.overallProgressDim}>{t('executionOverview.noRunYet')}</span>
+          <span style={styles.overallProgressDim}>{statusHint}</span>
         </div>
-        <div style={styles.overallProgressOuter}>
-          <div style={{ ...styles.overallProgressInner, width: `${overallProgressPct}%` }} />
+        <div style={{ ...styles.overallProgressOuter, display: 'flex' }}>
+          {/* 하나라도 run 진행 중이면 밝은 초록, 전부 끝나면 어두운 초록 (#59) — pipeline 바와 동일 규칙. */}
+          <div style={{ ...styles.overallProgressInner, width: `${overallProgressPct}%`, background: successFillColor(runningRuns === 0) }} />
+          {redPct > 0 && (
+            <div style={{ height: '100%', width: `${redPct}%`, background: 'var(--red)' }}
+                 title={t('executionOverview.statusFailed', { n: failedRuns })} />
+          )}
         </div>
       </div>
 
@@ -266,7 +470,7 @@ export function ExecutionOverviewPage() {
 
       {/* Toolbar — Refresh / Run / Abort */}
       <div style={styles.toolbar}>
-        <span style={styles.toolbarHint}>{t('executionOverview.noRunYet')}</span>
+        <span style={styles.toolbarHint}>{statusHint}</span>
         <div style={{ flex: 1 }} />
         {dirtyAssigneeIds.length > 0 && (
           <>
@@ -291,6 +495,15 @@ export function ExecutionOverviewPage() {
         <button onClick={handleRefresh} style={styles.btnGhost}>
           {t('executionOverview.btn.refresh')}
         </button>
+        {/* Unassigned 선택 시 — 체크는 유지하고 Run 만 비활성 + 이유를 명시 (2026-06-03). */}
+        {runCount > 0 && hasUnassignedSelected && (
+          <span style={{
+            fontSize: 11.5, color: 'var(--amber)', fontWeight: 600,
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+          }}>
+            ⚠ {t('executionOverview.unassignedSelectedHint')}
+          </span>
+        )}
         <button
           onClick={handleRun}
           disabled={!canRun || !isMaster}
@@ -309,6 +522,28 @@ export function ExecutionOverviewPage() {
         </button>
       </div>
 
+      {/* Run 거부 사유 — 인라인 red 배너 (브라우저 alert 대체) */}
+      {rejectMsgs.length > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'flex-start', gap: 8,
+          padding: '8px 12px', marginBottom: 8, borderRadius: 6,
+          background: 'var(--red-50)', border: '1px solid var(--red)',
+        }}>
+          <span style={{ color: 'var(--red)', fontWeight: 700, flexShrink: 0 }}>⛔ {t('executionOverview.runRejected')}</span>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {rejectMsgs.map((m, i) => (
+              <span key={i} style={{ fontSize: 12, color: 'var(--text-2)', fontFamily: 'var(--mono)' }}>{m}</span>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => setRejectMsgs([])}
+            style={{ background: 'none', border: 'none', color: 'var(--text-3)', cursor: 'pointer', fontSize: 16, lineHeight: 1, flexShrink: 0 }}
+            aria-label={t('common.close')}
+          >×</button>
+        </div>
+      )}
+
       {/* Table */}
       <div style={styles.tableWrap}>
         <table style={styles.table}>
@@ -322,7 +557,7 @@ export function ExecutionOverviewPage() {
               <Th width={150}>{t('executionOverview.col.pinned')}</Th>
               <Th align="center">{t('executionOverview.col.username')}</Th>
               <Th align="center" width={70}>{t('executionOverview.col.tables')}</Th>
-              <Th align="right"  width={80}>{t('executionOverview.col.rows')}</Th>
+              <Th align="center" width={80}>{t('executionOverview.col.rows')}</Th>
               <Th align="center" width={260}>{t('executionOverview.col.progress')}</Th>
               <Th align="center" width={64}>{t('executionOverview.col.errors')}</Th>
               <Th align="center" width={76}>{t('executionOverview.col.warnings')}</Th>
@@ -338,10 +573,9 @@ export function ExecutionOverviewPage() {
                 const dimmed = !selectable;
                 const rowBg = checked ? 'var(--navy-50)' : i % 2 ? 'var(--zebra)' : 'transparent';
                 const dimColor = dimmed ? 'var(--text-4)' : undefined;
-                const activeRun = preflightByProject[p.id]?.activeRun ?? null;
-                const pipelineStages: Stage[] = activeRun
-                  ? buildStagesFromActiveRun(activeRun, TOTAL_RUN_MS)
-                  : buildStages(p.phase);
+                const pipelineStages: Stage[] = buildStagesFromMetric(metrics[p.id], p.phase);
+                // 이 프로젝트 파이프라인 전체가 끝나야 완료 segment 가 어두워진다 (#59).
+                const pipelineComplete = isPipelineComplete(pipelineStages);
                 return (
                   <tr key={p.id} style={{ background: rowBg, borderBottom: '1px solid var(--border)' }}>
                     <td style={{ ...styles.td, paddingLeft: 12 }}>
@@ -356,8 +590,8 @@ export function ExecutionOverviewPage() {
                     <td style={styles.td}>
                       <span style={{ ...styles.projName, ...(dimColor ? { color: dimColor } : {}) }}>{p.name}</span>
                     </td>
-                    <td style={styles.td}>
-                      <span style={{ ...styles.phaseChip, ...phaseChipColor(p.phase, p.runStatus) }}>{p.phase}</span>
+                    <td style={{ ...styles.td, textAlign: 'center' }}>
+                      <span style={{ ...styles.phaseChip, ...phaseChipColor(p.phase, metrics[p.id]?.runStatus ?? p.runStatus) }}>{p.phase}</span>
                     </td>
                     <td style={styles.td}>
                       {(() => {
@@ -373,34 +607,61 @@ export function ExecutionOverviewPage() {
                         );
                       })()}
                     </td>
-                    <td style={styles.td}>
-                      {canEditRow(p) ? (
-                        (() => {
-                          const draftValue = assigneeDraft[p.id];
-                          const effective = draftValue !== undefined ? draftValue : (p.executionAssignee ?? '');
-                          const isDirty = draftValue !== undefined && (draftValue ?? '') !== (p.executionAssignee ?? '');
-                          return (
-                            <select
-                              value={effective}
-                              onChange={(e) => setAssigneeDraft((cur) => ({ ...cur, [p.id]: e.target.value }))}
-                              disabled={savingAssignees}
-                              style={{ ...styles.assigneeSelect, ...(isDirty ? styles.assigneeSelectDirty : {}) }}
-                            >
-                              <option value="">— {t('executionOverview.unassigned')} —</option>
-                              {users.map((u) => (
-                                <option key={u.id} value={u.username}>{u.username}</option>
-                              ))}
-                            </select>
-                          );
-                        })()
-                      ) : (
-                        <span style={{ ...styles.assigneeText, color: p.executionAssignee ? 'var(--text)' : 'var(--text-4)' }}>
-                          {p.executionAssignee ?? t('executionOverview.unassigned')}
-                        </span>
-                      )}
+                    <td style={{ ...styles.td, textAlign: 'center' }}>
+                      {(() => {
+                        // dropdown 또는 text 옆에 worker online 상태 dot 한 개 — assignee
+                        // 가 잡혀있고 그 사람의 Worker daemon 이 heartbeat 살아있으면 green,
+                        // 아니면 red. 미할당은 dot 없음.
+                        const effective = assigneeDraft[p.id] !== undefined
+                          ? assigneeDraft[p.id]
+                          : (p.executionAssignee ?? '');
+                        const online = isWorkerOnline(effective || null);
+                        const dotTitle = !effective
+                          ? ''
+                          : online
+                            ? t('executionOverview.worker.online', { name: effective })
+                            : t('executionOverview.worker.offline', { name: effective });
+                        return (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                            {effective && (
+                              <span
+                                title={dotTitle}
+                                style={{
+                                  width: 7, height: 7, borderRadius: '50%',
+                                  background: online ? 'var(--green)' : 'var(--red)',
+                                  flexShrink: 0,
+                                }}
+                              />
+                            )}
+                            {canEditRow(p) ? (
+                              (() => {
+                                const isDirty = assigneeDraft[p.id] !== undefined
+                                  && (assigneeDraft[p.id] ?? '') !== (p.executionAssignee ?? '');
+                                return (
+                                  <select
+                                    value={effective}
+                                    onChange={(e) => setAssigneeDraft((cur) => ({ ...cur, [p.id]: e.target.value }))}
+                                    disabled={savingAssignees}
+                                    style={{ ...styles.assigneeSelect, ...(isDirty ? styles.assigneeSelectDirty : {}) }}
+                                  >
+                                    <option value="">— {t('executionOverview.unassigned')} —</option>
+                                    {users.map((u) => (
+                                      <option key={u.id} value={u.username}>{u.username}</option>
+                                    ))}
+                                  </select>
+                                );
+                              })()
+                            ) : (
+                              <span style={{ ...styles.assigneeText, color: effective ? 'var(--text)' : 'var(--text-4)' }}>
+                                {effective || t('executionOverview.unassigned')}
+                              </span>
+                            )}
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)' }}>{p.tableCount}</td>
-                    <td style={{ ...styles.td, textAlign: 'right',  fontFamily: 'var(--mono)', color: 'var(--text-4)' }}>0 / 0</td>
+                    <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)', color: (metrics[p.id]?.rows ?? 0) > 0 ? 'var(--text-2)' : 'var(--text-4)' }}>{(metrics[p.id]?.rows ?? 0).toLocaleString()}</td>
                     <td style={{ ...styles.td, textAlign: 'center' }}>
                       <div style={styles.pipelineSlots}>
                         {pipelineStages.map((st) => (
@@ -413,19 +674,17 @@ export function ExecutionOverviewPage() {
                               style={{
                                 ...styles.pipelineSlotInner,
                                 width: `${st.pct}%`,
-                                background:
-                                  st.tone === 'ok'      ? 'var(--text-3)'
-                                  : st.tone === 'running' ? 'var(--green)'
-                                  : st.tone === 'err'   ? 'var(--red)'
-                                  : 'var(--amber)',
+                                background: stageFillColor(st.tone, pipelineComplete),
                               }}
                             />
                           </div>
                         ))}
                       </div>
                     </td>
-                    <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)', color: 'var(--text-4)' }}>0</td>
-                    <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)', color: 'var(--text-4)' }}>0</td>
+                    <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)', color: errorCount(p) > 0 ? 'var(--red)' : 'var(--text-4)' }}>{errorCount(p)}</td>
+                    <td style={{ ...styles.td, textAlign: 'center', fontFamily: 'var(--mono)', color: warningCount(p) > 0 ? 'var(--amber)' : 'var(--text-4)' }}>
+                      {warningCount(p) > 0 ? `${warningAckedCount(p)} / ${warningCount(p)}` : 0}
+                    </td>
                   </tr>
                 );
               })
@@ -622,3 +881,53 @@ const styles: Record<string, React.CSSProperties> = {
   },
   pipelineSlotInner: { height: '100%', transition: 'width .4s ease' },
 };
+
+/**
+ * ProjectExecMetrics(BE per-project 최신 run 집계)을 per-row pipeline Stage[] 로 변환.
+ *
+ * 優先: BE が返す per-stage の {@code stages} array をそのまま buildStagesFromStageViews
+ * に流す — Execution 画面と同じレンダラなので「3 success なのに 2 bar しか塗られない」
+ * 桁ずれが原理的に起きない.
+ *
+ * Fallback: stages が空 (古い BE / run 없음) ならば progressPct ベースの近似に切替.
+ * これは旧コードと同じふるまい (success/failed/aborted/running の 4 分岐 + floor()).
+ */
+function buildStagesFromMetric(metric: ProjectExecMetrics | undefined, fallbackPhase: Project['phase']): Stage[] {
+  const base = buildStages(fallbackPhase);
+  if (!metric || !metric.runStatus) return base;
+
+  // 優先パス — per-stage 情報あり.
+  if (metric.stages && metric.stages.length > 0) {
+    return buildStagesFromStageViews(metric.stages);
+  }
+
+  // Fallback — progressPct 近似 (run 직전 / BE 旧版 etc.)
+  const total = base.length;
+  const pct = Math.max(0, Math.min(100, metric.progressPct ?? 0));
+  const completed = Math.floor((pct / 100) * total);
+  const currentPct = ((pct / 100) * total - completed) * 100;
+  const status = metric.runStatus;
+
+  if (status === 'success') {
+    return base.map((s) => ({ ...s, pct: 100, tone: 'ok' as StageTone }));
+  }
+  if (status === 'failed' || status === 'timed_out') {
+    return base.map((s, i) => {
+      if (i < completed) return { ...s, pct: 100, tone: 'ok' as StageTone };
+      if (i === completed) return { ...s, pct: 100, tone: 'err' as StageTone };
+      return { ...s, pct: 0, tone: 'idle' as StageTone };
+    });
+  }
+  if (status === 'aborted') {
+    return base.map((s, i) => ({
+      ...s, pct: i < completed ? 100 : 0,
+      tone: (i < completed ? 'ok' : 'idle') as StageTone,
+    }));
+  }
+  // running / paused / pending
+  return base.map((s, i) => {
+    if (i < completed) return { ...s, pct: 100, tone: 'ok' as StageTone };
+    if (i === completed) return { ...s, pct: currentPct, tone: 'running' as StageTone };
+    return { ...s, pct: 0, tone: 'idle' as StageTone };
+  });
+}

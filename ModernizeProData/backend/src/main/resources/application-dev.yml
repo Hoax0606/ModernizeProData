@@ -8,12 +8,37 @@ spring:
 
   jpa:
     show-sql: true
+    properties:
+      hibernate:
+        # PG axis 측정의 핵심 — HibernateStatsDumper 가 SessionFactory.getStatistics()
+        # 주기 dump. queryCount / queryAvgMs / slowQueryCount / sessionCount.
+        generate_statistics: true
 
   flyway:
     # dev 단계에선 마이그레이션 적용 로그 자세히
     out-of-order: false
 
+# ── perf 측정 인프라 (dev 한정) ─────────────────────────────────────────
+# DuckDbService [perf] lock log + HibernateStatsDumper + actuator HikariCP metrics.
+modernize:
+  perf:
+    enabled: true
+
+# Actuator — localhost-only. /actuator/metrics/hikaricp.connections.pending 으로
+# pool waiter 수 확인. 폐쇄망 외부 노출 위험 zero.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: metrics,health
+  server:
+    address: 127.0.0.1
+
 logging:
   level:
     org.flywaydb: INFO
     org.hibernate.SQL: DEBUG
+    # Hibernate stats listener — generate_statistics + DEBUG 면 session 끝마다
+    # query count / time / cache hit 자동 출력. HibernateStatsDumper 의
+    # @Scheduled 60s 주기 dump 와 함께 phase-별 분석 가능.
+    org.hibernate.engine.internal.StatisticalLoggingSessionEventListener: DEBUG

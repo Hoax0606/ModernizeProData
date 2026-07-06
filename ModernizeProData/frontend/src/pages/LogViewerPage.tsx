@@ -1,47 +1,90 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { useQuery } from '@tanstack/react-query';
 import { useWorkspaceStore } from '../store/workspace';
 import { useT } from '../i18n';
 import {
   levelName,
+  runLogApi,
   type RunLogLevel,
   type RunLogLine,
+  type RunLogCounts,
 } from '../api/runLogs';
-import { runsApi, type RunHistoryDto } from '../api/runs';
-import { formatTimestamp, formatDuration } from '../lib/formatters';
-import { buildMockLines, stageColor } from './logViewerMock';
+import { runsApi, type RunHistoryDto, type RunTableResult } from '../api/runs';
+import { quarantineApi } from '../api/quarantine';
+import { quarantineAckApi, type RunPhase, type QuarantineGroupAck, type AckHistoryEntry } from '../api/quarantineAck';
+import { useSnapshotsStore, usePinnedSnapshotsStore } from '../store/snapshots';
+import { formatTimestamp, formatTimeMs, formatDuration } from '../lib/formatters';
+import { stageColor } from './logViewerMock';
 import {
-  buildQuarantineGroups,
   humanizeQuarantineDetail,
   quarantineRowAsIs,
   quarantineRowToBe,
+  quarantineRowPk,
+  quarantinePkColumnName,
+  quarantineViolatedColumnName,
+  buildQuarantineGroups,
   type QuarantineGroup,
   type QuarantineSeverity,
 } from './quarantineMock';
+import { Modal } from '../components/Modal';
+import { useActiveProjectReadOnly } from '../store/readOnly';
 
 /**
  * Log viewer — 프로젝트 실행 로그 조회.
  *
- *  데모 모드: USE_MOCK=true 면 결정적 합성 로그 240줄을 화면에 채운다.
- *  BE ingest 가 실데이터로 들어오면 useLogsHistory / useLogsStream 으로 swap.
- *  (swap 포인트: 아래 allLines 계산부)
+ *  activeProjectId 의 최근 run 의 runId 를 listByProject 로 자동 결정.
+ *  runLogApi.list 로 line stream, quarantineApi.byRun 로 group 데이터 fetch.
  */
 
-const USE_MOCK = true;
-const MOCK_COUNT = 240;
 const ROW_ESTIMATE = 22;
+const LOG_FETCH_LIMIT = 1000;
 
 export function LogViewerPage() {
   const t = useT();
   const navigate = useNavigate();
+  // read-only project = quarantine acknowledge / re-review 차단. 보기/필터는 허용.
+  const readOnly = useActiveProjectReadOnly();
   const projects = useWorkspaceStore((s) => s.projects);
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const project = useMemo(
     () => projects.find((p) => p.id === activeProjectId) ?? null,
     [projects, activeProjectId],
   );
-  const runId = activeProjectId ?? 'demo';
+  /** project 의 최근 run — useQuery 로 5s 폴링 + window focus refetch + WS invalidate 와 키 공유.
+     mount 후 새 run 起動되면 자동으로 최신 run 의 로그·quarantine 으로 전환된다. */
+  const { data: runHistory } = useQuery<RunHistoryDto[]>({
+    queryKey: ['run-history', activeProjectId],
+    enabled: !!activeProjectId,
+    queryFn: () => runsApi.listByProject(activeProjectId!),
+    refetchInterval: 5_000,
+    refetchOnWindowFocus: true,
+    staleTime: 2_000,
+  });
+  /* runHistory 가 비었거나 아직 로딩 중일 때 활성 snapshot 의 박제된 executionContext.runId
+     로 fallback. 활성 snapshot 우선순위: (1) pinned, (2) 가장 최근 mapping. 사용자가 pin 을
+     옛 snapshot 으로 옮기면 그 snapshot 의 logs 가 자동으로 보인다.
+     박제 안 된 snapshot 이면 runId 가 '' → empty state 표시 (사용자 결정). */
+  const snapshots = useSnapshotsStore((s) => s.snapshots);
+  const fetchSnapshots = useSnapshotsStore((s) => s.fetchByProject);
+  const pinnedIds = usePinnedSnapshotsStore((s) => s.pinnedIds);
+  useEffect(() => {
+    if (activeProjectId) void fetchSnapshots(activeProjectId);
+  }, [activeProjectId, fetchSnapshots]);
+  const snapshotFallbackRunId = useMemo(() => {
+    const projectMapping = snapshots.filter(
+      (s) => s.projectId === activeProjectId && s.type === 'mapping',
+    );
+    const pinned = projectMapping.find((s) => pinnedIds.includes(s.id));
+    const active = pinned
+      ?? [...projectMapping].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+    return active?.executionContext?.runId ?? '';
+  }, [snapshots, activeProjectId, pinnedIds]);
+  /* 활성 snapshot 의 박제된 runId 가 있으면 그것 우선. 박제 없으면 (snapshot 으로 한 번도
+     run 안 됐거나 옛 run 정보 누락) project 의 latest run history 로 fallback — quarantine /
+     로그가 비어 보이는 confusion 회피. */
+  const runId = snapshotFallbackRunId || (runHistory?.[0]?.id ?? '');
 
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -51,14 +94,26 @@ export function LogViewerPage() {
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
   /** STEP(=stage) 필터. null = 전체, 문자열 = 그 stage 만. */
   const [stepFilter, setStepFilter] = useState<string | null>(null);
+  /** Run History の drill-down 展開行 (複数同時展開可). */
+  const [expandedRunIds, setExpandedRunIds] = useState<Set<string>>(new Set());
+  const toggleExpandedRun = useCallback((runId: string) => {
+    setExpandedRunIds((cur) => {
+      const next = new Set(cur);
+      if (next.has(runId)) next.delete(runId); else next.add(runId);
+      return next;
+    });
+  }, []);
   /** 화면 모드. stream = 전체 로그 tail, quarantine = 규칙 위반 group 카드 뷰, history = run 履歴. */
   const [view, setView] = useState<'stream' | 'quarantine' | 'history'>('stream');
   /** Quarantine 화면의 severity 필터. */
-  const [severityFilter, setSeverityFilter] = useState<'all' | QuarantineSeverity>('all');
+  /* 'skip' = ack 된 WARN group. severity 와 별개 분류 — warning 카운트에서 제외. */
+  const [severityFilter, setSeverityFilter] = useState<'all' | QuarantineSeverity | 'skip'>('all');
   /** 펼쳐진 (= 액션바 표시) group 의 id. 한 번에 하나만. 같은 카드 다시 클릭 → 접힘. */
   const [openGroupId, setOpenGroupId] = useState<string | null>(null);
   /** 우상단 group dropdown 선택 — null 이면 severity 결과 다 표시, id 면 그 group 만 표시 + 자동 펼침. */
   const [pickedGroupId, setPickedGroupId] = useState<string | null>(null);
+  /** 테이블 dropdown 선택 — null 이면 전체 테이블, 문자열이면 그 테이블의 group 만. severity 와 AND 결합. */
+  const [tableFilter, setTableFilter] = useState<string | null>(null);
 
   useEffect(() => {
     const id = window.setTimeout(() => setDebouncedSearch(search), 200);
@@ -66,60 +121,259 @@ export function LogViewerPage() {
   }, [search]);
 
   /* ── 데이터 ─────────────────────────────────────── */
-  const allLines = useMemo<RunLogLine[]>(
-    () => (USE_MOCK ? buildMockLines(runId, MOCK_COUNT) : []),
-    [runId],
-  );
+  /** runId 의 모든 RunLog line (최대 LOG_FETCH_LIMIT). runId 변경 시 자동 refetch. */
+  const [allLines, setAllLines] = useState<RunLogLine[]>([]);
+  useEffect(() => {
+    if (!runId) { setAllLines([]); return; }
+    runLogApi.list(runId, { limit: LOG_FETCH_LIMIT })
+      .then((p) => setAllLines(p.lines))
+      .catch((e) => { console.error('runLog fetch failed', e); setAllLines([]); });
+  }, [runId]);
 
-  /** Stream 모드 라인 — 검색/level/step 필터 적용. Quarantine 모드는 별도 데이터 소스(아래 groups)로 동작. */
+  /** chip / footer 총계는 BE 실카운트 사용. allLines 는 max LOG_FETCH_LIMIT + INFO 는
+   *  BE 가 seq%100 샘플 적재라 fetch 배열로 세면 ~1/100 로 축소된다. counts endpoint 가
+   *  전건 카운트(WARN/ERROR 정확, INFO 는 적재된 샘플의 실수)를 돌려준다. */
+  const { data: realCounts } = useQuery<RunLogCounts>({
+    queryKey: ['run-log-counts', runId],
+    enabled: !!runId,
+    queryFn: () => runLogApi.counts(runId),
+    refetchInterval: 5_000,
+    staleTime: 2_000,
+  });
+
+  /** Stream 모드 라인 — 검색/level/step 필터 적용. Quarantine 모드는 별도 데이터 소스(아래 groups)로 동작.
+   *  stepFilter 매치는 정확 일치 또는 family prefix (예: 'validate' → 'validate.notnull') 둘 다 허용 —
+   *  quarantine 점프 시 그룹의 dotted stage 가 stream 의 family 라인과 매칭되지 않는 문제 회피. */
   const lines = useMemo(() => {
     const q = debouncedSearch.trim().toLowerCase();
     return allLines.filter((l) => {
       const name: RunLogLevel = l.level === 2 ? 'ERROR' : l.level === 1 ? 'WARN' : 'INFO';
       if (!levelFilter[name]) return false;
-      if (stepFilter && l.stage !== stepFilter) return false;
+      if (stepFilter && l.stage !== stepFilter && !l.stage.startsWith(stepFilter + '.')) return false;
       if (!q) return true;
       return l.message.toLowerCase().includes(q) || l.stage.toLowerCase().includes(q);
     });
   }, [allLines, debouncedSearch, levelFilter, stepFilter]);
 
-  /** Quarantine groups — rule-violation 묶음. mock 결정적. BE 들어오면 fetch 로 swap. */
-  const allGroups = useMemo<QuarantineGroup[]>(
-    () => buildQuarantineGroups(runId),
-    [runId],
-  );
+  /** Quarantine groups — runId 의 위반 row 묶음. useQuery 로 캐시 + 자동 refetch.
+     runId 변경 시 자동 refetch. usePipelineProgress 의 WS invalidate('run-history') 와는
+     별개 queryKey 라 직접 invalidate 안 받지만, 5s 폴링이 곧 따라잡음. */
+  const { data: allGroupsData, refetch: refetchQuarantine } = useQuery<QuarantineGroup[]>({
+    queryKey: ['quarantine', runId],
+    enabled: !!runId,
+    queryFn: () => quarantineApi.byRun(runId),
+    refetchInterval: 5_000,
+    staleTime: 2_000,
+  });
+
+  /* group 별 ack 상태 (carry-over 반영). ack 된 group 은 Quarantine 목록에서 숨김. */
+  const { data: ackGroupsData, refetch: refetchAckGroups } = useQuery<QuarantineGroupAck[]>({
+    queryKey: ['quarantine-ack', runId],
+    enabled: !!runId,
+    queryFn: () => quarantineAckApi.listGroups(runId),
+    refetchInterval: 5_000,
+    staleTime: 2_000,
+  });
+  /* ackGroupsData 는 carry-over visibility polling 용 — render 는 byRun 의 g.ack 직접 사용. */
+  void ackGroupsData;
+
+  /* WARN ack 시스템 (2026-06-01).
+     runHistory 의 latest run 의 runType 을 ack phase 로 사용.
+     runHistory 데이터 미도착 시 ack 버튼 미노출. */
+  const latestRun = (runHistory ?? [])[0];
+  const runPhase: RunPhase | null = latestRun
+    ? (latestRun.runType as RunPhase)
+    : null;
+
+  /** Ack Modal state — 운영자가 [그룹 검토 완료] 클릭 → 이 modal 에서 메모 입력 후 저장.
+      isRereview=true 면 carry-over 된 group 의 재검토 — 같은 modal 재사용, 제목/placeholder 만 동적. */
+  const [ackTarget, setAckTarget] = useState<QuarantineGroup | null>(null);
+  const [ackIsRereview, setAckIsRereview] = useState(false);
+  const [ackPreviousNote, setAckPreviousNote] = useState<string | null>(null);
+  const [ackNote, setAckNote] = useState('');
+  const [ackBusy, setAckBusy] = useState(false);
+  const [ackError, setAckError] = useState<string | null>(null);
+
+  /** Ack history popover state — dim 카드의 (↗ history) 클릭 시 group 의 전체 ack 이력 표시.
+      run history 의 historyRows 와 충돌 피하기 위해 ackHistory* prefix 사용. */
+  const [ackHistoryTarget, setAckHistoryTarget] = useState<QuarantineGroup | null>(null);
+  const [ackHistoryRows, setAckHistoryRows] = useState<AckHistoryEntry[]>([]);
+  const [ackHistoryBusy, setAckHistoryBusy] = useState(false);
+  const [ackHistoryError, setAckHistoryError] = useState<string | null>(null);
+  const openAckHistory = useCallback(async (g: QuarantineGroup) => {
+    if (!project || !g.bindingId) return;
+    setAckHistoryTarget(g);
+    setAckHistoryRows([]);
+    setAckHistoryError(null);
+    setAckHistoryBusy(true);
+    try {
+      const rows = await quarantineAckApi.history({
+        projectId: project.id,
+        bindingId: g.bindingId,
+        ruleName: g.stage,
+        reason: g.reason,
+      });
+      setAckHistoryRows(rows);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setAckHistoryError(t('logs.quarantine.ack.history.failed', { error: msg }));
+    } finally {
+      setAckHistoryBusy(false);
+    }
+  }, [project, t]);
+  const closeAckHistory = useCallback(() => {
+    setAckHistoryTarget(null);
+    setAckHistoryRows([]);
+    setAckHistoryError(null);
+  }, []);
+
+  const openAckModal = useCallback((g: QuarantineGroup) => {
+    setAckTarget(g);
+    setAckIsRereview(false);
+    setAckPreviousNote(null);
+    setAckNote('');
+    setAckError(null);
+  }, []);
+
+  /** Re-review — 이미 ack 된 group 을 다시 검토. 새 ack row 추가 (기존 ack 는 audit 보존). */
+  const openRereviewModal = useCallback(async (g: QuarantineGroup) => {
+    if (!project || !g.bindingId) return;
+    setAckTarget(g);
+    setAckIsRereview(true);
+    setAckPreviousNote(null);
+    setAckNote('');
+    setAckError(null);
+    // 이전 ack 의 note 를 모달 안내에 표시 — history endpoint 의 첫 row 가 latest.
+    try {
+      const rows = await quarantineAckApi.history({
+        projectId: project.id,
+        bindingId: g.bindingId,
+        ruleName: g.stage,
+        reason: g.reason,
+      });
+      if (rows.length > 0 && rows[0].note) setAckPreviousNote(rows[0].note);
+    } catch {
+      /* 이전 note 표시 실패 무시 — re-review 자체는 진행 가능. */
+    }
+  }, [project]);
+
+  const closeAckModal = useCallback(() => {
+    if (ackBusy) return;
+    setAckTarget(null);
+    setAckIsRereview(false);
+    setAckPreviousNote(null);
+    setAckNote('');
+    setAckError(null);
+  }, [ackBusy]);
+
+  const handleAckSave = useCallback(async () => {
+    const g = ackTarget;
+    if (readOnly) return;
+    if (!g || !project || !runPhase || !g.bindingId) return;
+    setAckBusy(true);
+    setAckError(null);
+    try {
+      await quarantineAckApi.acknowledge({
+        projectId: project.id,
+        bindingId: g.bindingId,
+        ruleName: g.stage,
+        reason: g.reason,
+        phase: runPhase,
+        // CSV fingerprint 전송 — 같은 CSV 로 재실행 시 carry-over (정책 3·6).
+        csvMtimeMs: g.csvMtimeMs ?? null,
+        csvSize: g.csvSize ?? null,
+        note: ackNote || null,
+      });
+      await refetchQuarantine();
+      await refetchAckGroups();
+      setAckTarget(null);
+      setAckNote('');
+    } catch (e: unknown) {
+      console.error('quarantine acknowledge failed', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      // BE 가 409 (ACK_DUPLICATE) 반환 시 친화적 메시지로 교체.
+      if (msg.includes('ACK_DUPLICATE') || msg.includes('409')) {
+        setAckError(t('logs.quarantine.ack.duplicate'));
+      } else {
+        setAckError(t('logs.quarantine.ack.failed', { error: msg }));
+      }
+    } finally {
+      setAckBusy(false);
+    }
+  }, [ackTarget, project, runPhase, ackNote, refetchQuarantine, refetchAckGroups, t, readOnly]);
+  /* ack 된 group 도 dim+meta 로 표시 (사용자 결정 — hide 가 아닌 dim). QuarantineCard 가 g.ack 로 처리. */
+  /* Demo / UI 검증용 — localStorage flag 'mpd_demo_quarantine' = 'true' 이고 backend 가 empty 일 때
+     mock buildQuarantineGroups 결과 사용. console 에서 toggle 가능:
+        localStorage.setItem('mpd_demo_quarantine','true')   // 켜기
+        localStorage.removeItem('mpd_demo_quarantine')        // 끄기
+     prod 일반 사용 시 영향 X — flag set 안 하면 backend 결과 그대로. */
+  const allGroups: QuarantineGroup[] = (() => {
+    const data = allGroupsData ?? [];
+    if (data.length > 0) return data;
+    if (typeof window !== 'undefined'
+        && window.localStorage?.getItem('mpd_demo_quarantine') === 'true') {
+      return buildQuarantineGroups(runId ?? 'demo');
+    }
+    return data;
+  })();
   const groupStats = useMemo(() => {
-    let errRows = 0, warnRows = 0;
+    /* ack 된 WARN 은 'skip' 으로 분리 카운트. warning 카운트에서 제외 (사용자 결정).
+       error 는 ack 무관 — error 는 ack 시스템 X. */
+    let errRows = 0, warnRows = 0, skipRows = 0;
     for (const g of allGroups) {
-      if (g.severity === 'error') errRows += g.rowCount; else warnRows += g.rowCount;
+      if (g.severity === 'error') errRows += g.rowCount;
+      else if (g.ack) skipRows += g.rowCount;
+      else warnRows += g.rowCount;
     }
     const errGroups  = allGroups.filter((g) => g.severity === 'error').length;
-    const warnGroups = allGroups.filter((g) => g.severity === 'warning').length;
+    const warnGroups = allGroups.filter((g) => g.severity === 'warning' && !g.ack).length;
+    const skipGroups = allGroups.filter((g) => g.severity === 'warning' && !!g.ack).length;
     return {
       total: allGroups.length,
-      errGroups, warnGroups,
-      errRows, warnRows,
-      totalRows: errRows + warnRows,
+      errGroups, warnGroups, skipGroups,
+      errRows, warnRows, skipRows,
+      totalRows: errRows + warnRows + skipRows,
     };
   }, [allGroups]);
-  /* All 이 기본이므로 dropdown 미선택 시 severity 필터 결과를 그대로 표시.
-     dropdown 으로 group 하나 고르면 그 카드만 보이고 나머지는 hide. */
-  const filteredGroups = useMemo(() => {
-    const bySev = severityFilter === 'all'
-      ? allGroups
-      : allGroups.filter((g) => g.severity === severityFilter);
-    if (!pickedGroupId) return bySev;
-    return bySev.filter((g) => g.id === pickedGroupId);
-  }, [allGroups, severityFilter, pickedGroupId]);
+  /* 필터는 severity → table → group(개별) 순으로 AND 결합한다.
+     - bySeverity : severity 탭 결과 (table dropdown 옵션의 모집단)
+     - byTable    : 거기서 테이블 dropdown 적용 (group dropdown 옵션의 모집단)
+     - filtered   : 거기서 개별 group dropdown 적용 → 최종 표시 카드 */
+  const bySeverity = useMemo(() => {
+    if (severityFilter === 'all')     return allGroups;
+    if (severityFilter === 'skip')    return allGroups.filter((g) => g.severity === 'warning' && !!g.ack);
+    if (severityFilter === 'warning') return allGroups.filter((g) => g.severity === 'warning' && !g.ack);
+    return allGroups.filter((g) => g.severity === severityFilter);
+  }, [allGroups, severityFilter]);
+  const byTable = useMemo(() => (
+    tableFilter ? bySeverity.filter((g) => g.table === tableFilter) : bySeverity
+  ), [bySeverity, tableFilter]);
+  const filteredGroups = useMemo(() => (
+    pickedGroupId ? byTable.filter((g) => g.id === pickedGroupId) : byTable
+  ), [byTable, pickedGroupId]);
 
-  /** dropdown 옵션 — 현재 severity 안에서 고를 수 있는 group 목록. */
-  const pickableGroups = useMemo(() => (
-    severityFilter === 'all'
-      ? allGroups
-      : allGroups.filter((g) => g.severity === severityFilter)
-  ), [allGroups, severityFilter]);
+  /** 테이블 dropdown 옵션 — 현재 severity 안에 등장하는 unique 테이블 + group 수, 알파벳순.
+     빈 table('') 인 entry 는 제외 (선택 의미 없음). */
+  const tableOptions = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const g of bySeverity) {
+      if (!g.table) continue;
+      m.set(g.table, (m.get(g.table) ?? 0) + 1);
+    }
+    return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [bySeverity]);
 
-  /* severity 가 바뀌면 그 안에 picked 가 더 이상 없으니 picked 초기화. */
+  /** group dropdown 옵션 — severity + table 필터까지 반영한 group 목록. */
+  const pickableGroups = byTable;
+
+  /* severity 가 바뀌어 그 안에 선택 테이블이 더는 없으면 table 필터 초기화. */
+  useEffect(() => {
+    if (tableFilter && !tableOptions.some(([v]) => v === tableFilter)) {
+      setTableFilter(null);
+    }
+  }, [tableOptions, tableFilter]);
+
+  /* severity/table 가 바뀌면 그 안에 picked 가 더 이상 없으니 picked 초기화. */
   useEffect(() => {
     if (pickedGroupId && !pickableGroups.some((g) => g.id === pickedGroupId)) {
       setPickedGroupId(null);
@@ -205,6 +459,10 @@ export function LogViewerPage() {
   }, [allLines]);
 
   const totalCounts = useMemo(() => {
+    if (realCounts) {
+      return { info: realCounts.info, warn: realCounts.warn, error: realCounts.error, total: realCounts.total };
+    }
+    // counts endpoint 미응답 시 fetch 배열 폴백 (INFO 는 샘플이라 과소집계 가능).
     let info = 0, warn = 0, err = 0;
     for (const l of allLines) {
       if (l.level === 2) err++;
@@ -212,7 +470,7 @@ export function LogViewerPage() {
       else info++;
     }
     return { info, warn, error: err, total: allLines.length };
-  }, [allLines]);
+  }, [realCounts, allLines]);
 
   const selected: RunLogLine | null = useMemo(
     () => lines.find((l) => l.seq === selectedSeq) ?? null,
@@ -334,7 +592,7 @@ export function LogViewerPage() {
             />
 
             <div style={styles.levelGroup}>
-              <LevelChip label="INFO"  active={levelFilter.INFO}  count={totalCounts.info}
+              <LevelChip label="INFO"  active={levelFilter.INFO}  count={totalCounts.info} sampled
                 color="#a0a8b4" onClick={() => setLevelFilter((f) => ({ ...f, INFO: !f.INFO }))} />
               <LevelChip label="WARN"  active={levelFilter.WARN}  count={totalCounts.warn}
                 color="#e8b563" onClick={() => setLevelFilter((f) => ({ ...f, WARN: !f.WARN }))} />
@@ -375,7 +633,7 @@ export function LogViewerPage() {
                 </div>
                 <div style={styles.quarStatsLine}>
                   {historyLoading
-                    ? '…'
+                    ? ''
                     : filteredHistoryRows.length === historyRows.length
                       ? `${historyRows.length} runs`
                       : `${filteredHistoryRows.length} / ${historyRows.length} runs`}
@@ -429,7 +687,7 @@ export function LogViewerPage() {
                   disabled={historyLoading || !activeProjectId}
                   style={styles.historyRefreshBtn}
                 >
-                  {historyLoading ? '…' : t('projectSettings.action.refresh')}
+                  {historyLoading ? '' : t('projectSettings.action.refresh')}
                 </button>
                 <div style={{ flex: 1 }} />
               </div>
@@ -442,33 +700,69 @@ export function LogViewerPage() {
                 <table style={styles.historyTable}>
                   <thead>
                     <tr>
+                      <th style={{ ...styles.historyTh, width: 22, padding: '6px 4px' }} aria-label="expand"></th>
+                      <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.runId')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.started')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.finished')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.type')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.trigger')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.worker')}</th>
+                      <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.tables')}</th>
                       <th style={styles.historyTh}>{t('projectSettings.schedule.history.col.status')}</th>
-                      <th style={{ ...styles.historyTh, textAlign: 'right' }}>
+                      <th
+                        style={{ ...styles.historyTh, textAlign: 'right' }}
+                        title={t('projectSettings.schedule.history.col.duration.tooltip')}
+                      >
                         {t('projectSettings.schedule.history.col.duration')}
                       </th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredHistoryRows.map((h) => (
-                      <tr key={h.id}>
-                        <td style={styles.historyTd}>{formatTimestamp(h.startedAt)}</td>
-                        <td style={styles.historyTd}>{h.finishedAt ? formatTimestamp(h.finishedAt) : '-'}</td>
-                        <td style={styles.historyTd}>{h.runType}</td>
-                        <td style={styles.historyTd}>{h.triggerSource}</td>
-                        <td style={styles.historyTd}>{h.workerId ?? '-'}</td>
-                        <td style={styles.historyTd}>
-                          <span style={historyStatusStyle(h.status)}>{h.status}</span>
-                        </td>
-                        <td style={{ ...styles.historyTd, textAlign: 'right', fontFamily: 'var(--mono)' }}>
-                          {formatDuration(h.durationMs)}
-                        </td>
-                      </tr>
-                    ))}
+                    {filteredHistoryRows.map((h) => {
+                      const expanded = expandedRunIds.has(h.id);
+                      const canExpand = h.tableSummary.total > 0;
+                      return (
+                        <Fragment key={h.id}>
+                          <tr
+                            onClick={canExpand ? () => toggleExpandedRun(h.id) : undefined}
+                            style={{ cursor: canExpand ? 'pointer' : 'default' }}
+                          >
+                            <td style={{ ...styles.historyTd, padding: '4px 4px', textAlign: 'center' }}>
+                              {canExpand && (
+                                <span style={{ color: 'var(--text-3)', fontSize: 11, userSelect: 'none' }}>
+                                  {expanded ? '▾' : '▸'}
+                                </span>
+                              )}
+                            </td>
+                            <td style={styles.historyTd}><code style={{ fontSize: 10, color: 'var(--text-3)' }}>{h.id}</code></td>
+                            <td style={styles.historyTd}>{formatTimestamp(h.startedAt)}</td>
+                            <td style={styles.historyTd}>{h.finishedAt ? formatTimestamp(h.finishedAt) : '-'}</td>
+                            <td style={styles.historyTd}>{h.runType}</td>
+                            <td style={styles.historyTd}>{h.triggerSource}</td>
+                            <td style={styles.historyTd}>{h.workerId ?? '-'}</td>
+                            <td style={styles.historyTd}>
+                              <HistoryTablesCell h={h} t={t} />
+                            </td>
+                            <td style={styles.historyTd}>
+                              <span style={historyStatusStyle(h.status)}>{h.status}</span>
+                            </td>
+                            <td
+                              style={{ ...styles.historyTd, textAlign: 'right', fontFamily: 'var(--mono)' }}
+                              title={t('projectSettings.schedule.history.col.duration.tooltip')}
+                            >
+                              {formatDuration(h.durationMs)}
+                            </td>
+                          </tr>
+                          {expanded && (
+                            <tr>
+                              <td colSpan={10} style={{ padding: 0, background: 'var(--panel-2)' }}>
+                                <HistoryRunDrilldown runId={h.id} t={t} />
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               )}
@@ -493,6 +787,7 @@ export function LogViewerPage() {
                     n: String(groupStats.totalRows),
                     err: String(groupStats.errRows),
                     warn: String(groupStats.warnRows),
+                    skip: String(groupStats.skipRows),
                   })}
                 </div>
               </div>
@@ -506,7 +801,21 @@ export function LogViewerPage() {
                     active={severityFilter === 'error'}   onClick={() => setSeverityFilter('error')}   tone="error" />
                   <SevTab label={t('logs.quarantine.filter.warnings')} count={groupStats.warnGroups}
                     active={severityFilter === 'warning'} onClick={() => setSeverityFilter('warning')} tone="warning" />
+                  <SevTab label={t('logs.quarantine.filter.skip')} count={groupStats.skipGroups}
+                    active={severityFilter === 'skip'} onClick={() => setSeverityFilter('skip')} />
                 </div>
+                {/* 테이블 dropdown — severity 탭 바로 옆. 한 테이블의 위반만 모아 보기. */}
+                <select
+                  style={styles.tablePickSelect}
+                  value={tableFilter ?? ''}
+                  onChange={(e) => setTableFilter(e.target.value || null)}
+                  disabled={tableOptions.length === 0}
+                >
+                  <option value="">{t('logs.quarantine.pickTable.all')}</option>
+                  {tableOptions.map(([tbl, n]) => (
+                    <option key={tbl} value={tbl}>{tbl} ({n})</option>
+                  ))}
+                </select>
                 <select
                   style={styles.groupPickSelect}
                   value={pickedGroupId ?? ''}
@@ -515,7 +824,11 @@ export function LogViewerPage() {
                 >
                   <option value="">{t('logs.quarantine.pick.all')}</option>
                   {pickableGroups.map((g) => (
-                    <option key={g.id} value={g.id}>{g.reason} ({g.rowCount})</option>
+                    /* 같은 reason 이 여러 테이블에서 나면 라벨이 동일해 구분 불가 →
+                       테이블명을 앞에 붙여 식별. table 비면 reason 만. */
+                    <option key={g.id} value={g.id}>
+                      {g.table ? `${g.table} — ${g.reason}` : g.reason} ({g.rowCount})
+                    </option>
                   ))}
                 </select>
                 <div style={{ flex: 1 }} />
@@ -532,25 +845,72 @@ export function LogViewerPage() {
                     g={g}
                     t={t}
                     open={openGroupId === g.id}
+                    runId={runId}
+                    onAcknowledge={!readOnly && g.severity === 'warning' && g.bindingId && runPhase && !g.ack
+                      ? () => openAckModal(g)
+                      : null}
+                    onRereview={!readOnly && g.severity === 'warning' && g.bindingId && runPhase && g.ack
+                      ? () => void openRereviewModal(g)
+                      : null}
+                    ackInfo={g.ack ?? null}
+                    onOpenHistory={g.severity === 'warning' && g.bindingId
+                      ? () => void openAckHistory(g)
+                      : null}
                     onToggle={() => setOpenGroupId((cur) => (cur === g.id ? null : g.id))}
-                    onOpenMapping={() => navigate('/mapping')}
+                    onOpenMapping={() => {
+                      // 매핑 row highlight 대상 컬럼명 추출 — 3 단계로 robust 하게 시도.
+                      // 1) 'violated' role 컬럼 우선 (정상 BE 응답)
+                      // 2) 그게 placeholder ('error'/'unknown'/빈값) 면 g.columns 전체에서 다시 필터
+                      // 3) 그래도 없으면 g.detail / g.reason 텍스트에서 'source column XXX' / 't.XXX' / 'OF XXX' 같은
+                      //    SQL 에러 패턴으로 컬럼명 보충 (예: 'casting from source column TXN_DTTM').
+                      const PLACEHOLDER = new Set(['error', 'unknown', '']);
+                      const isReal = (c: string) => c && !PLACEHOLDER.has(c.toLowerCase());
+
+                      let cols = g.columns
+                        .filter((_, i) => g.columnRoles[i] === 'violated')
+                        .filter(isReal);
+                      if (cols.length === 0) {
+                        cols = g.columns.filter(isReal);
+                      }
+                      if (cols.length === 0) {
+                        const text = `${g.detail || ''} ${g.reason || ''}`;
+                        const found = new Set<string>();
+                        // 'source column XXX' / 'column XXX' (대소문자 무관).
+                        for (const m of text.matchAll(/\b(?:source\s+)?column\s+([A-Za-z_][A-Za-z0-9_]*)/gi)) {
+                          found.add(m[1]);
+                        }
+                        // 't.XXX' / 'a.XXX' / 'src.XXX' alias 패턴 (SQL CAST/SELECT 안에 자주 등장).
+                        for (const m of text.matchAll(/\b[a-z]\w*\.([A-Z_][A-Z0-9_]+)\b/g)) {
+                          found.add(m[1]);
+                        }
+                        cols = [...found];
+                      }
+                      navigate('/mapping', {
+                        state: { focusRule: { tobeTable: g.table, tobeColumns: cols } },
+                      });
+                    }}
                     onOpenInspector={() => {
-                      // Quarantine group → Stream 모드로 점프. 그 group 의 stage 와 severity 로
-                      // 필터를 좁혀 해당 라인들만 보인다. ERROR 자동 선택 effect 가 동작.
+                      // Quarantine group → Stream 모드로 점프.
+                      //
+                      // 자동 stage/severity 좁힘은 폐기 — quarantine group 의 stage (validate.type 등)
+                      // 와 실제 RunLog 라인의 stage 가 매치된다는 보장이 없음 (백엔드/데이터에 따라 다름).
+                      // 좁힌 결과가 0 라인이면 "필터 조건에 맞는 로그가 없습니다" 만 떠서 빈 화면.
+                      // 그래서 stepFilter / search 는 풀고 level 만 모두 켠 채 stream 으로 전환 —
+                      // 그 run 의 전체 라인을 그대로 보여주고, 사용자가 STEP dropdown 으로 직접 좁힘.
                       setView('stream');
-                      setStepFilter(g.stage);
+                      setStepFilter(null);
                       setSearch('');
                       setDebouncedSearch('');
-                      setLevelFilter({
-                        INFO:  false,
-                        WARN:  g.severity === 'warning',
-                        ERROR: g.severity === 'error',
-                      });
+                      setLevelFilter({ INFO: true, WARN: true, ERROR: true });
                       setOpenGroupId(null);
                     }}
                   />
                 ))
               )}
+
+              {/* Page-level 「과거 발생 이력」 collapse — 카드 list 끝. 필터 적용된 group 의 옛 run entry.
+                  severity filter 가 warning/skip 일 때 history 의 ack 상태도 같이 filter. */}
+              <QuarantineHistoryArchive groups={filteredGroups} severityFilter={severityFilter} t={t} />
             </div>
           </div>
         ) : (
@@ -645,18 +1005,184 @@ export function LogViewerPage() {
         </aside>
         )}
       </div>
+
+      {/* WARN 그룹 ack Modal — 운영자가 검토 후 메모 입력. window.prompt 대체 (2026-06-01).
+          isRereview=true 면 같은 modal 을 재검토 용으로 재사용 — 제목/placeholder 동적,
+          이전 note 표시. Save 시 새 ack row 추가 (기존 ack 는 audit 보존). */}
+      <Modal
+        open={ackTarget !== null}
+        onClose={closeAckModal}
+        title={t(ackIsRereview ? 'logs.quarantine.ack.reReview.title' : 'logs.quarantine.ack.modal.title')}
+        width={520}
+      >
+        {ackTarget && (
+          <div>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 4 }}>
+                {t('logs.quarantine.ack.modal.reasonLabel')}
+              </div>
+              <div style={{ fontSize: 13, color: 'var(--text)' }}>{ackTarget.reason}</div>
+            </div>
+            {ackIsRereview && ackPreviousNote && (
+              <div style={{ marginBottom: 12, padding: 8, background: 'var(--panel-2)', borderRadius: 3, fontSize: 11, color: 'var(--text-2)' }}>
+                {t('logs.quarantine.ack.reReview.previousNote', { note: ackPreviousNote })}
+              </div>
+            )}
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ display: 'block', fontSize: 11, color: 'var(--text-3)', marginBottom: 4 }}>
+                {t('logs.quarantine.ack.modal.noteLabel')}
+              </label>
+              <textarea
+                value={ackNote}
+                onChange={(e) => setAckNote(e.target.value)}
+                placeholder={t(ackIsRereview ? 'logs.quarantine.ack.reReview.notePlaceholder' : 'logs.quarantine.ack.modal.notePlaceholder')}
+                rows={4}
+                disabled={ackBusy}
+                style={{
+                  width: '100%',
+                  fontFamily: 'inherit',
+                  fontSize: 12,
+                  border: '1px solid var(--border)',
+                  background: 'var(--panel)',
+                  color: 'var(--text)',
+                  padding: 8,
+                  borderRadius: 3,
+                  resize: 'vertical',
+                  boxSizing: 'border-box',
+                }}
+              />
+            </div>
+            {ackError && (
+              <div style={{ color: '#c92a3f', fontSize: 12, marginBottom: 8 }}>{ackError}</div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                type="button"
+                onClick={closeAckModal}
+                disabled={ackBusy}
+                style={{
+                  padding: '6px 14px',
+                  fontSize: 12,
+                  border: '1px solid var(--border)',
+                  background: 'var(--panel)',
+                  color: 'var(--text)',
+                  borderRadius: 3,
+                  cursor: ackBusy ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {t('logs.quarantine.ack.modal.cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleAckSave()}
+                disabled={ackBusy}
+                style={{
+                  padding: '6px 14px',
+                  fontSize: 12,
+                  border: '1px solid var(--navy)',
+                  background: 'var(--navy)',
+                  color: '#fff',
+                  borderRadius: 3,
+                  cursor: ackBusy ? 'not-allowed' : 'pointer',
+                  opacity: ackBusy ? 0.6 : 1,
+                }}
+              >
+                {t('logs.quarantine.ack.modal.save')}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Ack history popover — group 의 모든 ack 이력 (phase 무관 시간 역순). */}
+      <Modal
+        open={ackHistoryTarget !== null}
+        onClose={closeAckHistory}
+        title={t('logs.quarantine.ack.history.title')}
+        width={680}
+      >
+        {ackHistoryTarget && (
+          <div>
+            <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12 }}>
+              {t('logs.quarantine.ack.history.subtitle', {
+                table: ackHistoryTarget.table,
+                rule: ackHistoryTarget.stage,
+                reason: ackHistoryTarget.reason,
+              })}
+            </div>
+            {ackHistoryError && (
+              <div style={{ color: '#c92a3f', fontSize: 12, marginBottom: 8 }}>{ackHistoryError}</div>
+            )}
+            {ackHistoryBusy ? (
+              <div style={{ fontSize: 12, color: 'var(--text-3)', padding: '16px 0' }}>...</div>
+            ) : ackHistoryRows.length === 0 && !ackHistoryError ? (
+              <div style={{ fontSize: 12, color: 'var(--text-3)', padding: '16px 0' }}>
+                {t('logs.quarantine.ack.history.empty')}
+              </div>
+            ) : (
+              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border)', color: 'var(--text-3)' }}>
+                    <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{t('logs.quarantine.ack.history.col.phase')}</th>
+                    <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{t('logs.quarantine.ack.history.col.by')}</th>
+                    <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{t('logs.quarantine.ack.history.col.at')}</th>
+                    <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{t('logs.quarantine.ack.history.col.fp')}</th>
+                    <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 500 }}>{t('logs.quarantine.ack.history.col.note')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ackHistoryRows.map((r) => (
+                    <tr key={r.acknowledgmentId} style={{ borderBottom: '1px solid var(--border)' }}>
+                      <td style={{ padding: '6px 8px', fontFamily: 'var(--mono)', color: 'var(--text-2)' }}>[{r.phase}]</td>
+                      <td style={{ padding: '6px 8px' }}>{r.acknowledgedBy}</td>
+                      <td style={{ padding: '6px 8px', fontFamily: 'var(--mono)', color: 'var(--text-2)' }}>{new Date(r.acknowledgedAt).toLocaleString()}</td>
+                      <td style={{ padding: '6px 8px', fontFamily: 'var(--mono)', color: 'var(--text-3)', fontSize: 11 }}>
+                        {r.csvMtimeMs != null && r.csvSize != null
+                          ? `${r.csvMtimeMs} · ${r.csvSize}b`
+                          : '—'}
+                      </td>
+                      <td style={{ padding: '6px 8px', color: 'var(--text-2)', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.note ?? ''}>
+                        {r.note || '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+              <button
+                type="button"
+                onClick={closeAckHistory}
+                style={{
+                  padding: '6px 14px',
+                  fontSize: 12,
+                  border: '1px solid var(--border)',
+                  background: 'var(--panel)',
+                  color: 'var(--text)',
+                  borderRadius: 3,
+                  cursor: 'pointer',
+                }}
+              >
+                {t('logs.quarantine.ack.history.close')}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
 
 /* ─────────────────── small components ──────────────── */
 
-function LevelChip({ label, active, count, color, onClick }: {
+function LevelChip({ label, active, count, color, onClick, sampled }: {
   label: RunLogLevel; active: boolean; count: number; color: string; onClick: () => void;
+  sampled?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
+      title={sampled ? 'INFO 는 BE 가 seq%100 샘플로만 적재 — 카운트는 적재된 행 기준' : undefined}
       style={{
         ...styles.levelChip,
         color: active ? color : 'var(--text-4)',
@@ -665,7 +1191,7 @@ function LevelChip({ label, active, count, color, onClick }: {
       }}
     >
       <span style={{ ...styles.levelChipDot, background: 'currentColor' }} />
-      <span>{label}</span>
+      <span>{label}{sampled ? ' (sampled)' : ''}</span>
       <span style={styles.levelChipCount}>{count}</span>
     </button>
   );
@@ -695,18 +1221,30 @@ function SevTab({ label, count, active, onClick, tone }: {
 }
 
 /** Quarantine group card — 카드 클릭으로 열고 닫음. 열렸을 때만 액션바(이 테이블만 다시 이행/매핑/Requeue/...) 표시. */
-function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector }: {
+function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector, onAcknowledge, onRereview, onOpenHistory, ackInfo, runId }: {
   g: QuarantineGroup;
   t: (k: string, v?: Record<string, string>) => string;
   open: boolean;
   onToggle: () => void;
   onOpenMapping: () => void;
   onOpenInspector: () => void;
+  /** WARN 그룹 ack 핸들러. null 이면 버튼 미노출 (severity!=warning / bindingId 없음 / phase 미상 / 이미 ack 됨). */
+  onAcknowledge: (() => void) | null;
+  /** Re-review 핸들러 — 이미 ack 된 group 의 재검토. ack 된 상태에서만 활성. */
+  onRereview: (() => void) | null;
+  /** Ack history popover 핸들러. null 이면 link 미노출. */
+  onOpenHistory: (() => void) | null;
+  /** 이 group 의 명시 ack 메타 — 있으면 dim 처리 + "검토 완료" 라벨 표시. */
+  ackInfo: import('./quarantineMock').QuarantineGroupAck | null;
+  runId: string | null;
 }) {
   const isErr = g.severity === 'error';
-  const sevColor = isErr ? '#c92a3f' : '#a86b00';
-  const sevBg    = isErr ? 'rgba(232,93,117,0.08)' : 'rgba(232,181,99,0.10)';
-  const sevBorder = isErr ? '#e85d75' : '#e8b563';
+  /* ack 된 group(=skip 처리 완료) 은 carry-over 표시. severity tone 대신 회색으로 — 운영자가
+     한 눈에 "이 group 은 처리됨" 알 수 있도록. */
+  const isAcked = !!ackInfo;
+  const sevColor  = isAcked ? 'var(--text-3)' : isErr ? '#c92a3f' : '#a86b00';
+  const sevBg     = isAcked ? 'var(--panel-2)' : isErr ? 'rgba(232,93,117,0.08)' : 'rgba(232,181,99,0.10)';
+  const sevBorder = isAcked ? 'var(--border)' : isErr ? '#e85d75' : '#e8b563';
   const sample = g.sampleRows;
   const tt = t as unknown as (k: string, v?: Record<string, string>) => string;
   const human  = humanizeQuarantineDetail(g, tt);
@@ -733,7 +1271,11 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector }
       ref={rootRef}
       aria-expanded={open}
       className="quar-card"
-      style={{ ...styles.cardRoot, ...(open ? styles.cardRootOpen : {}) }}
+      style={{
+        ...styles.cardRoot,
+        ...(open ? styles.cardRootOpen : {}),
+        ...(isAcked ? { background: 'var(--panel-2)', opacity: 0.85 } : {}),
+      }}
     >
       <div style={{ ...styles.cardLeftBar, background: sevBorder }} />
       <div style={styles.cardBody}>
@@ -750,7 +1292,11 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector }
             {open ? '▾' : '▸'}
           </button>
           <div style={styles.cardTitles}>
-            <div style={{ ...styles.cardReason, color: sevColor }}>{g.reason}</div>
+            <div style={styles.cardReasonRow}>
+              <span style={{ ...styles.cardReason, color: sevColor }}>{g.reason}</span>
+              {/* 테이블명 — 같은 reason 이 여러 테이블에서 나도 카드별로 식별되도록 항상 노출. */}
+              {g.table && <span style={styles.cardTableChip}>{g.table}</span>}
+            </div>
             {human && <div style={styles.cardHumanDetail}>{human}</div>}
           </div>
           <div style={styles.cardMetaRight}>
@@ -766,23 +1312,36 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector }
         {open && (
           <div style={styles.cardExpand}>
             <div style={styles.cardTableWrap}>
+              {/* 첫 컬럼: PK (어느 row 가 위반인지 식별). 헤더는 PK 컬럼명, 없으면 fallback "ROW".
+                 (이전엔 group 의 table 이름을 매 row 반복 표시 — 행 식별 불가했음.) */}
               <table style={styles.cardTable}>
                 <thead>
+                  {/* AS-IS 헤더에 violated 컬럼명 부기 — 예: "AS-IS · gender" */}
                   <tr>
-                    <th style={{ ...styles.cardTh, ...styles.cardThTable }}>{t('logs.quarantine.colTable')}</th>
-                    <th style={{ ...styles.cardTh, color: sevColor }}>{t('logs.quarantine.colAsIs')}</th>
+                    <th style={{ ...styles.cardTh, ...styles.cardThTable }}>
+                      {quarantinePkColumnName(g) ?? t('logs.quarantine.colTable')}
+                    </th>
+                    <th style={{ ...styles.cardTh, color: sevColor }}>
+                      {t('logs.quarantine.colAsIs')}
+                      {quarantineViolatedColumnName(g) && (
+                        <span style={{ fontWeight: 400, opacity: 0.75 }}> · {quarantineViolatedColumnName(g)}</span>
+                      )}
+                    </th>
                     <th style={styles.cardTh}>{t('logs.quarantine.colToBe')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {sample.map((_, ri) => {
+                    const pk = quarantineRowPk(g, ri);
                     const asIs = quarantineRowAsIs(g, ri);
                     const toBe = quarantineRowToBe(g, ri);
                     /* AS-IS NULL 은 위반 값이므로 severity 색, TO-BE NULL 은 거부됐다는 표시라 중립색. */
                     const asIsNullStyle = { ...styles.nullCell, color: sevColor, background: 'transparent', border: `1px solid ${sevBorder}` };
                     return (
                       <tr key={ri}>
-                        <td style={{ ...styles.cardTd, ...styles.cardTdTable }}>{g.table}</td>
+                        <td style={{ ...styles.cardTd, ...styles.cardTdTable }}>
+                          {pk === null ? <span style={styles.nullCell}>—</span> : String(pk)}
+                        </td>
                         <td style={{ ...styles.cardTd, color: sevColor, fontWeight: 700, background: sevBg }}>
                           {asIs === null ? <span style={asIsNullStyle}>NULL</span> : String(asIs)}
                         </td>
@@ -805,7 +1364,99 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector }
               >
                 {t('logs.quarantine.act.openMapping')}
               </button>
+              {/* 위반 row 전수 parquet 다운로드 — BE 가 bindingId 채운 경우 + ERROR 만 노출.
+                  WARN entry 는 ValidationReportService 의 aggregate diff (SUM/MIN/MAX/SHA256) 라
+                  row-level parquet 파일이 없음 → 다운로드 버튼 노출 X. AuditStage 의 ERROR 만
+                  exportViolationParquet 로 파일 생성. fetch 로 blob 받아 직접 다운로드 —
+                  4xx 응답이 새 탭의 빈 페이지로 표시되던 문제 회피. */}
+              {runId && g.bindingId && g.severity === 'error' && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const { blob, filename } = await quarantineApi.downloadBinding(runId, g.bindingId!);
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = filename;
+                      document.body.appendChild(a);
+                      a.click();
+                      a.remove();
+                      URL.revokeObjectURL(url);
+                    } catch (e: unknown) {
+                      console.error('quarantine parquet download failed', e);
+                      alert(t('logs.quarantine.act.downloadFailed'));
+                    }
+                  }}
+                  style={{ ...styles.actLink, background: 'transparent', border: 'none', cursor: 'pointer' }}
+                >
+                  {t('logs.quarantine.act.downloadParquet')}
+                </button>
+              )}
               <div style={{ flex: 1 }} />
+              {/* WARN 그룹 명시 ack — 2026-06-01. 운영자가 검토 후 OK 표시 → 다음 run 에서
+                  같은 fingerprint (project + binding + rule + reason + csv_mtime + csv_size) 의
+                  WARN 은 자동 carry-over. 정책 7 — Rehearsal ack → Cutover 도 자동 적용.
+                  이미 ack 됐으면 라벨을 "by {운영자} · {시각}" 으로 바꾸고 비활성화. */}
+              {ackInfo ? (
+                <>
+                  <button
+                    type="button"
+                    style={{ ...styles.actPrimary, opacity: 0.6, cursor: 'default' }}
+                    disabled
+                    title={ackInfo.acknowledgedBy + ' · ' + ackInfo.phase}
+                  >
+                    {t('logs.quarantine.ack.acknowledgedBy', {
+                      phase: ackInfo.phase,
+                      by: ackInfo.acknowledgedBy,
+                      at: new Date(ackInfo.acknowledgedAt).toLocaleString(),
+                    })}
+                  </button>
+                  {onRereview && (
+                    <button
+                      type="button"
+                      style={styles.actLink}
+                      onClick={onRereview}
+                      title={t('logs.quarantine.ack.reReview.title')}
+                    >
+                      {t('logs.quarantine.ack.reReview.link')}
+                    </button>
+                  )}
+                </>
+              ) : onAcknowledge && (
+                <>
+                  {/* 이전 ack 가 있지만 fingerprint 다름 (다른 CSV/phase) — 운영자가 즉시
+                      과거 검토 이력 확인 가능하도록 hint + history 링크. carry-over 정책 3·6
+                      유지 (자동 통과 X), 단 audit 친화. */}
+                  {(g.priorAckCount ?? 0) > 0 && onOpenHistory && (
+                    <button
+                      type="button"
+                      style={{ ...styles.actLink, color: 'var(--amber)' }}
+                      onClick={onOpenHistory}
+                      title={t('logs.quarantine.ack.history.title')}
+                    >
+                      {t('logs.quarantine.ack.priorHint', { n: String(g.priorAckCount ?? 0) })}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    style={styles.actWarn}
+                    onClick={onAcknowledge}
+                  >
+                    {t('logs.quarantine.act.acknowledgeGroup')}
+                  </button>
+                </>
+              )}
+              {onOpenHistory && (
+                <button
+                  type="button"
+                  style={styles.actLink}
+                  onClick={onOpenHistory}
+                  title={t('logs.quarantine.ack.history.title')}
+                >
+                  {t('logs.quarantine.ack.history.link')}
+                </button>
+              )}
               <button
                 type="button"
                 style={styles.actLink}
@@ -818,6 +1469,203 @@ function QuarantineCard({ g, t, open, onToggle, onOpenMapping, onOpenInspector }
         )}
       </div>
     </div>
+  );
+}
+
+/** Page-level 「과거 발생 이력」 collapse section. LogViewerPage 의 quarantine tab 에서 카드 list 아래 표시.
+ *  같은 (binding × stage × rule_name) 의 옛 run entry 통합 list. SiteQuarantinePage 와 동일 구조 단
+ *  single project 라 Project column 없음. */
+function QuarantineHistoryArchive({ groups, severityFilter, t }: {
+  groups: QuarantineGroup[];
+  severityFilter: 'all' | QuarantineSeverity | 'skip';
+  t: (k: string, v?: Record<string, string>) => string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  useEffect(() => { if (!open) setExpandedKey(null); }, [open]);
+
+  const flatHistory = useMemo(() => {
+    const rows: Array<{
+      key: string;
+      group: QuarantineGroup;
+      runId: string;
+      createdAt: string;
+      rowCount: number;
+      acked: boolean;
+      ackedBy?: string;
+      ackedPhase?: string;
+      columns?: QuarantineGroup['columns'];
+      columnRoles?: QuarantineGroup['columnRoles'];
+      sampleRows?: QuarantineGroup['sampleRows'];
+      toBeValues?: QuarantineGroup['toBeValues'];
+    }> = [];
+    for (const g of groups) {
+      for (const h of g.history ?? []) {
+        /* severity filter 가 history 의 ack 상태에도 적용. */
+        if (g.severity === 'warning') {
+          if (severityFilter === 'warning' && h.acked) continue;
+          if (severityFilter === 'skip'    && !h.acked) continue;
+        }
+        rows.push({
+          key: g.id + '-' + h.runId,
+          group: g,
+          runId: h.runId,
+          createdAt: h.createdAt,
+          rowCount: h.rowCount,
+          acked: h.acked,
+          ackedBy: h.ackedBy,
+          ackedPhase: h.ackedPhase,
+          columns: h.columns,
+          columnRoles: h.columnRoles,
+          sampleRows: h.sampleRows,
+          toBeValues: h.toBeValues,
+        });
+      }
+    }
+    return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }, [groups, severityFilter]);
+
+  if (flatHistory.length === 0) return null;
+
+  return (
+    <>
+      <div style={styles.archiveSeparator} />
+      <div style={styles.archiveRoot}>
+        <div style={styles.archiveLeftBar} />
+        <div style={styles.archiveBody}>
+          <button
+            type="button"
+            onClick={() => setOpen((o) => !o)}
+            style={styles.archiveToggle}
+            aria-expanded={open}
+          >
+            <span style={styles.archiveChevron}>{open ? '▾' : '▸'}</span>
+            {t('logs.quarantine.history.toggle', { n: String(flatHistory.length) })}
+          </button>
+          {open && (
+            <div style={styles.archivePanel}>
+              <table style={styles.archiveTable}>
+                <thead>
+                  <tr>
+                    <th style={{ ...styles.archiveTh, width: 24 }}></th>
+                    <th style={styles.archiveTh}>Reason</th>
+                    <th style={styles.archiveTh}>Table</th>
+                    <th style={styles.archiveTh}>Stage</th>
+                    <th style={styles.archiveTh}>Run ID</th>
+                    <th style={styles.archiveTh}>Time</th>
+                    <th style={{ ...styles.archiveTh, textAlign: 'right' }}>Rows</th>
+                    <th style={styles.archiveTh}>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {flatHistory.map((h) => {
+                    const g = h.group;
+                    const isOpen = expandedKey === h.key;
+                    const isErr = g.severity === 'error';
+                    const sevColor  = isErr ? '#c92a3f' : '#a86b00';
+                    const sevBg     = isErr ? 'rgba(232,93,117,0.08)' : 'rgba(232,181,99,0.10)';
+                    const sevBorder = isErr ? '#e85d75' : '#e8b563';
+                    const human = humanizeQuarantineDetail(g, t);
+                    return (
+                      <Fragment key={h.key}>
+                        <tr
+                          style={{ cursor: 'pointer' }}
+                          onClick={() => setExpandedKey((cur) => (cur === h.key ? null : h.key))}
+                        >
+                          <td style={{ ...styles.archiveTd, color: 'var(--text-3)' }}>{isOpen ? '▾' : '▸'}</td>
+                          <td style={styles.archiveTd}>{g.reason}</td>
+                          <td style={{ ...styles.archiveTd, fontFamily: 'var(--mono)' }}>{g.table}</td>
+                          <td style={styles.archiveTd}>{g.stage}</td>
+                          <td style={{ ...styles.archiveTd, fontFamily: 'var(--mono)' }}>{h.runId}</td>
+                          <td style={{ ...styles.archiveTd, color: 'var(--text-3)' }}>{new Date(h.createdAt).toLocaleString()}</td>
+                          <td style={{ ...styles.archiveTd, textAlign: 'right' }}>{h.rowCount}</td>
+                          <td style={styles.archiveTd}>
+                            {(() => {
+                              if (g.severity === 'error') {
+                                return <span style={styles.statusErrorBadge}>error</span>;
+                              }
+                              if (h.acked) {
+                                return (
+                                  <span
+                                    style={styles.statusSkipBadge}
+                                    title={h.ackedBy ? `${h.ackedBy} · ${h.ackedPhase ?? ''}` : undefined}
+                                  >
+                                    skip
+                                  </span>
+                                );
+                              }
+                              return <span style={styles.statusWarningBadge}>warning</span>;
+                            })()}
+                          </td>
+                        </tr>
+                        {isOpen && (() => {
+                          /* archive expand 시 그 옛 entry (h) 의 sample 사용. backend 가 sample 채워줌. */
+                          const hView: QuarantineGroup = {
+                            ...g,
+                            columns: (h.columns && h.columns.length > 0) ? h.columns : g.columns,
+                            columnRoles: (h.columnRoles && h.columnRoles.length > 0) ? h.columnRoles : g.columnRoles,
+                            sampleRows: h.sampleRows ?? g.sampleRows,
+                            toBeValues: h.toBeValues ?? g.toBeValues,
+                          };
+                          return (
+                          <tr>
+                            <td colSpan={8} style={styles.archiveDetailTd}>
+                              <div style={styles.cardExpand}>
+                                {human && <div style={styles.cardHumanDetail}>{human}</div>}
+                                <div style={styles.cardTableWrap}>
+                                  <table style={styles.cardTable}>
+                                    <thead>
+                                      <tr>
+                                        <th style={{ ...styles.cardTh, ...styles.cardThTable }}>
+                                          {quarantinePkColumnName(hView) ?? t('logs.quarantine.colTable')}
+                                        </th>
+                                        <th style={{ ...styles.cardTh, color: sevColor }}>
+                                          {t('logs.quarantine.colAsIs')}
+                                          {quarantineViolatedColumnName(hView) && (
+                                            <span style={{ fontWeight: 400, opacity: 0.75 }}> · {quarantineViolatedColumnName(hView)}</span>
+                                          )}
+                                        </th>
+                                        <th style={styles.cardTh}>{t('logs.quarantine.colToBe')}</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {hView.sampleRows.map((_, ri) => {
+                                        const pk = quarantineRowPk(hView, ri);
+                                        const asIs = quarantineRowAsIs(hView, ri);
+                                        const toBe = quarantineRowToBe(hView, ri);
+                                        const asIsNullStyle = { ...styles.nullCell, color: sevColor, background: 'transparent', border: `1px solid ${sevBorder}` };
+                                        return (
+                                          <tr key={ri}>
+                                            <td style={{ ...styles.cardTd, ...styles.cardTdTable }}>
+                                              {pk === null ? <span style={styles.nullCell}>—</span> : String(pk)}
+                                            </td>
+                                            <td style={{ ...styles.cardTd, color: sevColor, fontWeight: 700, background: sevBg }}>
+                                              {asIs === null ? <span style={asIsNullStyle}>NULL</span> : String(asIs)}
+                                            </td>
+                                            <td style={{ ...styles.cardTd, ...styles.cardTdToBe }}>
+                                              {toBe === null ? <span style={styles.nullCell}>NULL</span> : String(toBe)}
+                                            </td>
+                                          </tr>
+                                        );
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            </td>
+                          </tr>
+                          );
+                        })()}
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -847,6 +1695,133 @@ function Hl({ text, q }: { text: string; q: string }) {
   }
   return <>{out}</>;
 }
+
+/**
+ * Run history の Tables セル. tableSummary (per-table 結果集計) を badge 表示.
+ * "4 tables: 3✓ 1✗" の形.  partial run (h.tables 設定あり) は tooltip に対象 table 一覧を出す.
+ * stage_table_result がまだ無い (新規/aborted) run は "—" 表示.
+ */
+function HistoryTablesCell({ h, t }: { h: RunHistoryDto; t: (k: string, v?: Record<string, string>) => string }) {
+  const s = h.tableSummary;
+  const tooltipLines: string[] = [];
+  if (h.tables == null) tooltipLines.push(t('projectSettings.schedule.history.tables.all'));
+  else if (h.tables.length > 0) {
+    tooltipLines.push(`partial: ${h.tables.length}`);
+    tooltipLines.push(...h.tables);
+  }
+  const tooltip = tooltipLines.join('\n');
+  if (s.total === 0) {
+    return <span title={tooltip} style={{ color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>—</span>;
+  }
+  return (
+    <span title={tooltip} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--mono)', fontSize: 11 }}>
+      <span style={{ color: 'var(--text-3)' }}>{s.total}</span>
+      {s.success > 0 && (
+        <span style={{ ...summaryBadgeStyle, color: '#166534', background: '#dcfce7', borderColor: '#86efac' }}>
+          {s.success}✓
+        </span>
+      )}
+      {s.failed > 0 && (
+        <span style={{ ...summaryBadgeStyle, color: '#991b1b', background: '#fee2e2', borderColor: '#fca5a5' }}>
+          {s.failed}✗
+        </span>
+      )}
+      {s.running > 0 && (
+        <span style={{ ...summaryBadgeStyle, color: '#92400e', background: '#fef3c7', borderColor: '#fcd34d' }}>
+          {s.running}
+        </span>
+      )}
+      {s.pending > 0 && (
+        /* Pipeline 의 idle stage 와 동일 톤 (회색) — 후속 stage 미실행 (abort 등). */
+        <span style={{ ...summaryBadgeStyle, color: 'var(--text-3)', background: 'var(--panel-2)', borderColor: 'var(--border-strong)' }}>
+          {s.pending}·
+        </span>
+      )}
+    </span>
+  );
+}
+
+const summaryBadgeStyle: React.CSSProperties = {
+  display: 'inline-block', padding: '0 5px', borderRadius: 3,
+  fontSize: 10, fontWeight: 700, border: '1px solid', lineHeight: '14px',
+};
+
+/**
+ * Run history drill-down sub-row 中身. 展開時に BE から per-table 結果を取得して
+ * status / rows / duration / error を 1 table = 1 行で表示.
+ */
+function HistoryRunDrilldown({ runId, t }: { runId: string; t: (k: string, v?: Record<string, string>) => string }) {
+  const { data, isLoading, isError } = useQuery<RunTableResult[]>({
+    queryKey: ['run-table-results', runId],
+    queryFn: () => runsApi.tableResults(runId),
+    staleTime: 5_000,
+  });
+  if (isLoading) {
+    return <div style={drillStyles.loading}>{t('projectSettings.schedule.history.drilldown.loading')}</div>;
+  }
+  if (isError) {
+    return <div style={drillStyles.error}>{t('projectSettings.schedule.history.drilldown.error')}</div>;
+  }
+  if (!data || data.length === 0) {
+    return <div style={drillStyles.loading}>{t('projectSettings.schedule.history.drilldown.empty')}</div>;
+  }
+  return (
+    <div style={drillStyles.wrap}>
+      <table style={drillStyles.table}>
+        <thead>
+          <tr>
+            <th style={drillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.status')}</th>
+            <th style={drillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.table')}</th>
+            <th style={{ ...drillStyles.th, textAlign: 'right' }}>{t('projectSettings.schedule.history.drilldown.col.rows')}</th>
+            <th style={drillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.started')}</th>
+            <th style={drillStyles.th}>{t('projectSettings.schedule.history.drilldown.col.finished')}</th>
+            <th style={{ ...drillStyles.th, textAlign: 'right' }}>{t('projectSettings.schedule.history.drilldown.col.duration')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.map((r) => {
+            const fullName = r.tobeSchema ? `${r.tobeSchema}.${r.tobeTable}` : r.tobeTable;
+            /* pending = 일부 stage 만 처리됨 (abort 등). Pipeline 의 idle tone 과 동일 (회색).
+               표시 라벨도 pipeline 의 queued 와 일치 — layer-specific terminology 규칙 따름. */
+            const statusColor = r.status === 'success' ? '#166534'
+              : r.status === 'failed' ? '#991b1b'
+              : r.status === 'pending' ? 'var(--text-3)'
+              : '#92400e';
+            const statusIcon = r.status === 'success' ? '✓'
+              : r.status === 'failed' ? '✗'
+              : r.status === 'pending' ? '·'
+              : '';
+            const statusLabel = r.status === 'pending' ? 'queued' : r.status;
+            return (
+              <tr key={fullName}>
+                <td style={{ ...drillStyles.td, color: statusColor, fontWeight: 700 }}>
+                  {statusIcon} {statusLabel}
+                </td>
+                <td style={drillStyles.td}>{fullName}</td>
+                <td style={{ ...drillStyles.td, textAlign: 'right' }}>{r.rows.toLocaleString()}</td>
+                <td style={drillStyles.td}>{r.startedAt ? formatTimeMs(r.startedAt) : '—'}</td>
+                <td style={drillStyles.td}>{r.finishedAt ? formatTimeMs(r.finishedAt) : '—'}</td>
+                <td style={{ ...drillStyles.td, textAlign: 'right' }}>{formatDuration(r.durationMs)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+const drillStyles: Record<string, React.CSSProperties> = {
+  wrap: { padding: '8px 12px 12px 36px', background: 'var(--panel-2)' },
+  table: { width: '100%', borderCollapse: 'collapse', fontSize: 11, fontFamily: 'var(--mono)' },
+  th: {
+    textAlign: 'left', padding: '4px 8px', borderBottom: '1px solid var(--border)',
+    color: 'var(--text-3)', fontWeight: 600, fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5,
+  },
+  td: { padding: '3px 8px', borderBottom: '1px dashed var(--border)', color: 'var(--text-2)' },
+  loading: { padding: '8px 12px 8px 36px', color: 'var(--text-3)', fontSize: 11, fontStyle: 'italic' },
+  error: { padding: '8px 12px 8px 36px', color: 'var(--red)', fontSize: 11 },
+};
 
 /* ─────────────────── helpers ────────────────────────── */
 /** Run history 行 status 배지 색 — SettingsPage / PSSchedule 의 historyStatusStyle 그대로 移植. */
@@ -1185,6 +2160,13 @@ const styles: Record<string, React.CSSProperties> = {
     color: 'inherit',
   },
 
+  /* 테이블 dropdown — severity 탭 바로 옆. group dropdown 보다 좁게 (테이블명 위주). */
+  tablePickSelect: {
+    padding: '5px 10px', border: '1px solid var(--border-strong)', borderRadius: 4,
+    background: 'var(--panel)', color: 'var(--text)',
+    fontSize: 11.5, cursor: 'pointer',
+    width: 180, flexShrink: 0,
+  },
   groupPickSelect: {
     padding: '5px 10px', border: '1px solid var(--border-strong)', borderRadius: 4,
     background: 'var(--panel)', color: 'var(--text)',
@@ -1232,7 +2214,16 @@ const styles: Record<string, React.CSSProperties> = {
   },
   cardExpand: { marginTop: 12 },
   cardTitles: { display: 'flex', flexDirection: 'column', gap: 2, flex: 1, minWidth: 0 },
+  cardReasonRow: { display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' },
   cardReason: { fontSize: 14, fontWeight: 700, lineHeight: 1.3 },
+  /* reason 옆 테이블명 chip — 사이트/프로젝트 chip 과 같은 톤, mono. */
+  cardTableChip: {
+    display: 'inline-flex', alignItems: 'center',
+    padding: '1px 8px', borderRadius: 999,
+    background: 'var(--panel-2)', border: '1px solid var(--border)',
+    color: 'var(--text-2)', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600,
+    maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+  },
   cardDetail: {
     fontSize: 11.5, color: 'var(--text-4)', fontFamily: 'var(--mono)',
     wordBreak: 'break-word',
@@ -1254,6 +2245,8 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'inline-flex', alignItems: 'center',
     padding: '3px 10px', border: '1px solid', borderRadius: 999,
     fontSize: 10.5, fontWeight: 800, letterSpacing: 0.6,
+    whiteSpace: 'nowrap',                                /* 큰 row count 도 1 행 유지 */
+    flexShrink: 0,                                       /* 부모 flex 안 압축 방지 */
   },
   cardStage: { fontSize: 11, color: 'var(--text-3)', fontWeight: 600 },
   cardTs:    { fontSize: 11, color: 'var(--text-4)' },
@@ -1312,9 +2305,157 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 12, paddingTop: 12,
     borderTop: '1px solid var(--border)',
   },
+  /* 과거 발생 이력 — 카드 footer 의 접/펴 panel. cardActions 다음 행. */
+  historyRoot: {
+    marginTop: 8, paddingTop: 8,
+    borderTop: '1px dashed var(--border)',
+  },
+  historyEmpty: {
+    marginTop: 8, paddingTop: 8,
+    borderTop: '1px dashed var(--border)',
+    fontSize: 10.5, color: 'var(--text-4)', fontStyle: 'italic',
+  },
+  historyToggle: {
+    display: 'inline-flex', alignItems: 'center', gap: 6,
+    padding: '4px 8px', border: 'none', borderRadius: 3,
+    background: 'transparent', color: 'var(--text-2)',
+    fontSize: 11, fontWeight: 600, cursor: 'pointer',
+  },
+  historyChevron: {
+    fontSize: 10, color: 'var(--text-3)',
+  },
+  historyPanel: {
+    marginTop: 6, padding: '6px 10px',
+    background: 'var(--panel-2)',
+    border: '1px solid var(--border)', borderRadius: 4,
+    display: 'flex', flexDirection: 'column', gap: 4,
+  },
+  historyRow: {
+    display: 'flex', alignItems: 'center', gap: 12,
+    padding: '4px 0',
+    fontSize: 11,
+    borderBottom: '1px dotted var(--border)',
+  },
+  historyRunId: {
+    fontFamily: 'var(--mono)', color: 'var(--text)', minWidth: 110,
+  },
+  historyTs: {
+    color: 'var(--text-3)', minWidth: 160,
+  },
+  historyRows: {
+    color: 'var(--text-2)', minWidth: 70, textAlign: 'right',
+  },
+  historyAckBadge: {
+    marginLeft: 'auto',
+    fontSize: 10, fontWeight: 700,
+    color: 'var(--text-3)',
+    padding: '2px 6px',
+    background: 'var(--panel)',
+    border: '1px solid var(--border)', borderRadius: 3,
+  },
+  historyUnackBadge: {
+    marginLeft: 'auto',
+    fontSize: 10, fontWeight: 700,
+    color: 'var(--amber)',
+    padding: '2px 6px',
+    background: 'rgba(232,181,99,0.10)',
+    border: '1px solid var(--amber)', borderRadius: 3,
+  },
+  /* Page-level archive section — 카드 list 끝의 「과거 발생 이력」 collapse. SiteQuarantinePage 와 동일. */
+  archiveSeparator: {
+    height: 1,
+    flexShrink: 0,                               /* column flex 안 압축 방지 */
+    marginTop: 20,
+    marginBottom: 16,
+    background: 'var(--border-strong)',          /* SiteQuarantinePage 와 동일 */
+  },
+  archiveRoot: {
+    display: 'flex',
+    flexShrink: 0,
+    background: 'var(--panel)',
+    border: '1px solid var(--border)',
+    borderRadius: 6,
+    overflow: 'hidden',
+  },
+  archiveLeftBar: {
+    width: 4, flexShrink: 0,
+    background: 'var(--text-3)',
+  },
+  archiveBody: {
+    flex: 1, minWidth: 0,
+    padding: '32px 18px',
+  },
+  archiveToggle: {
+    display: 'inline-flex', alignItems: 'center', gap: 10,
+    padding: '10px 16px', border: 'none', borderRadius: 4,
+    background: 'transparent', color: 'var(--text-2)',
+    fontSize: 13.5, fontWeight: 700, cursor: 'pointer',
+  },
+  archiveChevron: {
+    fontSize: 13, color: 'var(--text-3)',
+  },
+  archivePanel: {
+    marginTop: 10,
+    overflowX: 'auto',
+  },
+  archiveTable: {
+    width: '100%',
+    borderCollapse: 'collapse',
+    fontSize: 11.5,
+  },
+  archiveTh: {
+    padding: '6px 8px',
+    textAlign: 'left',
+    fontWeight: 700,
+    color: 'var(--text-2)',
+    background: 'var(--panel-2)',
+    borderBottom: '1px solid var(--border)',
+  },
+  archiveTd: {
+    padding: '6px 8px',
+    borderBottom: '1px solid var(--border)',
+    color: 'var(--text)',
+  },
+  archiveDetailTd: {
+    padding: '10px 14px 14px',
+    background: 'var(--panel)',
+    borderBottom: '1px solid var(--border)',
+  },
+  statusErrorBadge: {
+    display: 'inline-block',
+    fontSize: 10, fontWeight: 700,
+    padding: '2px 8px',
+    color: '#c92a3f',
+    background: 'rgba(232,93,117,0.10)',
+    border: '1px solid #e85d75',
+    borderRadius: 3,
+  },
+  statusWarningBadge: {
+    display: 'inline-block',
+    fontSize: 10, fontWeight: 700,
+    padding: '2px 8px',
+    color: '#a86b00',
+    background: 'rgba(232,181,99,0.10)',
+    border: '1px solid #e8b563',
+    borderRadius: 3,
+  },
+  statusSkipBadge: {
+    display: 'inline-block',
+    fontSize: 10, fontWeight: 700,
+    padding: '2px 8px',
+    color: 'var(--text-3)',
+    background: 'var(--panel-2)',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 3,
+  },
   actPrimary: {
     padding: '6px 14px', border: '1px solid #1f8a5c', borderRadius: 4,
     background: '#21946a', color: '#fff',
+    fontSize: 11.5, fontWeight: 700, cursor: 'pointer',
+  },
+  actWarn: {
+    padding: '6px 14px', border: '1px solid var(--amber)', borderRadius: 4,
+    background: 'var(--amber)', color: '#fff',
     fontSize: 11.5, fontWeight: 700, cursor: 'pointer',
   },
   actSecondary: {

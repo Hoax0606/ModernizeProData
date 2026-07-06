@@ -47,14 +47,25 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/v1/health/**").permitAll()
                         .requestMatchers("/api/v1/auth/**").permitAll()
+                        // 핸들러에서 예외가 나면 Spring 이 /error 로 forward 하는데, 이게 permitAll
+                        // 이 아니면 익명 forward 가 다시 막혀 실제 500 이 403 으로 둔갑한다 (원인 가림).
+                        // /error 를 열어 실제 에러/상태가 그대로 전달되게 한다.
+                        .requestMatchers("/error").permitAll()
                         // First-boot license import — anonymous, only succeeds
                         // while no license is yet loaded (controller-side guard).
                         .requestMatchers("/api/v1/license/initial-setup").permitAll()
-                        .requestMatchers("/ws/**").permitAll() // WebSocket handshake
+                        // Worker self-management — login 전에도 URL 끊기 가능해야 하므로 anonymous.
+                        // Controller 내부에서 mode=worker 가드.
+                        .requestMatchers("/api/v1/worker-self/**").permitAll()
+                        .requestMatchers("/ws/**").permitAll()     // 브라우저 SockJS handshake
+                        .requestMatchers("/ws-raw/**").permitAll() // Worker raw WebSocket handshake
                         // SPA shell — bundled Vite 산출물 (login 페이지 진입 전 anonymous 로딩).
+                        // 새 image 가 frontend/public 에 추가될 때 매번 SecurityConfig 만지지 않게
+                        // pattern (*.png / *.jpg / *.svg / *.ico) 로 whitelist. public asset 한정
+                        // (api / ws 경로 와 conflict 없음 — root 직속 file 만 매치).
                         .requestMatchers("/", "/index.html",
-                                         "/favicon.svg", "/favicon.ico",
-                                         "/mpd.png", "/mpd_lic.png",
+                                         "/*.png", "/*.jpg", "/*.jpeg",
+                                         "/*.svg", "/*.ico", "/*.webp",
                                          "/assets/**").permitAll()
                         .anyRequest().authenticated()
                 )

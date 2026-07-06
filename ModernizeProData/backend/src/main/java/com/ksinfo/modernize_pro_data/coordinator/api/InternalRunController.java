@@ -5,7 +5,12 @@ import com.ksinfo.modernize_pro_data.common.exception.ApiException;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunHistory;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunHistoryRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunService;
+import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
+import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableResult;
+import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageTableStatus;
 import lombok.RequiredArgsConstructor;
+
+import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -61,6 +66,21 @@ public class InternalRunController {
             String reason
     ) {}
 
+    public record StageCompleteDto(
+            Integer tablesSuccess,
+            Integer tablesFailed,
+            String errorSummary
+    ) {}
+
+    public record StageTableResultDto(
+            String bindingId,
+            StageTableStatus status,
+            Long rowCount,
+            Integer errorCount,
+            Map<String, Object> errorDetail,
+            Long durationMs
+    ) {}
+
     /* ── Endpoints ─────────────────────────────────── */
 
     /**
@@ -91,6 +111,18 @@ public class InternalRunController {
     public ApiResponse<Void> progress(@PathVariable String runId,
                                       @RequestBody ProgressDto dto) {
         messagingTemplate.convertAndSend("/topic/run/" + runId + "/progress", dto);
+        return ApiResponse.ok(null);
+    }
+
+    /**
+     * Stage 단위 진행 알림 — Worker 의 LocalWorkerExecutor.broadcastStage 가 호출.
+     * body 는 generic Map (type/stageKey/status/success/failed). FE 는 invalidate
+     * 트리거로만 사용해 polling cache 를 refresh.
+     */
+    @PostMapping("/api/v1/internal/runs/{runId}/stage")
+    public ApiResponse<Void> stageProgress(@PathVariable String runId,
+                                           @RequestBody Map<String, Object> payload) {
+        messagingTemplate.convertAndSend("/topic/run/" + runId + "/progress", payload);
         return ApiResponse.ok(null);
     }
 
@@ -134,5 +166,48 @@ public class InternalRunController {
     public ApiResponse<Void> heartbeat(@PathVariable String workerId) {
         log.debug("Worker heartbeat workerId={}", workerId);
         return ApiResponse.ok(null);
+    }
+
+    /* ── Stage lifecycle callbacks ─────────────────── */
+
+    /** Stage 開始. pending → running, started_at 셋. */
+    @PostMapping("/api/v1/internal/runs/{runId}/stages/{stageKey}/start")
+    public ApiResponse<StageInstance> startStage(@PathVariable String runId,
+                                                 @PathVariable String stageKey) {
+        StageInstance si = runService.startStage(runId, stageKey);
+        log.info("Worker stage start runId={} stageKey={}", runId, stageKey);
+        return ApiResponse.ok(si);
+    }
+
+    /**
+     * Stage 完了. tablesFailed > 0 이면 stage status=failed, 아니면 success.
+     * continue-on-error 모델 — worker 가 stage 안 모든 table 처리 끝낸 후 호출.
+     */
+    @PostMapping("/api/v1/internal/runs/{runId}/stages/{stageKey}/complete")
+    public ApiResponse<StageInstance> completeStage(@PathVariable String runId,
+                                                    @PathVariable String stageKey,
+                                                    @RequestBody StageCompleteDto dto) {
+        StageInstance si = runService.completeStage(runId, stageKey,
+                dto.tablesSuccess() == null ? 0 : dto.tablesSuccess(),
+                dto.tablesFailed() == null ? 0 : dto.tablesFailed(),
+                dto.errorSummary());
+        log.info("Worker stage complete runId={} stageKey={} success={} failed={}",
+                runId, stageKey, dto.tablesSuccess(), dto.tablesFailed());
+        return ApiResponse.ok(si);
+    }
+
+    /**
+     * Stage 안 1 테이블 처리 결과 upsert.
+     * 같은 (stage, binding) 으로 여러 번 호출 가능 — running → success/failed 전이를 표현.
+     */
+    @PostMapping("/api/v1/internal/runs/{runId}/stages/{stageKey}/tables")
+    public ApiResponse<StageTableResult> recordTable(@PathVariable String runId,
+                                                     @PathVariable String stageKey,
+                                                     @RequestBody StageTableResultDto dto) {
+        StageTableResult str = runService.recordTableResult(runId, stageKey,
+                dto.bindingId(), dto.status(),
+                dto.rowCount(), dto.errorCount(),
+                dto.errorDetail(), dto.durationMs());
+        return ApiResponse.ok(str);
     }
 }

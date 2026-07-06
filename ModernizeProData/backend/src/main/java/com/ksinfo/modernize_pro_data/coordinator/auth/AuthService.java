@@ -55,21 +55,20 @@ public class AuthService {
                     HttpStatus.UNAUTHORIZED);
         }
 
-        // confirm-to-evict: 활성 세션 있으면 거부. 클라이언트가 확인 후 forceSelfLogout 호출.
+        // last-write-wins: 활성 세션 있으면 자동 evict. 옛 정책 (confirm-to-evict, 409 reject)
+        // 은 사용자가 browser 끄고 강제 logout 안 하면 session 영구 잔존 → 재 login + Worker
+        // backend 의 WorkerBootstrap retry login 이 만성 reject 됐다. 마지막 login 만 유효 정책
+        // 으로 전환 — JwtAuthFilter 의 sid mismatch 가 옛 token 사용자에게 401 알림.
         OffsetDateTime now = OffsetDateTime.now();
         boolean hasActiveSession = user.getCurrentSessionId() != null
                 && user.getCurrentSessionExpiresAt() != null
                 && user.getCurrentSessionExpiresAt().isAfter(now);
-
         if (hasActiveSession) {
-            auditLogService.record(null, null, username, "LOGIN_REJECTED")
-                    .details("active session issued at " + user.getCurrentSessionIssuedAt())
+            auditLogService.record(null, null, username, "LOGIN_EVICTED_PRIOR")
+                    .details("prior session issued at " + user.getCurrentSessionIssuedAt())
                     .save();
-            log.info("Login rejected (active session elsewhere): {}", username);
-            throw new ApiException(
-                    "AUTH_SESSION_ACTIVE_ELSEWHERE",
-                    "다른 곳에서 이미 로그인되어 있습니다",
-                    HttpStatus.CONFLICT);
+            log.info("Login evicts prior session: {} (prior issued {})",
+                    username, user.getCurrentSessionIssuedAt());
         }
 
         // license gate — master 는 항상 통과. 그 외는 isFullyBlocked (MISSING/INVALID/EXPIRED) 면 거부.

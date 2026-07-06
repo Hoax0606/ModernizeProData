@@ -43,6 +43,7 @@ public class LicenseEnforcementFilter extends OncePerRequestFilter {
             "/api/v1/health",
             "/api/v1/auth",
             "/api/v1/license",
+            "/api/v1/worker-self",
             "/ws/",
             // SPA shell + assets so the React app boots even when the server
             // is in MISSING/INVALID/EXPIRED -- otherwise the JS bundle never

@@ -14,30 +14,24 @@ import { CreateProjectModal } from '../components/CreateProjectModal';
 import { SignOutModal } from '../components/SignOutModal';
 import { ClusterAdminModal } from '../components/ClusterAdminModal';
 import { LicenseBanner } from '../components/LicenseBanner';
+import { NotificationToast } from '../components/NotificationToast';
+import { UpdateModal } from '../components/UpdateModal';
 import { LockIcon } from '../components/LockIcon';
 import { HourglassHalfIcon } from '../components/HourglassHalfIcon';
 import { useLicenseStore } from '../store/license';
 import { useWorkspaceStore } from '../store/workspace';
-import { useExecutionPreflightStore } from '../store/executionPreflight';
-import { TOTAL_RUN_MS, computeElapsedMs } from '../lib/pipelineStages';
+// import { useExecutionPreflightStore } from '../store/executionPreflight';
+// import { TOTAL_RUN_MS, computeElapsedMs } from '../lib/pipelineStages';
 import { effectiveTobeDb, isTobeDbConfigured } from '../lib/effectiveTobeDb';
 import { useUiStore } from '../store/ui';
 import { isProjectReadOnly } from '../store/readOnly';
 import { useSnapshotsStore } from '../store/snapshots';
 import { useAsisDdlStore } from '../store/asisDdl';
 import { useTobeDdlStore } from '../store/tobeDdl';
-import {
-  DEMO_ASIS_SCHEMA,
-  DEMO_PROJECT,
-  DEMO_PROJECT_ID,
-  DEMO_SITE,
-  DEMO_SITE_ID,
-  DEMO_TOBE_SCHEMA,
-} from '../lib/demoFixtures';
-import { useDemoMode } from '../lib/useDemoMode';
 import { useAuditLogStore } from '../store/auditLog';
+import { createWebSocket, subscribe } from '../api/ws';
 import { useNotificationStore } from '../store/notifications';
-import { useNotificationPrefsStore, isEventEnabled, actionToEventKey } from '../store/notificationPreferences';
+import { isEventEnabled, actionToEventKey } from '../store/notificationPreferences';
 import { useSettingsStore, type ProjectSort } from '../store/settings';
 import { useT } from '../i18n';
 
@@ -50,11 +44,6 @@ export function AppShell() {
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const t = useT();
-
-  // `?demo=preflight` 진입 시 workspace + asisDdl + tobeDdl store 에 demo fixture 를
-  // 한 번 inject 하고, demo 가 빠질 때 정확히 원복. demo flag 는 sessionStorage
-  // 기반이라 URL 에서 query 가 빠져도 (다른 페이지로 navigate 해도) 유지된다.
-  const { isDemo } = useDemoMode();
 
   // Pre-flight 의 csv-arrived / conn-tobe Fix 가 `?siteSettings=csv|tobe-db` 를 붙이면
   // SiteSettingsModal 을 자동 open + 해당 섹션을 1초 강조. URL 쿼리는 즉시 정리해서
@@ -79,66 +68,6 @@ export function AppShell() {
     return () => window.clearTimeout(id);
   }, [siteSettingsHighlight]);
 
-  /*
-   * Global active-run finisher. 元は ExecutionPage の useEffect 内にあったため, ユーザーが
-   * 他ページに居る間に elapsed が TOTAL_RUN_MS を越えても activeRun が 'running' のまま居残り,
-   * project.runStatus も更新されずサイドバーの phase chip が「実行中」色のままになっていた.
-   * AppShell でグローバルに監視し, どのページにいても RUN 終了で即 store + workspace を更新する.
-   */
-  const runningProjectKey = useExecutionPreflightStore((s) => {
-    const ids: string[] = [];
-    for (const [id, entry] of Object.entries(s.byProject)) {
-      const ar = entry.activeRun;
-      if (ar && ar.runStatus === 'running' && ar.pausedAt === null) ids.push(id);
-    }
-    return ids.sort().join(',');
-  });
-  useEffect(() => {
-    if (!runningProjectKey) return;
-    const tick = () => {
-      const state = useExecutionPreflightStore.getState();
-      for (const [projectId, entry] of Object.entries(state.byProject)) {
-        const ar = entry.activeRun;
-        if (!ar) continue;
-        if (ar.runStatus !== 'running') continue;
-        if (ar.pausedAt !== null) continue;
-        if (computeElapsedMs(ar) >= TOTAL_RUN_MS) {
-          state.finishActiveRun(projectId);
-          useWorkspaceStore.getState().setProjectRunStatus(projectId, 'completed').catch(() => { /* mock; ignore */ });
-        }
-      }
-    };
-    const id = window.setInterval(tick, 500);
-    return () => window.clearInterval(id);
-  }, [runningProjectKey]);
-
-  useEffect(() => {
-    if (!isDemo) return;
-    /* 실 데이터 백업 — exit 시 정확히 복원하기 위함. demo 동안엔 sandbox 처럼 real 숨김. */
-    const ws = useWorkspaceStore.getState();
-    const prev = {
-      sites: ws.sites,
-      projects: ws.projects,
-      activeSiteId: ws.activeSiteId,
-      activeProjectId: ws.activeProjectId,
-    };
-    const asisPrev = useAsisDdlStore.getState().schemasByProject;
-    const tobePrev = useTobeDdlStore.getState().schemasByProject;
-    /* demo 동안엔 real 숨기고 demo 만 노출. */
-    useWorkspaceStore.setState({
-      sites: [DEMO_SITE],
-      projects: [DEMO_PROJECT],
-      activeSiteId: DEMO_SITE_ID,
-      activeProjectId: DEMO_PROJECT_ID,
-    });
-    useAsisDdlStore.setState({ schemasByProject: { [DEMO_PROJECT_ID]: DEMO_ASIS_SCHEMA } });
-    useTobeDdlStore.setState({ schemasByProject: { [DEMO_PROJECT_ID]: DEMO_TOBE_SCHEMA } });
-    return () => {
-      useWorkspaceStore.setState(prev);
-      useAsisDdlStore.setState({ schemasByProject: asisPrev });
-      useTobeDdlStore.setState({ schemasByProject: tobePrev });
-    };
-  }, [isDemo]);
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
   const loadUsers = useUsersStore((s) => s.loadUsers);
@@ -146,7 +75,7 @@ export function AppShell() {
   const allLogs = useAuditLogStore((s) => s.logs);
   const globalNotifEnabled = useSettingsStore((s) => s.notifications);
   const globalNotifScope   = useSettingsStore((s) => s.notificationScope);
-  const notifPrefSubs   = useNotificationPrefsStore((s) => s.subs);
+  const notifDefaults   = useSettingsStore((s) => s.notificationDefaults);
   const notifReadIdsByUser = useNotificationStore((s) => s.readIds);
   const notifDismissedIdsByUser = useNotificationStore((s) => s.dismissedIds);
   const markAllNotifRead = useNotificationStore((s) => s.markAllRead);
@@ -169,6 +98,7 @@ export function AppShell() {
   const [createSiteOpen, setCreateSiteOpen] = useState(false);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [clusterAdminOpen, setClusterAdminOpen] = useState(false);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
   const [siteSettingsOpen, setSiteSettingsOpen] = useState(false);
   const [siteSettingsFocus, setSiteSettingsFocus] = useState<import('../store/ui').SiteSettingsFocus>(undefined);
   const [siteMenuOpen, setSiteMenuOpen] = useState(false);
@@ -230,29 +160,120 @@ export function AppShell() {
     setActiveProject(st.activateProjectId ?? null);
   }, [location.key, setActiveProject]);
 
-  // 10초 간격으로 서버 동기화 (sites → projects → snapshots → audit logs 순서 보장).
-  // demo 중엔 polling 전체 skip — 백업한 real data 를 서버 응답으로 덮어쓰지 않도록.
-  const isDemoRef = useRef(isDemo);
-  isDemoRef.current = isDemo;
+  /* 2 つの sync を分ける:
+     - heavy sync (10 s): sites → snapshots → audit logs.  changes slow, can wait.
+     - light sync ( 2 s): projects のみ. phase / runStatus がここに乗ってて、サイドバーの
+       phase badge の "running" カラーが Execution 画面の 2 秒 progress 表示と揃うように
+       同じ周期で fetch. Execution 起動直後でも phase badge が即色付く. */
   useEffect(() => {
-    const sync = async () => {
-      if (isDemoRef.current) return;
+    const heavySync = async () => {
       if (isEditingRef.current) return;
       await fetchSites();
       const siteId = useWorkspaceStore.getState().activeSiteId;
       if (siteId) {
-        await fetchProjects(siteId);
         await fetchSnapshots(siteId);
         await useAuditLogStore.getState().fetchBySite(siteId);
       }
     };
-    void sync();
-    const id = setInterval(() => void sync(), 10_000);
+    void heavySync();
+    // 30s 주기 — sites/snapshots/audit 는 payload 가 커서 5 user 동시 시 부하 비중 큼.
+    // 60s 는 phase/snapshot 반영 지연이 동시 작업 confusion 유발해 30s 절충.
+    const id = setInterval(() => void heavySync(), 30_000);
     return () => clearInterval(id);
-  }, [fetchSites, fetchProjects, fetchSnapshots]);
+  }, [fetchSites, fetchSnapshots]);
+
+  // 알림 즉시화 (2026-06-04) — BE 가 audit_log commit 後 /topic/notifications 로 push.
+  // 수신 시 그 site 의 audit 를 즉시 refetch → 토스트가 30초 폴링 안 기다리고 바로 뜸.
+  // WS 끊겨도 30초 heavySync 가 fallback. 350ms debounce 로 push 폭주 시 묶음.
+  useEffect(() => {
+    const client = createWebSocket();
+    let sub: { unsubscribe(): void } | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const refetch = () => {
+      const siteId = useWorkspaceStore.getState().activeSiteId;
+      if (siteId) void useAuditLogStore.getState().fetchBySite(siteId);
+    };
+    client.onConnect = () => {
+      try {
+        sub = subscribe(client, '/topic/notifications', () => {
+          if (timer != null) return;
+          timer = setTimeout(() => { timer = null; refetch(); }, 350);
+        });
+      } catch { /* polling fallback */ }
+    };
+    client.onStompError = () => { /* polling fallback */ };
+    client.onWebSocketError = () => { /* polling fallback */ };
+    client.activate();
+    return () => {
+      if (timer != null) clearTimeout(timer);
+      try { sub?.unsubscribe(); } catch { /* ignore */ }
+      try { void client.deactivate(); } catch { /* ignore */ }
+    };
+  }, []);
+
+  useEffect(() => {
+    const lightSync = async () => {
+      if (isEditingRef.current) return;
+      const siteId = useWorkspaceStore.getState().activeSiteId;
+      if (!siteId) return;
+      await fetchProjects(siteId);
+    };
+    void lightSync();
+    // 5s 주기 — Coord 1 + Worker 다수 환경에서 projects fetch 가 매초 발사되면 PG lock
+    // 경쟁 + HikariCP saturation. 5s 면 phase/runStatus 라이브 표시도 충분.
+    const id = setInterval(() => void lightSync(), 5_000);
+    return () => clearInterval(id);
+  }, [fetchProjects]);
 
   const activeSite = useMemo(() => sites.find((s) => s.id === activeSiteId) ?? null, [sites, activeSiteId]);
   const activeProject = useMemo(() => allProjects.find((p) => p.id === activeProjectId) ?? null, [allProjects, activeProjectId]);
+  // 활성 사이트의 프로젝트 수 — 0 이면 "All Projects" 개념이 무의미(보여줄 프로젝트 없음).
+  // 그 상태는 "첫 프로젝트 만들기" 온보딩 컨텍스트라 All Projects 하이라이트/헤더를 끈다.
+  const siteProjectCount = useMemo(
+    () => allProjects.filter((p) => p.siteId === activeSiteId).length,
+    [allProjects, activeSiteId]);
+  const hasSiteProjects = siteProjectCount > 0;
+
+  // ── Global keyboard shortcuts ──
+  // Ctrl+B = sidebar toggle, Ctrl+1~7 = project tab nav, Ctrl+, = Solution Settings.
+  // 한국어 IME 변환 중 (isComposing) 일 때는 무시 — 다른 단축키 conflict 방지.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod || e.altKey || e.shiftKey) return;
+      // Ctrl+B — sidebar toggle (input/textarea focus 여도 작동)
+      if (e.key === 'b' || e.key === 'B') {
+        e.preventDefault();
+        setSidebarOpen((o) => !o);
+        return;
+      }
+      // Ctrl+, — Solution Settings open
+      if (e.key === ',') {
+        e.preventDefault();
+        setSolutionOpen(true);
+        return;
+      }
+      // Ctrl+1~7 — page nav. activeProject 있으면 project tabs, 없고 activeSite 있으면 site tabs.
+      const idx = ['1', '2', '3', '4', '5', '6', '7'].indexOf(e.key);
+      if (idx >= 0) {
+        const projectPaths = ['/', '/mapping', '/versions', '/execution', '/artifacts', '/logs', '/settings'];
+        const sitePaths    = ['/', '/site/execution', '/site/quarantine', '/site/approvals', '/site/export', '/site/audit', '/site/scheduler'];
+        if (activeProject) {
+          e.preventDefault();
+          navigate(projectPaths[idx]);
+        } else if (activeSite) {
+          // Ctrl+7 = Scheduler 는 master 만 — 비-master 면 noop.
+          if (idx === 6 && user?.role !== 'master') return;
+          e.preventDefault();
+          navigate(sitePaths[idx]);
+        }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [navigate, activeProject, activeSite, user?.role]);
+
   const activeProjectReadOnly = isProjectReadOnly(activeProject, user);
 
   // scope='project' 인 site 의 active project 가 그 site 면 Project DB 로,
@@ -322,7 +343,7 @@ export function AppShell() {
       .filter((l) => {
         // Event subscription: action → event key 매핑이 존재하면 OFF 시 제외.
         const eventKey = actionToEventKey(l.action);
-        if (eventKey && !isEventEnabled(notifPrefSubs, l.projectId, eventKey)) return false;
+        if (eventKey && !isEventEnabled(notifDefaults, eventKey)) return false;
         // Scope (글로벌): 'mine-only' 면 본인이 한 action 만.
         if (globalNotifScope === 'mine-only' && currentUserName && l.user !== currentUserName) return false;
         return true;
@@ -354,7 +375,7 @@ export function AppShell() {
         };
       })
       .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-  }, [allLogs, allProjects, activeSiteId, notifPrefSubs, globalNotifScope, user?.username, globalNotifEnabled]);
+  }, [allLogs, allProjects, activeSiteId, notifDefaults, globalNotifScope, user?.username, globalNotifEnabled]);
 
   const visibleNotifs = useMemo(
     () => notifItems.filter((n) => !notifDismissedIds.includes(n.id)),
@@ -545,7 +566,7 @@ export function AppShell() {
           </div>
 
           {/* All projects */}
-          <div style={{ ...styles.allProjects, ...(activeProjectId === null && activeSiteId ? styles.allProjectsActive : {}) }} onClick={() => { setActiveProject(null); navigate('/'); }}>
+          <div style={{ ...styles.allProjects, ...(activeProjectId === null && activeSiteId && hasSiteProjects ? styles.allProjectsActive : {}) }} onClick={() => { setActiveProject(null); navigate('/'); }}>
             <div style={styles.allProjectsIcon}>
               <svg width="9" height="9" viewBox="0 0 10 10" fill="currentColor">
                 <rect x="0" y="0" width="4" height="4" />
@@ -614,7 +635,9 @@ export function AppShell() {
                   >
                     <div style={styles.projectNameRow}>
                       <span style={styles.projectName}>{p.name}</span>
-                      {pendingProjectIds.has(p.id) && p.phase === 'test' && p.runStatus === 'completed' && (
+                      {/* pending snapshot 모래시계 — phase/runStatus 조건은 제거 (2026-06-03).
+                          Request Review 後 runStatus 가 completed 가 아닌 경우에도 pending 표시 필요. */}
+                      {pendingProjectIds.has(p.id) && (
                         <span
                           style={styles.projectPendingIcon}
                           title={t('siteOverview.pendingSnapshotIcon.title')}
@@ -639,6 +662,12 @@ export function AppShell() {
                         );
                       })()}
                       <span style={styles.projectMetaDim}>{p.tableCount} tables</span>
+                      {/* assignee 표시 (2026-06-03) — unassigned 면 아무것도 안 보여줌. */}
+                      {(p.assignee ?? '').trim() !== '' && (
+                        <span style={styles.projectMetaAssignee} title={p.assignee!}>
+                          {p.assignee}
+                        </span>
+                      )}
                     </div>
                   </div>
                 );
@@ -673,6 +702,13 @@ export function AppShell() {
                     onClick={() => { setUserOpen(false); setClusterAdminOpen(true); }}
                   />
                 )}
+                {user?.role === 'master' && (
+                  <MenuItem
+                    icon={<IconUpdate />}
+                    label={t('menu.checkForUpdates')}
+                    onClick={() => { setUserOpen(false); setUpdateModalOpen(true); }}
+                  />
+                )}
                 <div style={styles.userMenuDivider} />
                 <MenuItem
                   icon={<IconHelp />}
@@ -696,7 +732,13 @@ export function AppShell() {
               onClick={(e) => { e.stopPropagation(); setUserOpen((o) => !o); }}
               style={{ ...styles.userRow, ...(userOpen ? styles.userRowActive : {}) }}
             >
-              <div style={styles.avatar}>{user?.username?.[0]?.toUpperCase() ?? '?'}</div>
+              {(() => {
+                const src = user?.role === 'master' ? '/master.png'
+                          : user?.role === 'admin'  ? '/admin.jpg'
+                          : null;
+                if (src) return <img src={src} alt={user?.role} style={styles.avatarImg} />;
+                return <div style={styles.avatar}>{user?.username?.[0]?.toUpperCase() ?? '?'}</div>;
+              })()}
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div style={styles.userName}>{user?.username}</div>
                 <div style={styles.userSub}>KS Info System</div>
@@ -751,8 +793,11 @@ export function AppShell() {
                   <span>{activeProject.tableCount} tables</span>
                 </div>
               </>
-            ) : activeSite ? (
+            ) : activeSite && hasSiteProjects ? (
               <div style={styles.topTitleMain}>{t('shell.allProjects')}</div>
+            ) : activeSite ? (
+              // 프로젝트 0개 사이트 — "All projects" 가 아니라 사이트명(첫 프로젝트 만들기 컨텍스트).
+              <div style={styles.topTitleMain}>{activeSite.name}</div>
             ) : (
               <>
                 <div style={styles.topTitleMain}><BrandName /></div>
@@ -958,12 +1003,25 @@ export function AppShell() {
         </div>
       </main>
 
+      {/* 새 audit log entry 가 생기면 우측 하단에 잠깐 toast 로 떴다 사라짐.
+          bell panel 의 알림과 동일한 필터 (notification subscription / scope / global enabled). */}
+      <NotificationToast />
+
       <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} />
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
       <AccountProfileModal open={profileOpen} onClose={() => setProfileOpen(false)} />
       <SolutionSettingsModal open={solutionOpen} onClose={() => setSolutionOpen(false)} />
-      <SiteSettingsModal open={siteSettingsOpen} onClose={() => setSiteSettingsOpen(false)} highlight={siteSettingsHighlight} />
+      <SiteSettingsModal
+        open={siteSettingsOpen}
+        onClose={() => setSiteSettingsOpen(false)}
+        focus={
+          siteSettingsHighlight === 'csv' ? 'asis-csv'
+          : siteSettingsHighlight === 'tobe-db' ? 'tobe-db'
+          : siteSettingsFocus
+        }
+      />
       <ClusterAdminModal open={clusterAdminOpen} onClose={() => setClusterAdminOpen(false)} />
+      <UpdateModal open={updateModalOpen} onClose={() => setUpdateModalOpen(false)} />
       <CreateSiteModal open={createSiteOpen} onClose={() => setCreateSiteOpen(false)} />
       <CreateProjectModal open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} />
       <SignOutModal
@@ -1098,6 +1156,17 @@ function IconSignout() {
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="var(--red)" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
       <path d="M8.5 3V2a1 1 0 0 0-1-1H2.5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-1" />
       <path d="M6 7h6.5M10.5 4.5 13 7l-2.5 2.5" />
+    </svg>
+  );
+}
+
+function IconUpdate() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 7a5 5 0 0 1 9-3" />
+      <path d="M11 1.5V4h-2.5" />
+      <path d="M12 7a5 5 0 0 1-9 3" />
+      <path d="M3 12.5V10h2.5" />
     </svg>
   );
 }
@@ -1402,6 +1471,17 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 2,
   },
   projectMetaDim: { fontSize: 10, color: 'var(--text-3)', fontFamily: 'var(--mono)' },
+  /* 사이드바 project row 의 assignee — 길면 ellipsis, unassigned 는 렌더 자체 안 함. */
+  projectMetaAssignee: {
+    fontSize: 10,
+    color: 'var(--text-3)',
+    fontFamily: 'var(--mono)',
+    marginLeft: 'auto',
+    maxWidth: 72,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
   phaseBadge: {
     display: 'inline-flex',
     alignItems: 'center',
@@ -1624,6 +1704,14 @@ const styles: Record<string, React.CSSProperties> = {
     placeItems: 'center',
     fontSize: 12,
     fontWeight: 700,
+    flexShrink: 0,
+  },
+  avatarImg: {
+    width: 26,
+    height: 26,
+    borderRadius: '50%',
+    objectFit: 'contain',
+    background: 'var(--panel-2)',
     flexShrink: 0,
   },
   userName: { fontSize: 12, fontWeight: 600, color: 'var(--text)' },

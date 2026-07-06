@@ -2,6 +2,7 @@ package com.ksinfo.modernize_pro_data.coordinator.site;
 
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.SnapshotChanges;
 import com.ksinfo.modernize_pro_data.coordinator.site.frozen.SnapshotData;
+import com.ksinfo.modernize_pro_data.coordinator.site.frozen.SnapshotExecutionContext;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
@@ -98,6 +99,13 @@ public class Snapshot {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "changes", columnDefinition = "jsonb")
     private SnapshotChanges changes;
+
+    /** 이 snapshot 으로 실행된 가장 최근 run 의 종료 시점 박제본.
+     *  RunService.finishRun → SnapshotExecutionContextService 가 갱신한다.
+     *  같은 snapshot 으로 여러 번 run 하면 덮어쓴다. 아직 실행 안 한 snapshot 은 null. */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "execution_context", columnDefinition = "jsonb")
+    private SnapshotExecutionContext executionContext;
 
     public static Snapshot create(String projectId, String name, String description,
                                   String type, String createdBy, String nextVersion) {

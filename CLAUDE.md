@@ -26,7 +26,7 @@
 - i18n: 자체 구현 (`src/i18n/{ko,ja,en}.ts` + `useT` 훅)
 
 ### 운영 형태
-- **Coordinator (본사)** ↔ **Worker (현장)** 분리. Worker 는 Coordinator 의 REST + WebSocket 으로만 통신. 메타 DB 직접 접속 금지. 등록은 URL + 토큰으로.
+- **Coordinator** ↔ **Worker** 분리 (둘 다 현장 사이트에 설치 — 작은 사이트는 한 PC, 큰 사이트는 같은 LAN 의 별도 PC). Worker 는 Coordinator 의 REST + WebSocket 으로만 통신. 메타 DB 직접 접속 금지. 등록은 URL + 토큰으로.
 - 인스톨러: PG 18 동봉, 기존 PG 가 있으면 그것을 사용하거나 별도 설치 선택.
 
 ## 디렉터리 맵
@@ -96,7 +96,8 @@ Rules:
 
 ### Phase 모델
 - 9 단계: `planning · analysis · test · sign-off · rehearsal · ready · cutover · hypercare · done`
-- run 起動 가능한 phase 는 `test` / `rehearsal` / `ready` (`ready` 에서 cutover 起動). `cutover` 는 **실행 중 phase** = 신규 run reject. 完了 시 `hypercare` 로 전이.
+- **UI 手動 run** (runType 明示) 起動 可能 phase: `test` / `rehearsal` / `ready` (`ready` 에서 cutover 起動). `cutover` 는 **실행 중 phase** = 신규 run reject. 完了 시 `hypercare` 로 전이.
+- **Scheduler / 외부 trigger** (Quartz / `/runs/all` / `/runs` runType 省略時) 起動 可能 phase: `sign-off` (→ rehearsal run, phase 自動 advance) / `ready` (→ cutover run) 限定 (2026-05-29 制限化). 他 phase 는 REJECTED. `sign-off` 와 `ready` 는 snapshot Request Review 通過 後 = mapping 検証 済이라는 暗黙 保証.
 - `cutover` 는 **production 환경에서만** 실행 가능.
 - 스냅샷은 mapping snapshot 과 cutover snapshot 두 갈래.
 - `runStatus` (`idle | running | completed`) 는 test/rehearsal/cutover 의 sub-status.
@@ -137,8 +138,8 @@ cd ModernizeProData/frontend; npx tsc --noEmit
 
 | 용어 | 의미 |
 |---|---|
-| Coordinator | 본사 관리 노드. 메타 DB 소유. 모든 권한 행사 지점. |
-| Worker | 현장 격리망에 설치되는 실행 노드. REST/WS 로만 통신. |
+| Coordinator | 현장 사이트의 관리 노드. 메타 DB 소유. 모든 권한 행사 지점. (본사 = 개발팀 위치 — 소스 수정·빌드·릴리스 전용, 운영 참여 X) |
+| Worker | 현장 사이트의 실행 노드. Coordinator 와 같은 PC 또는 같은 LAN 의 별도 PC. REST/WS 로만 통신. |
 | Site | 한 고객사의 한 운영 환경 단위. AS-IS / TO-BE / 환경 라벨(dev/test/stg/prod) 보유. |
 | Project | Site 안의 이행 단위. 하나의 AS-IS → TO-BE 매핑 작업. |
 | Phase | Project 의 진행 단계 (위 9단계). |
@@ -148,7 +149,9 @@ cd ModernizeProData/frontend; npx tsc --noEmit
 | AS-IS DB (도구 내장) | 운영팀 야간 CSV 추출 파일을 도구가 받아 DuckDB 로 적재 — 외부 DB 직접 접속 X. |
 | Artifact | 프로젝트가 생성하는 산출물 (DDL · Migration SQL · Mapping spec · Schema diff · Validation report · Dashboard snapshot). `/artifacts` 페이지에서 Excel-style 워크북 미리보기 + 다운로드. |
 | Site export | All projects 페이지의 `Site export` 탭(`/site/export`). 사이트 단위로 산출물 4 종 (Migration / Mapping / Validation / Site summary) 을 zip 으로 일괄 다운로드. 현재는 client-side (JSZip + ExcelJS), 백엔드 export job 도입 시점에 서버 측 생성으로 교체 예정. |
-| Pre-flight | Test / Rehearsal / Cutover 실행 직전의 readiness 게이트. 8개 체크가 모두 pass 일 때만 Start run 활성. 상태는 `pass · fail · skip` 3종. `approved-snapshot` 은 ALL 선택 시에만 검사 (부분 선택 = skip). 상세는 `docs/ONBOARDING.md` §18. |
+| Pre-flight | Execution run 起動 直前의 readiness 게이트 (7 체크: `csv-arrived` / `ddl-asis` / `ddl-tobe` / `conn-tobe` / `tobe-bindings` / `unmapped-cols` / `asis-unmapped`). 상태는 `pass · fail · skip` 3종, **per-table + project-wide** 혼재. 결과는 snapshot 별 캐시 (`executionPreflight.bySnapshot`, FE localStorage). Execution startrun 게이트는 「pin + 선택 테이블 × 전 check pass + `runMode !== null`」. 상세는 `docs/ONBOARDING.md` §18. |
+| Request Review gate | Versions 画面 Request Review 게이트 (2026-05-28 변경). 旧 preflight cache 기반에서 「project 의 全 TO-BE 테이블의 최신 run 이 success」 기준으로. 判定 粒度는 `stage_table_results` 의 per-binding status (run-level status 가 아님 — partial failure 後도 정상 table 은 success 유지). BE: `ProjectRunReadinessService` + `GET /api/v1/projects/{id}/run-readiness`. |
+| Run History drill-down | Run History 行展開で per-table 詳細 (status/rows/started/finished/duration) 表示 (2026-05-29 추가). BE: `RunTableResultsService` + `GET /api/v1/runs/{id}/table-results`. 一覧 行에는 `tableSummary` (success/failed/running 件数) badge 表示. 時刻은 ms 精度. |
 
 ## 세션 시작 시 권장 동작
 

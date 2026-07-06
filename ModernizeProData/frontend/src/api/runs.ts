@@ -4,7 +4,7 @@ import { api, unwrap, type ApiResponse } from './client';
  * Run 起動 / 状態取得 / 履歴閲覧 의 API client.
  *
  * - start          : POST /api/v1/runs           (REST 認証 = api_token, master/admin JWT 도 가능)
- * - startAll       : POST /api/v1/runs/all       (schedule_enabled 全 project 일괄)
+ * - startAll       : POST /api/v1/runs/all       (siteId 必須 — その site 의 全 project 일괄)
  * - get            : GET  /api/v1/runs/{id}      (user session)
  * - listByProject  : GET  /api/v1/projects/{id}/runs (user session)
  * - devComplete/devFail : Worker callback シミュレーション (master/admin/worker)
@@ -40,6 +40,63 @@ export interface BulkRunResultDto {
   results: RunResultDto[];
 }
 
+/** 1 stage 中の 1 テーブル処理結果 (BE: StageTableResult). */
+export interface TableResultView {
+  tobeTable: string;
+  tobeSchema?: string;
+  status: 'running' | 'success' | 'failed';
+  rowCount?: number;
+  durationMs?: number;
+  /** BE は Map<String,Object> (例: { message: "..." }) を直列化する — string ではない.
+   *  表示は errorDetailText() で message を抽出 (object を JSX に直接渡すと React #31). */
+  errorDetail?: Record<string, unknown> | string | null;
+  /** TransformStage 가 박제한 CREATE OR REPLACE TABLE ... AS SELECT ... 텍스트.
+   *  transform 외 stage 는 null. ArtifactsPage 의 MIGRATION SQL 카테고리에서 표시. */
+  compiledSql?: string;
+}
+
+/** errorDetail (string | Map 形) から表示用テキストを取り出す. 無ければ undefined. */
+export function errorDetailText(d: TableResultView['errorDetail']): string | undefined {
+  if (d == null) return undefined;
+  if (typeof d === 'string') return d || undefined;
+  const msg = d.message;
+  return typeof msg === 'string' && msg ? msg : undefined;
+}
+
+/** 1 run の 1 stage の進捗 (BE: StageView, GET /api/v1/runs/{id}/stages の戻り値要素). */
+export interface StageView {
+  stageKey: string;
+  seq: number;
+  status: 'pending' | 'running' | 'success' | 'failed' | 'failed_with_pending_warnings';
+  /** 0-100. BE が tables_success/tables_total から算出 (or 単純 100/0). */
+  pct: number;
+  tablesTotal: number;
+  tablesSuccess: number;
+  tablesFailed: number;
+  startedAt?: string;
+  finishedAt?: string;
+  durationMs?: number;
+  errorSummary?: string;
+  tables: TableResultView[];
+}
+
+/**
+ * Versions 画面の Request Review ゲート用の per-project run readiness.
+ * BE: GET /api/v1/projects/{id}/run-readiness.
+ *
+ * allReady: 全 TO-BE テーブルの最新 run が success の時のみ true.
+ *   FE 側は allReady=true でないと Request Review ボタンが押せない.
+ */
+export interface ProjectRunReadinessDto {
+  allReady: boolean;
+  totalTables: number;
+  completedTables: number;
+  /** まだ一度も run に含まれた事のない TO-BE テーブル名. */
+  notRunTables: string[];
+  /** 最新 run が success 以外 (failed/aborted/timed_out) の TO-BE テーブル名. */
+  failedTables: string[];
+}
+
 export interface RunHistoryDto {
   id: string;
   projectId: string;
@@ -66,24 +123,104 @@ export interface RunHistoryDto {
   snapshotId: string | null;
   batchJobExecutionId: number | null;
   errorMessage: string | null;
+  /**
+   * 部分実行の TO-BE 物理テーブル名一覧. null = 全 binding 対象 run.
+   * metadata.selectedTables の型付き写し. Run History 表でこの値を表示.
+   */
+  tables: string[] | null;
+  /**
+   * Run History drill-down 用の table 別件数サマリ. stage_table_results を tobe_table
+   * 単位に集約した success / failed / running 件数. まだ stage 結果が無い run は 0/0/0/0.
+   * 一覧行に "4 tables: 3✓ 1✗" のような badge を出す材料.
+   */
+  tableSummary: RunTableSummary;
   metadata: Record<string, unknown>;
+}
+
+/** Run History 一覧用の 1 run の table 件数サマリ. */
+export interface RunTableSummary {
+  total: number;
+  success: number;
+  failed: number;
+  running: number;
+  /** 処理された stage 까진 success だが後続 stage 未実行 (abort 등). Pipeline の idle 相当. */
+  pending: number;
+}
+
+/**
+ * Run History drill-down 行展開時に取得する per-table 詳細.
+ * BE: GET /api/v1/runs/{id}/table-results (RunTableResultsService.TableResultDto)
+ *
+ * 時間系は wall-clock per table:
+ *   - startedAt  = 最初に処理した stage の startedAt (= min)
+ *   - finishedAt = 最後に処理した stage の finishedAt (= max). 未完了なら null
+ *   - durationMs = finishedAt - startedAt. その間に他テーブルの処理が挟まる可能性が
+ *                  あるので、合計が run-level duration と一致しないことに注意.
+ *
+ * エラー情報は含まない — Quarantine タブで個別表示するため重複を避ける.
+ */
+export interface RunTableResult {
+  tobeSchema: string;
+  tobeTable: string;
+  /** pending = 일부 stage 만 처리됨 (abort 등). Pipeline 의 idle 과 동등. */
+  status: 'success' | 'failed' | 'running' | 'pending';
+  rows: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
 }
 
 export const runsApi = {
   /**
    * 単一 project 起動. runType 省略時은 BE 가 project.phase 로부터 자동 결정
    * (test / rehearsal / cutover; 그 외 phase 면 REJECTED).
+   *
+   * tables: 部分実行用. TO-BE 物理名の配列を渡すと、その binding だけが処理される.
+   * 未指定 (undefined / 空配列) なら BE は全 binding を処理. BE が tables を未対応の
+   * 期間でも互換性あり (フィールド無視されるだけ).
    */
-  start: (projectId: string, runType?: RunTypeStr) =>
+  start: (projectId: string, runType?: RunTypeStr, tables?: string[],
+          opts?: { resumeFromRunId?: string; useCache?: boolean }) =>
     unwrap(
       api.post<ApiResponse<RunResultDto>>(
         '/api/v1/runs',
-        runType ? { projectId, runType } : { projectId },
+        {
+          projectId,
+          ...(runType ? { runType } : {}),
+          ...(tables && tables.length > 0 ? { tables } : {}),
+          ...(opts?.resumeFromRunId ? { resumeFromRunId: opts.resumeFromRunId } : {}),
+          ...(opts?.useCache ? { useCache: true } : {}),
+        },
       ),
     ),
 
-  startAll: () =>
-    unwrap(api.post<ApiResponse<BulkRunResultDto>>('/api/v1/runs/all')),
+  /**
+   * 進行中 / 終了済 run の stage 単位の進捗を取得. 2 秒 polling 想定.
+   * Terminal 状態 (run.status が success/failed/aborted/timed_out) になったら呼び元が
+   * polling を止める.
+   */
+  stages: (runId: string) =>
+    unwrap(api.get<ApiResponse<StageView[]>>(`/api/v1/runs/${runId}/stages`)),
+
+  /**
+   * run の中断. status を 'aborted' に遷移させる (実行中 thread の強制中断は PoC 2 次).
+   * BE 側 abort endpoint が public で着くまでは 4xx になり得るので、呼び元は失敗を許容.
+   */
+  abort: (runId: string, reason?: string) =>
+    unwrap(api.post<ApiResponse<RunHistoryDto>>(
+      `/api/v1/runs/${runId}/abort`,
+      reason ? { reason } : {},
+    )),
+
+  // pause / resume 제거 (2026-05-29). Stop + Retry (resume-from-failed-stage) 가 기능 동치.
+
+  /**
+   * 指定 site の全 project 一斉起動. siteId 必須 (2026-05-29 仕様変更で必須化).
+   * 旧仕様の「全 site 横断 findAll」は誤発火事故防止のため廃止.
+   */
+  /** projectIds 지정 시 그 project 만 일괄, 생략 시 site 전체. */
+  startAll: (siteId: string, projectIds?: string[]) =>
+    unwrap(api.post<ApiResponse<BulkRunResultDto>>('/api/v1/runs/all', { siteId, projectIds })),
 
   get: (runId: string) =>
     unwrap(api.get<ApiResponse<RunHistoryDto>>(`/api/v1/runs/${runId}`)),
@@ -94,6 +231,19 @@ export const runsApi = {
 
   listByProject: (projectId: string) =>
     unwrap(api.get<ApiResponse<RunHistoryDto[]>>(`/api/v1/projects/${projectId}/runs`)),
+
+  /**
+   * Versions 画面の Request Review ゲート判定. BE が project の全 TO-BE テーブル
+   * について「最新 run の status」を集計して返す.
+   */
+  runReadiness: (projectId: string) =>
+    unwrap(api.get<ApiResponse<ProjectRunReadinessDto>>(`/api/v1/projects/${projectId}/run-readiness`)),
+
+  /**
+   * Run History drill-down — 1 run の per-table 詳細結果. 行展開時に取得.
+   */
+  tableResults: (runId: string) =>
+    unwrap(api.get<ApiResponse<RunTableResult[]>>(`/api/v1/runs/${runId}/table-results`)),
 
   /**
    * DEV: Worker complete callback シミュレーション. PoC dev mode 에서 master/admin 으로 호출 가능.

@@ -1,13 +1,23 @@
 # prod profile — jpackage 인스톨러로 설치된 Coordinator 가 활성화.
 # Launcher 가 `-Dspring.profiles.active=prod` 로 시작.
 #
-# 사용자 PC 의 host native PostgreSQL (CLAUDE.md default: 포트 5433,
-# DB mpd_meta, user/pw mpd/mpd) 를 그대로 사용. 환경 변수 DB_URL /
-# DB_USER / DB_PASSWORD 로 override 가능.
+# 메타 PG 는 installer 동봉 (PG 18, port 5432, DB mpd_meta, user/pw mpd/mpd).
+# 기존 PG 가 5432 점유면 installer 가 user 선택 — 기존 사용 or 다른 port 로 별도 install.
+# 환경 변수 DB_URL / DB_USER / DB_PASSWORD 로 override 가능.
 
 spring:
+  # 부팅 시간 단축 — bean 들 lazy 초기화. 첫 HTTP 요청 시 해당 bean 만 init (-3~5s).
+  # production desktop 앱 = backend 단일 사용자 + 1 process 라 lazy 안전.
+  main:
+    lazy-initialization: true
+
+  # Quartz 부팅 시 자동 시작 안 함 — 실제 trigger 등록 시점에 SchedulerInitializer 가
+  # 명시적으로 .start() 호출. 부팅 -0.5~1s.
+  quartz:
+    auto-startup: false
+
   datasource:
-    url:      ${DB_URL:jdbc:postgresql://localhost:5433/mpd_meta}
+    url:      ${DB_URL:jdbc:postgresql://localhost:5432/mpd_meta}
     username: ${DB_USER:mpd}
     password: ${DB_PASSWORD:mpd}
 
@@ -28,6 +38,12 @@ modernize:
     allowed-origins: ${CORS_ORIGINS:http://localhost:8080}
   license:
     public-key: ${MPD_LICENSE_PUBKEY:classpath:license/public.pem}
+  # 현장 대용량 — 파일 모드로 테이블도 디스크 spill (RAM 초과 OOM 내성). dev/test 는 base 의 in-memory 유지.
+  duckdb:
+    memory-mode: false
+  # Coordinator 인스톨 환경 = HikariCP 10 default. 4 thread 안전.
+  run:
+    load-parallelism: ${LOAD_PARALLELISM:4}
 
 logging:
   level:

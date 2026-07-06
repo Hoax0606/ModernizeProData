@@ -2,11 +2,15 @@ import JSZip from 'jszip';
 import ExcelJS from 'exceljs';
 import type { Site, Project } from '../store/workspace';
 import type { DdlSchema } from '../api/asisDdl';
+import { buildDiff, reconstructDdl, buildXlsxBlob, SHEETS, validationRowsFor, type DiffRule } from '../pages/ArtifactsPage';
+import type { ValidationReportDto } from '../api/validation';
 
 /* Site export — manifest 생성 + client-side zip bundle 생성.
- * 백엔드 export job 이 아직 없으므로 .sql 은 stub 텍스트,
- * Mapping / Validation 의 .xlsx 자리는 placeholder.txt 로 zip.
- * Site summary 만은 TO-BE DDL 데이터로 실제 .xlsx 를 ExcelJS 로 만든다. */
+ * 2026-05-30 update: 4 카테고리 모두 실 데이터 wire.
+ * - Migration SQL: stage_table_results.compiled_sql
+ * - Mapping: buildDiff() 결과 .xlsx
+ * - Validation: validation_reports → validationRowsFor() .xlsx
+ * - Site summary: TO-BE DDL 기반 .xlsx (변경 X) */
 
 export type ArtifactCat =
   | 'Migration SQL'
@@ -72,9 +76,12 @@ interface BuildManifestArgs {
   selectedFormats: SelectedFormats;
   /** zip 내부 최상위 폴더명 (`/` 없이). 보통 zip 파일명 stem 과 동일하게 전달. */
   bundleStem: string;
+  /** projectId → 활성 snapshot 의 박제 / frozen rules 기반 실 table 명 목록 (lowercase).
+   *  있으면 paddedTableName(i) 대신 실 명 사용 — manifest preview 와 zip 내 파일명이 일치한다. */
+  tablesByProject?: Record<string, string[]>;
 }
 
-export function buildManifest({ projects, schemaCounts, selectedFormats, bundleStem }: BuildManifestArgs): ManifestEntry[] {
+export function buildManifest({ projects, schemaCounts, selectedFormats, bundleStem, tablesByProject }: BuildManifestArgs): ManifestEntry[] {
   const entries: ManifestEntry[] = [];
   const prefix = `${bundleStem}/`;
 
@@ -87,7 +94,10 @@ export function buildManifest({ projects, schemaCounts, selectedFormats, bundleS
   };
 
   for (const p of projects) {
-    const tc = tableCountOf(p);
+    const realTables = tablesByProject?.[p.id];
+    const tc = realTables?.length ?? tableCountOf(p);
+    const tableLabelAt = (i: number): string =>
+      realTables?.[i] ? pathSafeName(realTables[i]) : paddedTableName(i);
     // 폴더명은 한글/일본어 보존을 위해 pathSafeName 사용 (slugify 는 비-ASCII 를 다 깎는다).
     const pslug = pathSafeName(p.name);
 
@@ -95,7 +105,7 @@ export function buildManifest({ projects, schemaCounts, selectedFormats, bundleS
       for (let i = 0; i < tc; i++) {
         entries.push({
           cat: 'Migration SQL',
-          path: `${prefix}${pslug}/migration/${paddedTableName(i)}.up.sql`,
+          path: `${prefix}${pslug}/migration/${tableLabelAt(i)}.up.sql`,
           kind: 'sql',
         });
       }
@@ -104,7 +114,7 @@ export function buildManifest({ projects, schemaCounts, selectedFormats, bundleS
       for (let i = 0; i < tc; i++) {
         entries.push({
           cat: 'Mapping',
-          path: `${prefix}${pslug}/mapping/${paddedTableName(i)}.map.xlsx`,
+          path: `${prefix}${pslug}/mapping/${tableLabelAt(i)}.map.xlsx`,
           kind: 'xlsx',
         });
       }
@@ -113,7 +123,7 @@ export function buildManifest({ projects, schemaCounts, selectedFormats, bundleS
       for (let i = 0; i < tc; i++) {
         entries.push({
           cat: 'Validation',
-          path: `${prefix}${pslug}/validation/${paddedTableName(i)}.report.xlsx`,
+          path: `${prefix}${pslug}/validation/${tableLabelAt(i)}.report.xlsx`,
           kind: 'xlsx',
         });
       }
@@ -141,6 +151,25 @@ export function groupManifest(manifest: ManifestEntry[]): Record<string, Manifes
   return grouped;
 }
 
+/** 활성 snapshot 기준 한 project 의 실 데이터 묶음. SiteExportPage 가 fetch 해서 전달. */
+export interface ProjectArtifactData {
+  /** activated snapshot (pinned > latest mapping). null 이면 그 project 는 placeholder. */
+  snapshotId: string | null;
+  /** snapshotApi.getMapping 의 rules — 활성 snapshot 의 frozen rules. */
+  rules: DiffRule[];
+  /** AS-IS DDL — reconstructDdl + buildDiff 의 type 정보. */
+  asisSchema: DdlSchema | null;
+  /** TO-BE DDL. */
+  tobeSchema: DdlSchema | null;
+  /** snapshot.executionContext.transform 에서 success 인 TOBE 테이블 (lowercase). null = 박제 X. */
+  successTables: Set<string> | null;
+  /** snapshot.executionContext.load 의 합성 SQL — TOBE 테이블 (lowercase) → SQL. */
+  compiledSqlByTable: Record<string, string>;
+  /** validation_reports — snapshot.executionContext.runId 의 per-binding report.
+   *  key = tobe_table (case-sensitive). run 없거나 binding 미포함 시 비어있음. */
+  validationByTable: Record<string, ValidationReportDto>;
+}
+
 interface BuildZipArgs {
   site: Site;
   /** site 의 모든 프로젝트 — Site summary 워크북 빌드에 사용 */
@@ -150,45 +179,107 @@ interface BuildZipArgs {
   manifest: ManifestEntry[];
   /** 'YYYY-MM-DD HH:MM JST' 같은 표기 — stub / placeholder 본문에 박는다 */
   generatedAt: string;
+  /** projectId → 활성 snapshot 의 실 데이터. 없으면 placeholder 로 fallback. */
+  projectArtifacts?: Record<string, ProjectArtifactData>;
 }
 
 export async function generateZipBundle({
-  site, projects, schemas, manifest, generatedAt,
+  site, projects, schemas, manifest, generatedAt, projectArtifacts,
 }: BuildZipArgs): Promise<Blob> {
   const zip = new JSZip();
 
   // path 안의 project slug → Project 매칭 (Mapping/Validation 워크북 메타에 사용).
   const projectBySlug = new Map(projects.map(p => [pathSafeName(p.name), p]));
 
+  // path "<stem>/<pslug>/..." 에서 pslug → Project 추출.
+  const projectOfEntry = (entry: ManifestEntry): Project | null => {
+    const parts = entry.path.split('/');
+    return parts.length >= 2 ? (projectBySlug.get(parts[1]) ?? null) : null;
+  };
+  // entry path 의 파일명에서 table stem ("tbl_001" / "customers" 등) 추출.
+  const tableStemOfEntry = (entry: ManifestEntry): string => {
+    const fileName = entry.path.split('/').pop() ?? 'table';
+    return fileName.replace(/\.(up\.)?sql$/, '').replace(/\.(map|report|pipeline)?\.xlsx$/, '');
+  };
+
   for (const entry of manifest) {
-    if (entry.kind === 'sql') {
-      // 짧은 stub DDL/Migration 본문. 실제 SQL 은 백엔드 wiring 후.
-      const tableName = entry.path.split('/').pop()?.replace(/\.(up\.)?sql$/, '') ?? 'table';
-      const body =
-        `-- ${entry.cat}\n` +
-        `-- ${entry.path}\n` +
-        `-- generated ${generatedAt}\n` +
-        `-- NOTE: placeholder. real content arrives when the backend export job is wired.\n` +
-        `\n` +
-        `-- TODO: ${tableName}\n`;
+    const project = projectOfEntry(entry);
+    const data = project && projectArtifacts ? projectArtifacts[project.id] : undefined;
+    const tableStem = tableStemOfEntry(entry);
+
+    if (entry.kind === 'sql' && entry.cat === 'Migration SQL') {
+      // 활성 snapshot 의 박제된 합성 SQL — table 별 .up.sql.
+      const sql = data?.compiledSqlByTable[tableStem.toLowerCase()];
+      const body = sql
+        ? `-- Migration SQL — ${tableStem}\n-- generated ${generatedAt}\n-- snapshot ${data!.snapshotId ?? '(none)'}\n\n${sql}\n`
+        : `-- Migration SQL — ${tableStem}\n-- generated ${generatedAt}\n-- NOTE: no run yet for this snapshot — table missing in execution_context.\n`;
+      zip.file(entry.path, body);
+    } else if (entry.kind === 'sql') {
+      // 기타 sql (현재 없음) — placeholder.
+      const body = `-- ${entry.cat}\n-- ${entry.path}\n-- generated ${generatedAt}\n-- TODO: ${tableStem}\n`;
       zip.file(entry.path, body);
     } else if (entry.cat === 'Site summary') {
-      // 사이트 단위 단일 워크북. 화면의 Site summary preview 와 1:1.
       const buf = await buildSiteSummaryWorkbook({ site, projects, schemas, generatedAt });
       zip.file(entry.path, buf);
+    } else if (entry.cat === 'Mapping' && data) {
+      // 활성 snapshot 의 frozen rules + DDL 로 buildDiff → 그 table 의 Diff/Summary 시트만.
+      const diff = buildDiff(data.rules, data.asisSchema, data.tobeSchema, data.successTables);
+      const tableMatch = diff.tables.find((t) => t.toLowerCase() === tableStem.toLowerCase());
+      try {
+        const blob = await buildXlsxBlob('diff', SHEETS.diff, (sheet) => {
+          if (!tableMatch) return [];
+          if (sheet === 'Diff') return diff.rows.filter((r) => String(r[1]) === tableMatch);
+          if (sheet === 'Summary') return diff.summaryByTable[tableMatch] ?? [];
+          return [];
+        });
+        zip.file(entry.path, await blob.arrayBuffer());
+      } catch {
+        const buf = await buildEmptyArtifactWorkbook({
+          category: entry.cat, projectName: project?.name ?? 'project', tableName: tableStem, generatedAt,
+        });
+        zip.file(entry.path, buf);
+      }
+    } else if (entry.cat === 'Validation' && data) {
+      /* 2026-05-30: validation_reports 실 데이터 → 5 시트 (Overview / Sum recon / NULL parity /
+         Min Max / Range). table 명으로 lookup. */
+      const validationDto = data.validationByTable[tableStem]
+                         ?? Object.entries(data.validationByTable)
+                                  .find(([k]) => k.toLowerCase() === tableStem.toLowerCase())?.[1]
+                         ?? null;
+      try {
+        const blob = await buildXlsxBlob('validation', SHEETS.validation,
+            (sheet) => validationRowsFor(validationDto, sheet));
+        zip.file(entry.path, await blob.arrayBuffer());
+      } catch {
+        const buf = await buildEmptyArtifactWorkbook({
+          category: entry.cat, projectName: project?.name ?? 'project', tableName: tableStem, generatedAt,
+        });
+        zip.file(entry.path, buf);
+      }
     } else {
-      // Mapping / Validation 등: 빈 .xlsx 워크북 (1 시트 Cover, 가짜 데이터 없음).
-      // 라벨이 .xlsx 라 약속한 대로 진짜 .xlsx 가 떨어지되, 본문은 "Not yet populated" 안내.
-      const fileName = entry.path.split('/').pop() ?? 'artifact';
-      const tableName = fileName.replace(/\.(map|report|pipeline)?\.xlsx$/, '');
-      const project = projectBySlug.get(entry.path.split('/')[1]) ?? null;
+      // Mapping (data 없음) 등: fallback placeholder.
       const buf = await buildEmptyArtifactWorkbook({
         category: entry.cat,
         projectName: project?.name ?? 'project',
-        tableName,
+        tableName: tableStem,
         generatedAt,
       });
       zip.file(entry.path, buf);
+    }
+  }
+
+  // DDL (asis / tobe) 도 활성 snapshot 의 reconstruct 결과로 추가 — manifest 에는 없지만
+  // bundle 안엔 포함 (사용자 의도: 전체 프로젝트 산출물).
+  if (projectArtifacts) {
+    const bundleStem = manifest[0]?.path.split('/')[0] ?? 'site-export';
+    for (const project of projects) {
+      const data = projectArtifacts[project.id];
+      if (!data) continue;
+      const pslug = pathSafeName(project.name);
+      const asisDdl = reconstructDdl(data.asisSchema);
+      const tobeDdl = reconstructDdl(data.tobeSchema);
+      if (asisDdl) zip.file(`${bundleStem}/${pslug}/ddl/asis.ddl.sql`, asisDdl);
+      if (tobeDdl) zip.file(`${bundleStem}/${pslug}/ddl/tobe.ddl.sql`, tobeDdl);
     }
   }
 
@@ -493,4 +584,214 @@ export function manifestToClipboardText(site: Site, manifest: ManifestEntry[], g
     '',
     ...manifest.map(m => `${m.path}\t${fmtBytes(m.size)}`),
   ].join('\n');
+}
+
+/* ────────────────────────────────────────────────────────────────
+ * 미리보기용 데이터 생성기 — Migration SQL / Validation plan / Mapping preview.
+ * snapshot rules + bindings + DDL 으로 실 동작 가능한 SQL / 검증 계획을 생성.
+ * (백엔드 export job 이 결국 같은 것을 만듦. FE 미리보기는 작업 검수용.)
+ * ──────────────────────────────────────────────────────────────── */
+
+/** Validation 시트 컬럼 정의 — ArtifactsPage.tsx SHEETS.validation 과 동일. */
+export interface ValidationSheetSpec {
+  name: string;
+  columns: { name: string; type: string }[];
+  freeForm?: boolean;
+}
+export const VALIDATION_SHEET_COLUMNS: ValidationSheetSpec[] = [
+  { name: 'Overview', freeForm: true, columns: [
+    { name: 'Item',    type: 'TEXT' },
+    { name: 'ASIS',    type: 'TEXT' },
+    { name: 'TOBE',    type: 'TEXT' },
+    { name: 'Verdict', type: 'TEXT' },
+  ]},
+  { name: 'Sum recon', columns: [
+    { name: 'Column',    type: 'VARCHAR' },
+    { name: 'Type',      type: 'VARCHAR' },
+    { name: 'SUM(ASIS)', type: 'NUMBER' },
+    { name: 'SUM(TOBE)', type: 'NUMBER' },
+    { name: 'Δ %',       type: 'TEXT' },
+    { name: 'Verdict',   type: 'TEXT' },
+  ]},
+  { name: 'NULL parity', columns: [
+    { name: 'Column',     type: 'VARCHAR' },
+    { name: 'Type',       type: 'VARCHAR' },
+    { name: 'NULLS ASIS', type: 'BIGINT' },
+    { name: 'NULLS TOBE', type: 'BIGINT' },
+    { name: 'Δ',          type: 'BIGINT' },
+    { name: 'Verdict',    type: 'TEXT' },
+  ]},
+  { name: 'Range', columns: [
+    { name: 'Column',        type: 'VARCHAR' },
+    { name: 'Type',          type: 'VARCHAR' },
+    { name: 'Bound',         type: 'TEXT' },
+    { name: 'Observed max',  type: 'NUMBER' },
+    { name: 'Overflow rows', type: 'INT' },
+    { name: 'Verdict',       type: 'TEXT' },
+  ]},
+];
+
+/** Migration SQL 한 테이블당 entry — Tables 시트 + Sample SQL 시트 용도. */
+export interface MigrationSqlEntry {
+  table: string;          // fully qualified TOBE table
+  ruleCount: number;
+  composition: string;    // 'single' | 'join (N)' | 'union (N)' | 'none'
+  source: string;         // AS-IS source(s) joined by composition symbol
+  sql: string;            // CREATE + INSERT statements
+}
+
+/** snapshot rules + bindings + TOBE DDL → 실 INSERT/CREATE SQL.
+ *  공통 transformation logic — 백엔드 export job 의 출력과 큰 틀 동일. */
+export function generateMigrationSql(
+  rules: Array<{
+    strategy: 'expression' | 'null' | 'default' | 'skip';
+    tobeSchema: string; tobeTable: string; tobeColumn: string;
+    asisTable: string | null; asisColumn: string[] | null;
+    transformSql: string | null; transformRule: string | null;
+    defaultValue: string | null;
+  }>,
+  bindings: Array<{
+    tobeSchema: string; tobeTable: string;
+    compositionKind: 'single' | 'join' | 'union' | 'none';
+    sources: Array<{ asisSchema: string | null; asisTable: string; alias: string; role: 'primary' | 'join' | 'union'; joinType: string | null; joinOn: string | null }>;
+  }>,
+  tobeSchema: DdlSchema | null,
+): MigrationSqlEntry[] {
+  if (!tobeSchema) return [];
+  const rulesByTable = new Map<string, typeof rules>();
+  for (const r of rules) {
+    const key = `${r.tobeSchema || ''}.${r.tobeTable}`.toLowerCase();
+    if (!rulesByTable.has(key)) rulesByTable.set(key, []);
+    rulesByTable.get(key)!.push(r);
+  }
+  const bindingByTable = new Map<string, typeof bindings[number]>();
+  for (const b of bindings) bindingByTable.set(`${b.tobeSchema || ''}.${b.tobeTable}`.toLowerCase(), b);
+
+  const out: MigrationSqlEntry[] = [];
+  for (const tw of [...tobeSchema.tables].sort((a, b) => a.table.ordinal - b.table.ordinal)) {
+    const key = `${tw.table.schemaName || ''}.${tw.table.physicalName}`.toLowerCase();
+    const tableRules = rulesByTable.get(key) ?? [];
+    if (tableRules.length === 0) continue;
+    const tobeFqn = `${tw.table.schemaName ? tw.table.schemaName + '.' : ''}${tw.table.physicalName}`;
+    const binding = bindingByTable.get(key);
+
+    const composition: string = binding
+      ? binding.compositionKind === 'single' ? 'single'
+        : binding.compositionKind === 'none' ? 'none'
+        : `${binding.compositionKind} (${binding.sources.length})`
+      : 'none';
+    const sourceJoin = binding?.compositionKind === 'join' ? ' ⋈ '
+                    : binding?.compositionKind === 'union' ? ' ∪ ' : ', ';
+    const source = binding && binding.sources.length > 0
+      ? binding.sources.map((s) => `${s.asisSchema ? s.asisSchema + '.' : ''}${s.asisTable}`).join(sourceJoin)
+      : '—';
+
+    const nonSkip = tableRules.filter((r) => r.strategy !== 'skip');
+    const insertCols = nonSkip.map((r) => r.tobeColumn);
+    const primary = binding?.sources.find((s) => s.role === 'primary') ?? binding?.sources[0];
+    const primaryAlias = primary?.alias || 'a';
+
+    const selectExprs = nonSkip.map((r) => {
+      if (r.strategy === 'null') return `NULL AS ${r.tobeColumn}`;
+      if (r.strategy === 'default') {
+        const dv = r.defaultValue ?? '';
+        const isNum = /^-?\d+(\.\d+)?$/.test(dv);
+        return `${isNum ? dv : `'${dv.replace(/'/g, "''")}'`} AS ${r.tobeColumn}`;
+      }
+      if (r.transformSql && r.transformSql.trim()) return `${r.transformSql.trim()} AS ${r.tobeColumn}`;
+      const cols = (r.asisColumn ?? []).filter((c) => c && c.trim());
+      if (cols.length === 0) return `NULL /* no source */ AS ${r.tobeColumn}`;
+      if (cols.length === 1) return `${primaryAlias}.${cols[0]} AS ${r.tobeColumn}`;
+      return `/* combine: ${cols.join(', ')} */ ${primaryAlias}.${cols[0]} AS ${r.tobeColumn}`;
+    });
+
+    let fromClause = '';
+    if (!binding || binding.sources.length === 0) {
+      fromClause = `FROM (/* no binding */)`;
+    } else if (binding.compositionKind === 'single' || binding.sources.length === 1) {
+      const p = primary!;
+      fromClause = `FROM ${p.asisSchema ? p.asisSchema + '.' : ''}${p.asisTable} AS ${p.alias || 'a'}`;
+    } else if (binding.compositionKind === 'join') {
+      const lines = [`FROM ${primary!.asisSchema ? primary!.asisSchema + '.' : ''}${primary!.asisTable} AS ${primary!.alias}`];
+      for (const s of binding.sources) {
+        if (s === primary) continue;
+        const jt = s.joinType || 'LEFT JOIN';
+        const tn = `${s.asisSchema ? s.asisSchema + '.' : ''}${s.asisTable}`;
+        const on = s.joinOn?.trim() || '/* missing join clause */';
+        lines.push(`${jt} ${tn} AS ${s.alias} ON ${on}`);
+      }
+      fromClause = lines.join('\n');
+    } else {
+      // union
+      fromClause = `FROM ${primary!.asisSchema ? primary!.asisSchema + '.' : ''}${primary!.asisTable} AS ${primary!.alias}  -- (UNION ALL with ${binding.sources.length - 1} more)`;
+    }
+
+    const createCols = tw.columns
+      .sort((a, b) => a.ordinal - b.ordinal)
+      .map((c) => {
+        const nn = c.nullable ? '' : ' NOT NULL';
+        const dv = c.defaultValue ? ` DEFAULT ${c.defaultValue}` : '';
+        return `  ${c.physicalName} ${c.dataTypeRaw}${nn}${dv}`;
+      });
+    const pkCols = tw.columns
+      .filter((c) => c.pkOrder != null)
+      .sort((a, b) => (a.pkOrder ?? 0) - (b.pkOrder ?? 0))
+      .map((c) => c.physicalName);
+    const pkLine = pkCols.length > 0 ? `,\n  PRIMARY KEY (${pkCols.join(', ')})` : '';
+
+    const sql = [
+      `-- ${tobeFqn}`,
+      `CREATE TABLE IF NOT EXISTS ${tobeFqn} (`,
+      createCols.join(',\n') + pkLine,
+      `);`,
+      ``,
+      `INSERT INTO ${tobeFqn} (`,
+      insertCols.map((c) => `  ${c}`).join(',\n'),
+      `)`,
+      `SELECT`,
+      selectExprs.map((e) => `  ${e}`).join(',\n'),
+      fromClause,
+      `;`,
+    ].join('\n');
+
+    out.push({ table: tobeFqn, ruleCount: nonSkip.length, composition, source, sql });
+  }
+  return out;
+}
+
+/** TOBE DDL → 어떤 컬럼에 어떤 검증이 걸리는지 (Sum/NULL/Range) 플랜. 비교 값은 'pending'. */
+export interface ValidationPlanRows {
+  Overview:      (string | number | null)[][];
+  'Sum recon':   (string | number | null)[][];
+  'NULL parity': (string | number | null)[][];
+  Range:         (string | number | null)[][];
+}
+
+const NUMERIC_TYPE_RE = /^(NUMBER|NUMERIC|DECIMAL|INT|INTEGER|BIGINT|SMALLINT|FLOAT|REAL|DOUBLE)/i;
+const STRING_BOUND_TYPE_RE = /^(VARCHAR|CHAR|VARCHAR2)/i;
+
+export function generateValidationPlan(tobeSchema: DdlSchema | null): ValidationPlanRows {
+  const empty: ValidationPlanRows = { Overview: [], 'Sum recon': [], 'NULL parity': [], Range: [] };
+  if (!tobeSchema) return empty;
+
+  for (const tw of [...tobeSchema.tables].sort((a, b) => a.table.ordinal - b.table.ordinal)) {
+    const tobeFqn = `${tw.table.schemaName ? tw.table.schemaName + '.' : ''}${tw.table.physicalName}`;
+    empty.Overview.push([tobeFqn, 'pending', 'pending', 'pending']);
+    for (const c of tw.columns) {
+      const type = (c.dataType || c.dataTypeRaw || '').toUpperCase();
+      const rawType = c.dataTypeRaw || type;
+      if (NUMERIC_TYPE_RE.test(type)) {
+        empty['Sum recon'].push([c.physicalName, rawType, null, null, null, 'pending']);
+      }
+      if (c.nullable) {
+        empty['NULL parity'].push([c.physicalName, rawType, null, null, null, 'pending']);
+      }
+      if (c.length != null && STRING_BOUND_TYPE_RE.test(type)) {
+        empty.Range.push([c.physicalName, rawType, `len ≤ ${c.length}`, null, null, 'pending']);
+      } else if (/SMALLINT/i.test(type)) {
+        empty.Range.push([c.physicalName, rawType, '±32767', null, null, 'pending']);
+      }
+    }
+  }
+  return empty;
 }

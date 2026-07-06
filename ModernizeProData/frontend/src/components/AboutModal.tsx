@@ -1,6 +1,7 @@
 import { Modal } from './Modal';
 import { BrandName } from './BrandName';
 import { useT } from '../i18n';
+import { APP_VERSION } from '../lib/appVersion';
 
 interface Props {
   open: boolean;
@@ -15,7 +16,7 @@ export function AboutModal({ open, onClose }: Props) {
         <img src="/mpd.png" alt="" width={48} height={48} style={{ display: 'block' }} />
         <div>
           <div style={styles.brandText}><BrandName /></div>
-          <div style={styles.versionText}>v0.1.0-dev</div>
+          <div style={styles.versionText}>v{APP_VERSION}</div>
         </div>
       </div>
 
@@ -23,7 +24,7 @@ export function AboutModal({ open, onClose }: Props) {
 
       <table style={styles.kv}>
         <tbody>
-          <Row k={t('about.build')} v="0.1.0-dev" mono />
+          <Row k={t('about.build')} v={APP_VERSION} mono />
           <Row k={t('about.backend')} v="Spring Boot 3.5 · Java 21" mono />
           <Row k={t('about.frontend')} v="React 19 · Vite 8 · TypeScript 6" mono />
           <Row k={t('about.engine')} v={t('about.engineVal')} mono />

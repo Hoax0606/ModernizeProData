@@ -1,47 +1,49 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { licenseApi } from '../api/license';
 import { BrandName } from '../components/BrandName';
+import { LanguageDropdown } from '../components/LanguageDropdown';
 import { useT } from '../i18n';
 import { useAuthStore } from '../store/auth';
+import { useSettingsStore } from '../store/settings';
+import { APP_VERSION } from '../lib/appVersion';
 
 /**
  * First-boot license setup screen.
  *
- * Uses the `window.javaConnector.openLicenseFile()` bridge wired up in
- * Launcher.java instead of <input type="file"> because JavaFX 21 WebView
- * does not surface a native file picker on HTML file inputs.
+ * 2026-05-30 — Edge 의 native file picker 사용 (HTML5 input type=file).
+ * 옛 JavaFX WebView 의 prompt-handler trick 폐기.
  */
-declare global {
-  interface Window {
-    javaConnector?: { openLicenseFile(): string | null };
-  }
-}
-
 export function LicenseSetupPage() {
   const t = useT();
   const nav = useNavigate();
   const user = useAuthStore((s) => s.user);
+  const language = useSettingsStore((s) => s.language);
+  const setLanguage = useSettingsStore((s) => s.setLanguage);
   // Anonymous first-boot OR master only. A worker (admin role) that has
   // somehow landed here from a license-MISSING Coordinator should NOT be
   // able to apply a license file — that's master's job. Backend's
   // controller guard is the authority; this just keeps the UI honest.
   const canApply = !user || user.role === 'master';
   const [content, setContent] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const onPick = () => {
-    // Bridge — Launcher.java's prompt handler intercepts the sentinel string
-    // 'OPEN_LICENSE_FILE' and shows a native JavaFX FileChooser instead of
-    // a text prompt. window.prompt() returns the file contents (or null on
-    // cancel). This sidesteps JavaFX 21's JSObject limitation where Java
-    // methods attached via setMember() are not callable from JS.
+    fileInputRef.current?.click();
+  };
+
+  const onFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // 같은 파일 재선택 가능하도록.
+    if (!file) return;
     try {
-      const text = window.prompt('OPEN_LICENSE_FILE');
-      if (text == null) return;
+      const text = await file.text();
       setContent(text);
+      setFileName(file.name);
       setError(null);
     } catch (err) {
       setError(t('licenseSetup.error.fileChooser', {
@@ -88,11 +90,14 @@ export function LicenseSetupPage() {
             <div style={styles.title}><BrandName /></div>
           </div>
           <div style={styles.card}>
-            <div style={styles.cardTitle}>{t('licenseSetup.title')}</div>
+            <div style={styles.cardTitleRow}>
+              <div style={styles.cardTitle}>{t('licenseSetup.title')}</div>
+              <LanguageDropdown language={language} onChange={setLanguage} />
+            </div>
             <div style={styles.cardHint}>{t('licenseSetup.workerBlocked')}</div>
           </div>
           <div style={styles.footer}>
-            © KS Info System Co., Ltd. <span style={styles.footerVersion}>v0.1.0-dev</span>
+            © KS Info System Co., Ltd. <span style={styles.footerVersion}>v{APP_VERSION}</span>
           </div>
         </div>
       </div>
@@ -108,15 +113,25 @@ export function LicenseSetupPage() {
         </div>
 
         <form style={styles.card} onSubmit={onSubmit}>
-          <div style={styles.cardTitle}>{t('licenseSetup.title')}</div>
+          <div style={styles.cardTitleRow}>
+            <div style={styles.cardTitle}>{t('licenseSetup.title')}</div>
+            <LanguageDropdown language={language} onChange={setLanguage} />
+          </div>
           <div style={styles.cardHint}>{t('licenseSetup.hint')}</div>
 
           <div style={styles.label}>
             <span style={styles.labelText}>{t('licenseSetup.fileLabel')}</span>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".lic,.json,application/json,text/plain"
+              onChange={onFileChange}
+              style={{ display: 'none' }}
+            />
             <button type="button" onClick={onPick} style={styles.filePickerBtn}>
               <span style={loaded ? styles.fileNameSet : styles.fileNameEmpty}>
                 {loaded
-                  ? t('licenseSetup.fileLoaded', { bytes: content!.length })
+                  ? (fileName ?? t('licenseSetup.fileLoaded', { bytes: content!.length }))
                   : t('licenseSetup.pickFile')}
               </span>
               <span style={styles.fileBrowseTag}>{t('licenseSetup.browse')}</span>
@@ -132,10 +147,19 @@ export function LicenseSetupPage() {
           >
             {busy ? t('licenseSetup.applying') : t('licenseSetup.apply')}
           </button>
+
+          {/* Re-enter 실수로 진입한 경우 빠져나갈 path — login 화면으로 복귀. */}
+          <button
+            type="button"
+            onClick={() => nav('/login', { replace: true })}
+            style={styles.cancelBtn}
+          >
+            {t('licenseSetup.back')}
+          </button>
         </form>
 
         <div style={styles.footer}>
-          © KS Info System Co., Ltd. <span style={styles.footerVersion}>v0.1.0-dev</span>
+          © KS Info System Co., Ltd. <span style={styles.footerVersion}>v{APP_VERSION}</span>
         </div>
       </div>
     </div>
@@ -159,6 +183,7 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     gap: 22,
   },
+  cardTitleRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
   brandBlock: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 },
   logo: { display: 'block', marginBottom: 4 },
   title: { fontSize: 24, fontWeight: 700, color: 'var(--text)', letterSpacing: -0.4 },
@@ -218,6 +243,16 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 4,
   },
   buttonDisabled: { opacity: 0.6, cursor: 'wait' },
+  cancelBtn: {
+    padding: '9px 12px',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 4,
+    background: 'var(--panel-2)',
+    color: 'var(--text-2)',
+    fontSize: 12.5,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
   error: {
     padding: '8px 10px',
     background: 'var(--red-50)',

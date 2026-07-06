@@ -22,6 +22,12 @@ export type TableBindingEdit = {
   }>;
   mode: 'join' | 'union';
   whereFilter?: string;
+  /** master project_id — 값 있으면 자식 link, row editor read-only, master 룰 inherit. */
+  sharedFromProjectId?: string;
+  /** Row N:1 집계 GROUP BY 표현식 — null / 빈 값이면 GROUP BY 없음. */
+  groupByExpr?: string;
+  /** Row 1:N 펼침 free SQL fragment — null / 빈 값이면 펼침 없음. */
+  expandExpr?: string;
 };
 
 export type RowEdit = {
@@ -49,6 +55,8 @@ interface MappingEditsState {
   /** 임포트/hydrate 후 DB 의 mapping_rules 로 해당 project 의 row edits 전체 교체. */
   replaceRowEdits: (projectId: string, edits: Record<string, Record<string, RowEdit>>) => void;
   setAsisSkip: (projectId: string, tableName: string, colName: string, nextSkip: boolean) => void;
+  /** batch replace — backend listAsisSkips → store. table.col → true 인 entry 만 들어옴. */
+  replaceAsisSkips: (projectId: string, skipsByTable: Record<string, Record<string, boolean>>) => void;
   clearProject: (projectId: string) => void;
 }
 
@@ -104,6 +112,10 @@ export const useMappingEditsStore = create<MappingEditsState>()(
           },
         };
       }),
+
+      replaceAsisSkips: (projectId, skipsByTable) => set((s) => ({
+        asisSkippedCols: { ...s.asisSkippedCols, [projectId]: skipsByTable },
+      })),
 
       clearProject: (projectId) => set((s) => {
         const { [projectId]: _b, ...restBindings } = s.tableBindingEdits;

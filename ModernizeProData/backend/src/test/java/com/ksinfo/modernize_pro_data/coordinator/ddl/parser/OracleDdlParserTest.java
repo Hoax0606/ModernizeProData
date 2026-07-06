@@ -91,7 +91,7 @@ class OracleDdlParserTest {
     }
 
     @Test
-    void ignoresFkAndIndexConstraints() {
+    void parsesInlineNamedFkAndUk() {
         String sql = """
                 CREATE TABLE T (
                     A NUMBER,
@@ -102,6 +102,162 @@ class OracleDdlParserTest {
                 """;
         ParsedDdl result = parser.parse(sql);
         assertThat(result.getTables().get(0).getColumns()).hasSize(2);
+        assertThat(result.getConstraints()).hasSize(2);
+
+        ParsedConstraint fk = result.getConstraints().stream()
+                .filter(c -> ParsedConstraint.TYPE_FK.equals(c.getType()))
+                .findFirst().orElseThrow();
+        assertThat(fk.getName()).isEqualTo("FK_T_OTHER");
+        assertThat(fk.getTableName()).isEqualTo("T");
+        assertThat(fk.getColumns()).hasSize(1);
+        assertThat(fk.getColumns().get(0).getColumnName()).isEqualTo("B");
+        assertThat(fk.getColumns().get(0).getRefColumnName()).isEqualTo("ID");
+        assertThat(fk.getForeignKey().getRefTableName()).isEqualTo("OTHER");
+
+        ParsedConstraint uk = result.getConstraints().stream()
+                .filter(c -> ParsedConstraint.TYPE_UK.equals(c.getType()))
+                .findFirst().orElseThrow();
+        assertThat(uk.getName()).isEqualTo("UQ_T_A");
+        assertThat(uk.getColumns().get(0).getColumnName()).isEqualTo("A");
+    }
+
+    @Test
+    void parsesCompositeForeignKey() {
+        String sql = """
+                CREATE TABLE CHILD (
+                    A NUMBER, B NUMBER,
+                    CONSTRAINT FK_CHILD FOREIGN KEY (A, B) REFERENCES PARENT(X, Y)
+                );
+                """;
+        ParsedDdl result = parser.parse(sql);
+        assertThat(result.getConstraints()).hasSize(1);
+        ParsedConstraint fk = result.getConstraints().get(0);
+        assertThat(fk.getColumns()).hasSize(2);
+        assertThat(fk.getColumns().get(0).getColumnName()).isEqualTo("A");
+        assertThat(fk.getColumns().get(0).getRefColumnName()).isEqualTo("X");
+        assertThat(fk.getColumns().get(1).getColumnName()).isEqualTo("B");
+        assertThat(fk.getColumns().get(1).getRefColumnName()).isEqualTo("Y");
+    }
+
+    @Test
+    void parsesInlineCheckConstraint() {
+        String sql = """
+                CREATE TABLE EMP (
+                    SALARY NUMBER,
+                    CONSTRAINT CK_EMP_SAL CHECK (SALARY > 0)
+                );
+                """;
+        ParsedDdl result = parser.parse(sql);
+        assertThat(result.getConstraints()).hasSize(1);
+        ParsedConstraint ck = result.getConstraints().get(0);
+        assertThat(ck.getName()).isEqualTo("CK_EMP_SAL");
+        assertThat(ck.getType()).isEqualTo(ParsedConstraint.TYPE_CHECK);
+        assertThat(ck.getCheckExpression()).isEqualTo("SALARY > 0");
+    }
+
+    @Test
+    void parsesCreateUniqueIndex() {
+        String sql = "CREATE UNIQUE INDEX UK_EMP_EMAIL ON HR.EMP (EMAIL);";
+        ParsedDdl result = parser.parse(sql);
+        assertThat(result.getIndexes()).hasSize(1);
+        ParsedIndex idx = result.getIndexes().get(0);
+        assertThat(idx.getName()).isEqualTo("UK_EMP_EMAIL");
+        assertThat(idx.getTableName()).isEqualTo("EMP");
+        assertThat(idx.getSchemaName()).isEqualTo("HR");
+        assertThat(idx.isUnique()).isTrue();
+        assertThat(idx.getType()).isEqualTo("btree");
+        assertThat(idx.getColumns()).hasSize(1);
+        assertThat(idx.getColumns().get(0).getColumnName()).isEqualTo("EMAIL");
+    }
+
+    @Test
+    void parsesBitmapIndex() {
+        String sql = "CREATE BITMAP INDEX IDX_EMP_DEPT ON EMP (DEPT_ID);";
+        ParsedDdl result = parser.parse(sql);
+        assertThat(result.getIndexes()).hasSize(1);
+        assertThat(result.getIndexes().get(0).getType()).isEqualTo("bitmap");
+    }
+
+    @Test
+    void parsesFunctionBasedIndex() {
+        String sql = "CREATE INDEX IDX_EMP_LOWER ON EMP (LOWER(NAME));";
+        ParsedDdl result = parser.parse(sql);
+        assertThat(result.getIndexes()).hasSize(1);
+        ParsedIndex idx = result.getIndexes().get(0);
+        assertThat(idx.getType()).isEqualTo("functional");
+        assertThat(idx.getExpression()).contains("LOWER(NAME)");
+    }
+
+    @Test
+    void parsesIndexWithSortOrder() {
+        String sql = "CREATE INDEX IDX_T ON T (A ASC, B DESC);";
+        ParsedDdl result = parser.parse(sql);
+        ParsedIndex idx = result.getIndexes().get(0);
+        assertThat(idx.getColumns()).hasSize(2);
+        assertThat(idx.getColumns().get(0).getSortOrder()).isEqualTo("ASC");
+        assertThat(idx.getColumns().get(1).getSortOrder()).isEqualTo("DESC");
+    }
+
+    @Test
+    void parsesAlterTableAddForeignKey() {
+        String sql = "ALTER TABLE CHILD ADD CONSTRAINT FK_CP FOREIGN KEY (PARENT_ID) REFERENCES PARENT(ID) ON DELETE CASCADE;";
+        ParsedDdl result = parser.parse(sql);
+        assertThat(result.getConstraints()).hasSize(1);
+        ParsedConstraint fk = result.getConstraints().get(0);
+        assertThat(fk.getName()).isEqualTo("FK_CP");
+        assertThat(fk.getType()).isEqualTo(ParsedConstraint.TYPE_FK);
+        assertThat(fk.getTableName()).isEqualTo("CHILD");
+        assertThat(fk.getForeignKey().getRefTableName()).isEqualTo("PARENT");
+        assertThat(fk.getForeignKey().getOnDelete()).isEqualTo("CASCADE");
+    }
+
+    @Test
+    void parsesAlterTableAddUnique() {
+        String sql = "ALTER TABLE EMP ADD CONSTRAINT UQ_EMP_EMAIL UNIQUE (EMAIL);";
+        ParsedDdl result = parser.parse(sql);
+        assertThat(result.getConstraints()).hasSize(1);
+        ParsedConstraint uk = result.getConstraints().get(0);
+        assertThat(uk.getName()).isEqualTo("UQ_EMP_EMAIL");
+        assertThat(uk.getType()).isEqualTo(ParsedConstraint.TYPE_UK);
+        assertThat(uk.getColumns().get(0).getColumnName()).isEqualTo("EMAIL");
+    }
+
+    @Test
+    void parsesAlterTableAddCheck() {
+        String sql = "ALTER TABLE EMP ADD CONSTRAINT CK_EMP_AGE CHECK (AGE >= 18);";
+        ParsedDdl result = parser.parse(sql);
+        assertThat(result.getConstraints()).hasSize(1);
+        ParsedConstraint ck = result.getConstraints().get(0);
+        assertThat(ck.getType()).isEqualTo(ParsedConstraint.TYPE_CHECK);
+        assertThat(ck.getCheckExpression()).contains("AGE >= 18");
+    }
+
+    @Test
+    void ignoresAlterTableAddPrimaryKey() {
+        // PK 는 column.pk_order 가 표현. ALTER 의 PK 는 무시.
+        String sql = """
+                CREATE TABLE T (A NUMBER, B NUMBER);
+                ALTER TABLE T ADD CONSTRAINT PK_T PRIMARY KEY (A);
+                """;
+        ParsedDdl result = parser.parse(sql);
+        assertThat(result.getConstraints()).isEmpty();
+    }
+
+    @Test
+    void unnamedInlineConstraintsGetGeneratedNames() {
+        String sql = """
+                CREATE TABLE T (
+                    A NUMBER, B NUMBER,
+                    UNIQUE (A),
+                    CHECK (B > 0)
+                );
+                """;
+        ParsedDdl result = parser.parse(sql);
+        assertThat(result.getConstraints()).hasSize(2);
+        assertThat(result.getConstraints()).anyMatch(c ->
+                c.getName().startsWith("uq_t_") && ParsedConstraint.TYPE_UK.equals(c.getType()));
+        assertThat(result.getConstraints()).anyMatch(c ->
+                c.getName().startsWith("ck_t_") && ParsedConstraint.TYPE_CHECK.equals(c.getType()));
     }
 
     @Test

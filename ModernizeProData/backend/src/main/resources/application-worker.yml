@@ -1,0 +1,86 @@
+# Worker mode profile — 같은 backend jar 가 사용자 PC 에서 Worker daemon 으로 동작할 때 사용.
+# 활성 방법: java -jar app.jar --spring.profiles.active=worker
+#            또는 SPRING_PROFILES_ACTIVE=worker
+#
+# 정책 (2026-05-29 결정):
+#   - Worker 는 다른 PC 에 있고 Coordinator 와 같은 사내 LAN.
+#   - Worker 는 Coordinator REST + WS 로 통신 + 메타 PG 직접 connect (분리 계정).
+#   - 분리 계정 = master 가 User Management 에서 발급한 admin user 의 username/password
+#     (UserController.create 가 PG role 도 같이 만든다 — PgRoleService).
+#   - schema 변경 (Flyway) 은 Coordinator owner 단독. Worker 는 read/write 만.
+
+spring:
+  # Worker 는 schema 변경 권한 없음. Flyway 끔 — owner 가 아니므로 history 갱신도 못 한다.
+  # validate 단계는 JPA ddl-auto 가 담당 (현재 application.yml 의 'validate').
+  flyway:
+    enabled: false
+
+  # Worker 가 Coordinator 의 메타 PG 에 분리 계정으로 connect.
+  # URL 은 Coordinator host 를 가리킴 (사내 LAN IP 또는 hostname). installer 입력으로 채움.
+  # username/password 는 admin user 와 동일 (PG role 도 같은 이름으로 발급됨).
+  # port 5432 = installer 동봉 PG (application-prod.yml 과 일치).
+  datasource:
+    url:      ${COORDINATOR_DB_URL:jdbc:postgresql://coordinator-host:5432/mpd_meta}
+    username: ${WORKER_USERNAME:}
+    password: ${WORKER_PASSWORD:}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      # Worker 1대당 — LoadStage 병렬 4 thread + REST handler / heartbeat 여유.
+      # 옛 5 = parallel 1 가정. 4 thread parallel 도입 후 부족 → 10.
+      # HIKARI_POOL_MAX 로 host 별 override (예: 작은 메모리 PC 는 7).
+      maximum-pool-size: ${HIKARI_POOL_MAX:10}
+      connection-timeout: 5000
+      idle-timeout: 300000
+      max-lifetime: 1800000
+
+  # Worker 는 자체 Batch job 을 띄울 일이 거의 없지만 (Coordinator 가 발사),
+  # 같은 jar 라 schema validation 만 통과시키면 됨. Flyway off 와 일관.
+  batch:
+    jdbc:
+      initialize-schema: never
+
+modernize:
+  # Coordinator 가 아닌 Worker 모드로 동작.
+  mode: worker
+
+  # 이 Worker 가 어떤 Coordinator 를 바라보는지. installer 시 사용자 입력으로 override.
+  coordinator:
+    url: ${COORDINATOR_URL:http://coordinator-host:8080}
+
+  # 이 Worker 가 Coordinator 에 로그인할 때 쓰는 admin user 자격 + hostname.
+  # WorkerBootstrap 이 이 값을 읽어 /auth/login + /workers/self-register + heartbeat.
+  worker:
+    username: ${WORKER_USERNAME:}
+    password: ${WORKER_PASSWORD:}
+    hostname: ${WORKER_HOSTNAME:}
+
+  # Worker 자동 업데이트 — Spring 시작 직후 background thread 가 manifest URL 에서
+  # latest fetch + 새 버전 있으면 자동 apply (next 부팅에 swap). 본사 외부망 = 자동 갱신,
+  # 사이트 폐쇄망 = outbound fail = silent skip. Coord 는 default OFF (master 가 UI click).
+  update:
+    auto-apply-on-start: ${MPD_UPDATE_AUTO_APPLY:true}
+
+  # Run 실행 튜닝 — Coordinator 와 동일 default 4 thread 병렬 적재.
+  # 단 Worker HikariCP pool size = 5 (이 yml line 29) 라 parallel 4 thread 가
+  # 메타 DB connection 을 동시 점유하면 pool 거의 고갈. P3-7 HikariCP 검증
+  # 작업에서 pool size 조정 또는 parallelism 별 환경 변수 override 운영 권장.
+  run:
+    load-parallelism: ${LOAD_PARALLELISM:4}
+
+  # ── Storage 정책 (2026-05-29 분산 운영 결정) ─────────────────────────────
+  # CSV 입력: Site.csvPath (master 가 UI 에서 입력). 4대 모두 reach 가능한 UNC 추천
+  #          예: \\10.0.0.10\modernize\siteA\input  (Coordinator SMB share 또는 NAS).
+  #
+  # Parquet / DuckDB: 각 Worker PC 의 local 디스크. 4대가 각자의 디스크/CPU 쓰는 것이
+  #                   분산의 핵심. envvar 로 override 가능 (SSD 위치 등).
+  # default: C:/modernize/output (Coordinator 와 동일 — system-wide, user-independent).
+  output:
+    base-path: ${MPD_OUTPUT_BASE_PATH:C:/modernize/output}
+  duckdb:
+    file-path:      ${MPD_DUCKDB_PATH:./data/duckdb.db}
+    temp-directory: ${MPD_DUCKDB_TEMP:./data/duckdb-tmp}
+
+# Worker 는 master 화면을 띄울 일이 없으니 server port 는 다른 값 (Coordinator 와 같은
+# PC 에서 동시에 띄울 때 충돌 회피).
+server:
+  port: ${WORKER_PORT:8081}

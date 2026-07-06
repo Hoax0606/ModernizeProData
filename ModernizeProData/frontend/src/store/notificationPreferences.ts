@@ -53,13 +53,15 @@ export function getRetentionFor(
   return retentions[projectId] ?? '90 days';
 }
 
-/** 미설정 시 default true. */
+/**
+ * 이벤트 알림 표시 여부 — 전 프로젝트 공통(global) 설정 기준.
+ * defaults 에 키가 없으면(= 토글이 없는 이벤트) default true(항상 표시).
+ */
 export function isEventEnabled(
-  subs: Record<string, Record<string, boolean>>,
-  projectId: string,
+  defaults: Record<string, boolean>,
   eventKey: string,
 ): boolean {
-  return subs[projectId]?.[eventKey] ?? true;
+  return defaults[eventKey] ?? true;
 }
 
 /** 미설정 시 default 'all-project'. */
@@ -76,11 +78,25 @@ export function getScopeFor(
  */
 export function actionToEventKey(action: string): string | null {
   const a = action.toLowerCase();
-  if (a.includes('approval requested') || (a.includes('approval') && a.includes('request'))) return 'snapshot.pending';
+  // snapshot.pending — BE 실제 action 은 "review requested" (구 "approval requested" 아님).
+  if (a.includes('review requested') || a.includes('approval requested')
+      || (a.includes('approval') && a.includes('request'))) return 'snapshot.pending';
   if (a === 'approved' || a.startsWith('approved ')) return 'snapshot.approved';
   if (a === 'rejected' || a.startsWith('rejected ')) return 'snapshot.rejected';
   if (a.includes('run') && a.includes('fail')) return 'run.failed';
   if (a.includes('run') && a.includes('start')) return 'run.started';
-  if (a.includes('run') && (a.includes('finish') || a.includes('complete'))) return 'run.finished';
+  // run.finished — BE finishRun action 은 "run success" / "run aborted" / "run timed_out"
+  // (finish/complete 단어가 안 들어감). 성공·중단·타임아웃 종료를 모두 run.finished 로.
+  if (a.includes('run') && (a.includes('finish') || a.includes('complete')
+      || a.includes('success') || a.includes('abort') || a.includes('timed_out')
+      || a.includes('timed out'))) return 'run.finished';
+  // 2026-06-04 추가 — 기존엔 매핑 없어 토글 없이 항상 뜨던 알림들에 event key 부여.
+  if (a.includes('snapshot created')) return 'snapshot.created';        // "snapshot created" / "cutover snapshot created"
+  if (a.includes('snapshot deleted')) return 'snapshot.deleted';
+  if (a.includes('baseline')) return 'snapshot.baseline';               // "baseline set ..." / "baseline cleared"
+  if (a.includes('ddl import')) return 'ddl.imported';                  // "DDL imported"
+  if (a.includes('project created')) return 'project.created';
+  // phase 변경은 알림 안 함 (2026-06-05) — 매핑 없음 → null → 토스트 X (audit 기록은 유지).
+  if (a.includes('assignee changed')) return 'project.assignee';        // "assignee changed" / "execution assignee changed"
   return null;
 }

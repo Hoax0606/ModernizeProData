@@ -96,27 +96,43 @@ function AppRoutes() {
   // location-mutator APIs update the URL but do NOT reload the page —
   // that left users stuck on /login forever even after the URL changed.
   useEffect(() => {
-    if (location.pathname === '/license-setup') return;
     fetch('/api/v1/health/info?_=' + Date.now(), { cache: 'no-store' })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        const lic = d?.data?.licenseStatus;
-        if (lic === 'MISSING') {
+        if (!d) return;
+        // install 언어 보정 — 사용자가 직접 고르기 전(languageExplicit=false)이면 백엔드
+        // defaultLanguage(=MSI 설치 언어) 적용. license-setup 포함 모든 화면에서 실행해
+        // 첫 화면이 OS locale 로 새지 않게 한다 (영어 MSI 인데 일본어로 뜨던 버그).
+        const lang = d?.data?.defaultLanguage;
+        if (lang === 'ko' || lang === 'ja' || lang === 'en') {
+          useSettingsStore.getState().applyDefaultLanguage(lang);
+        }
+        // 라이선스 없으면 wizard 로. 이미 license-setup 이면 재이동 안 함 (루프 방지).
+        if (d?.data?.licenseStatus === 'MISSING' && location.pathname !== '/license-setup') {
           try { useAuthStore.getState().logout(); } catch {}
           navigate('/license-setup', { replace: true });
-          return;
         }
-        try {
-          const persisted = localStorage.getItem('modernize-settings');
-          if (!persisted) {
-            const lang = d?.data?.defaultLanguage;
-            if (lang === 'ko' || lang === 'ja' || lang === 'en') {
-              useSettingsStore.getState().setLanguage(lang);
-            }
-          }
-        } catch {}
       })
       .catch(() => {});
+  }, [location.pathname, navigate]);
+
+  // 세션 만료 watcher (2026-06-11) — zustand 셀렉터는 "시간 경과" 로는 재평가되지 않아,
+  // 마운트된 SPA 가 JWT 만료(예: 야간 8h)돼도 화면이 로그인된 채 남아있다가 다음 API 401
+  // 때에만 로그아웃됐다. FE polling 마저 멈추면 그 트리거조차 없어 "로그인된 듯 보이지만
+  // 클릭하면 로그인 화면" 혼란. 30초마다(+네비게이션 즉시) 만료를 직접 검사해 로그인 화면으로.
+  useEffect(() => {
+    const check = () => {
+      const s = useAuthStore.getState();
+      if (s.token && !s.isAuthenticated()) {
+        try { s.logout(); } catch { /* noop */ }
+        if (location.pathname !== '/login' && location.pathname !== '/license-setup') {
+          navigate('/login', { replace: true });
+        }
+      }
+    };
+    check();
+    const id = window.setInterval(check, 30_000);
+    return () => window.clearInterval(id);
   }, [location.pathname, navigate]);
 
   return (

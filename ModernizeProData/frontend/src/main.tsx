@@ -27,8 +27,50 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
 
+// beforeunload 의 best-effort logout 제거 (2026-05-31). 옛 정책 (confirm-to-evict)
+// 에서는 옛 session 강제 clear 위해 필요했지만 AuthService 가 last-write-wins 로
+// 전환 후 = 다음 login 시 자동 evict. beforeunload logout 은 F5 시도 fire 되어
+// reload 후 옛 token 이 sid mismatch (server 가 session clear 함) → 401 → logout
+// cycle 의 진짜 원인이었음.
+
+// F5 / Ctrl+R 자체 disable — Edge --app mode 의 chromeless 상태에서 사용자가
+// 실수로 누르거나 의도적 reload 가 의미 없는 시나리오 (zustand 가 state 보유 +
+// STOMP / polling 이 자동 재연결). 의도된 reload 가 진짜 필요한 dev 상황은
+// Ctrl+F5 (cache bypass) 로 우회 가능 — 그것은 막지 않음.
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'F5' && !e.ctrlKey && !e.shiftKey) {
+    e.preventDefault();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'r' || e.key === 'R') && !e.shiftKey) {
+    e.preventDefault();
+    return;
+  }
+});
+
+// Right-click context menu 차단 — Edge --app 모드의 chromeless 일관성. text
+// selection 등 시스템 컨텍스트 메뉴 (브라우저 / Inspect / View source) 가 도구
+// 사용 흐름과 무관하므로 전체 disable.
+window.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+});
+
+// 파일 다운로드 트리거 차단 — 도구 내부 다운로드 (export 등) 는 page 가 직접
+// blob → <a download> 클릭으로 처리하므로 user-initiated drag 외 외부 link
+// 의 download attribute 만 가로채는 건 의미 없음. 대신 download attr 의
+// click 을 가로채 새 탭 열림 등 chrome 다운로드 bar 노출 방지는 Edge 의
+// --disable-features 로 처리 (EdgeAppLauncher 의 flags).
+
 try {
-  createRoot(document.getElementById('root')!).render(
+  createRoot(document.getElementById('root')!, {
+    // Recoverable error (예: React #520 — concurrent render 중 에러났지만 sync 재렌더로
+    // 복구 성공) 는 기본적으로 reportError() → window 'error' 이벤트로 올라와 위의
+    // showErr 가 멀쩡한 앱 화면을 에러 화면으로 덮어버렸다 (2026-06-03, All projects 보고).
+    // 복구된 에러는 콘솔 경고만 — DOM 은 건드리지 않는다.
+    onRecoverableError: (err: unknown) => {
+      console.warn('[react] recovered from render error:', err);
+    },
+  }).render(
     <StrictMode>
       <App />
     </StrictMode>,
@@ -36,3 +78,4 @@ try {
 } catch (e) {
   showErr('createRoot/render', e instanceof Error ? e.message + '\n' + (e.stack ?? '') : String(e));
 }
+

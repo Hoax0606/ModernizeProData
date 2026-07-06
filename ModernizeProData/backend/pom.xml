@@ -10,7 +10,7 @@
 	</parent>
 	<groupId>com.ksinfo</groupId>
 	<artifactId>modernize-pro-data</artifactId>
-	<version>0.0.1-SNAPSHOT</version>
+	<version>1.0.0</version>
 	<name/>
 	<description/>
 	<url/>
@@ -34,6 +34,13 @@
 		<start-class>com.ksinfo.modernize_pro_data.launcher.Launcher</start-class>
 	</properties>
 	<dependencies>
+		<!-- Actuator — dev profile 한정 perf 측정용. HikariCP metrics
+		     (/actuator/metrics/hikaricp.connections.*) auto-binding 목적.
+		     application-dev.yml 에서만 endpoint expose, prod 영향 zero. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-batch</artifactId>
@@ -54,20 +61,31 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-validation</artifactId>
 		</dependency>
+		<!-- spring-boot-starter-web — Tomcat 대신 Undertow 사용 (부팅 -0.5~1s).
+		     Undertow = Wildfly 기반 lightweight servlet container. tomcat 와 동일 servlet API. -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-web</artifactId>
+			<exclusions>
+				<exclusion>
+					<groupId>org.springframework.boot</groupId>
+					<artifactId>spring-boot-starter-tomcat</artifactId>
+				</exclusion>
+			</exclusions>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-undertow</artifactId>
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-websocket</artifactId>
 		</dependency>
 
-		<!-- 메타 DB — PostgreSQL -->
+		<!-- 메타 DB + TO-BE DB — PostgreSQL. compile scope = PgCopyManager 가 CopyManager API 사용. -->
 		<dependency>
 			<groupId>org.postgresql</groupId>
 			<artifactId>postgresql</artifactId>
-			<scope>runtime</scope>
 		</dependency>
 
 		<!-- Flyway — 스키마 마이그레이션 단일 관리 책임 (Spring Batch / Quartz 스크립트 포함) -->
@@ -114,18 +132,14 @@
 			<version>23.4.0.24.05</version>
 		</dependency>
 
-		<!-- JavaFX — jpackage 인스톨러의 native 창 (WebView 로 React 렌더링).
+		<!-- JavaFX — Stage/Scene 골격 (Worker wizard 의 URL+credentials form 만).
+		     UI rendering 은 OS 의 Edge (Chromium chrome-less window, app 모드) 사용 —
+		     JavaFX WebView/JCEF 모두 폐기 (2026-05-30). MSI 200MB 감소.
 		     scope=provided: fat jar 에 포함하지 않음. 런타임 모듈은 build.ps1 이
 		     JavaFX SDK 를 다운로드해서 jpackage 의 module-path 로 주입. -->
 		<dependency>
 			<groupId>org.openjfx</groupId>
 			<artifactId>javafx-controls</artifactId>
-			<version>${javafx.version}</version>
-			<scope>provided</scope>
-		</dependency>
-		<dependency>
-			<groupId>org.openjfx</groupId>
-			<artifactId>javafx-web</artifactId>
 			<version>${javafx.version}</version>
 			<scope>provided</scope>
 		</dependency>
@@ -180,6 +194,11 @@
 	</dependencies>
 
 	<build>
+		<!-- finalName 을 version 무관 고정 — 자동 업데이트 시 jar 파일명이 매 release
+		     마다 달라지면 jpackage 의 .cfg 의 app.classpath line 과 미스매치. 고정으로
+		     UpdateApplier 의 단순 swap 가능. version 정보는 manifest 의
+		     Implementation-Version 만 사용. -->
+		<finalName>modernize-pro-data</finalName>
 		<plugins>
 			<plugin>
 				<groupId>org.springframework.boot</groupId>

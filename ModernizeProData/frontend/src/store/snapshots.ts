@@ -13,10 +13,21 @@ export interface SnapshotData {
   rules: FrozenRule[];
   codeMaps: FrozenCodeMap[];
   bindings: FrozenBinding[];
+  /** AS-IS 컬럼 단위 명시적 skip 마킹 (snapshot 동결). preflight 의 unmapped 검사 등에서 제외 대상.
+   *  옛 snapshot 은 누락 가능 → undefined/empty 허용 (호출 측에서 빈 list 로 normalize). */
+  asisSkips?: FrozenAsisSkip[];
+}
+
+export interface FrozenAsisSkip {
+  asisSchema: string;
+  asisTable: string;
+  asisColumn: string;
 }
 
 export interface FrozenRule {
   id: string;
+  /** 이 rule 의 원본 mapping_imports row id. 옛 snapshot (이 필드 추가 전) 은 null. */
+  importId: string | null;
   tobeSchema: string;
   tobeTable: string;
   tobeColumn: string;
@@ -103,6 +114,61 @@ export interface FieldChange {
   after: string;
 }
 
+/**
+ * Snapshot 에 박제된 run 실행 컨텍스트.
+ * BE SnapshotExecutionContext (record) 와 1:1.
+ *
+ * snapshot 으로 실행된 run 이 terminal (success / failed / aborted / timed_out) 상태에 도달하면
+ * RunService.finishRun → SnapshotExecutionContextService 가 이 shape 으로 갱신한다.
+ * 같은 snapshot 으로 여러 번 run 하면 매 run 종료마다 덮어쓴다. 아직 실행 안 된 snapshot 은 null.
+ *
+ * ExecutionPage / LogViewer / ArtifactsPage 가 snapshot view 모드일 때 live run polling 대신
+ * 이 컨텍스트를 source 로 사용해 "그 snapshot 시점" 상태로 시간 여행.
+ */
+export interface SnapshotExecutionContext {
+  runId: string;
+  runType: 'test' | 'rehearsal' | 'cutover' | string;
+  status: 'success' | 'failed' | 'aborted' | 'timed_out' | string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
+  stages: StageSnapshot[];
+  /** 박제 시점의 quarantine entry count (severity=error). 박제 전 row 는 null. Overview KPI 의 pinned 경로용. */
+  errorCount?: number | null;
+  /** 박제 시점의 quarantine entry count (severity=warning). 박제 전 row 는 null. */
+  warningCount?: number | null;
+}
+
+export interface StageSnapshot {
+  stageKey: string;
+  seq: number | null;
+  status: 'pending' | 'running' | 'success' | 'failed' | string | null;
+  pct: number;
+  tablesTotal: number | null;
+  tablesSuccess: number | null;
+  tablesFailed: number | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
+  errorSummary: string | null;
+  tables: TableSnapshot[];
+}
+
+export interface TableSnapshot {
+  bindingId: string;
+  tobeSchema: string;
+  tobeTable: string;
+  status: 'running' | 'success' | 'failed' | string | null;
+  rowCount: number | null;
+  errorCount: number | null;
+  errorDetail: Record<string, unknown> | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
+  /** Load stage 만 채움 — MIGRATION SQL artifact 의 실데이터. */
+  compiledSql: string | null;
+}
+
 export interface MappingSnapshot {
   id: string;
   projectId: string;
@@ -132,6 +198,8 @@ export interface MappingSnapshot {
   changes?: SnapshotChanges;
   /** changes.previousVersionId 와 같은 값을 entity-level 에서도 노출. */
   previousVersionId?: string;
+  /** 이 snapshot 으로 실행된 가장 최근 run 의 종료 시점 박제. 미실행이면 null. */
+  executionContext?: SnapshotExecutionContext | null;
 }
 
 interface SnapshotsState {
@@ -144,6 +212,8 @@ interface SnapshotsState {
   approveSnapshot: (id: string) => Promise<void>;
   rejectSnapshot: (id: string, reason: string) => Promise<void>;
   deleteSnapshot: (id: string) => Promise<void>;
+  /** snapshotData (rules / bindings / codeMaps) を lazy fetch 하고 cache. 既に在ればそのまま返す. */
+  ensureSnapshotData: (id: string) => Promise<SnapshotData>;
 }
 
 /**
@@ -160,7 +230,9 @@ export const useSnapshotsStore = create<SnapshotsState>()(
         set((st) => ({
           snapshots: [
             ...st.snapshots.filter((s) => s.projectId !== projectId),
-            ...list,
+            // list 는 snapshot_data 제외 projection — 이미 lazy fetch 한 snapshotData
+            // 가 list refetch 로 사라지지 않게 기존 cache 보존.
+            ...mergeSnapshotData(list, st.snapshots),
           ],
         }));
         syncPinnedFromList(list);
@@ -175,7 +247,7 @@ export const useSnapshotsStore = create<SnapshotsState>()(
         set((st) => ({
           snapshots: [
             ...st.snapshots.filter((s) => !projectIds.has(s.projectId)),
-            ...list,
+            ...mergeSnapshotData(list, st.snapshots),
           ],
         }));
         syncPinnedFromList(list);
@@ -215,6 +287,26 @@ export const useSnapshotsStore = create<SnapshotsState>()(
         snapshots: st.snapshots.filter((s) => s.id !== id),
       }));
     },
+
+    ensureSnapshotData: async (id) => {
+      const existing = get().snapshots.find((s) => s.id === id);
+      if (existing?.snapshotData) return existing.snapshotData;
+      const raw = await snapshotApi.getMapping(id);
+      /* BE が空の mapping (rules/bindings/codeMaps が無い snapshot) を返すと null/undefined
+         になる場合があるので空配列で正規化. runPreflight が input.snapshotData.bindings 등을
+         non-null 으로 가정한다. */
+      const data: SnapshotData = raw ?? { rules: [], bindings: [], codeMaps: [] };
+      const normalized: SnapshotData = {
+        rules: data.rules ?? [],
+        bindings: data.bindings ?? [],
+        codeMaps: data.codeMaps ?? [],
+        asisSkips: data.asisSkips ?? [],
+      };
+      set((st) => ({
+        snapshots: st.snapshots.map((s) => s.id === id ? { ...s, snapshotData: normalized } : s),
+      }));
+      return normalized;
+    },
   }),
 );
 
@@ -239,6 +331,14 @@ function projectIdOf(id: string): string | undefined {
   return useSnapshotsStore.getState().snapshots.find((s) => s.id === id)?.projectId;
 }
 
+/**
+ * setBaseline inflight guard — 같은 project 의 baseline 요청이 진행 중이면 중복 발사
+ * 차단. 더블클릭 / 다중 탭 race 가 backend 의 ObjectOptimisticLockingFailureException
+ * (restoreMapping 의 cascade DELETE 동시 수정) 을 유발하는 것을 FE 단에서 1차 방어.
+ * key = projectId (같은 project 의 baseline 은 단일 직렬). module-scope — persist 대상 X.
+ */
+const baselineInflight = new Set<string>();
+
 export const usePinnedSnapshotsStore = create<PinnedSnapshotsState>()(
   persist(
     (set, get) => ({
@@ -258,6 +358,10 @@ export const usePinnedSnapshotsStore = create<PinnedSnapshotsState>()(
           snapshotApi.clearBaseline(id).catch(() => {});
           return;
         }
+        // inflight guard — 같은 project baseline 진행 중이면 무시 (더블클릭/다중탭).
+        const guardKey = projectId ?? id;
+        if (baselineInflight.has(guardKey)) return;
+        baselineInflight.add(guardKey);
         snapshotApi.setBaseline(id).then(() => {
           set((st) => {
             const others = projectId
@@ -268,12 +372,16 @@ export const usePinnedSnapshotsStore = create<PinnedSnapshotsState>()(
           if (projectId) {
             useSnapshotsStore.getState().fetchByProject(projectId).catch(() => {});
           }
-        }).catch(() => { /* 실패 시 다음 fetch 가 백엔드 truth 로 정정 */ });
+        }).catch(() => { /* 실패 시 다음 fetch 가 백엔드 truth 로 정정 */ })
+          .finally(() => { baselineInflight.delete(guardKey); });
       },
       // approve 직후 자동 pin — 같은 프로젝트의 기존 pin 만 교체됨.
       // togglePin 의 set 케이스와 동일 패턴 (Restore 모델 race 회피).
       setPin: (id) => {
         const projectId = projectIdOf(id);
+        const guardKey = projectId ?? id;
+        if (baselineInflight.has(guardKey)) return;
+        baselineInflight.add(guardKey);
         snapshotApi.setBaseline(id).then(() => {
           set((st) => {
             const others = projectId
@@ -284,7 +392,8 @@ export const usePinnedSnapshotsStore = create<PinnedSnapshotsState>()(
           if (projectId) {
             useSnapshotsStore.getState().fetchByProject(projectId).catch(() => {});
           }
-        }).catch(() => {});
+        }).catch(() => {})
+          .finally(() => { baselineInflight.delete(guardKey); });
       },
       // 인자 없으면 모든 핀 해제, id 주면 그 핀만 해제.
       clearPin: (id) => {
@@ -302,6 +411,20 @@ export const usePinnedSnapshotsStore = create<PinnedSnapshotsState>()(
     { name: 'modernize-pinned-snapshots' },
   ),
 );
+
+/**
+ * list 응답 (snapshot_data 제외 projection) 에 기존 store 의 lazy-cached
+ * snapshotData 를 다시 붙인다. list refetch (polling) 가 fetchMapping 으로
+ * 가져온 snapshotData cache 를 날리지 않게.
+ */
+function mergeSnapshotData(list: MappingSnapshot[], prev: MappingSnapshot[]): MappingSnapshot[] {
+  const prevById = new Map(prev.map((s) => [s.id, s]));
+  return list.map((ns) => {
+    if (ns.snapshotData) return ns;
+    const old = prevById.get(ns.id);
+    return old?.snapshotData ? { ...ns, snapshotData: old.snapshotData } : ns;
+  });
+}
 
 /**
  * snapshot list 응답으로부터 pinnedIds 갱신.

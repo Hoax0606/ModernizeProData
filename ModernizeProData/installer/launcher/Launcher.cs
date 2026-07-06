@@ -40,16 +40,34 @@ internal static class Launcher
             string mode = dialog.SelectedMode;
 
             string exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? ".";
-            string msi = Path.Combine(exeDir, "ModernizeProData-" + lang + "-1.0.0.msi");
-            if (!File.Exists(msi))
-            {
+            // role 별 msi prefix. worker 만 별 jpackage build (build.ps1 -Role worker).
+            // standalone = coordinator 와 동일 jar / 동일 msi — 첫 boot 시 APP_MODE 로 분기.
+            string msiPrefix = mode == "worker" ? "ModernizeProData-Worker-" : "ModernizeProData-";
+            // ProductVersion 이 매 빌드 bump (1.0.<counter>) — 고정 file 이름 hardcode
+            // 안 됨. wildcard 검색 + 최신 mtime 의 msi 사용.
+            // Coordinator pattern 은 worker prefix 와 충돌 — 명시적으로 'Worker-' 포함
+            // 여부로 필터링.
+            string[] allMsis = Directory.GetFiles(exeDir, "ModernizeProData-*-" + lang + "-*.msi");
+            string[] candidates;
+            if (mode == "worker") {
+                candidates = Array.FindAll(allMsis, f => Path.GetFileName(f).StartsWith("ModernizeProData-Worker-", StringComparison.OrdinalIgnoreCase));
+            } else {
+                // Coordinator / standalone — exclude Worker variants explicitly.
+                candidates = Array.FindAll(allMsis, f => !Path.GetFileName(f).StartsWith("ModernizeProData-Worker-", StringComparison.OrdinalIgnoreCase));
+                // Coord 의 정확한 이름은 'ModernizeProData-<lang>-<ver>.msi' (segment 3) 라
+                // 위 glob 가 매치 안 함. 별 glob 로 다시 잡음.
+                candidates = Directory.GetFiles(exeDir, msiPrefix + lang + "-*.msi");
+            }
+            if (candidates.Length == 0) {
                 MessageBox.Show(
-                    "Localized installer not found next to Launcher.exe.\n\nExpected:\n" + msi,
+                    "Localized installer not found next to Launcher.exe.\n\nExpected pattern:\n" + Path.Combine(exeDir, msiPrefix + lang + "-*.msi"),
                     "ModernizeProData",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
                 return 2;
             }
+            Array.Sort(candidates, (a, b) => File.GetLastWriteTime(b).CompareTo(File.GetLastWriteTime(a)));
+            string msi = candidates[0];
 
             string logPath = Path.Combine(exeDir, "install-" + lang + ".log");
             string arguments = "/i \"" + msi + "\" APP_LANG=" + lang + " APP_MODE=" + mode + " /l*v \"" + logPath + "\"";
@@ -77,9 +95,56 @@ internal static class Launcher
                 return 3;
             }
 
+            // install 성공 (exit 0) 시 msi 사본을 영구 위치에 보존.
+            // 이유: Add/Remove Programs uninstall 시 Windows Installer 가 install 시점
+            // 의 dist 경로에서 msi 검색. dist 가 정리되거나 다음 빌드로 PackageCode 다른
+            // msi 로 덮이면 1612 (Source out of sync). dist 와 무관한 영구 위치에
+            // 사본 두면 사용자가 dialog 의 Browse 로 거기 지정 → 통과.
+            //
+            // 위치: install dir 밖 (%LOCALAPPDATA%\ModernizeProDataInstallCache\) —
+            // install dir 안에 두면 uninstall 시 같이 사라져 무용. permission 불필요
+            // (LocalAppData = user-writable).
+            if (exitCode == 0)
+            {
+                PreserveInstallSource(msi);
+            }
+
             // License + Coordinator URL are no longer collected at install
             // time -- those are entered in-app on first boot.
             return exitCode;
+        }
+    }
+
+    private static void PreserveInstallSource(string msiPath)
+    {
+        try
+        {
+            string cacheDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ModernizeProDataInstallCache");
+            Directory.CreateDirectory(cacheDir);
+            string preserved = Path.Combine(cacheDir, Path.GetFileName(msiPath));
+            File.Copy(msiPath, preserved, true);
+
+            MessageBox.Show(
+                "Installation complete.\n\n" +
+                "MSI source preserved at:\n" + preserved + "\n\n" +
+                "If Windows asks for installation media during uninstall,\n" +
+                "click Browse and select this file.",
+                "ModernizeProData",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            // 보존 실패는 install 자체와 무관 — 경고만. uninstall 시 사용자가 직접
+            // dist 또는 setup.zip 의 msi 를 Browse 로 지정해야.
+            MessageBox.Show(
+                "Note: MSI source preservation failed.\n\n" + ex.Message +
+                "\n\nKeep the setup.zip handy for future uninstall.",
+                "ModernizeProData",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
         }
     }
 

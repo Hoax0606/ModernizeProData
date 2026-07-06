@@ -57,8 +57,10 @@ export function DdlImportButton({ projectId, siteId, side, label, disabled, tone
                 : tone === 'green' ? 'var(--green)'
                 : 'var(--navy)';
 
+  // position: relative + 에러 absolute — 에러 메시지가 버튼 박스(폭/높이)에 전혀 영향 안 주게.
+  // 이전엔 에러가 컨테이너를 넓히거나(폭) 아래로 밀어(높이) 버튼 배치가 흔들렸다(#72 후속).
   return (
-    <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'stretch' }}>
+    <div style={{ position: 'relative', display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start' }}>
       <input
         ref={fileInputRef}
         type="file"
@@ -87,7 +89,20 @@ export function DdlImportButton({ projectId, siteId, side, label, disabled, tone
         {loading ? loadingLabel : label ?? defaultLabel}
       </button>
       {error && (
-        <div style={{ marginTop: 6, fontSize: 11, color: 'var(--red)' }}>
+        <div style={{
+          position: 'absolute',
+          top: '100%',
+          left: 0,
+          marginTop: 6,
+          fontSize: 11,
+          color: 'var(--red)',
+          // 버튼 아래에 띄우되 layout 비차지(absolute) — 폭 고정, 줄바꿈.
+          width: 240,
+          whiteSpace: 'normal',
+          wordBreak: 'break-word',
+          textAlign: 'left',
+          zIndex: 1,
+        }}>
           {errorPrefix}: {error}
         </div>
       )}

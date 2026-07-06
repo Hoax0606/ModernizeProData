@@ -11,9 +11,8 @@ import { useSnapshotsStore, usePinnedSnapshotsStore, type FrozenBinding, type Fr
 import { PinIconSvg } from './VersionsPage';
 import type { DdlSchema, DdlTableWithColumns } from '../api/asisDdl';
 import { csvPreviewApi, type CsvPreview } from '../api/csvPreview';
-import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult, type MappingRuleDto, type MappingTableBindingDto } from '../api/mappingImport';
+import { mappingImportApi, type MappingStatus as MappingStatusDto, type MappingReportResult, type MappingRuleDto, type MappingTableBindingDto, type LinkCandidatesResponse } from '../api/mappingImport';
 import { MappingOnboarding } from './DashboardPage';
-import { isDemoProjectId } from '../lib/demoFixtures';
 import { copyText } from '../lib/clipboard';
 import { effectiveTobeDb } from '../lib/effectiveTobeDb';
 import { Checkbox } from '../components/Checkbox';
@@ -35,6 +34,8 @@ type AsisTable = {
   columnCount: number;
   rows: number;
   unrouted?: boolean;
+  /** unrouted 면서 모든 컬럼이 explicit skip 처리됨 → badge 를 'skipped' (회색) 로 표시. */
+  allColsSkipped?: boolean;
   /** Whether extracted data (CSV) has been imported into the AS-IS workspace. */
   imported?: boolean;
   /** TO-BE internalNames this AS-IS feeds (mock). */
@@ -51,6 +52,12 @@ type TobeTable = {
   compositionKind: 'single' | 'join' | 'union' | 'none';
   sources: { alias: string; table: string; role: 'primary' | 'join' | 'union'; joinType?: string; joinOn?: string; rows: number }[];
   whereFilter?: string;
+  groupByExpr?: string;
+  expandExpr?: string;
+  /** 부모 project_id — null/undef 면 자체 정의, 값 있으면 자식 link */
+  linkedFromProjectId?: string;
+  /** 다른 project 의 자식들이 자기를 link 한 부모인지 */
+  isParent?: boolean;
 };
 
 type MappingRow = {
@@ -58,7 +65,7 @@ type MappingRow = {
   tgt: string;
   srcType: string;
   tgtType: string;
-  rule: 'auto' | 'rule' | 'unmapped' | 'null' | 'default' | 'added' | 'skip';
+  rule: 'auto' | 'rule' | 'unmapped' | 'null' | 'default' | 'added' | 'skip' | 'link';
   status: 'ok' | 'warn' | 'err' | 'skip' | 'queued';
   pk?: boolean;
   sourceAlias?: string;
@@ -75,6 +82,37 @@ type MappingRow = {
 let ASIS_TABLES: AsisTable[] = [];
 
 let TOBE_TABLES: TobeTable[] = [];
+
+// AS-IS csv 파일 존재(imported) + data row 수 캐시 — 키 = `${siteId}|${tableName}`.
+// hydrationTick 마다 재fetch 되던 회귀 + 동시 중복(stampede) 방지용으로 module-level 에 박제.
+// imported 판정은 가벼운 csv-preview(limit 1, 404=missing) 로, rows(무거운 full scan)는
+// table 당 1회만 + 직렬 큐로 background fetch (worker thread 포화 회피).
+const ASIS_IMPORTED_CACHE = new Map<string, boolean>();
+const ASIS_ROWS_CACHE = new Map<string, number>();
+const ASIS_EXIST_INFLIGHT = new Set<string>();
+const ASIS_ROWS_QUEUE: Array<{ siteId: string; name: string; key: string }> = [];
+let asisRowsDraining = false;
+
+/** rows 큐를 한 번에 하나씩 처리 — 동시 다중 full-scan 으로 인한 서버 포화 방지. */
+async function drainAsisRowsQueue(onProgress: () => void): Promise<void> {
+  if (asisRowsDraining) return;
+  asisRowsDraining = true;
+  try {
+    while (ASIS_ROWS_QUEUE.length > 0) {
+      const job = ASIS_ROWS_QUEUE.shift()!;
+      if (ASIS_ROWS_CACHE.has(job.key)) continue;
+      try {
+        const r = await csvPreviewApi.rowCount(job.siteId, job.name);
+        ASIS_ROWS_CACHE.set(job.key, r.rowCount);
+        onProgress();
+      } catch {
+        /* 실패 → 미캐시 유지 (rows 0 표시) */
+      }
+    }
+  } finally {
+    asisRowsDraining = false;
+  }
+}
 
 let MAPPING_BY_TOBE: Record<string, MappingRow[]> = {};
 
@@ -133,6 +171,32 @@ function ddlToAsisColumns(schema: DdlSchema | undefined | null): Record<string, 
 }
 
 /**
+ * ASIS_COLUMNS 조회 — schema-lenient. binding 의 source table 은 schema 한정
+ * (BANKSYS.CUSTOMERS) 인데 AS-IS DDL 은 schema 빈값(CUSTOMERS)일 수 있어(또는 반대),
+ * exact 키 조회가 miss 하면 컬럼 드롭다운/자동매핑이 빈다. TO-BE 매칭(qualifiedName 주석 참조)이
+ * 이미 하는 physical 이름 fallback 을 source 쪽에도 적용한다. (대소문자 무시)
+ */
+/** 테이블 식별자의 physical(bare) 이름 — schema 한정(BANKSYS.X) 든 bare(X) 든 소문자 X 반환. */
+function bareTable(name: string | undefined | null): string {
+  if (!name) return '';
+  const s = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : name;
+  return s.toLowerCase();
+}
+
+function lookupAsisCols(key: string | undefined | null): AsisColumn[] {
+  if (!key) return [];
+  const exact = ASIS_COLUMNS[key];
+  if (exact) return exact;
+  const bare = key.includes('.') ? key.slice(key.lastIndexOf('.') + 1) : key;
+  const bl = bare.toLowerCase();
+  for (const k of Object.keys(ASIS_COLUMNS)) {
+    const kb = k.includes('.') ? k.slice(k.lastIndexOf('.') + 1) : k;
+    if (kb.toLowerCase() === bl) return ASIS_COLUMNS[k];
+  }
+  return [];
+}
+
+/**
  * Initial mapping rows for each TO-BE table — all columns start as unmapped
  * (no mapping snapshot in backend yet). User edits accumulate in rowEdits.
  */
@@ -157,6 +221,26 @@ function ddlToMappingByTobe(tobe: DdlSchema | undefined | null): Record<string, 
 
 function qualifiedName(t: DdlTableWithColumns): string {
   return t.table.schemaName ? `${t.table.schemaName}.${t.table.physicalName}` : t.table.physicalName;
+}
+
+/** quarantine focusRule.tobeTable (= 'schema.physical' 또는 'physical') 을 TO-BE 테이블에 매칭.
+   DDL 의 schemaName 과 mapping binding 의 tobeSchema 가 다르거나(대소문자/유무) 한쪽만 스키마를
+   가질 수 있어, 정규화 이름뿐 아니라 physical(마지막 '.' 뒷부분) 이름끼리도 비교한다.
+   못 맞추면 첫 테이블로 잘못 이동 + 강조 누락 → 반드시 physical fallback 필요. */
+function tablePhysical(label: string): string {
+  const i = label.lastIndexOf('.');
+  return (i >= 0 ? label.slice(i + 1) : label).toLowerCase();
+}
+function findTobeByLabel(tables: TobeTable[], label: string): TobeTable | undefined {
+  const want = label.toLowerCase();
+  const wantPhysical = tablePhysical(label);
+  return tables.find((tt) =>
+    tt.internalName.toLowerCase() === want
+    || tt.name.toLowerCase() === want
+    || tt.short.toLowerCase() === want
+    || tt.short.toLowerCase() === wantPhysical
+    || tablePhysical(tt.name) === wantPhysical,
+  );
 }
 
 /** Site 의 raw DB type 문자열을 dialect 코드로 정규화. 빈 값/모름 → 'oracle' 폴백. */
@@ -237,6 +321,20 @@ function demoteToAnalysisOnEdit(projectId: string | null) {
     void useWorkspaceStore.getState().setProjectPhase(projectId, 'analysis');
   }
 }
+
+/**
+ * binding 편집 시 baseline pin 해제. 편집된 mapping 상태가 frozen snapshot 과 달라졌으니
+ * baseline 유지하면 has-changes / 신규 snapshot 생성이 막힘. clearPin 가 backend
+ * snapshots.is_baseline=false 도 sync.
+ */
+function unpinBaselineOnEdit(projectId: string | null) {
+  if (!projectId) return;
+  const pinnedIds = usePinnedSnapshotsStore.getState().pinnedIds;
+  const baseline = useSnapshotsStore.getState().snapshots.find(
+    (s) => s.projectId === projectId && pinnedIds.includes(s.id),
+  );
+  if (baseline) usePinnedSnapshotsStore.getState().clearPin(baseline.id);
+}
 const EMPTY_SKIP_COLS: Record<string, Record<string, boolean>> = Object.freeze({}) as Record<string, Record<string, boolean>>;
 const EMPTY_ROW_EDITS: Record<string, RowEdit> = Object.freeze({}) as Record<string, RowEdit>;
 
@@ -270,6 +368,7 @@ type Selection = { side: Side; name: string; internalName?: string } | null;
 type TableBindingEdit = { sources: TobeTable['sources']; mode: 'join' | 'union' };
 
 export function MappingPage() {
+  const t = useT();
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const projects = useWorkspaceStore((s) => s.projects);
   const activeProject = useMemo(
@@ -283,8 +382,6 @@ export function MappingPage() {
 
   useEffect(() => {
     if (!activeProjectId) return;
-    // demo project 는 AppShell 이 schema 를 inject 했으므로 백엔드 fetch 를 건너뛴다.
-    if (isDemoProjectId(activeProjectId)) return;
     useAsisDdlStore.getState().fetch(activeProjectId).catch((e) => console.error('[mapping] asis-ddl fetch failed', e));
     useTobeDdlStore.getState().fetch(activeProjectId).catch((e) => console.error('[mapping] tobe-ddl fetch failed', e));
   }, [activeProjectId]);
@@ -292,6 +389,18 @@ export function MappingPage() {
   // Hydrate module-level fixtures whenever schemas change, then bump a state value
   // to force a re-render so children see the new ASIS_TABLES / TOBE_TABLES / etc.
   const [hydrationTick, setHydrationTick] = useState(0);
+  // 부모 테이블 마킹 — sidebar 의 badge 분기용. mapping 화면 진입 시 link-candidates 한 번 fetch.
+  const [parentTableKeys, setParentTableKeys] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    if (!activeProjectId) { setParentTableKeys(new Set()); return; }
+    mappingImportApi.getLinkCandidates(activeProjectId)
+      .then((r) => {
+        const keys = new Set<string>();
+        for (const p of r.parentOf) keys.add(p.tobeSchema.toLowerCase() + '|' + p.tobeTable.toLowerCase());
+        setParentTableKeys(keys);
+      })
+      .catch(() => setParentTableKeys(new Set()));
+  }, [activeProjectId, hydrationTick]);
   // dialect 는 site 의 DB type 을 1차 source 로 사용 (DDL 재임포트 없이 즉시 반영).
   // site 정보가 없거나 type 이 비어있으면 ddl_imports.dialect 폴백.
   const siteForDialect = useWorkspaceStore((s) => {
@@ -302,12 +411,16 @@ export function MappingPage() {
     (s) => s.projects.find((p) => p.id === s.activeProjectId) ?? null,
   );
   useEffect(() => {
-    ASIS_TABLES = ddlToAsisTables(asisSchema);
-    // PoC: Site 의 csvPath 가 채워져 있으면 모든 AS-IS 테이블을 imported 로 간주.
-    // (실제 파일 존재 / 행 수 검증은 백엔드 CSV import API 가 생기면 그 응답으로 교체.)
-    if (siteForDialect?.csvPath && siteForDialect.csvPath.trim() !== '') {
-      ASIS_TABLES = ASIS_TABLES.map((t) => ({ ...t, imported: true }));
-    }
+    // imported/rows 는 module-level 캐시에서 즉시 반영 (가벼움). 실제 fetch 는 아래 별도 effect 가
+    // session 당 1회만 수행 — 여기서 매 hydrationTick 마다 무거운 full-scan 을 재발화하지 않는다.
+    const siteId = siteForDialect?.id ?? '';
+    ASIS_TABLES = ddlToAsisTables(asisSchema).map((t) => {
+      const key = siteId + '|' + t.name;
+      if (ASIS_IMPORTED_CACHE.get(key) === true) {
+        return { ...t, imported: true, rows: ASIS_ROWS_CACHE.get(key) ?? 0 };
+      }
+      return t;
+    });
     TOBE_TABLES = ddlToTobeTables(tobeSchema);
     ASIS_COLUMNS = ddlToAsisColumns(asisSchema);
     MAPPING_BY_TOBE = ddlToMappingByTobe(tobeSchema);
@@ -321,32 +434,90 @@ export function MappingPage() {
     setHydrationTick((t) => t + 1);
   }, [asisSchema, tobeSchema, siteForDialect, projectForDialect]);
 
+  // AS-IS csv 파일 존재(imported) + row 수 — schema/site 확정 후 table 별 1회만 fetch.
+  //  1) 존재 판정: 가벼운 csv-preview(limit 1, 404=missing). 옛 full-scan rowCount 판정 회귀 수정.
+  //  2) rows: 파일 존재 확정 + 미캐시일 때만 직렬 큐에 넣어 background full-scan (1개씩, 포화 회피).
+  // 캐시/in-flight 가드로 hydrationTick 재발화에도 중복 호출 안 함.
+  const asisTableNamesKey = useMemo(
+    () => (asisSchema?.tables ?? []).map((t) => qualifiedName(t)).join('\n'),
+    [asisSchema],
+  );
+  useEffect(() => {
+    const siteId = siteForDialect?.id;
+    const csvPath = siteForDialect?.csvPath;
+    if (!siteId || !csvPath || csvPath.trim() === '') return;
+    const names = asisTableNamesKey ? asisTableNamesKey.split('\n') : [];
+    let queued = false;
+    for (const name of names) {
+      const key = siteId + '|' + name;
+      // 1) 존재 판정 (가벼움)
+      if (!ASIS_IMPORTED_CACHE.has(key) && !ASIS_EXIST_INFLIGHT.has(key)) {
+        ASIS_EXIST_INFLIGHT.add(key);
+        csvPreviewApi.forTable(siteId, name, 1)
+          .then(() => { ASIS_IMPORTED_CACHE.set(key, true); setHydrationTick((v) => v + 1); })
+          .catch(() => { ASIS_IMPORTED_CACHE.set(key, false); })
+          .finally(() => { ASIS_EXIST_INFLIGHT.delete(key); });
+      }
+      // 2) rows (무거움) — 파일 존재 확정 + 미캐시 + 큐에 없을 때만 1회.
+      if (ASIS_IMPORTED_CACHE.get(key) === true
+          && !ASIS_ROWS_CACHE.has(key)
+          && !ASIS_ROWS_QUEUE.some((j) => j.key === key)) {
+        ASIS_ROWS_QUEUE.push({ siteId, name, key });
+        queued = true;
+      }
+    }
+    if (queued) void drainAsisRowsQueue(() => setHydrationTick((v) => v + 1));
+  }, [siteForDialect?.id, siteForDialect?.csvPath, asisTableNamesKey, hydrationTick]);
+
   // Pre-flight Fix → 첫 unmapped row 찾아 scrollIntoView + 1초 teal pulse.
   // ExecutionPage 가 navigate('/mapping', { state: { fixTarget: { kind } } }) 로 진입.
   // Dashboard 행 클릭 → state.focusTable.internalName 로 해당 TO-BE 테이블을 active 화.
   const location = useLocation();
   const routerNavigate = useNavigate();
+  /** 사용자가 "skip" 으로 끈 navigation 의 location.state 객체 참조. 그 참조와 같은 동안만 강조 숨김.
+     navigate 마다 state 는 항상 새 객체 참조라, 새 "매핑 열기" 는 절대 dismiss 와 같지 않아 항상 다시 강조.
+     (location.key 는 환경에 따라 안정적이지 않을 수 있어 객체 참조로 식별 — 이게 재진입 보장의 핵심.) */
+  const [dismissedState, setDismissedState] = useState<unknown>(null);
+  /** focusRule navigation 을 1회만 테이블 점프하도록 식별 — location.state 객체 참조 기준. */
+  const jumpedStateRef = useRef<unknown>(null);
   // 同じ focusTable を hydrationTick の度に再適用しないためのガード.
   // window.history.replaceState だけだと React Router の location.state は更新されず, 結果として
   // schema 再 fetch (= hydrationTick++) のたびに同じテーブルへ強制リセットされていた.
   const consumedFocusKeyRef = useRef<string | null>(null);
+  // fixTarget 도 同じ理由でガード. hydrationTick 変動のたびに highlight が再適用されると
+  // 1 秒後に消える内側 timer よりも先に外側 timer が再スケジュールされ, ハイライトが永続化する.
+  const consumedFixTargetKeyRef = useRef<string | null>(null);
   useEffect(() => {
     const state = location.state as {
-      fixTarget?: { kind: 'unmapped-tobe' | 'unmapped-asis' | 'unbound-tobe' };
-      focusTable?: { internalName: string };
+      fixTarget?: { kind: 'unmapped-tobe' | 'unmapped-asis' | 'unbound-tobe'; table?: string };
+      focusTable?: { internalName?: string; tobeSchema?: string; tobeTable?: string };
+      focusRule?: { tobeTable: string; tobeColumns: string[] };
     } | null;
+
+    // (LogViewer Quarantine "매핑 열기" → focusRule 점프는 effectiveTobe 가 deps 인 별도 effect 에서
+    //  처리 — 아래 quarantineHl 근처. 여기 big effect 는 effectiveTobe 가 deps 가 아니라, 테이블이
+    //  늦게 로드되면 점프를 놓치기 때문. quarantineHl(useMemo)과 동일 타이밍으로 맞춘다.)
 
     // Dashboard row → focus a specific TO-BE table.
     if (state?.focusTable) {
-      const id = state.focusTable.internalName;
-      if (consumedFocusKeyRef.current === id) return;  // 既に処理済み
-      if (TOBE_TABLES.length === 0) return;            // hydrate 待ち
-      const target = TOBE_TABLES.find((t) => t.internalName === id);
+      const ft = state.focusTable;
+      const key = ft.internalName ?? `${ft.tobeSchema ?? ''}|${ft.tobeTable ?? ''}`;
+      if (consumedFocusKeyRef.current === key) return;  // 既に処理済み
+      if (TOBE_TABLES.length === 0) return;             // hydrate 待ち
+      const target = ft.internalName
+        ? TOBE_TABLES.find((t) => t.internalName === ft.internalName)
+        : TOBE_TABLES.find((t) => {
+            const i = t.name.indexOf('.');
+            const sch = (i > 0 ? t.name.slice(0, i) : '').toLowerCase();
+            const tbl = (i > 0 ? t.name.slice(i + 1) : t.name).toLowerCase();
+            return sch === (ft.tobeSchema ?? '').toLowerCase()
+                && tbl === (ft.tobeTable ?? '').toLowerCase();
+          });
       if (target) {
         setSelected({ side: 'tobe', name: target.name, internalName: target.internalName });
         // 自動初期選択を抑止 — 既に欲しい行を選んだ.
         didInitialSelectRef.current = true;
-        consumedFocusKeyRef.current = id;
+        consumedFocusKeyRef.current = key;
         // React Router の location.state を実際にクリア (history.replaceState だけでは不足).
         routerNavigate(location.pathname, { replace: true });
       }
@@ -354,17 +525,37 @@ export function MappingPage() {
     }
 
     const kind = state?.fixTarget?.kind;
+    const targetTable = state?.fixTarget?.table;
     if (!kind) return;
+    // location.key 를 키に含めて, 同じ Fix を続けて押した場合は (key 가 다른 location 으로 처리되어)
+    // 다시 ハイライト が走るが, 같은 location 内의 hydrationTick 再発火에서는 skip 한다.
+    const fixKey = `${location.key}|${kind}|${targetTable ?? ''}`;
+    if (consumedFixTargetKeyRef.current === fixKey) return;
     // unmapped-asis: AS-IS 사이드로 자동 전환해야 AsisTableDetail 이 mount 되고
-    // [data-fix-row="asis-unmapped"] 마커가 DOM 에 등장. 첫 AS-IS 테이블로 switch.
+    // [data-fix-row="asis-unmapped"] 마커가 DOM 에 등장. table 명시 시 그 AS-IS table, 없으면 첫번째.
+    // matcher: qualified name (`schema.physical`) / physical name (`short`) 둘 다 받기.
     if (kind === 'unmapped-asis' && ASIS_TABLES.length > 0) {
-      setSelected({ side: 'asis', name: ASIS_TABLES[0].name });
+      const target = targetTable
+        ? ASIS_TABLES.find((tt) => tt.name === targetTable || tt.short === targetTable)
+        : null;
+      const pick = target ?? ASIS_TABLES[0];
+      setSelected({ side: 'asis', name: pick.name });
     }
-    // unbound-tobe: 첫 unbound TO-BE 테이블(sources 비어있는)을 활성으로 → CollapsibleBinding 렌더.
-    if (kind === 'unbound-tobe') {
-      const firstUnbound = effectiveTobe.find((t) => t.sources.length === 0);
-      if (firstUnbound) {
-        setSelected({ side: 'tobe', name: firstUnbound.name, internalName: firstUnbound.internalName });
+    // unbound-tobe / unmapped-tobe: table 指定 → その TO-BE を選択. なければ最初の該当を選択.
+    // matcher: qualified name / internalName(uuid) / physical name 全部 OK.
+    if (kind === 'unbound-tobe' || kind === 'unmapped-tobe') {
+      let chosen = targetTable
+        ? effectiveTobe.find((tt) =>
+            tt.name === targetTable
+            || tt.internalName === targetTable
+            || tt.short === targetTable,
+          )
+        : null;
+      if (!chosen && kind === 'unbound-tobe') {
+        chosen = effectiveTobe.find((tt) => tt.sources.length === 0);
+      }
+      if (chosen) {
+        setSelected({ side: 'tobe', name: chosen.name, internalName: chosen.internalName });
       }
     }
     const id = window.setTimeout(() => {
@@ -375,6 +566,9 @@ export function MappingPage() {
           : '[data-fix-row="tobe-unmapped"]';
       const els = document.querySelectorAll<HTMLElement>(sel);
       if (els.length === 0) return;
+      // DOM 마커가 등장한 시점에만 consumed 로 마킹 — schema 가 아직 hydrate 되지 않은 채
+      // 早期 fire 가 일어났을 때는 다시 시도할 여지를 남긴다.
+      consumedFixTargetKeyRef.current = fixKey;
       // 첫 element 만 화면 중앙으로 스크롤 — 여러 곳 동시 점프는 혼란.
       els[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
       // 강조는 모든 matching element 에 동시에.
@@ -383,7 +577,6 @@ export function MappingPage() {
         els.forEach((el) => el.classList.remove('mpd-fix-highlight'));
       }, 1000);
     }, 200);
-    window.history.replaceState({}, '');
     return () => window.clearTimeout(id);
     // effectiveTobe 는 closure 로 캡처 — deps 에 넣으면 binding 편집마다 effect 재실행됨.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -402,6 +595,7 @@ export function MappingPage() {
   }, [hydrationTick]);
 
   const [selected, setSelected] = useState<Selection>(null);
+
   // 매핑 메뉴 초기 화면은 무조건 TO-BE 첫 테이블. 프로젝트가 바뀌면 다시 reset.
   const didInitialSelectRef = useRef(false);
   // 프로젝트 변경 시 selection lock 해제.
@@ -414,11 +608,14 @@ export function MappingPage() {
   useEffect(() => {
     if (didInitialSelectRef.current) return;
     if (TOBE_TABLES.length === 0) return;  // TO-BE 아직 안 옴 — 다음 tick 대기
+    // Quarantine "매핑 열기"(focusRule) 진입이면 첫 테이블을 자동선택하지 않는다 — 아래 focusRule
+    // effect 가 대상 테이블을 고르기 때문. (안 막으면 첫 테이블=customers 가 끼어들어 항상 거기로 이동.)
+    if ((location.state as { focusRule?: { tobeTable?: string } } | null)?.focusRule?.tobeTable) return;
     const first = TOBE_TABLES[0];
     setSelected({ side: 'tobe', name: first.name, internalName: first.internalName });
     didInitialSelectRef.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrationTick]);
+  }, [hydrationTick, location.state]);
   // hydrate 된 데이터에 selected 가 존재하지 않으면 자동으로 첫 TOBE 로 reset.
   useEffect(() => {
     if (!initialSelection) return;
@@ -444,6 +641,24 @@ export function MappingPage() {
     try { setProjMapStatus(await mappingImportApi.status(activeProjectId)); } catch { /* ignore */ }
   }, [activeProjectId]);
   useEffect(() => { void refreshProjMapStatus(); }, [refreshProjMapStatus, hydrationTick]);
+
+  // backend 의 mapping_asis_skip → store. 화면 진입 시 + hydrationTick 변경 시.
+  useEffect(() => {
+    if (!activeProjectId) return;
+    mappingImportApi.listAsisSkips(activeProjectId)
+      .then((list) => {
+        const byTable: Record<string, Record<string, boolean>> = {};
+        for (const s of list) {
+          const qualified = (s.asisSchema ? s.asisSchema + '.' : '') + s.asisTable;
+          const byCol = byTable[qualified] || {};
+          byCol[s.asisColumn] = true;
+          byTable[qualified] = byCol;
+        }
+        useMappingEditsStore.getState().replaceAsisSkips(activeProjectId, byTable);
+      })
+      .catch((e) => console.warn('[mapping] listAsisSkips failed', e));
+  }, [activeProjectId, hydrationTick]);
+
   const projMappingImported = projMapStatus.columnFilename !== null || projMapStatus.codeFilename !== null;
 
   const tableBindingEdits = useMappingEditsStore(
@@ -488,44 +703,139 @@ export function MappingPage() {
       compositionKind,
       whereFilter: edit.whereFilter ?? null,
       sources,
+      sharedFromProjectId: edit.sharedFromProjectId ?? null,
+      groupByExpr: edit.groupByExpr ?? null,
+      expandExpr: edit.expandExpr ?? null,
     }).catch((e) => console.warn('[mapping] upsertBinding failed', e));
     demoteToAnalysisOnEdit(activeProjectId);
+    unpinBaselineOnEdit(activeProjectId);
   }, [activeProjectId, readOnly]);
 
   const handleToggleAsisSkip = useCallback((tableName: string, colName: string, nextSkip: boolean) => {
     if (!activeProjectId || readOnly) return;
     useMappingEditsStore.getState().setAsisSkip(activeProjectId, tableName, colName, nextSkip);
+    // backend persist — has-changes diff + snapshot freeze 에 포함되려면 DB 에 들어가야.
+    const i = tableName.indexOf('.');
+    const asisSchema = i > 0 ? tableName.slice(0, i) : '';
+    const asisTable  = i > 0 ? tableName.slice(i + 1) : tableName;
+    mappingImportApi.upsertAsisSkip(activeProjectId, {
+      asisSchema: asisSchema || null,
+      asisTable,
+      asisColumn: colName,
+      skipped: nextSkip,
+    }).catch((e) => console.warn('[mapping] upsertAsisSkip failed', e));
     demoteToAnalysisOnEdit(activeProjectId);
+    unpinBaselineOnEdit(activeProjectId);
   }, [activeProjectId, readOnly]);
 
   const effectiveTobe = useMemo(() =>
     TOBE_TABLES.map((t) => {
+      const i = t.name.indexOf('.');
+      const tSchema = (i > 0 ? t.name.slice(0, i) : '').toLowerCase();
+      const tTable = (i > 0 ? t.name.slice(i + 1) : t.name).toLowerCase();
+      const isParent = parentTableKeys.has(tSchema + '|' + tTable);
       const edit = tableBindingEdits[t.internalName];
-      if (!edit) return t;
+      if (!edit) return { ...t, isParent };
       const srcs = edit.sources;
       return {
         ...t,
         sources: srcs,
-        unrouted: srcs.length === 0,
+        // 자식 link 상태면 sources 가 0 이어도 unrouted 로 표시하지 않음 (별도 linked 뱃지로 나옴).
+        unrouted: !edit.sharedFromProjectId && srcs.length === 0,
         compositionKind: (srcs.length === 0 ? 'none' : srcs.length === 1 ? 'single' : edit.mode) as TobeTable['compositionKind'],
         whereFilter: edit.whereFilter ?? t.whereFilter,
+        groupByExpr: edit.groupByExpr ?? t.groupByExpr,
+        expandExpr: edit.expandExpr ?? t.expandExpr,
+        linkedFromProjectId: edit.sharedFromProjectId,
+        isParent,
       };
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tableBindingEdits, hydrationTick]);
+    [tableBindingEdits, hydrationTick, parentTableKeys]);
 
   const effectiveAsis = useMemo(() => {
+    // schema-lenient — binding source 가 schema 한정(BANKSYS.CUSTOMERS)인데 AS-IS DDL 은
+    // bare(CUSTOMERS)면(또는 반대) exact 매칭이 miss 해 AS-IS 테이블이 unrouted 로 잘못 표시.
+    // physical(bare) 테이블명으로 매칭(lookupAsisCols/computeUncovered 와 동일 원칙).
     const routedByAsis: Record<string, string[]> = {};
     for (const t of effectiveTobe) {
       for (const s of t.sources) {
-        (routedByAsis[s.table] ||= []).push(t.internalName);
+        (routedByAsis[bareTable(s.table)] ||= []).push(t.internalName);
       }
     }
     return ASIS_TABLES.map((at) => {
-      const r = routedByAsis[at.name] || [];
-      return { ...at, routing: r, unrouted: r.length === 0 };
+      const r = routedByAsis[bareTable(at.name)] || [];
+      const isUnrouted = r.length === 0;
+      // unrouted 인데 모든 컬럼이 explicit skip 이면 'skipped' (회색) 표시.
+      // asisSkippedCols[table][col] === true 인 컬럼만 skip 으로 카운트.
+      const skipMap = asisSkippedCols[at.name] || {};
+      const cols = lookupAsisCols(at.name);
+      const allColsSkipped = isUnrouted
+        && cols.length > 0
+        && cols.every((c) => skipMap[c.name] === true);
+      return { ...at, routing: r, unrouted: isUnrouted, allColsSkipped };
     });
-  }, [effectiveTobe]);
+  }, [effectiveTobe, asisSkippedCols, hydrationTick]);
+
+  /** Quarantine "매핑 열기" 강조 대상 — location.state.focusRule 에서 매 렌더 파생.
+     dismiss 는 "그 navigation 의 state 객체" 한정 (location.state === dismissedState). 새 "매핑 열기"
+     는 새 state 객체라 절대 dismiss 와 같지 않으므로, 몇 번을 다시 들어와도 항상 강조된다.
+     hydrationTick 재렌더는 같은 state 객체 → dismiss 유지 (재발화 없음). */
+  const quarantineHl = useMemo<{ internalName: string; cols: string[] } | null>(() => {
+    const st = location.state as { focusRule?: { tobeTable: string; tobeColumns: string[] } } | null;
+    const fr = st?.focusRule;
+    if (!fr?.tobeTable) return null;
+    if (st === dismissedState) return null;  // 이 navigation 을 사용자가 skip 함
+    if (effectiveTobe.length === 0) return null;
+    const target = findTobeByLabel(effectiveTobe, fr.tobeTable);
+    return target ? { internalName: target.internalName, cols: fr.tobeColumns ?? [] } : null;
+  }, [location.state, dismissedState, effectiveTobe]);
+  /** 사용자가 이 navigation 에서 수동으로 테이블을 골랐는지 (= override 해제) 표시하는 location.state 참조. */
+  const userNavRef = useRef<unknown>(null);
+  /** "skip" — 강조만 끄고 그 테이블 목록은 그대로 둔다. dismiss 하면 quarantineHl 이 null 이 되어
+     화면 테이블이 selected 로 돌아가므로, 먼저 현재 강조 테이블을 selected 로 고정한 뒤 dismiss
+     (안 그러면 selected 가 비어 GuidePanel "좌측에서 테이블을 선택하세요" 로 빠진다). */
+  const clearQuarantineHl = useCallback(() => {
+    if (quarantineHl) {
+      const tt = effectiveTobe.find((t) => t.internalName === quarantineHl.internalName);
+      setSelected({ side: 'tobe', name: tt?.name ?? '', internalName: quarantineHl.internalName });
+      userNavRef.current = location.state;  // 이 navigation 에서 사용자 선택으로 간주 → override 해제
+    }
+    setDismissedState(location.state);
+  }, [location.state, quarantineHl, effectiveTobe]);
+
+  /* Quarantine "매핑 열기" → 대상 TO-BE 테이블로 1회 자동 점프.
+     deps 에 effectiveTobe 포함 — 테이블 목록이 늦게 로드돼도(quarantineHl useMemo 와 동일 타이밍)
+     반드시 그 시점에 다시 실행되어 점프한다. (big effect 는 effectiveTobe 가 deps 가 아니라
+     "강조는 맞는 테이블인데 이동만 첫 테이블" 증상이 났음.) jumpedStateRef 로 navigation 당 1회 제한. */
+  useEffect(() => {
+    const fr = (location.state as { focusRule?: { tobeTable: string; tobeColumns: string[] } } | null)?.focusRule;
+    if (!fr?.tobeTable) return;
+    if (jumpedStateRef.current === location.state) return;  // 이 navigation 은 이미 점프함
+    if (effectiveTobe.length === 0) return;                 // 테이블 로드 대기 — 다음 effectiveTobe 변경 때 재시도
+    const target = findTobeByLabel(effectiveTobe, fr.tobeTable);
+    if (target) {
+      setSelected({ side: 'tobe', name: target.name, internalName: target.internalName });
+      didInitialSelectRef.current = true;
+    }
+    jumpedStateRef.current = location.state;
+  }, [location.state, effectiveTobe]);
+
+  /* 화면에 열 테이블 = 파생값. quarantine "매핑 열기" 로 들어왔고 (quarantineHl 존재) 사용자가 이
+     navigation 에서 수동으로 다른 테이블을 고르지 않았으면, 강조 대상 테이블을 그대로 연다.
+     effect/자동선택 타이밍과 무관하게 quarantineHl(이미 정확히 해석됨)에서 직접 파생하므로
+     "항상 customers 로만 열림" 문제가 구조적으로 사라진다. */
+  const handleSelect = useCallback((s: Selection) => {
+    userNavRef.current = location.state;  // 사용자가 수동 선택 → 이 navigation 동안 override 해제
+    setSelected(s);
+  }, [location.state]);
+  const effectiveSelected = useMemo<Selection>(() => {
+    if (quarantineHl && userNavRef.current !== location.state) {
+      const tt = effectiveTobe.find((t) => t.internalName === quarantineHl.internalName);
+      return { side: 'tobe', name: tt?.name ?? '', internalName: quarantineHl.internalName };
+    }
+    return selected;
+  }, [quarantineHl, selected, location.state, effectiveTobe]);
 
   if (!activeProjectId) {
     return (
@@ -543,7 +853,7 @@ export function MappingPage() {
     return (
       <div style={styles.fullBleed}>
         <div style={styles.centerEmpty}>
-          <div style={{ color: 'var(--text-3)', fontSize: 13 }}>DDL 로딩 중…</div>
+          <div style={{ color: 'var(--text-3)', fontSize: 13 }}>{t('mapping.loading.ddl')}</div>
         </div>
       </div>
     );
@@ -558,8 +868,8 @@ export function MappingPage() {
       <DualInventory
         asis={effectiveAsis}
         tobe={effectiveTobe}
-        selected={selected}
-        onSelect={setSelected}
+        selected={effectiveSelected}
+        onSelect={handleSelect}
         search={search}
         setSearch={setSearch}
         showUnrouted={showUnrouted}
@@ -568,21 +878,28 @@ export function MappingPage() {
         onOpenFullImport={readOnly ? undefined : () => setFullImportOpen(true)}
       />
       <Workspace
-        selected={selected}
-        onSelect={setSelected}
+        selected={effectiveSelected}
+        onSelect={handleSelect}
         tableBindingEdits={tableBindingEdits}
         onBindingChange={handleBindingChange}
         effectiveTobe={effectiveTobe}
         asisSkippedCols={asisSkippedCols}
         onToggleAsisSkip={handleToggleAsisSkip}
         hydrationTick={hydrationTick}
+        quarantineHl={quarantineHl}
+        onClearQuarantineHl={clearQuarantineHl}
       />
       {fullImportOpen && (
         <MappingDefinitionImportModal
           projectId={activeProjectId ?? ''}
           activeFiles={{ column: projMapStatus.columnFilename, code: projMapStatus.codeFilename }}
           onClose={() => setFullImportOpen(false)}
-          onChanged={async () => { await refreshProjMapStatus(); setHydrationTick((n) => n + 1); return []; }}
+          onChanged={async (tf) => {
+            await refreshProjMapStatus();
+            setHydrationTick((n) => n + 1);
+            // project-wide import → tf=null → 전체 DDL 검증.
+            return await findUncoveredDdlColumns(activeProjectId ?? '', tf);
+          }}
           tableFilter={null}
         />
       )}
@@ -664,7 +981,7 @@ function DualInventory({
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Filter…"
+            placeholder="Filter"
             style={styles.searchInput}
           />
         </div>
@@ -709,6 +1026,7 @@ function InventoryTree({
   mappingImported?: boolean;
   onOpenFullImport?: () => void;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(true);
   const isOpen = alwaysOpen ?? open;
   const accent = side === 'asis' ? 'var(--amber)' : 'var(--navy)';
@@ -731,7 +1049,7 @@ function InventoryTree({
           {onOpenFullImport && (
             <button
               onClick={onOpenFullImport}
-              title="프로젝트 전체 매핑 정의서를 import / 재적용 (모든 테이블)"
+              title={t('mapping.tooltip.importAll')}
               style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
                 margin: '4px 10px 8px', padding: '6px 10px',
@@ -783,20 +1101,33 @@ function InventoryItem({
   const selBg  = side === 'asis' ? 'var(--amber-50)' : 'var(--navy-50)';
 
   let badgeText = '';
-  let badgeTone: 'ok' | 'warn' | 'info' | null = null;
+  let badgeIcon: string | null = null;
+  let badgeTone: 'ok' | 'warn' | 'info' | 'muted' | null = null;
+  let showParentIcon = false;  // 부모 테이블 — chip 밖 왼쪽에 별도 표시
   if (side === 'tobe') {
     const tt = table as TobeTable;
-    if (unrouted)                              { badgeText = 'no source'; badgeTone = 'warn'; }
+    if (tt.linkedFromProjectId)                { badgeText = 'linked'; badgeIcon = 'fa-link'; badgeTone = 'info'; }
+    else if (unrouted)                         { badgeText = 'no source'; badgeTone = 'warn'; }
     else if (tt.compositionKind === 'join')    { badgeText = `⋈ ${tt.sources.length}`; badgeTone = 'info'; }
     else if (tt.compositionKind === 'union')   { badgeText = `∪ ${tt.sources.length}`; badgeTone = 'info'; }
     else                                       { badgeText = '← 1'; badgeTone = 'ok'; }
+    if (tt.isParent && !tt.linkedFromProjectId) showParentIcon = true;
   } else {
     const at = table as AsisTable;
-    if (unrouted) { badgeText = 'unrouted'; badgeTone = 'warn'; }
+    if (at.allColsSkipped) { badgeText = 'skipped'; badgeTone = 'muted'; }
+    else if (unrouted) { badgeText = 'unrouted'; badgeTone = 'warn'; }
     else          { badgeText = `→ ${at.routing.length}`; badgeTone = 'ok'; }
   }
-  const toneColor = badgeTone === 'warn' ? 'var(--amber)' : badgeTone === 'info' ? 'var(--navy)' : 'var(--green)';
-  const toneBg    = badgeTone === 'warn' ? 'var(--amber-50)' : badgeTone === 'info' ? 'var(--navy-50)' : 'var(--green-50)';
+  const toneColor =
+    badgeTone === 'warn'  ? 'var(--amber)'
+    : badgeTone === 'info'  ? 'var(--navy)'
+    : badgeTone === 'muted' ? 'var(--text-3)'
+    : 'var(--green)';
+  const toneBg =
+    badgeTone === 'warn'  ? 'var(--amber-50)'
+    : badgeTone === 'info'  ? 'var(--navy-50)'
+    : badgeTone === 'muted' ? 'var(--panel-2)'
+    : 'var(--green-50)';
 
   return (
     <div
@@ -815,18 +1146,35 @@ function InventoryItem({
         fontWeight: isSelected ? 600 : 500,
       }}>
         <span style={styles.invItemName}>{(table as TobeTable).short || table.name}</span>
-        <span style={{ ...styles.invItemBadge, color: toneColor, background: toneBg, borderColor: toneColor }}>{badgeText}</span>
+        {showParentIcon && <i className="fa-solid fa-link" style={{ fontSize: 10, color: 'var(--navy)' }} />}
+        <span style={{ ...styles.invItemBadge, color: toneColor, background: toneBg, borderColor: toneColor, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          {badgeIcon && <i className={`fa-solid ${badgeIcon}`} style={{ fontSize: 9 }} />}
+          {badgeText}
+        </span>
       </div>
       <div style={styles.invItemSub}>
-        {table.columnCount} cols · {table.rows >= 1e6 ? (table.rows / 1e6).toFixed(1) + 'M' : table.rows.toLocaleString()} rows
+        {side === 'tobe'
+          ? `${table.columnCount} cols`
+          : `${table.columnCount} cols · ${formatRowCount(table.rows)} rows`}
       </div>
     </div>
   );
 }
 
+/** 천 단위 K, 백만 단위 M 압축. Trial preview 의 row 수 표시용. */
+function formatRowCount(n: number): string {
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return n.toLocaleString();
+}
+
 // ── Right: workspace ─────────────────────────────────────────
 
-function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, effectiveTobe, asisSkippedCols, onToggleAsisSkip, hydrationTick }: {
+/** 강조 대상이 아닐 때 TobeMappingDetail 에 넘기는 고정 빈 배열 — 매 렌더 새 [] 생성으로 인한
+   useMemo 무효화/scroll effect 재발화 방지. */
+const EMPTY_HL_COLS: string[] = [];
+
+function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, effectiveTobe, asisSkippedCols, onToggleAsisSkip, hydrationTick, quarantineHl, onClearQuarantineHl }: {
   selected: Selection;
   onSelect: (s: Selection) => void;
   tableBindingEdits: Record<string, TableBindingEdit>;
@@ -835,6 +1183,8 @@ function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, eff
   asisSkippedCols: Record<string, Record<string, boolean>>;
   onToggleAsisSkip: (tableName: string, colName: string, nextSkip: boolean) => void;
   hydrationTick: number;
+  quarantineHl: { internalName: string; cols: string[] } | null;
+  onClearQuarantineHl: () => void;
 }) {
   if (!selected) return <GuidePanel />;
   if (selected.side === 'tobe') {
@@ -842,6 +1192,10 @@ function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, eff
     if (!table) return <GuidePanel />;
     const bindingEdit = tableBindingEdits[table.internalName];
     const rows = MAPPING_BY_TOBE[table.internalName] || [];
+    // quarantine 강조가 현재 보고 있는 테이블 대상인지 + 그 위반 컬럼들. active 면 cols 가 비어도
+    // 첫 row 라도 강조한다 (아래 TobeMappingDetail). 아니면 빈 배열(고정 ref).
+    const highlightActive = !!quarantineHl && quarantineHl.internalName === table.internalName;
+    const highlightCols = highlightActive ? quarantineHl!.cols : EMPTY_HL_COLS;
     return (
       <TobeMappingDetail
         key={table.internalName}
@@ -850,6 +1204,9 @@ function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, eff
         bindingEdit={bindingEdit}
         onBindingChange={(edit) => onBindingChange(table.internalName, edit)}
         hydrationTick={hydrationTick}
+        highlightActive={highlightActive}
+        highlightCols={highlightCols}
+        onSkipHighlight={onClearQuarantineHl}
       />
     );
   }
@@ -867,18 +1224,115 @@ function Workspace({ selected, onSelect, tableBindingEdits, onBindingChange, eff
   );
 }
 
+/**
+ * 검증: DDL 의 (TO-BE table.column) 중 매핑정의서 (mapping_rules) 에 없는 것 목록.
+ * MappingPage 의 project-wide import 와 TobeMappingDetail 의 table-remap 양쪽에서 호출하므로
+ * 컴포넌트 closure 가 아닌 모듈 함수로 둔다. TOBE_TABLES / MAPPING_BY_TOBE 는 모듈 mutable
+ * 라 그대로 접근 가능.
+ * tableFilter (스키마 제외 테이블명) 있으면 그 테이블만, 없으면 전체 DDL.
+ */
+async function findUncoveredDdlColumns(projectId: string, tableFilter: string | null = null): Promise<string[]> {
+  if (TOBE_TABLES.length === 0) return [];
+  try {
+    const [rules, bindings] = await Promise.all([
+      mappingImportApi.listRules(projectId),
+      mappingImportApi.listBindings(projectId).catch(() => []),
+    ]);
+    // schema-lenient — rule.tobeSchema 가 DDL schema 와 유무/대소문자가 달라도(예: 정의서는
+    // bare `transaction_reissued`, DDL 은 `bigassignseq.transaction_reissued`) 매칭되도록
+    // exact (schema|table) 와 bare (table) 두 키를 모두 만든다. 컬럼명도 대소문자 무시.
+    const ruleCols = new Map<string, Set<string>>();        // `${schema}|${table}` (lowercase) → Set<column lower>
+    const ruleColsByTable = new Map<string, Set<string>>(); // bare `${table}` (lowercase) → Set<column lower>
+    const addCol = (m: Map<string, Set<string>>, key: string, col: string) => {
+      if (!m.has(key)) m.set(key, new Set());
+      m.get(key)!.add(col);
+    };
+    for (const r of rules) {
+      const tbl = (r.tobeTable || '').toLowerCase();
+      addCol(ruleCols, (r.tobeSchema || '').toLowerCase() + '|' + tbl, r.tobeColumn.toLowerCase());
+      addCol(ruleColsByTable, tbl, r.tobeColumn.toLowerCase());
+    }
+    // 자식 link 테이블은 master 에서 정의되므로 임포트 검증에서 제외 (bare table 기준).
+    const linkedTables = new Set<string>();
+    for (const b of bindings) {
+      if (b.sharedFromProjectId) linkedTables.add((b.tobeTable || '').toLowerCase());
+    }
+    const targets = tableFilter
+      ? TOBE_TABLES.filter((t) => (t.name.split('.').pop() || t.name) === tableFilter)
+      : TOBE_TABLES;
+    const uncovered: string[] = [];
+    for (const tobe of targets) {
+      const i = tobe.name.indexOf('.');
+      const schema = (i > 0 ? tobe.name.slice(0, i) : '').toLowerCase();
+      const table = (i > 0 ? tobe.name.slice(i + 1) : tobe.name).toLowerCase();
+      if (linkedTables.has(table)) continue;  // 자식 link 테이블 — skip
+      // exact (schema|table) + bare (table) 합집합 — schema 유무가 행마다 달라도 누락 없이 매칭.
+      const haveCols = new Set<string>([
+        ...(ruleCols.get(schema + '|' + table) ?? []),
+        ...(ruleColsByTable.get(table) ?? []),
+      ]);
+      const ddlCols = MAPPING_BY_TOBE[tobe.internalName] || [];
+      for (const c of ddlCols) {
+        if (!haveCols.has(c.tgt.toLowerCase())) uncovered.push(`${tobe.name}.${c.tgt}`);
+      }
+    }
+    return uncovered;
+  } catch (e) {
+    console.warn('[mapping] failed to compute uncovered DDL columns', e);
+    return [];
+  }
+}
+
 // ── TO-BE mapping detail ─────────────────────────────────────
 
-function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydrationTick }: {
+function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydrationTick, highlightActive = false, highlightCols = EMPTY_HL_COLS, onSkipHighlight }: {
   table: TobeTable;
   rows: MappingRow[];
   bindingEdit?: TableBindingEdit;
   onBindingChange: (edit: TableBindingEdit) => void;
   hydrationTick: number;
+  /** Quarantine "매핑 열기" 강조가 이 테이블 대상인지. true 면 cols 가 비어도 첫 row 라도 강조. */
+  highlightActive?: boolean;
+  /** 강조 위반 컬럼명들 (있으면 매칭 row 강조, 없으면 첫 row fallback). */
+  highlightCols?: string[];
+  /** 강조 종료 콜백 — 에러 row 의 "skip" 버튼 / 강조 row 클릭 시 호출. */
+  onSkipHighlight?: () => void;
 }) {
   const navigate = useNavigate();
-  const [bindingOpen, setBindingOpen] = useState((bindingEdit?.sources ?? table.sources).length === 0);
+  const t = useT();
+  /** 강조 대상 컬럼 set (lowercase). tgt(=TO-BE) 또는 src(=AS-IS) 컬럼명이 여기 들면 그 row 가 강조. */
+  const hlSet = useMemo(
+    () => new Set(highlightCols.map((c) => c.toLowerCase())),
+    [highlightCols],
+  );
+  /** 강조 첫 row 로 스크롤 — 강조가 켜질 때 한 번. */
+  const firstHlRowRef = useRef<HTMLTableRowElement | null>(null);
+  useEffect(() => {
+    if (highlightActive) {
+      firstHlRowRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [highlightActive, hlSet]);
+  // Banner 의 프로젝트명을 클릭 가능한 텍스트 버튼으로 — 다른 project 의 같은 테이블 매핑 화면으로 이동.
+  const projectLinkStyle: React.CSSProperties = {
+    background: 'transparent',
+    border: 'none',
+    padding: 0,
+    cursor: 'pointer',
+    fontFamily: 'var(--mono)',
+    fontSize: 12,
+    fontWeight: 600,
+    color: 'var(--navy)',
+  };
+  // 자식 link 면 binding 패널 closed. 자체 정의 + sources 비어 있으면 열림 (사용자 알림).
+  const [bindingOpen, setBindingOpen] = useState(
+    !bindingEdit?.sharedFromProjectId
+    && (bindingEdit?.sources ?? table.sources).length === 0
+  );
   const [bindingPulse, setBindingPulse] = useState(false);
+  // bindingEdit.sharedFromProjectId 가 link/unlink 로 변하면 bindingOpen 도 sync.
+  useEffect(() => {
+    if (bindingEdit?.sharedFromProjectId) setBindingOpen(false);
+  }, [bindingEdit?.sharedFromProjectId]);
   const readOnly = useActiveProjectReadOnly();
   const triggerBindingHighlight = () => {
     setBindingOpen(true);
@@ -900,6 +1354,101 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
   const [coverageFilter, setCoverageFilter] = useState<RuleFilter>('all');
   const [activeIdx, setActiveIdx] = useState(0);
   const activeProjectIdForRow = useWorkspaceStore((s) => s.activeProjectId);
+  const allProjects = useWorkspaceStore((s) => s.projects);
+
+  // Master-child link 상태. bindingEdit.sharedFromProjectId 가 있으면 자식 — row editor 와
+  // binding 패널 모두 lock. master project 이름 lookup 은 workspace store 에서.
+  const isLinkedChild = !!bindingEdit?.sharedFromProjectId;
+  const masterProject = useMemo(
+    () => isLinkedChild ? allProjects.find((p) => p.id === bindingEdit?.sharedFromProjectId) : null,
+    [isLinkedChild, allProjects, bindingEdit?.sharedFromProjectId],
+  );
+  const [linkModalOpen, setLinkModalOpen] = useState(false);
+  const [linkCandidates, setLinkCandidates] = useState<LinkCandidatesResponse | null>(null);
+  const [linkSelection, setLinkSelection] = useState<string>('');  // "projectId|schema|table" 또는 ""
+  const [linkSaving, setLinkSaving] = useState(false);
+
+  // 자기 테이블이 다른 project 의 자식들의 부모인지 확인 — banner 분기용. mapping 화면 진입 시
+  // link-candidates 한 번 fetch 해서 parentOf 정보 보관.
+  useEffect(() => {
+    if (!activeProjectIdForRow) { setLinkCandidates(null); return; }
+    mappingImportApi.getLinkCandidates(activeProjectIdForRow)
+      .then(setLinkCandidates)
+      .catch(() => setLinkCandidates(null));
+  }, [activeProjectIdForRow, hydrationTick]);
+  const tobeSplitForBanner = useMemo(() => {
+    const i = table.name.indexOf('.');
+    return {
+      schema: i > 0 ? table.name.slice(0, i) : '',
+      table: i > 0 ? table.name.slice(i + 1) : table.name,
+    };
+  }, [table.name]);
+
+  const parentInfo = useMemo(
+    () => linkCandidates?.parentOf.find(
+      (p) => p.tobeSchema.toLowerCase() === tobeSplitForBanner.schema.toLowerCase()
+          && p.tobeTable.toLowerCase() === tobeSplitForBanner.table.toLowerCase(),
+    ),
+    [linkCandidates, tobeSplitForBanner],
+  );
+  const isParentTable = !isLinkedChild && !!parentInfo;
+  useEffect(() => {
+    if (!linkModalOpen || !activeProjectIdForRow) return;
+    mappingImportApi.getLinkCandidates(activeProjectIdForRow)
+      .then((r) => setLinkCandidates(r))
+      .catch((e) => console.warn('[mapping] getLinkCandidates failed', e));
+    setLinkSelection(bindingEdit?.sharedFromProjectId
+      ? `${bindingEdit.sharedFromProjectId}||${table.short}`
+      : '');
+  }, [linkModalOpen, activeProjectIdForRow, bindingEdit?.sharedFromProjectId, table.short]);
+
+  const applyLink = async (newSharedFromProjectId: string | null) => {
+    if (!activeProjectIdForRow) return;
+    setLinkSaving(true);
+    try {
+      const tobeQualified = table.name;
+      const i = tobeQualified.indexOf('.');
+      const tobeSchema = i > 0 ? tobeQualified.slice(0, i) : '';
+      const tobeTable = i > 0 ? tobeQualified.slice(i + 1) : tobeQualified;
+      await mappingImportApi.upsertBinding(activeProjectIdForRow, {
+        tobeSchema,
+        tobeTable,
+        compositionKind: newSharedFromProjectId ? 'none' : (bindingMode === 'union' ? 'union' : (bindingSources.length === 1 ? 'single' : 'join')),
+        whereFilter: newSharedFromProjectId ? null : (bindingWhere || null),
+        sources: newSharedFromProjectId ? [] : bindingSources.map((s, idx) => {
+          const si = s.table.indexOf('.');
+          return {
+            ordinal: idx,
+            asisSchema: si > 0 ? s.table.slice(0, si) : null,
+            asisTable: si > 0 ? s.table.slice(si + 1) : s.table,
+            alias: s.alias,
+            role: s.role,
+            joinType: s.joinType ?? null,
+            joinOn: s.joinOn ?? null,
+          };
+        }),
+        sharedFromProjectId: newSharedFromProjectId,
+        groupByExpr: newSharedFromProjectId ? null : (bindingGroupBy || null),
+        expandExpr: newSharedFromProjectId ? null : (bindingExpand || null),
+      });
+      // store 의 binding edit 도 갱신
+      onBindingChange({
+        sources: newSharedFromProjectId ? [] : bindingSources,
+        mode: bindingMode,
+        whereFilter: bindingWhere,
+        groupByExpr: newSharedFromProjectId ? undefined : bindingGroupBy,
+        expandExpr: newSharedFromProjectId ? undefined : bindingExpand,
+        sharedFromProjectId: newSharedFromProjectId ?? undefined,
+      });
+      demoteToAnalysisOnEdit(activeProjectIdForRow);
+      unpinBaselineOnEdit(activeProjectIdForRow);
+      setLinkModalOpen(false);
+    } catch (e) {
+      console.warn('[mapping] applyLink failed', e);
+    } finally {
+      setLinkSaving(false);
+    }
+  };
 
   // 프로젝트의 고정핀(baseline) snapshot — context bar 의 table chip 옆에 version 표시.
   // 진입 시 1 회 fetch (이미 다른 화면에서 불러와 있으면 store 가 채워둠).
@@ -932,6 +1481,22 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
   /**
    * Hydrate bindings from DB into zustand. (검증은 별도 — findUncoveredDdlColumns)
    */
+  const hydrateAsisSkipsFromDb = useCallback(async (projectId: string): Promise<void> => {
+    try {
+      const list = await mappingImportApi.listAsisSkips(projectId);
+      const byTable: Record<string, Record<string, boolean>> = {};
+      for (const s of list) {
+        const qualified = (s.asisSchema ? s.asisSchema + '.' : '') + s.asisTable;
+        const byCol = byTable[qualified] || {};
+        byCol[s.asisColumn] = true;
+        byTable[qualified] = byCol;
+      }
+      useMappingEditsStore.getState().replaceAsisSkips(projectId, byTable);
+    } catch (e) {
+      console.warn('[mapping] failed to hydrate asis-skips', e);
+    }
+  }, []);
+
   const hydrateBindingsFromDb = useCallback(async (projectId: string): Promise<void> => {
     if (TOBE_TABLES.length === 0) return;
     try {
@@ -948,6 +1513,9 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
         edits[tobe.internalName] = {
           mode,
           whereFilter: b.whereFilter ?? undefined,
+          groupByExpr: b.groupByExpr ?? undefined,
+          expandExpr: b.expandExpr ?? undefined,
+          sharedFromProjectId: b.sharedFromProjectId ?? undefined,
           sources: b.sources.map((s) => ({
             alias: s.alias,
             table: (s.asisSchema ? s.asisSchema + '.' : '') + s.asisTable,
@@ -965,39 +1533,6 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
   }, []);
 
   /**
-   * 검증: DDL 의 (TO-BE table.column) 중 매핑정의서 (mapping_rules) 에 없는 것 목록.
-   * 사이트의 맵핑정의서는 슈퍼셋이어야 하고, 프로젝트 DDL 은 부분집합. DDL 컬럼이
-   * 매핑정의서에 없으면 그 컬럼을 채울 명세가 없는 것 → 사용자에게 경고.
-   */
-  const findUncoveredDdlColumns = useCallback(async (projectId: string): Promise<string[]> => {
-    if (TOBE_TABLES.length === 0) return [];
-    try {
-      const rules = await mappingImportApi.listRules(projectId);
-      const ruleCols = new Map<string, Set<string>>();  // `${schema}|${table}` → Set<column>
-      for (const r of rules) {
-        const key = (r.tobeSchema || '') + '|' + r.tobeTable;
-        if (!ruleCols.has(key)) ruleCols.set(key, new Set());
-        ruleCols.get(key)!.add(r.tobeColumn);
-      }
-      const uncovered: string[] = [];
-      for (const tobe of TOBE_TABLES) {
-        const i = tobe.name.indexOf('.');
-        const schema = i > 0 ? tobe.name.slice(0, i) : '';
-        const table = i > 0 ? tobe.name.slice(i + 1) : tobe.name;
-        const haveCols = ruleCols.get(schema + '|' + table) || new Set();
-        const ddlCols = MAPPING_BY_TOBE[tobe.internalName] || [];
-        for (const c of ddlCols) {
-          if (!haveCols.has(c.tgt)) uncovered.push(`${tobe.name}.${c.tgt}`);
-        }
-      }
-      return uncovered;
-    } catch (e) {
-      console.warn('[mapping] failed to compute uncovered DDL columns', e);
-      return [];
-    }
-  }, []);
-
-  /**
    * DB 의 mapping_rules → zustand 의 rowEdits 로 hydrate.
    * Bindings 를 alias 매핑 소스로 사용 (asis_table → alias).
    */
@@ -1010,9 +1545,15 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
       ]);
       // alias 룩업 — key: `{tobeSchema}|{tobeTable}|{asisTable}` → alias
       const aliasMap = new Map<string, string>();
+      // expand alias 룩업 — key: `{tobeSchema}|{tobeTable}` → [{alias, columns}]
+      // expand_expr 의 AS u(col1, col2) 같은 펼침 alias 도 hydrate 시 보존.
+      const expandMap = new Map<string, { alias: string; columns: string[] }[]>();
       for (const b of bindings) {
         for (const s of b.sources) {
           aliasMap.set(`${b.tobeSchema}|${b.tobeTable}|${s.asisTable}`, s.alias);
+        }
+        if (b.expandExpr) {
+          expandMap.set(`${b.tobeSchema}|${b.tobeTable}`, parseExpandAliases(b.expandExpr));
         }
       }
       // rules 를 internalName / tgtColumn 으로 그룹화
@@ -1027,15 +1568,22 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
         const internalName = tobe.internalName;
         if (!edits[internalName]) edits[internalName] = {};
 
-        // savedSrc: 가능하면 `{alias}.{column}`, alias 못 찾으면 column 만.
+        // savedSrc: 가능하면 `{alias}.{column}`. asisTable 매칭이 우선, 못 찾으면 expand alias 매칭
+        // (CROSS JOIN LATERAL 같이 펼친 컬럼들), 둘 다 없으면 column 만.
         // r.asisColumn 은 PG TEXT[] 매핑 string[] — combine 시 여러 원소.
         let savedSrc: string[] | undefined;
         if (r.asisColumn && r.asisColumn.length > 0) {
-          const alias = r.asisTable
+          const sourceAlias = r.asisTable
             ? aliasMap.get(`${r.tobeSchema}|${r.tobeTable}|${r.asisTable}`)
             : undefined;
+          const expandAliases = expandMap.get(`${r.tobeSchema}|${r.tobeTable}`) ?? [];
           const cols = r.asisColumn.map((c) => c.trim()).filter((c) => c);
-          savedSrc = cols.map((c) => alias ? `${alias}.${c}` : c);
+          savedSrc = cols.map((c) => {
+            if (sourceAlias) return `${sourceAlias}.${c}`;
+            // asisTable 매칭 실패 → expand alias 의 column 매칭 시도
+            const exp = expandAliases.find((e) => e.columns.includes(c));
+            return exp ? `${exp.alias}.${c}` : c;
+          });
         }
 
         const strat = r.strategy === 'skip' ? undefined
@@ -1056,7 +1604,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     }
   }, []);
 
-  const refreshMappingStatus = useCallback(async (): Promise<string[]> => {
+  const refreshMappingStatus = useCallback(async (tableFilter: string | null = null): Promise<string[]> => {
     if (!activeProjectIdForRow) return [];
     try {
       const st = await mappingImportApi.status(activeProjectIdForRow);
@@ -1066,8 +1614,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     }
     await hydrateBindingsFromDb(activeProjectIdForRow);
     await hydrateRowEditsFromDb(activeProjectIdForRow);
-    return await findUncoveredDdlColumns(activeProjectIdForRow);
-  }, [activeProjectIdForRow, hydrateBindingsFromDb, hydrateRowEditsFromDb, findUncoveredDdlColumns]);
+    return await findUncoveredDdlColumns(activeProjectIdForRow, tableFilter);
+  }, [activeProjectIdForRow, hydrateBindingsFromDb, hydrateRowEditsFromDb]);
 
   useEffect(() => {
     if (!activeProjectIdForRow) {
@@ -1087,35 +1635,56 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     // baselineSnapshot 변경 (set/clear) → main effect 가 fresh fetch.
     hydrateBindingsFromDb(activeProjectIdForRow);
     hydrateRowEditsFromDb(activeProjectIdForRow);
+    hydrateAsisSkipsFromDb(activeProjectIdForRow);
     return () => { cancelled = true; };
     // hydrationTick: 전체(프로젝트) import 후 status/룰/바인딩을 다시 읽어 toolbar·그리드 갱신.
-  }, [activeProjectIdForRow, baselineSnapshot?.id, hydrateBindingsFromDb, hydrateRowEditsFromDb, hydrationTick]);
+  }, [activeProjectIdForRow, baselineSnapshot?.id, hydrateBindingsFromDb, hydrateRowEditsFromDb, hydrateAsisSkipsFromDb, hydrationTick]);
   const rowEdits = useMappingEditsStore(
     (s) => (activeProjectIdForRow ? s.rowEdits[activeProjectIdForRow]?.[table.internalName] : undefined) || EMPTY_ROW_EDITS,
   );
-  const [testStatus, setTestStatus] = useState<'idle' | 'running' | 'completed'>('idle');
+  const [testStatus, setTestStatus] = useState<'idle' | 'running' | 'completed' | 'failed'>('idle');
   const [testProgress, setTestProgress] = useState(0);
-  // Trial 은 DuckDB 위 in-memory 미리보기 — TO-BE DB 적재도, project phase 변경도 하지 않는다.
+  /* Trial 결과 캐시 — Trial = 실제 BE 변환(샘플 100행), Report 는 이 결과의 TOP 20 재사용 (#8-1).
+     DuckDB 위 in-memory 미리보기라 TO-BE DB 적재·phase 변경은 없음. */
+  const [trialResult, setTrialResult] = useState<MappingReportResult | null>(null);
+  const TRIAL_SAMPLE = 100;
+  // Trial 은 BE runReport 한 번의 round-trip — granular % 가 없으므로 도착 전엔 ~90% 까지
+  // 크리프 애니메이션, 성공 시 100, 실패 시 빨강 바.
   const startTest = useCallback(() => {
+    if (!activeProjectIdForRow) return;
+    const i = table.name.indexOf('.');
+    const tobeSchema = i > 0 ? table.name.slice(0, i) : '';
+    const tobeTable = i > 0 ? table.name.slice(i + 1) : table.name;
     setTestStatus('running');
     setTestProgress(0);
-  }, []);
+    setTrialResult(null);
+    mappingImportApi.runReport(activeProjectIdForRow, tobeSchema, tobeTable, TRIAL_SAMPLE)
+      .then((r) => {
+        setTrialResult(r);
+        setTestProgress(100);
+        setTestStatus(r.error ? 'failed' : 'completed');
+      })
+      .catch((e) => {
+        setTrialResult({
+          tobeSchema, tobeTable, headers: [], rows: [], rowCount: 0, truncated: false,
+          sql: null, error: e instanceof Error ? e.message : String(e),
+        });
+        setTestProgress(100);
+        setTestStatus('failed');
+      });
+  }, [activeProjectIdForRow, table.name]);
+  // running 동안 progress 크리프 (도착 전 ~90% 까지). 도착 시 startTest 가 100 으로 snap.
   useEffect(() => {
     if (testStatus !== 'running') return;
     const id = window.setInterval(() => {
-      setTestProgress((p) => {
-        if (p >= 100) {
-          window.clearInterval(id);
-          setTestStatus('completed');
-          return 100;
-        }
-        return Math.min(100, p + 4);
-      });
+      setTestProgress((p) => (p >= 90 ? 90 : p + 6));
     }, 80);
     return () => window.clearInterval(id);
   }, [testStatus]);
   const handleSaveEdit = useCallback(async (r: MappingRow, edit: RowEdit) => {
     if (!activeProjectIdForRow || readOnly) return;
+    // 자식 link 테이블은 master 에서 수정해야 함 — UI 에서 disable 이지만 안전망.
+    if (isLinkedChild) return;
     // 사용자가 row 편집기에서 저장한 것 = manual
     const editWithOrigin: RowEdit = { ...edit, ruleOrigin: 'manual' };
     useMappingEditsStore.getState().setRowEdit(activeProjectIdForRow, table.internalName, r.tgt, editWithOrigin);
@@ -1169,20 +1738,27 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     // 옛 live 데이터를 가져와 사용자 변경값을 덮어쓰는 race 가 발생.
     clearBaselineIfPinned();
     demoteToAnalysisOnEdit(activeProjectIdForRow);
-  }, [activeProjectIdForRow, table.internalName, table.name, bindingEdit, clearBaselineIfPinned, readOnly]);
+  }, [activeProjectIdForRow, table.internalName, table.name, bindingEdit, clearBaselineIfPinned, readOnly, isLinkedChild]);
   const [bindingSources, setBindingSources] = useState(bindingEdit?.sources ?? table.sources);
   const [bindingMode, setBindingMode] = useState<'join' | 'union'>(
     bindingEdit?.mode ?? (table.compositionKind === 'union' ? 'union' : 'join'),
   );
   const [bindingWhere, setBindingWhere] = useState(bindingEdit?.whereFilter ?? table.whereFilter ?? '');
+  const [bindingGroupBy, setBindingGroupBy] = useState(bindingEdit?.groupByExpr ?? table.groupByExpr ?? '');
+  const [bindingExpand, setBindingExpand] = useState(bindingEdit?.expandExpr ?? table.expandExpr ?? '');
   // Apply/hydrate 등으로 외부에서 bindingEdit 가 갱신되면 로컬 state 도 따라가게.
   // (useState 는 첫 렌더의 prop 으로만 초기화되어 이후 prop 변경을 못 받음)
   useEffect(() => {
     setBindingSources(bindingEdit?.sources ?? table.sources);
     setBindingMode(bindingEdit?.mode ?? (table.compositionKind === 'union' ? 'union' : 'join'));
     setBindingWhere(bindingEdit?.whereFilter ?? table.whereFilter ?? '');
-  }, [bindingEdit, table.internalName, table.sources, table.compositionKind, table.whereFilter]);
+    setBindingGroupBy(bindingEdit?.groupByExpr ?? table.groupByExpr ?? '');
+    setBindingExpand(bindingEdit?.expandExpr ?? table.expandExpr ?? '');
+  }, [bindingEdit, table.internalName, table.sources, table.compositionKind, table.whereFilter, table.groupByExpr, table.expandExpr]);
   const allRows = useMemo(() => rows.map((r) => {
+    // 자식 link 테이블 — 모든 컬럼이 'link' state. master 룰은 실행 시점에 read-time inherit
+    // 되므로 자식 화면 자체는 단순 'Linked' 단일 표시.
+    if (isLinkedChild) return { ...r, rule: 'link' as const };
     const re = rowEdits[r.tgt];
     if (!re) return r;
     const filledSrc = re.savedSrc?.some((s) => s && s.trim() !== '') ?? false;
@@ -1208,7 +1784,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     const noteFromEdit = re.savedNotes && re.savedNotes.trim() ? re.savedNotes : undefined;
     if (eff === r.rule && noteFromEdit === r.note) return r;
     return { ...r, rule: eff, note: noteFromEdit ?? r.note };
-  }), [rows, rowEdits]);
+  }), [rows, rowEdits, isLinkedChild]);
 
   const visibleRows = useMemo(() => allRows.filter((r) => r.rule !== 'skip'), [allRows]);
 
@@ -1224,6 +1800,17 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     (!q || (r.src + ' ' + r.tgt).toLowerCase().includes(q.toLowerCase())) &&
     (coverageFilter === 'all' || r.rule === coverageFilter),
   );
+  // 컬럼명 매치 — tgt(TO-BE) 또는 src(AS-IS, 마지막 '.' 뒷부분) 가 hlSet 에 들면 매치.
+  const rowColMatch = (r: MappingRow): boolean =>
+    (!!r.tgt && hlSet.has(r.tgt.toLowerCase()))
+    || (!!r.src && hlSet.has((r.src.split('.').pop() ?? '').toLowerCase()));
+  // 강조가 켜져 있으면 (= quarantine "매핑 열기" 로 진입) 컬럼 매치 row 를 강조.
+  // 매치가 하나도 없으면 (컬럼명 추출 실패 / 빈 cols / 표현식 source 등) 첫 row 라도 강조 →
+  // "이 테이블로 왔다" 시각 신호 (기존 imperative fallback 동작 유지).
+  const anyHlMatch = highlightActive && filtered.some(rowColMatch);
+  const rowIsHl = (r: MappingRow, i: number): boolean =>
+    highlightActive && (anyHlMatch ? rowColMatch(r) : i === 0);
+  const firstHlIdx = !highlightActive ? -1 : (anyHlMatch ? filtered.findIndex(rowColMatch) : 0);
 
   const counts = {
     all:      visibleRows.length,
@@ -1236,7 +1823,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
   const active = visibleRows[activeIdx] ?? visibleRows[0];
 
   const missingImports = bindingSources
-    .map((s) => ASIS_TABLES.find((a) => a.name === s.table))
+    .map((s) => ASIS_TABLES.find((a) => bareTable(a.name) === bareTable(s.table)))
     .filter((a): a is AsisTable => !!a && !a.imported);
   // TO-BE Target DB 가 Site Settings 에서 "configured" 상태인지 검사 — Site Settings 의
   // Trial 은 in-memory 미리보기라 TO-BE DB 연결 여부와 무관 — 매핑 정합성만 검사.
@@ -1245,10 +1832,10 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
     || bindingSources.length === 0
     || missingImports.length > 0;
   const testDisabledReason =
-    bindingSources.length === 0 ? 'AS-IS source 가 연결되어 있지 않습니다.'
-    : missingImports.length > 0 ? `AS-IS extracted data 가 임포트되지 않았습니다: ${missingImports.map((a) => a.short).join(', ')}`
-    : counts.unmapped > 0 ? `Unmapped 컬럼이 ${counts.unmapped}개 남아 있습니다.`
-    : 'Run trial transformation for this table';
+    bindingSources.length === 0 ? t('mapping.test.disabled.noSource')
+    : missingImports.length > 0 ? t('mapping.test.disabled.notImported', { tables: missingImports.map((a) => a.short).join(', ') })
+    : counts.unmapped > 0 ? t('mapping.test.disabled.unmapped', { n: String(counts.unmapped) })
+    : t('mapping.test.disabled.ready');
 
   return (
     <div style={styles.workspace}>
@@ -1271,12 +1858,12 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
         <div style={styles.statusCounts}>
           {(() => {
             // 우선순위 — 매핑 작업 순. 한 번에 하나씩만 표시.
-            if (bindingSources.length === 0) {
+            if (bindingSources.length === 0 && !isLinkedChild) {
               return (
                 <button
                   type="button"
                   onClick={triggerBindingHighlight}
-                  title="Table binding 패널을 엽니다."
+                  title={t('mapping.tooltip.openBinding')}
                   style={styles.csvMissingBtn}
                 >
                   <StatusBadge tone="warn">AS-IS source not bound →</StatusBadge>
@@ -1288,7 +1875,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                 <button
                   type="button"
                   onClick={() => useUiStore.getState().requestOpenSiteSettings({ focus: 'asis-csv' })}
-                  title="Site Settings → AS-IS CSV path 필드를 엽니다."
+                  title={t('mapping.tooltip.openCsvPath')}
                   style={styles.csvMissingBtn}
                 >
                   <StatusBadge tone="warn">{missingImports.length} CSV not imported →</StatusBadge>
@@ -1307,67 +1894,149 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
           onClick={startTest}
           title={
             reportOpen ? 'Close the Report to run Trial again'
-            : testStatus === 'running' ? `Running… ${testProgress}%`
+            : testStatus === 'running' ? `Running ${testProgress}%`
             : testStatus === 'completed' ? 'Trial completed. Click to re-run.'
+            : testStatus === 'failed' ? (trialResult?.error ?? 'Trial failed. Click to re-run.')
             : testDisabledReason
           }
         >
           <Ic.play /> {testStatus === 'running' ? `Running ${testProgress}%` : 'Trial'}
         </button>
-        {testStatus === 'completed' && (
+        {/* 완료/실패 둘 다 Report 열기 가능 — 실패 시 Report 에서 에러 메시지·힌트를 확인한다. */}
+        {(testStatus === 'completed' || testStatus === 'failed') && (
           <button
             type="button"
             onClick={() => setReportOpen(true)}
-            title="변환 룰을 적용한 TO-BE 데이터 미리보기를 봅니다."
-            style={styles.reportChip}
+            title={testStatus === 'failed'
+              ? (trialResult?.error ?? 'Trial failed — open Report to see the error.')
+              : t('mapping.tooltip.openReport')}
+            style={testStatus === 'failed'
+              ? { ...styles.reportChip, color: 'var(--red)', borderColor: 'var(--red)' }
+              : styles.reportChip}
           >
-            <Ic.arrow /> Report
+            <Ic.arrow /> {testStatus === 'failed' ? 'Report (error)' : 'Report'}
           </button>
         )}
       </div>
 
-      {!reportOpen && bindingSources.length === 0 && (
+      {!reportOpen && bindingSources.length === 0 && !isLinkedChild && (
         <div style={styles.noSourceBanner}>
           <Ic.warn />
-          <span>AS-IS 테이블이 매핑되지 않았습니다. <b>Table binding</b> 패널에서 <b>+ Add source</b>로 테이블을 추가하세요.</span>
+          <span>{t('mapping.banner.noSourceBound.pre')}<b>Table binding</b>{t('mapping.banner.noSourceBound.mid')}<b>+ Add source</b>{t('mapping.banner.noSourceBound.post')}</span>
         </div>
       )}
       {!reportOpen && (
-        <CollapsibleBinding
-          table={table} open={bindingOpen} pulse={bindingPulse} onToggle={() => setBindingOpen((o) => !o)}
-          sources={bindingSources}
-          onSourcesChange={(s) => { setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode, whereFilter: bindingWhere }); }}
-          compositionMode={bindingMode}
-          onCompositionModeChange={(m) => { setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m, whereFilter: bindingWhere }); }}
-          whereFilter={bindingWhere}
-          onWhereChange={(v) => { setBindingWhere(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: v }); }}
-        />
+        <div style={{ padding: '8px 16px', borderBottom: '1px solid var(--border)', background: 'var(--panel-2)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          {isLinkedChild ? (
+            <>
+              <i className="fa-solid fa-link" style={{ fontSize: 11, color: 'var(--text-2)' }} />
+              <span style={{ fontSize: 11, color: 'var(--text-2)' }}>{t('mapping.link.inheritedFrom')}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  const masterId = bindingEdit?.sharedFromProjectId;
+                  if (!masterId) return;
+                  navigate('/mapping', {
+                    state: {
+                      activateProjectId: masterId,
+                      focusTable: { tobeSchema: tobeSplitForBanner.schema, tobeTable: tobeSplitForBanner.table },
+                    },
+                  });
+                }}
+                style={projectLinkStyle}
+                title={t('mapping.link.openInMaster')}
+              >
+                {masterProject?.name ?? bindingEdit?.sharedFromProjectId}
+              </button>
+              <div style={{ flex: 1 }} />
+              {!readOnly && (
+                <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>{t('mapping.link.button.changeUnlink')}</button>
+              )}
+            </>
+          ) : isParentTable && parentInfo ? (
+            <>
+              <i className="fa-solid fa-link" style={{ fontSize: 11, color: 'var(--text-2)' }} />
+              <span style={{ fontSize: 11, color: 'var(--text-2)' }}>{t('mapping.link.parentOf')}</span>
+              {parentInfo.children.map((c, i) => (
+                <span key={c.projectId + '|' + c.tobeTable + '|' + i}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigate('/mapping', {
+                        state: {
+                          activateProjectId: c.projectId,
+                          focusTable: { tobeSchema: c.tobeSchema, tobeTable: c.tobeTable },
+                        },
+                      });
+                    }}
+                    style={projectLinkStyle}
+                    title={t('mapping.link.openInChild')}
+                  >
+                    {c.projectName}
+                  </button>
+                  {i < parentInfo.children.length - 1 ? <span style={{ marginRight: 2 }}>,</span> : null}
+                </span>
+              ))}
+              <div style={{ flex: 1 }} />
+            </>
+          ) : (
+            <>
+              <i className="fa-solid fa-unlink" style={{ fontSize: 11, color: 'var(--text-3)' }} />
+              <span style={{ fontSize: 11, color: 'var(--text-3)' }}>{t('mapping.link.standalone')}</span>
+              <div style={{ flex: 1 }} />
+              {!readOnly && (
+                <button type="button" style={styles.btnSecondary} onClick={() => setLinkModalOpen(true)}>{t('mapping.link.button.link')}</button>
+              )}
+            </>
+          )}
+        </div>
+      )}
+      {!reportOpen && (
+        <div style={isLinkedChild ? { pointerEvents: 'none', opacity: 0.55 } : undefined}>
+          <CollapsibleBinding
+            table={table} open={bindingOpen} pulse={bindingPulse} onToggle={() => setBindingOpen((o) => !o)}
+            sources={bindingSources}
+            onSourcesChange={(s) => { if (isLinkedChild) return; setBindingSources(s); onBindingChange({ sources: s, mode: bindingMode, whereFilter: bindingWhere, groupByExpr: bindingGroupBy, expandExpr: bindingExpand }); }}
+            compositionMode={bindingMode}
+            onCompositionModeChange={(m) => { if (isLinkedChild) return; setBindingMode(m); onBindingChange({ sources: bindingSources, mode: m, whereFilter: bindingWhere, groupByExpr: bindingGroupBy, expandExpr: bindingExpand }); }}
+            whereFilter={bindingWhere}
+            onWhereChange={(v) => { if (isLinkedChild) return; setBindingWhere(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: v, groupByExpr: bindingGroupBy, expandExpr: bindingExpand }); }}
+            groupByExpr={bindingGroupBy}
+            onGroupByChange={(v) => { if (isLinkedChild) return; setBindingGroupBy(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: bindingWhere, groupByExpr: v, expandExpr: bindingExpand }); }}
+            expandExpr={bindingExpand}
+            onExpandChange={(v) => { if (isLinkedChild) return; setBindingExpand(v); onBindingChange({ sources: bindingSources, mode: bindingMode, whereFilter: bindingWhere, groupByExpr: bindingGroupBy, expandExpr: v }); }}
+          />
+        </div>
       )}
 
       {/* Toolbar */}
       <div style={{ ...styles.toolbar, display: reportOpen ? 'none' : 'flex' }}>
         <div style={styles.toolbarSearch}>
           <Ic.search />
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by field name…" style={styles.searchInput} />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by field name" style={styles.searchInput} />
         </div>
         <div style={{ flex: 1 }} />
-        <button
-          style={yamlImported
-            ? { ...styles.btnSecondary, color: 'var(--text-3)' }
-            : styles.btnSecondary}
-          onClick={() => setImportYamlOpen(true)}
-        >{yamlImported
-            ? <><Ic.check /> YAML Imported</>
-            : <><i className="fa-solid fa-download" style={{ fontSize: 11 }} /> Import YAML</>}</button>
-        <button
-          style={mappingImported
-            ? { ...styles.btnSecondary, color: 'var(--text-3)' }
-            : styles.btnSecondary}
-          onClick={() => setImportMappingOpen(true)}
-          title="이 TO-BE 테이블만 매핑 정의서로 재매칭"
-        >{mappingImported
-            ? <><Ic.check /> Table mapped</>
-            : <><i className="fa-solid fa-table" style={{ fontSize: 11 }} /> Re-map table</>}</button>
+        {!readOnly && (
+          <>
+            <button
+              style={yamlImported
+                ? { ...styles.btnSecondary, color: 'var(--text-3)' }
+                : styles.btnSecondary}
+              onClick={() => setImportYamlOpen(true)}
+            >{yamlImported
+                ? <><Ic.check /> YAML Imported</>
+                : <><i className="fa-solid fa-download" style={{ fontSize: 11 }} /> Import YAML</>}</button>
+            <button
+              style={mappingImported
+                ? { ...styles.btnSecondary, color: 'var(--text-3)' }
+                : styles.btnSecondary}
+              onClick={() => setImportMappingOpen(true)}
+              title={t('mapping.tooltip.rematchTable')}
+            >{mappingImported
+                ? <><Ic.check /> Table mapped</>
+                : <><i className="fa-solid fa-table" style={{ fontSize: 11 }} /> Re-map table</>}</button>
+          </>
+        )}
       </div>
       {importMappingOpen && (
         <MappingDefinitionImportModal
@@ -1383,7 +2052,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
           title="Import YAML"
           accept=".yml,.yaml"
           acceptLabel=".yml · .yaml"
-          hint="YAML 정의서로 매핑을 일괄 임포트합니다. 매칭된 unmapped 행만 채워지고, 이미 매핑된 행은 덮어쓰지 않습니다."
+          hint={t('mapping.import.yamlHint')}
           onClose={() => setImportYamlOpen(false)}
           onImported={() => setYamlImported(true)}
         />
@@ -1393,6 +2062,8 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
         <ReportView
           table={table}
           rows={reportRows}
+          sources={bindingSources}
+          prefetched={trialResult}
           onClose={() => setReportOpen(false)}
           onPickColumn={(tgt) => {
             const idx = visibleRows.findIndex((r) => r.tgt === tgt);
@@ -1419,6 +2090,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
             }}
             filter={coverageFilter}
             onFilter={setCoverageFilter}
+            hideFilters={isLinkedChild}
           />
           <table style={{ ...styles.gridTable, tableLayout: 'auto', minWidth: 980 }}>
             <colgroup>
@@ -1451,11 +2123,20 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
               {filtered.map((r, i) => {
                 const realIdx = visibleRows.indexOf(r);
                 const isActive = realIdx === activeIdx;
+                const isHl = rowIsHl(r, i);
                 return (
                   <tr
                     key={`${r.src}>${r.tgt}-${i}`}
+                    ref={i === firstHlIdx ? firstHlRowRef : undefined}
+                    className={isHl ? 'mpd-quarantine-highlight' : undefined}
                     data-fix-row={r.rule === 'unmapped' ? 'tobe-unmapped' : undefined}
+                    data-mpd-tobe-column={r.tgt || undefined}
+                    data-mpd-asis-column={r.src || undefined}
                     onClick={() => {
+                      // 강조된 row 를 클릭하면 강조 종료 (행 인터랙션과 일체화).
+                      if (isHl) onSkipHighlight?.();
+                      // 자식 link 테이블은 master 에서만 수정 가능 — Inspector 안 열림.
+                      if (isLinkedChild) return;
                       // 같은 행을 다시 누르면 inspector 를 닫는다 (토글). 다른 행이면 그 행으로 열기.
                       if (inspectorOpen && activeIdx === realIdx) {
                         setInspectorOpen(false);
@@ -1491,7 +2172,10 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                       {(() => {
                         const eff = rowEdits[r.tgt]?.savedSrc;
                         if (eff?.length) {
-                          const alias = eff[0].slice(0, eff[0].indexOf('.')) || undefined;
+                          // dot 없는 source (alias 미포함) 의 경우 alias undefined — slice(0,-1) 로
+                          // column 명 앞 글자가 잘리는 표시 버그 회피.
+                          const di = eff[0].indexOf('.');
+                          const alias = di >= 0 ? eff[0].slice(0, di) : undefined;
                           return <SourceAliasTag alias={alias} composition={table.compositionKind} />;
                         }
                         return <SourceAliasTag alias={r.sourceAlias} composition={table.compositionKind} />;
@@ -1501,7 +2185,7 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                       {(() => {
                         const savedSrcs = rowEdits[r.tgt]?.savedSrc;
                         if (savedSrcs?.length) {
-                          const types = savedSrcs.map((s) => resolveSrcType(s, bindingSources)).filter((t) => t && t !== '—');
+                          const types = savedSrcs.map((s) => resolveSrcType(s, bindingSources, bindingExpand)).filter((t) => t && t !== '—');
                           return types.length
                             ? <TypeBadge>{types.join(', ')}</TypeBadge>
                             : <span style={{ color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>—</span>;
@@ -1520,7 +2204,23 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
                     <td style={styles.gridTd}>
                       {r.tgtType === '—' ? <span style={{ color: 'var(--text-4)', fontFamily: 'var(--mono)' }}>—</span> : <TypeBadge>{r.tgtType}</TypeBadge>}
                     </td>
-                    <td style={{ ...styles.gridTd, textAlign: 'center' }}><RuleTag rule={r.rule} status={r.status} /></td>
+                    <td style={{ ...styles.gridTd, textAlign: 'center' }}>
+                      {isHl ? (
+                        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                          <RuleTag rule={r.rule} status={r.status} />
+                          {/* 강조 종료 버튼 — row onClick(=강조 끄기 + inspector) 로 전파 안 되게 stopPropagation. */}
+                          <button
+                            type="button"
+                            style={styles.rowSkipBtn}
+                            onClick={(e) => { e.stopPropagation(); onSkipHighlight?.(); }}
+                          >
+                            skip
+                          </button>
+                        </div>
+                      ) : (
+                        <RuleTag rule={r.rule} status={r.status} />
+                      )}
+                    </td>
                   </tr>
                 );
               })}
@@ -1538,18 +2238,91 @@ function TobeMappingDetail({ table, rows, bindingEdit, onBindingChange, hydratio
             active={active}
             composition={table.compositionKind}
             sources={bindingSources}
+            expandExpr={bindingExpand}
             rowEdit={rowEdits[active?.tgt ?? '']}
             onSave={(edit) => handleSaveEdit(active, edit)}
             onClose={() => setInspectorOpen(false)}
           />
         )}
       </div>
+
+      {/* Master-child link 모달 — site 안 다른 project / 테이블 중 master 선택 또는 unlink. */}
+      {linkModalOpen && (
+        <div
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}
+          onClick={() => linkSaving ? undefined : setLinkModalOpen(false)}
+        >
+          <div
+            style={{ background: 'var(--panel)', border: '1px solid var(--border-strong)', borderRadius: 6, width: 600, maxHeight: '80vh', display: 'flex', flexDirection: 'column' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>Link {table.short} → parent table</div>
+              <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 4 }}>
+                같은 site 의 다른 project 의 부모 테이블을 link 하면 이 테이블의 모든 룰을 그 project 에서 inherit 합니다. row editor 와 binding 패널은 read-only 가 됩니다.
+              </div>
+            </div>
+            <div style={{ overflow: 'auto', padding: '12px 18px', flex: 1 }}>
+              <label style={{ display: 'flex', gap: 8, padding: 8, border: '1px solid var(--border)', borderRadius: 4, marginBottom: 6, cursor: 'pointer' }}>
+                <input type="radio" name="link-target" checked={linkSelection === ''} onChange={() => setLinkSelection('')} />
+                <span>{t('mapping.binding.selfDefined')}</span>
+              </label>
+              {(() => {
+                // 같은 (tobeSchema, tobeTable) 이름 매칭되는 후보만 — 그 테이블을 포함한 다른 project 들.
+                const i = table.name.indexOf('.');
+                const mySchema = i > 0 ? table.name.slice(0, i) : '';
+                const myTable = i > 0 ? table.name.slice(i + 1) : table.name;
+                const filtered = (linkCandidates?.manualOptions ?? []).filter(
+                  (o) => (o.tobeSchema ?? '').toLowerCase() === mySchema.toLowerCase()
+                      && o.tobeTable.toLowerCase() === myTable.toLowerCase()
+                );
+                if (filtered.length === 0) {
+                  return (
+                    <div style={{ fontSize: 11, color: 'var(--text-3)', padding: 8 }}>
+                      같은 site 의 다른 project 에 같은 이름의 테이블이 없습니다.
+                    </div>
+                  );
+                }
+                return filtered.map((o) => {
+                  const key = `${o.projectId}|${o.tobeSchema}|${o.tobeTable}`;
+                  return (
+                    <label key={key} style={{ display: 'flex', gap: 8, padding: 8, border: '1px solid var(--border)', borderRadius: 4, marginBottom: 6, cursor: 'pointer' }}>
+                      <input type="radio" name="link-target" checked={linkSelection === key} onChange={() => setLinkSelection(key)} />
+                      <span>
+                        <span style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{o.tobeSchema ? `${o.tobeSchema}.${o.tobeTable}` : o.tobeTable}</span>
+                        <span style={{ fontSize: 11, color: 'var(--text-3)', marginLeft: 8 }}>in {o.projectName}</span>
+                      </span>
+                    </label>
+                  );
+                });
+              })()}
+            </div>
+            <div style={{ padding: '12px 18px', borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button type="button" style={styles.btnGhost} disabled={linkSaving} onClick={() => setLinkModalOpen(false)}>Cancel</button>
+              <button
+                type="button"
+                style={linkSaving ? { ...styles.btnPrimary, ...styles.btnDisabled } : styles.btnPrimary}
+                disabled={linkSaving}
+                onClick={() => {
+                  if (linkSelection === '') {
+                    applyLink(null);
+                  } else {
+                    const [pid] = linkSelection.split('|');
+                    applyLink(pid);
+                  }
+                }}
+              >{linkSaving ? 'Saving' : 'Apply'}</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 function srcCellColor(r: MappingRow): string {
   if (r.rule === 'skip') return 'var(--text-3)';
+  if (r.rule === 'link') return 'var(--text-3)';
   if (r.rule === 'added' || r.rule === 'unmapped' || r.rule === 'null' || r.rule === 'default') return 'var(--text-4)';
   return 'var(--text)';
 }
@@ -1557,6 +2330,7 @@ function arrowColor(r: MappingRow): string {
   if (r.rule === 'skip')     return 'var(--text-4)';
   if (r.rule === 'added')    return 'var(--green)';
   if (r.rule === 'unmapped') return 'var(--text-4)';
+  if (r.rule === 'link')     return 'var(--text-3)';
   return 'var(--text-3)';
 }
 function srcCellContent(r: MappingRow): React.ReactNode {
@@ -1564,6 +2338,7 @@ function srcCellContent(r: MappingRow): React.ReactNode {
   if (r.rule === 'unmapped') return <span style={{ fontStyle: 'italic' }}>(unassigned)</span>;
   if (r.rule === 'null')     return <span style={{ fontStyle: 'italic', color: 'var(--text-3)' }}>NULL</span>;
   if (r.rule === 'default')  return <span style={{ fontStyle: 'italic', color: 'var(--text-3)' }}>DEFAULT</span>;
+  if (r.rule === 'link')     return <span style={{ fontStyle: 'italic', color: 'var(--text-3)' }}>(inherited from master)</span>;
   return r.src;
 }
 
@@ -1596,6 +2371,8 @@ function AutocompleteInput({
   const [focused, setFocused] = useState(false);
   const [acItems, setAcItems] = useState<string[]>([]);
   const [acIdx, setAcIdx] = useState(0);
+  // Ctrl+Space 로 강제 popup 트리거 — 빈 word 일 때도 전체 completions 표시.
+  const [force, setForce] = useState(false);
   const savedCursor = useRef<number | null>(null);
 
   useLayoutEffect(() => {
@@ -1606,17 +2383,31 @@ function AutocompleteInput({
   }, [value]);
 
   useEffect(() => {
-    if (!focused || !completions.length || !inputRef.current) { setAcItems([]); return; }
+    if (!focused || !completions.length || !inputRef.current) {
+      setAcItems((prev) => { if (prev.length) { setAcIdx(0); return []; } return prev; });
+      return;
+    }
     const pos = inputRef.current.selectionStart ?? 0;
     let s = pos;
     while (s > 0 && /[\w.]/.test(value[s - 1])) s--;
     const word = value.slice(s, pos);
-    if (word.length < 1) { setAcItems([]); return; }
+    if (!force && word.length < 1) {
+      setAcItems((prev) => { if (prev.length) { setAcIdx(0); return []; } return prev; });
+      return;
+    }
     const lo = word.toLowerCase();
-    const hits = completions.filter((c) => c.toLowerCase().includes(lo) && c.toLowerCase() !== lo).slice(0, 10);
-    setAcItems(hits);
-    setAcIdx(0);
-  }, [value, focused, completions]);
+    const hits = force && word.length === 0
+      ? completions.slice(0, 10)
+      : completions.filter((c) => c.toLowerCase().includes(lo) && c.toLowerCase() !== lo).slice(0, 10);
+    // hits 가 *실제로 변경됐을 때만* acIdx reset — 사용자 ArrowDown 선택이 effect 재실행으로
+    // 첫 항목으로 되돌아가는 것 방지.
+    setAcItems((prev) => {
+      const same = prev.length === hits.length && prev.every((p, i) => p === hits[i]);
+      if (same) return prev;
+      setAcIdx(0);
+      return hits;
+    });
+  }, [value, focused, completions, force]);
 
   const applyAc = (item: string) => {
     if (!inputRef.current) return;
@@ -1628,14 +2419,22 @@ function AutocompleteInput({
     savedCursor.current = before.length + item.length;
     onChange(before + item + after);
     setAcItems([]);
+    setForce(false);
     inputRef.current.focus();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Ctrl+Space — 강제 자동완성 popup 트리거.
+    if ((e.ctrlKey || e.metaKey) && e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      setForce(true);
+      return;
+    }
     if (!acItems.length) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); setAcIdx((i) => Math.min(i + 1, acItems.length - 1)); return; }
     if (e.key === 'ArrowUp')   { e.preventDefault(); setAcIdx((i) => Math.max(i - 1, 0)); return; }
-    if (e.key === 'Escape')    { setAcItems([]); return; }
+    if (e.key === 'Escape')    { e.stopPropagation(); setForce(false); setAcItems([]); return; }
     if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); applyAc(acItems[acIdx]); return; }
   };
 
@@ -1651,7 +2450,7 @@ function AutocompleteInput({
         }}
         onKeyDown={handleKeyDown}
         onFocus={() => setFocused(true)}
-        onBlur={() => { setFocused(false); setAcItems([]); }}
+        onBlur={() => { setFocused(false); setAcItems([]); setForce(false); }}
         placeholder={placeholder}
         spellCheck={false}
         style={{ width: '100%', boxSizing: 'border-box', ...style }}
@@ -1676,11 +2475,13 @@ function AutocompleteInput({
   );
 }
 
-function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesChange, compositionMode, onCompositionModeChange, whereFilter, onWhereChange }: {
+function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesChange, compositionMode, onCompositionModeChange, whereFilter, onWhereChange, groupByExpr, onGroupByChange, expandExpr, onExpandChange }: {
   table: TobeTable; open: boolean; pulse?: boolean; onToggle: () => void;
   sources: TobeTable['sources']; onSourcesChange: (s: TobeTable['sources']) => void;
   compositionMode: 'join' | 'union'; onCompositionModeChange: (m: 'join' | 'union') => void;
   whereFilter: string; onWhereChange: (v: string) => void;
+  groupByExpr: string; onGroupByChange: (v: string) => void;
+  expandExpr: string; onExpandChange: (v: string) => void;
 }) {
   const t = useT();
   const readOnly = useActiveProjectReadOnly();
@@ -1699,16 +2500,19 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
   const usedTables = new Set(sources.map((s) => s.table));
   const availableTables = ASIS_TABLES.filter((t) => !usedTables.has(t.name));
 
-  // {alias}.{column} 자동완성 후보 — 현재 binding 의 모든 source 의 컬럼들.
+  // {alias}.{column} 자동완성 후보 — sources 의 컬럼들 + expand_expr 의 AS u(...) 컬럼들.
   const datalistId = `mpd-cols-${table.internalName}`;
   const aliasColumnOptions = useMemo(() => {
     const opts: string[] = [];
     for (const s of sources) {
-      const cols = ASIS_COLUMNS[s.table] || [];
+      const cols = lookupAsisCols(s.table);
       for (const c of cols) opts.push(`${s.alias}.${c.name}`);
     }
+    for (const e of parseExpandAliases(expandExpr)) {
+      for (const c of e.columns) opts.push(`${e.alias}.${c}`);
+    }
     return opts;
-  }, [sources, table.internalName]);
+  }, [sources, expandExpr, table.internalName]);
 
   const startAdd = () => {
     if (readOnly) return;
@@ -1911,6 +2715,30 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
 
           {sources.length > 0 && (
             <div style={{ marginTop: 12 }}>
+              <div style={{ ...styles.whereLabel, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span>EXPAND (row 1:N)</span>
+                <span style={styles.whereHint}>{t('mapping.binding.expandHint')}</span>
+                <div style={{ flex: 1 }} />
+                <ExpandTemplateMenu
+                  onPick={(kind) => {
+                    const alias = sources[0]?.alias || 't';
+                    onExpandChange(kind === null ? '' : generateExpandTemplate(kind, alias));
+                  }}
+                  disabled={readOnly}
+                />
+              </div>
+              <AutocompleteInput
+                completions={aliasColumnOptions}
+                value={expandExpr}
+                onChange={onExpandChange}
+                placeholder={`${t('mapping.eg')}: CROSS JOIN LATERAL (VALUES ('phone', ${sources[0].alias}.PHONE), ('email', ${sources[0].alias}.EMAIL)) AS u(channel, value)`}
+                style={styles.whereInput}
+                disabled={readOnly}
+              />
+            </div>
+          )}
+          {sources.length > 0 && (
+            <div style={{ marginTop: 12 }}>
               <div style={styles.whereLabel}>
                 <span>WHERE filter</span>
                 <span style={styles.whereHint}>{t('mapping.binding.whereHint')}</span>
@@ -1919,7 +2747,23 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
                 completions={aliasColumnOptions}
                 value={whereFilter}
                 onChange={onWhereChange}
-                placeholder={`예: ${sources[0].alias}.party_type = 'P'`}
+                placeholder={`${t('mapping.eg')}: ${sources[0].alias}.party_type = 'P'`}
+                style={styles.whereInput}
+                disabled={readOnly}
+              />
+            </div>
+          )}
+          {sources.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={styles.whereLabel}>
+                <span>GROUP BY</span>
+                <span style={styles.whereHint}>{t('mapping.binding.groupByHint')}</span>
+              </div>
+              <AutocompleteInput
+                completions={aliasColumnOptions}
+                value={groupByExpr}
+                onChange={onGroupByChange}
+                placeholder={`${t('mapping.eg')}: EXTRACT(MONTH FROM ${sources[0].alias}.txn_date), ${sources[0].alias}.account`}
                 style={styles.whereInput}
                 disabled={readOnly}
               />
@@ -1941,13 +2785,379 @@ function CollapsibleBinding({ table, open, pulse, onToggle, sources, onSourcesCh
 type RowEdit = { savedSrc?: string[]; savedRule?: string; savedDefault?: string; savedNotNull?: boolean; savedStrategy?: 'expression' | 'null' | 'default'; ruleOrigin?: 'imported' | 'manual'; savedNotes?: string };
 
 // Module-level helper so it can be called from useEffect closures
-function resolveSrcType(s: string, sources: TobeTable['sources']): string {
+/**
+ * binding 의 expand_expr 안에서 `AS alias(col1, col2, ...)` 패턴을 모두 추출.
+ * row editor / 자동완성이 expand alias.column 도 source 후보로 보여줄 수 있게 한다.
+ * type 정보는 expand_expr 에 없으므로 VARCHAR fallback.
+ */
+/** Inspector 의 RULE 칸 template 종류 — SQL aggregate (Row N:1) + DuckDB UDF (scalar). */
+type AggregateTemplateKind =
+  | 'count_star' | 'sum' | 'avg' | 'min' | 'max' | 'cond_sum'
+  // UDF (scalar functions — backend UdfRegistry 의 12 UDFs)
+  | 'apply_scale' | 'unpack_zone_decimal' | 'unpack_comp' | 'unpack_comp_float'
+  | 'unpack_signed_separate' | 'unpack_overpunch'
+  | 'convert_era' | 'assign_seq' | 'validate_bizno'
+  | 'mask_phone' | 'hash_sha256' | 'normalize_corp';
+
+/**
+ * RULE 칸 template SQL boilerplate 생성. alias / column 자동 인식 — 없으면 marker {col}.
+ * SQL aggregate (Row N:1) + UDF (scalar). 사용자 수정 부분은 {...} 마커.
+ */
+function generateAggregateTemplate(kind: AggregateTemplateKind, sourceAlias: string, sourceCol?: string): string {
+  const a = sourceAlias || 't';
+  const col = sourceCol || '{col}';
+  const ref = `${a}.${col}`;
+  switch (kind) {
+    case 'count_star': return 'COUNT(*)';
+    case 'sum':        return `SUM(CAST(${ref} AS DECIMAL(20,2)))`;
+    case 'avg':        return `AVG(CAST(${ref} AS DECIMAL(20,2)))`;
+    case 'min':        return `MIN(${ref})`;
+    case 'max':        return `MAX(${ref})`;
+    case 'cond_sum':   return `SUM(CASE WHEN ${a}.{cond_col} = '{cond_val}' THEN CAST(${ref} AS DECIMAL(20,2)) ELSE 0 END)`;
+    // UDF — backend UdfRegistry 시그니처 기반
+    case 'apply_scale':            return `apply_scale(${ref}, {scale})`;
+    case 'unpack_zone_decimal':    return `unpack_zone_decimal(${ref}, {scale})`;
+    case 'unpack_comp':            return `unpack_comp(${ref}, {scale})`;
+    case 'unpack_comp_float':      return `unpack_comp_float(${ref})`;
+    case 'unpack_signed_separate': return `unpack_signed_separate(${ref}, {scale})`;
+    case 'unpack_overpunch':       return `unpack_overpunch(${ref}, {scale})`;
+    case 'convert_era':            return `convert_era(${ref})`;
+    case 'assign_seq':             return `assign_seq()`;
+    case 'validate_bizno':         return `validate_bizno(${ref})`;
+    case 'mask_phone':             return `mask_phone(${ref})`;
+    case 'hash_sha256':            return `hash_sha256(${ref})`;
+    case 'normalize_corp':         return `normalize_corp(${ref})`;
+  }
+}
+
+/** EXPAND template kind — dropdown 의 선택 항목. null = Clear. */
+type ExpandTemplateKind = 'wide_to_long' | 'array_unnest';
+
+/**
+ * binding 의 첫 source alias 를 받아 expand_expr 의 boilerplate SQL 을 생성.
+ * 사용자가 dropdown 에서 template 선택 시 호출. -- TODO: 주석으로 수정 위치 안내.
+ */
+function generateExpandTemplate(kind: ExpandTemplateKind, sourceAlias: string): string {
+  const a = sourceAlias || 't';
+  // 사용자 수정 부분은 {...} 마커로 표시 — input 안에서 부분 색/이탤릭은 native 로 안 되므로
+  // 시각적 구분은 마커 syntax 로. 사용자가 {...} 모두 교체하지 않으면 SQL invalid 라
+  // Trial 에서 즉시 피드백.
+  if (kind === 'wide_to_long') {
+    return `CROSS JOIN LATERAL (VALUES
+  ('{label1}', ${a}.{COLUMN_A}),
+  ('{label2}', ${a}.{COLUMN_B})
+) AS {alias}({label_col}, {value_col})`;
+  }
+  // array_unnest
+  return `, UNNEST([{'A','B','C'}], [${a}.{VAL_A}, ${a}.{VAL_B}, ${a}.{VAL_C}]) AS {alias}({code_col}, {val_col})`;
+}
+
+function parseExpandAliases(expr: string | undefined | null): { alias: string; columns: string[] }[] {
+  if (!expr) return [];
+  const out: { alias: string; columns: string[] }[] = [];
+  const re = /\bAS\s+(\w+)\s*\(\s*([^)]+)\s*\)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(expr)) !== null) {
+    const cols = m[2].split(',').map((c) => c.trim()).filter(Boolean);
+    if (cols.length > 0) out.push({ alias: m[1], columns: cols });
+  }
+  return out;
+}
+
+/**
+ * EXPAND template dropdown — binding 패널의 EXPAND label 우측에 표시.
+ * 사용자가 항목 선택 → onPick callback. kind=null 은 Clear (EXPAND 칸 비우기).
+ */
+function ExpandTemplateMenu({ onPick, disabled }: {
+  onPick: (kind: ExpandTemplateKind | null) => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener('mousedown', onDocClick);
+    return () => window.removeEventListener('mousedown', onDocClick);
+  }, [open]);
+  const pick = (kind: ExpandTemplateKind | null) => {
+    onPick(kind);
+    setOpen(false);
+  };
+  return (
+    <div ref={wrapRef} style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          background: 'transparent',
+          border: '1px solid var(--border)',
+          padding: '2px 8px',
+          fontSize: 10.5,
+          fontFamily: 'var(--mono)',
+          color: 'var(--text-2)',
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          opacity: disabled ? 0.5 : 1,
+          borderRadius: 2,
+        }}
+      >
+        {t('mapping.binding.expandTemplate.button')}
+      </button>
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '100%',
+            right: 0,
+            marginTop: 2,
+            background: 'var(--panel)',
+            border: '1px solid var(--border)',
+            borderRadius: 2,
+            boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
+            zIndex: 100,
+            minWidth: 200,
+            padding: '4px 0',
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => pick('wide_to_long')}
+            style={menuItemStyle}
+          >
+            {t('mapping.binding.expandTemplate.wideToLong')}
+          </button>
+          <button
+            type="button"
+            onClick={() => pick('array_unnest')}
+            style={menuItemStyle}
+          >
+            {t('mapping.binding.expandTemplate.arrayUnnest')}
+          </button>
+          <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+          <button
+            type="button"
+            onClick={() => pick(null)}
+            style={{ ...menuItemStyle, color: 'var(--text-3)' }}
+          >
+            {t('mapping.binding.expandTemplate.clear')}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const menuItemStyle: React.CSSProperties = {
+  display: 'block',
+  width: '100%',
+  textAlign: 'left',
+  background: 'transparent',
+  border: 'none',
+  padding: '6px 12px',
+  fontSize: 11,
+  fontFamily: 'var(--mono)',
+  color: 'var(--text)',
+  cursor: 'pointer',
+};
+
+/**
+ * Row N:1 aggregate template dropdown — Inspector 의 RULE 입력 칸 위에 표시.
+ * COUNT / SUM / AVG / MIN / MAX / SUM with CASE. kind=null 은 Clear.
+ */
+function AggregateTemplateMenu({ onPick, disabled }: {
+  onPick: (kind: AggregateTemplateKind | null) => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState('');
+  const [category, setCategory] = useState<'all' | 'sql' | 'udf'>('all');
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener('mousedown', onDocClick);
+    return () => window.removeEventListener('mousedown', onDocClick);
+  }, [open]);
+  useEffect(() => {
+    if (open) { setFilter(''); setCategory('all'); setTimeout(() => searchRef.current?.focus(), 0); }
+  }, [open]);
+  const pick = (kind: AggregateTemplateKind | null) => {
+    onPick(kind);
+    setOpen(false);
+  };
+  // 항목 정의 (section + label). filter 와 매칭 시만 표시.
+  type Item = { kind: AggregateTemplateKind; label: string };
+  const aggregateItems: Item[] = [
+    { kind: 'count_star', label: t('mapping.inspector.aggregate.count') },
+    { kind: 'sum',        label: t('mapping.inspector.aggregate.sum') },
+    { kind: 'avg',        label: t('mapping.inspector.aggregate.avg') },
+    { kind: 'min',        label: t('mapping.inspector.aggregate.min') },
+    { kind: 'max',        label: t('mapping.inspector.aggregate.max') },
+    { kind: 'cond_sum',   label: t('mapping.inspector.aggregate.condSum') },
+  ];
+  const udfItems: Item[] = [
+    { kind: 'apply_scale',            label: t('mapping.inspector.aggregate.applyScale') },
+    { kind: 'unpack_zone_decimal',    label: t('mapping.inspector.aggregate.unpackZoneDecimal') },
+    { kind: 'unpack_comp',            label: t('mapping.inspector.aggregate.unpackComp') },
+    { kind: 'unpack_comp_float',      label: t('mapping.inspector.aggregate.unpackCompFloat') },
+    { kind: 'unpack_signed_separate', label: t('mapping.inspector.aggregate.unpackSignedSeparate') },
+    { kind: 'unpack_overpunch',       label: t('mapping.inspector.aggregate.unpackOverpunch') },
+    { kind: 'convert_era',            label: t('mapping.inspector.aggregate.convertEra') },
+    { kind: 'assign_seq',             label: t('mapping.inspector.aggregate.assignSeq') },
+    { kind: 'validate_bizno',         label: t('mapping.inspector.aggregate.validateBizno') },
+    { kind: 'mask_phone',             label: t('mapping.inspector.aggregate.maskPhone') },
+    { kind: 'hash_sha256',            label: t('mapping.inspector.aggregate.hashSha256') },
+    { kind: 'normalize_corp',         label: t('mapping.inspector.aggregate.normalizeCorp') },
+  ];
+  const lo = filter.toLowerCase().trim();
+  const matches = (item: Item) => !lo || item.label.toLowerCase().includes(lo) || item.kind.toLowerCase().includes(lo);
+  const aggFiltered = category === 'udf' ? [] : aggregateItems.filter(matches);
+  const udfFiltered = category === 'sql' ? [] : udfItems.filter(matches);
+  return (
+    <div ref={wrapRef} style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          background: 'transparent',
+          border: '1px solid var(--border)',
+          padding: '2px 8px',
+          fontSize: 10.5,
+          fontFamily: 'var(--mono)',
+          color: 'var(--text-2)',
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          opacity: disabled ? 0.5 : 1,
+          borderRadius: 2,
+        }}
+      >
+        {t('mapping.inspector.aggregate.button')}
+      </button>
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '100%',
+            right: 0,
+            marginTop: 2,
+            background: 'var(--panel)',
+            border: '1px solid var(--border)',
+            borderRadius: 2,
+            boxShadow: '0 2px 6px rgba(0,0,0,0.08)',
+            zIndex: 100,
+            minWidth: 260,
+            maxHeight: 360,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+          }}
+        >
+          {/* 검색 input + 카테고리 chip. esc 시 닫음. */}
+          <div style={{ padding: '6px 8px', borderBottom: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <input
+              ref={searchRef}
+              type="text"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false); }}
+              placeholder="Filter (e.g. sum, unpack, mask)"
+              style={{
+                width: '100%',
+                fontSize: 11,
+                fontFamily: 'var(--mono)',
+                padding: '4px 6px',
+                border: '1px solid var(--border)',
+                borderRadius: 2,
+                background: 'var(--bg)',
+                color: 'var(--text)',
+                outline: 'none',
+              }}
+            />
+            <div style={{ display: 'flex', gap: 4 }}>
+              {(['all', 'sql', 'udf'] as const).map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => setCategory(c)}
+                  style={{
+                    flex: 1,
+                    fontSize: 10,
+                    padding: '3px 6px',
+                    border: `1px solid ${category === c ? 'var(--navy)' : 'var(--border)'}`,
+                    background: category === c ? 'var(--navy-50)' : 'transparent',
+                    color: category === c ? 'var(--navy)' : 'var(--text-2)',
+                    borderRadius: 10,
+                    cursor: 'pointer',
+                    fontWeight: category === c ? 600 : 400,
+                  }}
+                >
+                  {c === 'all' ? 'All' : c === 'sql' ? 'SQL' : 'UDF'}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div style={{ overflowY: 'auto', flex: 1, padding: '4px 0' }}>
+            {aggFiltered.length > 0 && (
+              <>
+                <div style={menuSectionHeader}>SQL Aggregate</div>
+                {aggFiltered.map((it) => (
+                  <button key={it.kind} type="button" onClick={() => pick(it.kind)} style={menuItemStyle}>
+                    {it.label}
+                  </button>
+                ))}
+              </>
+            )}
+            {udfFiltered.length > 0 && (
+              <>
+                {aggFiltered.length > 0 && <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />}
+                <div style={menuSectionHeader}>DuckDB UDF</div>
+                {udfFiltered.map((it) => (
+                  <button key={it.kind} type="button" onClick={() => pick(it.kind)} style={menuItemStyle}>
+                    {it.label}
+                  </button>
+                ))}
+              </>
+            )}
+            {aggFiltered.length === 0 && udfFiltered.length === 0 && (
+              <div style={{ padding: '8px 12px', fontSize: 11, color: 'var(--text-3)', textAlign: 'center' }}>
+                no match
+              </div>
+            )}
+          </div>
+          <div style={{ height: 1, background: 'var(--border)' }} />
+          <button type="button" onClick={() => pick(null)} style={{ ...menuItemStyle, color: 'var(--text-3)' }}>
+            {t('mapping.inspector.aggregate.clear')}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const menuSectionHeader: React.CSSProperties = {
+  padding: '4px 12px 2px',
+  fontSize: 9.5,
+  textTransform: 'uppercase',
+  letterSpacing: 0.6,
+  color: 'var(--text-3)',
+  fontWeight: 600,
+};
+
+function resolveSrcType(s: string, sources: TobeTable['sources'], expandExpr?: string): string {
   if (!s) return '—';
   const di = s.indexOf('.');
   if (di < 0) {
     // No alias prefix — search every bound source table for the first matching column.
     for (const src of sources) {
-      const col = (ASIS_COLUMNS[src.table] || []).find((c) => c.name === s);
+      const col = lookupAsisCols(src.table).find((c) => c.name === s);
       if (col) return col.type;
     }
     return '—';
@@ -1955,7 +3165,16 @@ function resolveSrcType(s: string, sources: TobeTable['sources']): string {
   const alias = s.slice(0, di);
   const col = s.slice(di + 1);
   const entry = sources.find((e) => e.alias === alias);
-  return (entry ? (ASIS_COLUMNS[entry.table] || []).find((c) => c.name === col)?.type : undefined) ?? '—';
+  if (entry) {
+    return lookupAsisCols(entry.table).find((c) => c.name === col)?.type ?? '—';
+  }
+  // expand_expr 의 AS u(col1, col2) 같은 펼침 alias 면 type = VARCHAR fallback
+  // (expand 의 값은 SQL fragment 라 정확한 type 추론 불가; all_varchar input 의 일관 fallback).
+  if (expandExpr) {
+    const exp = parseExpandAliases(expandExpr).find((e) => e.alias === alias);
+    if (exp && exp.columns.includes(col)) return 'VARCHAR';
+  }
+  return '—';
 }
 
 function validateRule(code: string): string | null {
@@ -2006,6 +3225,8 @@ const _str  = (s: string) => `<span style="color:#9fd9b3">${_e(s)}</span>`;
 const _cmt  = (s: string) => `<span style="color:#7a8aa6">${_e(s)}</span>`;
 const _num  = (s: string) => `<span style="color:#79c0ff">${_e(s)}</span>`;
 const _def  = (s: string) => `<span style="color:#cad7e8">${_e(s)}</span>`;
+/** template placeholder {...} — 사용자가 채워야 할 marker. 노란 50% alpha 배경 + 흰 글자. */
+const _ph   = (s: string) => `<span style="background:rgba(250,204,21,0.5);color:#ffffff;padding:0 3px;border-radius:2px">${_e(s)}</span>`;
 
 // 예약어 / 절 / 타입 — 주황 (#e8b86f) 으로 강조.
 const SQL_KW = new Set(['SELECT','FROM','WHERE','AND','OR','NOT','IN','IS','NULL','AS','JOIN','LEFT','RIGHT','INNER','OUTER','FULL','ON','DROP','DEFAULT','UNION','ALL','DISTINCT','CASE','WHEN','THEN','ELSE','END','TRUE','FALSE','WITH','INSERT','UPDATE','DELETE','LIKE','BETWEEN','EXISTS','USING','INTO','RETURNS','ORDER','GROUP','BY','HAVING','LIMIT','OFFSET','NUMERIC','INTEGER','VARCHAR','CHAR','DATE','TIMESTAMP','BOOLEAN','UUID','TEXT','JSONB','INT','BIGINT','FLOAT','DOUBLE']);
@@ -2047,19 +3268,23 @@ const SQL_FUNCS = new Set(Object.keys(SQL_FUNC_SIGS));
 // 백엔드: backend/.../common/duckdb/udf/{UdfRegistry, *Udf}.java
 const UDF_FUNC_SIGS: Record<string, string> = {
   // 숫자 / 소수점
-  APPLY_SCALE:         '(raw_hex, scale)',
-  UNPACK_ZONE_DECIMAL: '(zone_hex)',
+  APPLY_SCALE:            '(raw_hex, scale)',
+  UNPACK_ZONE_DECIMAL:    '(zone_hex)',
+  UNPACK_COMP:            '(raw_hex, scale)',
+  UNPACK_COMP_FLOAT:      '(raw_hex)',
+  UNPACK_SIGNED_SEPARATE: '(raw)',
+  UNPACK_OVERPUNCH:       '(raw)',
   // 날짜 / 시간
-  CONVERT_ERA:         '(era_text)',
+  CONVERT_ERA:            '(era_text)',
   // 채번
-  ASSIGN_SEQ:          '(partition_key)',
+  ASSIGN_SEQ:             '(partition_key)',
   // 식별자 검증
-  VALIDATE_BIZNO:      '(bizno)',
+  VALIDATE_BIZNO:         '(bizno)',
   // 마스킹 / 해시
-  MASK_PHONE:          '(phone)',
-  HASH_SHA256:         '(input)',
+  MASK_PHONE:             '(phone)',
+  HASH_SHA256:            '(input)',
   // 문자열 정규화
-  NORMALIZE_CORP:      '(corp_name)',
+  NORMALIZE_CORP:         '(corp_name)',
 };
 const UDF_FUNCS = new Set(Object.keys(UDF_FUNC_SIGS));
 
@@ -2079,6 +3304,12 @@ function highlightSql(raw: string): string {
   const out: string[] = [];
   let i = 0;
   while (i < raw.length) {
+    if (raw[i] === '{') {
+      // {word} placeholder — template marker. {scale}, {cond_col} 등. 일반 코드 block `{` 와
+      // 구분 위해 [A-Za-z_]\w* 패턴만. 폐쇄 brace 까지.
+      const m = raw.slice(i).match(/^\{[A-Za-z_][\w]*\}/);
+      if (m) { out.push(_ph(m[0])); i += m[0].length; continue; }
+    }
     if (raw[i] === '-' && raw[i + 1] === '-') {
       const end = raw.indexOf('\n', i);
       const s = end < 0 ? raw.slice(i) : raw.slice(i, end + 1);
@@ -2114,6 +3345,10 @@ function highlightJava(raw: string): string {
   const out: string[] = [];
   let i = 0;
   while (i < raw.length) {
+    if (raw[i] === '{') {
+      const m = raw.slice(i).match(/^\{[A-Za-z_][\w]*\}/);
+      if (m) { out.push(_ph(m[0])); i += m[0].length; continue; }
+    }
     if (raw[i] === '/' && raw[i + 1] === '*') {
       const end = raw.indexOf('*/', i + 2);
       const s = end < 0 ? raw.slice(i) : raw.slice(i, end + 2);
@@ -2143,7 +3378,7 @@ function highlightJava(raw: string): string {
 }
 
 function HighlightEditor({
-  value, onChange, language, placeholder, minHeight, hasError, completions,
+  value, onChange, language, placeholder, minHeight, hasError, completions, onCancel,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -2152,6 +3387,8 @@ function HighlightEditor({
   minHeight?: number;
   hasError?: boolean;
   completions?: string[];
+  /** Esc 시 호출 (autocomplete dropdown 떠있지 않을 때만). Cancel 버튼과 동등. */
+  onCancel?: () => void;
 }) {
   const preRef = useRef<HTMLPreElement>(null);
   const taRef  = useRef<HTMLTextAreaElement>(null);
@@ -2159,6 +3396,8 @@ function HighlightEditor({
   const [isFocused, setIsFocused] = useState(false);
   const [acItems, setAcItems] = useState<string[]>([]);
   const [acIdx, setAcIdx] = useState(0);
+  // Ctrl+Space 로 강제 popup 트리거 — 빈 word 일 때도 전체 completions 표시.
+  const [force, setForce] = useState(false);
 
   useLayoutEffect(() => {
     if (savedCursor.current !== null && taRef.current) {
@@ -2167,19 +3406,34 @@ function HighlightEditor({
     }
   }, [value]);
 
-  // Refresh autocomplete after each value/focus change (runs after cursor is restored)
+  // Refresh autocomplete after each value/focus change (runs after cursor is restored).
+  // acIdx reset 은 hits 가 *실제로 변경됐을 때만* — 사용자가 ArrowDown 으로 선택한 후 같은
+  // word 의 effect 재실행 (caret 이동, focus 토글 등) 으로 인해 highlight 가 첫 항목으로
+  // 되돌아가지 않도록.
   useEffect(() => {
-    if (!isFocused || !completions?.length || !taRef.current) { setAcItems([]); return; }
+    if (!isFocused || !completions?.length || !taRef.current) {
+      setAcItems((prev) => { if (prev.length) { setAcIdx(0); return []; } return prev; });
+      return;
+    }
     const pos = taRef.current.selectionStart;
     let s = pos;
     while (s > 0 && /[\w.]/.test(value[s - 1])) s--;
     const word = value.slice(s, pos);
-    if (word.length < 1) { setAcItems([]); return; }
+    if (!force && word.length < 1) {
+      setAcItems((prev) => { if (prev.length) { setAcIdx(0); return []; } return prev; });
+      return;
+    }
     const lo = word.toLowerCase();
-    const hits = completions.filter((c) => c.toLowerCase().includes(lo) && c.toLowerCase() !== lo).slice(0, 10);
-    setAcItems(hits);
-    setAcIdx(0);
-  }, [value, isFocused]); // eslint-disable-line react-hooks/exhaustive-deps
+    const hits = force && word.length === 0
+      ? completions.slice(0, 10)
+      : completions.filter((c) => c.toLowerCase().includes(lo) && c.toLowerCase() !== lo).slice(0, 10);
+    setAcItems((prev) => {
+      const same = prev.length === hits.length && prev.every((p, i) => p === hits[i]);
+      if (same) return prev;
+      setAcIdx(0);
+      return hits;
+    });
+  }, [value, isFocused, force]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const applyAc = (item: string) => {
     if (!taRef.current) return;
@@ -2209,14 +3463,33 @@ function HighlightEditor({
     savedCursor.current = { start: before.length + cursorOffset, end: before.length + cursorOffset };
     onChange(before + inserted + after);
     setAcItems([]);
+    setForce(false);
     taRef.current.focus();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Ctrl+Space — 강제 자동완성 popup 트리거.
+    if ((e.ctrlKey || e.metaKey) && e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      setForce(true);
+      return;
+    }
+    // Esc — dropdown 떠있으면 dropdown 만 닫음, 아니면 onCancel 호출 (Cancel 버튼 동등).
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      if (acItems.length) {
+        setForce(false);
+        setAcItems([]);
+      } else if (onCancel) {
+        e.preventDefault();
+        onCancel();
+      }
+      return;
+    }
     if (!acItems.length) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); setAcIdx((i) => Math.min(i + 1, acItems.length - 1)); return; }
     if (e.key === 'ArrowUp')   { e.preventDefault(); setAcIdx((i) => Math.max(i - 1, 0)); return; }
-    if (e.key === 'Escape')    { setAcItems([]); return; }
     if (e.key === 'Tab' || e.key === 'Enter') { e.preventDefault(); applyAc(acItems[acIdx]); return; }
   };
 
@@ -2256,7 +3529,7 @@ function HighlightEditor({
         }}
         onKeyDown={handleKeyDown}
         onFocus={() => setIsFocused(true)}
-        onBlur={() => { setIsFocused(false); setAcItems([]); }}
+        onBlur={() => { setIsFocused(false); setAcItems([]); setForce(false); }}
         onScroll={syncScroll}
         spellCheck={false}
         style={{ ...shared, position: 'relative', zIndex: 1, color: 'transparent', caretColor: '#cad7e8', background: 'transparent', resize: 'vertical', outline: 'none', overflow: 'auto' }}
@@ -2291,10 +3564,11 @@ function HighlightEditor({
 
 // ── Inspector ────────────────────────────────────────────────
 
-function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
+function Inspector({ active, composition, sources, expandExpr, rowEdit, onSave, onClose }: {
   active: MappingRow | undefined;
   composition: TobeTable['compositionKind'];
   sources: TobeTable['sources'];
+  expandExpr?: string;
   rowEdit?: RowEdit;
   onSave: (edit: RowEdit) => void;
   onClose: () => void;
@@ -2317,6 +3591,25 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
   const [javaCode, setJavaCode] = useState('');
   const [notesOpen, setNotesOpen] = useState(false);
   useEffect(() => { setNotesOpen(false); }, [active?.tgt]);
+
+  // Esc — 편집 중이면 cancel, 아니면 inspector 닫기. textarea/input focus 일 때는
+  // 그쪽 (HighlightEditor / AutocompleteInput) 이 우선 처리 — focus 체크로 양보.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.isComposing) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.isContentEditable)) return;
+      if (editingRule) {
+        setEditingRule(false);
+        setRuleError(null);
+      } else {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [editingRule, onClose]);
+
   useEffect(() => {
     // 같은 컬럼이면 effective rule 갱신으로 active 객체 reference 가 새로 만들어져도
     // 편집 모드를 종료하지 않는다 — active.tgt 만 dep 로 사용.
@@ -2330,23 +3623,39 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     setSavedSrcType(src ? src.map((s) => resolveSrcType(s, sources)) : null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.tgt]);
+  /* hooks 는 반드시 early return 위에 — active 가 null 로 바뀌는 렌더에서 hook 개수가
+     줄어 React #300 (Rendered fewer hooks) 발생 (2026-06-03 fix). */
+  const prevAutoCastRef = useRef('');
   if (!active) return null;
   const initSrc: string[] = active.src === '—' ? [] : [active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src];
   const resolveType = (s: string) => resolveSrcType(s, sources);
-  const validAliases = new Set(sources.map((s) => s.alias));
-  const prevAutoCastRef = useRef('');
+  // binding sources 의 alias + expand_expr 의 AS u(...) 의 alias 모두 valid 로 인정.
+  // expand alias 가 invalid 로 잡히면 row editor 의 cleanedSrc filter 에서 제거되어 사용자가
+  // 선택한 u.channel 같은 source 가 사라짐.
+  const validAliases = new Set([
+    ...sources.map((s) => s.alias),
+    ...parseExpandAliases(expandExpr).map((e) => e.alias),
+  ]);
 
   // 슬롯 i 의 source 값을 새 값으로 바꾸고, 첫 번째 슬롯이면 CAST 자동 입력 갱신.
   // editValue 가 비어있거나 이전 자동 CAST 와 같을 때만 덮어써서 사용자 수동 입력은 보존.
-  const computeAutoCast = (firstSrc: string | undefined): string => {
-    if (!firstSrc || !active) return '';
-    const srcCol = firstSrc.includes('.') ? firstSrc.slice(firstSrc.indexOf('.') + 1) : firstSrc;
-    const srcT = resolveSrcType(firstSrc, sources);
-    if (!srcT || srcT === '—' || active.tgtType === '—') return '';
-    // AS-IS type 을 TO-BE dialect 로 정규화한 결과가 TO-BE 컬럼 type 과 같으면 단순 컬럼.
-    const translatedSrcT = translateTypeToTobe(srcT, TOBE_DIALECT);
-    const same = translatedSrcT.toUpperCase() === active.tgtType.toUpperCase();
-    return same ? srcCol : `CAST(${srcCol} AS ${active.tgtType})`;
+  const computeAutoCast = (srcs: string | string[] | undefined): string => {
+    if (!active) return '';
+    // 단일 source 면 그대로, multi-source 면 || (concat) 로 합침.
+    // 사용자가 row editor 에서 의도에 맞게 수정 (MAKE_DATE / CONCAT with delimiter 등).
+    const arr = Array.isArray(srcs) ? srcs : (srcs ? [srcs] : []);
+    const filtered = arr.filter((s) => s && s.trim());
+    if (!filtered.length) return '';
+    const expr = filtered.length === 1 ? filtered[0] : filtered.join(' || ');
+    if (!active.tgtType || active.tgtType === '—') return expr;
+    // ExtractStage 의 all_varchar=true 로 실데이터 input 이 모두 VARCHAR. asis_type 무시 —
+    // tgtType 만 보고 결정 (backend MappingImportService 의 자동 생성 logic 과 일관).
+    //   tgtType 이 string 카테고리 → expr 그대로 (VARCHAR → VARCHAR no-op)
+    //   그 외 → CAST 박음 (VARCHAR → tgtType 변환 필요)
+    const tt = active.tgtType.toUpperCase().trim();
+    const isString = tt.startsWith('VARCHAR') || tt.startsWith('CHAR')
+      || tt === 'TEXT' || tt === 'CLOB' || tt.startsWith('NVARCHAR');
+    return isString ? expr : `CAST(${expr} AS ${active.tgtType})`;
   };
 
   const handleEdit = () => {
@@ -2365,18 +3674,19 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     });
     const filledSrcs = cleanedSrc.filter((s) => s && s.trim() !== '');
 
-    // 자동 CAST 생성:
-    //   - source 가 2개 이상 (combine) → editValue 는 빈 칸. placeholder 가 '-- combine' 안내 표시.
-    //     클릭 시 placeholder 사라지고 사용자가 바로 입력 가능.
-    //   - source 1개 → computeAutoCast 로 dialect 변환표 적용한 CAST 를 editValue 에 채움 (편집 시작점)
-    //   - source 0개 → 빈 자동값 (computeAutoCast 가 '' 반환)
+    // 자동 CAST 생성: computeAutoCast 가 single / multi-source 모두 처리
+    //   - source ≥ 2 → 모든 source 를 || 로 concat 후 tobe_type 으로 CAST. 사용자가 row editor
+    //     에서 의도에 맞게 수정 (MAKE_DATE 같은 specific 함수로)
+    //   - source 1 → 단일 src 로 CAST
+    //   - source 0 → 빈 자동값
     let initialAutoCast: string;
-    if (filledSrcs.length > 1) {
-      initialAutoCast = '';
+    if (filledSrcs.length > 0) {
+      initialAutoCast = computeAutoCast(filledSrcs);
+    } else if (active.src !== '—') {
+      const fallback = active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src;
+      initialAutoCast = computeAutoCast(fallback);
     } else {
-      const firstSrcForCast = filledSrcs[0]
-        || (active.src !== '—' ? (active.sourceAlias ? `${active.sourceAlias}.${active.src}` : active.src) : undefined);
-      initialAutoCast = computeAutoCast(firstSrcForCast);
+      initialAutoCast = '';
     }
     prevAutoCastRef.current = initialAutoCast;
     setEditValue(savedRule ?? initialAutoCast);
@@ -2420,15 +3730,8 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
     // 어느 슬롯 변경이든 자동 식을 다시 평가 (combine 추가/제거 시점 캐치).
     // 단, editValue 가 이전 자동값과 다르면 = 사용자가 손댄 식이므로 보존.
     const filledSrcs = nextEditSrc.filter((s) => s && s.trim() !== '');
-    let newAutoCast: string;
-    if (filledSrcs.length > 1) {
-      // combine — 빈 칸으로 두고 placeholder 가 '-- combine' 안내 표시.
-      newAutoCast = '';
-    } else if (filledSrcs.length === 1) {
-      newAutoCast = computeAutoCast(filledSrcs[0]);
-    } else {
-      newAutoCast = '';
-    }
+    // single / multi-source 모두 computeAutoCast 가 처리 (multi 면 || concat 후 CAST)
+    const newAutoCast = filledSrcs.length > 0 ? computeAutoCast(filledSrcs) : '';
     if (editValue === prevAutoCastRef.current) {
       setEditValue(newAutoCast);
     }
@@ -2466,14 +3769,14 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
             <button
               type="button"
               onClick={handleClear}
-              title="이 컬럼의 매핑·룰 흔적을 모두 초기화합니다."
+              title={t('mapping.tooltip.resetColumn')}
               style={styles.inspectorHeaderIconBtn}
             ><Ic.refresh /></button>
           )}
           <button
             type="button"
             onClick={onClose}
-            title="Mapping detail 닫기"
+            title={t('mapping.tooltip.closeDetail')}
             style={styles.inspectorHeaderClose}
           ><Ic.x /></button>
         </div>
@@ -2495,9 +3798,16 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
                   >
                     <option value="">— unassigned —</option>
                     {sources.flatMap((src) =>
-                      (ASIS_COLUMNS[src.table] || []).map((c) => (
+                      lookupAsisCols(src.table).map((c) => (
                         <option key={`${src.alias}.${c.name}`} value={`${src.alias}.${c.name}`}>
                           [{src.alias}] {c.name}  ({c.type})
+                        </option>
+                      ))
+                    )}
+                    {parseExpandAliases(expandExpr).flatMap((e) =>
+                      e.columns.map((c) => (
+                        <option key={`${e.alias}.${c}`} value={`${e.alias}.${c}`}>
+                          [{e.alias}] {c}  (expand)
                         </option>
                       ))
                     )}
@@ -2650,6 +3960,24 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
               })();
               return (
                 <>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4 }}>
+                    <AggregateTemplateMenu
+                      onPick={(kind) => {
+                        if (kind === null) {
+                          setEditValue('');
+                          return;
+                        }
+                        // 첫 source 의 alias / column 자동 인식.
+                        const firstSrc = editSrc.find((s) => s && s.trim());
+                        const di = firstSrc?.indexOf('.') ?? -1;
+                        const alias = di >= 0 ? firstSrc!.slice(0, di) : '';
+                        const col = di >= 0 ? firstSrc!.slice(di + 1) : firstSrc || '';
+                        setEditValue(generateAggregateTemplate(kind, alias, col));
+                        if (ruleError) setRuleError(null);
+                      }}
+                      disabled={readOnly}
+                    />
+                  </div>
                   <HighlightEditor
                     value={editValue}
                     onChange={(v) => { setEditValue(upperSqlKeywords(v)); if (ruleError) setRuleError(null); }}
@@ -2658,6 +3986,7 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
                     hasError={!!ruleError}
                     completions={localCompletions}
                     minHeight={72}
+                    onCancel={() => setEditingRule(false)}
                   />
                   {ruleError && <div style={styles.ruleErrorMsg}>{ruleError}</div>}
                 </>
@@ -2674,8 +4003,9 @@ function Inspector({ active, composition, sources, rowEdit, onSave, onClose }: {
                 value={editDefault}
                 onChange={setEditDefault}
                 language="sql"
-                placeholder={`예: 0  /  'N'  /  CURRENT_TIMESTAMP  (비우면 NULL — 모든 행에 이 값으로 채움)`}
+                placeholder={`${t('mapping.eg')}: 0  /  'N'  /  CURRENT_TIMESTAMP  ${t('mapping.placeholder.defaultEmptyNote')}`}
                 minHeight={48}
+                onCancel={() => setEditingRule(false)}
               />
             )}
           </>
@@ -2771,6 +4101,7 @@ function ImportFileModal({
   onClose: () => void;
   onImported?: () => void;
 }) {
+  const t = useT();
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -2825,12 +4156,12 @@ function ImportFileModal({
                   title={file.name}
                 >{file.name}</div>
                 <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 4 }}>
-                  {(file.size / 1024).toFixed(1)} KB · 다른 파일을 선택하려면 다시 클릭
+                  {(file.size / 1024).toFixed(1)} KB · {t('mapping.import.reselectHint')}
                 </div>
               </div>
             ) : (
               <div style={{ textAlign: 'center', color: 'var(--text-3)' }}>
-                <div style={{ fontSize: 13, marginBottom: 4 }}>파일을 끌어다 놓거나 클릭해서 선택</div>
+                <div style={{ fontSize: 13, marginBottom: 4 }}>{t('mapping.import.dropHint')}</div>
                 <div style={{ fontSize: 11 }}>{acceptLabel}</div>
               </div>
             )}
@@ -2907,6 +4238,8 @@ function rulesEqual(a: FrozenRule[], b: MappingRuleDto[]): boolean {
 function bindingSignature(b: {
   tobeSchema: string; tobeTable: string;
   compositionKind: string; whereFilter?: string | null;
+  groupByExpr?: string | null; expandExpr?: string | null;
+  sharedFromProjectId?: string | null;
   sources: Array<{
     ordinal: number; asisSchema?: string | null; asisTable: string;
     alias: string; role: string; joinType?: string | null; joinOn?: string | null;
@@ -2920,6 +4253,9 @@ function bindingSignature(b: {
     k: `${b.tobeSchema}|${b.tobeTable}`,
     ck: b.compositionKind,
     wf: b.whereFilter ?? null,
+    gb: b.groupByExpr ?? null,
+    ex: b.expandExpr ?? null,
+    sf: b.sharedFromProjectId ?? null,
     srcs,
   });
 }
@@ -2938,8 +4274,10 @@ function MappingDefinitionImportModal({
   projectId: string;
   activeFiles: { column: string | null; code: string | null };
   onClose: () => void;
-  /** Returns the list of TO-BE qualified names from DB bindings that didn't match TOBE_TABLES. */
-  onChanged: () => Promise<string[]>;
+  /** Returns the list of TO-BE qualified names that are in the DDL but missing from mapping rules.
+   *  Caller passes tableFilter so table-remap narrows the check to that single TO-BE table; project-wide
+   *  import passes null and checks the entire DDL. */
+  onChanged: (tableFilter: string | null) => Promise<string[]>;
   /** null/undefined = 프로젝트 전체. 값이 있으면 그 TO-BE 테이블만 적용 (스키마 제외 테이블명). */
   tableFilter?: string | null;
 }) {
@@ -2973,6 +4311,9 @@ function MappingDefinitionImportModal({
         await mappingImportApi.reapplyLatest(projectId, tableFilter ?? null);
       }
       await mappingImportApi.rebuildBindings(projectId);
+      // mapping 을 건드린 셈이므로 phase 를 analysis 로 demote — rule 직접 편집과 동일 정책.
+      // import / reapply / delete / 단순 rebuild 어떤 경로든 일관되게 적용.
+      demoteToAnalysisOnEdit(projectId);
 
       // Snapshot baseline 자동 해제: apply 후 데이터가 frozen snapshotData 와 달라지면 핀 해제.
       // - code CSV 변경 (codePending != 'none') → frozen codeMaps 와 다를 가능성 매우 큼.
@@ -2998,7 +4339,7 @@ function MappingDefinitionImportModal({
         }
       }
 
-      const unmatched = await onChanged();
+      const unmatched = await onChanged(tableFilter ?? null);
       if (unmatched.length > 0) {
         const shown = unmatched.slice(0, 5).join(', ');
         const more = unmatched.length > 5 ? ` 외 ${unmatched.length - 5}개` : '';
@@ -3026,8 +4367,8 @@ function MappingDefinitionImportModal({
   const codDisp = displayName('code');
 
   return (
-    <div style={styles.modalBackdrop} onClick={saving ? undefined : onClose}>
-      <div style={{ ...styles.modalCard, width: 520 }} onClick={(e) => e.stopPropagation()}>
+    <div style={styles.modalBackdrop}>
+      <div style={{ ...styles.modalCard, width: 520 }}>
         <div style={styles.modalHeader}>
           <div style={styles.modalTitle}>Mapping Definition{tableFilter ? ` · ${tableFilter}` : ''}</div>
           <div style={{ flex: 1 }} />
@@ -3081,7 +4422,7 @@ function MappingDefinitionImportModal({
             style={!saving ? styles.btnPrimary : styles.btnPrimaryDisabled}
             disabled={saving}
             onClick={handleApply}
-          >{saving ? 'Applying…' : 'Apply'}</button>
+          >{saving ? 'Applying' : 'Apply'}</button>
           <button style={styles.btnSecondary} disabled={saving} onClick={onClose}>Close</button>
         </div>
       </div>
@@ -3216,13 +4557,26 @@ function useReportRows(
   projectId: string | null,
   tobeSchema: string,
   tobeTable: string | undefined,
-): { result: MappingReportResult | null; loading: boolean } {
+  prefetched?: MappingReportResult | null,
+): { result: MappingReportResult | null; loading: boolean; durationMs: number | null; executedAt: Date | null } {
   const [result, setResult] = useState<MappingReportResult | null>(null);
   const [loading, setLoading] = useState(false);
+  // 실제 Report 쿼리 round-trip 소요시간 + 완료 시각 (상태바 표시용 — 가짜 0.0s/렌더타임 대체).
+  const [durationMs, setDurationMs] = useState<number | null>(null);
+  const [executedAt, setExecutedAt] = useState<Date | null>(null);
   useEffect(() => {
-    if (!projectId || !tobeTable) { setResult(null); return; }
+    if (!projectId || !tobeTable) { setResult(null); setDurationMs(null); setExecutedAt(null); return; }
+    // Trial 이 이미 변환한 결과(prefetched)가 있으면 재변환 없이 재사용 (#8-1) — 이중 변환 방지.
+    if (prefetched) {
+      setResult(prefetched);
+      setDurationMs(0);
+      setExecutedAt(new Date());
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
+    const startedAt = performance.now();
     mappingImportApi.runReport(projectId, tobeSchema, tobeTable, 20)
       .then((r) => { if (!cancelled) setResult(r); })
       .catch((e) => {
@@ -3231,10 +4585,15 @@ function useReportRows(
           sql: null, error: e instanceof Error ? e.message : String(e),
         });
       })
-      .finally(() => { if (!cancelled) setLoading(false); });
+      .finally(() => {
+        if (cancelled) return;
+        setDurationMs(performance.now() - startedAt);
+        setExecutedAt(new Date());
+        setLoading(false);
+      });
     return () => { cancelled = true; };
-  }, [projectId, tobeSchema, tobeTable]);
-  return { result, loading };
+  }, [projectId, tobeSchema, tobeTable, prefetched]);
+  return { result, loading, durationMs, executedAt };
 }
 
 /**
@@ -3321,9 +4680,14 @@ function isNumericType(t: string): boolean {
     || u.startsWith('numeric') || u.startsWith('number') || u.startsWith('decimal');
 }
 
-function ReportView({ table, rows, onClose, onPickColumn }: {
+function ReportView({ table, rows, sources, prefetched, onClose, onPickColumn }: {
   table: TobeTable;
   rows: MappingRow[];
+  /** Editor 가 현재 보유한 binding sources. table.sources (TOBE_TABLES) 가 module-level 이라
+   * binding edit 으로 추가된 source 가 반영 안 되어, 명시적으로 받아서 사용. */
+  sources: TobeTable['sources'];
+  /** Trial 이 이미 변환한 결과 — 있으면 재변환 없이 재사용 (#8-1). */
+  prefetched?: MappingReportResult | null;
   onClose: () => void;
   onPickColumn: (tgt: string) => void;
 }) {
@@ -3346,14 +4710,38 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
       ? { schema: table.name.slice(0, i), table: table.name.slice(i + 1) }
       : { schema: '', table: table.name };
   }, [table.name]);
-  const { result: report, loading: reportLoading } = useReportRows(activeProject?.id ?? null, tobeSplit.schema, tobeSplit.table);
+  const { result: report, loading: reportLoading, durationMs: reportDurationMs, executedAt: reportExecutedAt } = useReportRows(activeProject?.id ?? null, tobeSplit.schema, tobeSplit.table, prefetched);
   const reportColIdx = useMemo(() => {
     if (!report) return null;
     const m = new Map<string, number>();
     report.headers.forEach((h, i) => m.set(h.trim().toLowerCase(), i));
     return m;
   }, [report]);
-  const dataRowCount = report ? Math.min(report.rows.length, PREVIEW_ROWS) : 0;
+
+  // viewMode: 'tobe' (기본, 변환 결과) / 'asis' (raw csv VARCHAR 그대로).
+  // ↶ 버튼 → asis 로 되돌리기 / ↷ 버튼 → tobe 로 앞으로.
+  const [viewMode, setViewMode] = useState<'tobe' | 'asis'>('tobe');
+  // binding edit 의 sources 우선, 없으면 module-level fallback.
+  const effectiveSources = sources && sources.length > 0 ? sources : table.sources;
+  const firstSource = effectiveSources[0];
+  const [asisPreview, setAsisPreview] = useState<CsvPreview | null>(null);
+  const [asisPreviewLoading, setAsisPreviewLoading] = useState(false);
+  useEffect(() => {
+    if (viewMode !== 'asis' || !firstSource || !activeSite) return;
+    if (asisPreview) return; // cache
+    let alive = true;
+    setAsisPreviewLoading(true);
+    csvPreviewApi.forTable(activeSite.id, firstSource.table, PREVIEW_ROWS)
+      .then((p) => { if (alive) setAsisPreview(p); })
+      .catch(() => { if (alive) setAsisPreview(null); })
+      .finally(() => { if (alive) setAsisPreviewLoading(false); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode, firstSource?.table, activeSite?.id]);
+
+  const dataRowCount = viewMode === 'tobe'
+    ? (report ? Math.min(report.rows.length, PREVIEW_ROWS) : 0)
+    : (asisPreview ? Math.min(asisPreview.rows.length, PREVIEW_ROWS) : 0);
   // 디버그 — 결과가 도착했을 때 한 번만 찍음
   useEffect(() => {
     if (!report) return;
@@ -3389,7 +4777,7 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
           <button
             type="button"
             onClick={onClose}
-            title="Mapping 화면으로 돌아가기"
+            title={t('mapping.tooltip.backToMapping')}
             style={{ ...styles.dbvTitleBtn, ...styles.dbvTitleBtnClose }}
             aria-label="Close report"
           >✕</button>
@@ -3407,7 +4795,32 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
       <div style={styles.dbvToolbar}>
         {['📄','📂','💾'].map((s, i) => <span key={`g1-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
         <span style={styles.dbvToolSep} />
-        {['↶','↷'].map((s, i) => <span key={`g2-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
+        <button
+          type="button"
+          onClick={() => setViewMode('asis')}
+          disabled={viewMode === 'asis' || !firstSource}
+          title={viewMode === 'asis' ? t('mapping.report.toAsisTitle.already') : t('mapping.report.toAsisTitle.revert')}
+          style={{
+            ...styles.dbvToolBtn,
+            background: 'transparent',
+            border: 'none',
+            cursor: viewMode === 'asis' || !firstSource ? 'not-allowed' : 'pointer',
+            opacity: viewMode === 'asis' || !firstSource ? 0.35 : 1,
+          }}
+        >↶</button>
+        <button
+          type="button"
+          onClick={() => setViewMode('tobe')}
+          disabled={viewMode === 'tobe'}
+          title={viewMode === 'tobe' ? t('mapping.report.toTobeTitle.already') : t('mapping.report.toTobeTitle.forward')}
+          style={{
+            ...styles.dbvToolBtn,
+            background: 'transparent',
+            border: 'none',
+            cursor: viewMode === 'tobe' ? 'not-allowed' : 'pointer',
+            opacity: viewMode === 'tobe' ? 0.35 : 1,
+          }}
+        >↷</button>
         <span style={styles.dbvToolSep} />
         {['▶','⏹'].map((s, i) => <span key={`g3-${i}`} style={styles.dbvToolBtn}>{s}</span>)}
         <span style={styles.dbvToolSep} />
@@ -3441,16 +4854,31 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
       {/* ⑥ 필터바 */}
       <div style={styles.dbvFilterbar}>
         <span style={styles.dbvFilterShowSql}>Show SQL</span>
-        <span style={styles.dbvFilterInput}>이 데이터는 DB에 저장되지 않습니다.</span>
+        <span style={styles.dbvFilterInput}>{t('mapping.report.notPersisted')}</span>
         <span style={styles.dbvFilterIcons}>
           {['▾','▶','✕','⟳','⊞','⚙'].map((s, i) => <span key={i} style={styles.dbvFilterIcon}>{s}</span>)}
         </span>
       </div>
 
       {/* 상태 배너 — loading / error / 빈 결과 */}
-      {reportLoading && (
+      {viewMode === 'tobe' && reportLoading && (
         <div style={{ padding: '8px 14px', background: '#fff8e1', color: '#856404', borderBottom: '1px solid #e8e8e8', fontSize: 11.5 }}>
           ⏳ {t('mapping.report.loading')}
+        </div>
+      )}
+      {viewMode === 'asis' && asisPreviewLoading && (
+        <div style={{ padding: '8px 14px', background: '#fff8e1', color: '#856404', borderBottom: '1px solid #e8e8e8', fontSize: 11.5 }}>
+          ⏳ {t('mapping.report.asisLoading')}
+        </div>
+      )}
+      {viewMode === 'asis' && !asisPreviewLoading && !asisPreview && firstSource && (
+        <div style={{ padding: '8px 14px', background: '#fde2e2', color: '#a02020', borderBottom: '1px solid #e8e8e8', fontSize: 11.5 }}>
+          ⚠ {t('mapping.report.csvLoadFailed', { table: firstSource.table })}
+        </div>
+      )}
+      {viewMode === 'asis' && firstSource && effectiveSources.length > 1 && (
+        <div style={{ padding: '6px 14px', background: '#eef4ff', color: '#3a5a8c', borderBottom: '1px solid #e8e8e8', fontSize: 10.5 }}>
+          ℹ {t('mapping.report.firstSourceOnly', { n: String(effectiveSources.length), alias: firstSource.alias, table: firstSource.table })}
         </div>
       )}
 
@@ -3460,11 +4888,11 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
           <thead>
             <tr>
               <th style={styles.dbvGridCorner}> </th>
-              {rows.map((r) => (
+              {viewMode === 'tobe' ? rows.map((r) => (
                 <th
                   key={r.tgt}
                   onClick={() => onPickColumn(r.tgt)}
-                  title={`${r.tgt} (${r.tgtType}) · 클릭해서 매핑 상세 보기`}
+                  title={t('mapping.report.cellTitle', { col: r.tgt, type: r.tgtType })}
                   style={styles.dbvGridCol}
                 >
                   <div style={styles.dbvColHeaderInner}>
@@ -3473,11 +4901,26 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
                     <span style={styles.dbvColCaret}>▾</span>
                   </div>
                 </th>
-              ))}
+              )) : (asisPreview?.headers ?? []).map((h) => {
+                // AS-IS DDL 의 컬럼 type lookup (대소문자 무관 매칭).
+                const asisType = firstSource
+                  ? lookupAsisCols(firstSource.table).find((c) => c.name.toLowerCase() === h.toLowerCase())?.type
+                  : undefined;
+                const typeLabel = asisType || 'VARCHAR';
+                return (
+                  <th key={h} title={`${h} (${typeLabel}) · AS-IS raw`} style={styles.dbvGridCol}>
+                    <div style={styles.dbvColHeaderInner}>
+                      <span style={styles.dbvColTypeIcon}>{typeIconLabel(typeLabel)}</span>
+                      <span>{h}</span>
+                      <span style={styles.dbvColCaret}>▾</span>
+                    </div>
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>
-            {report?.error ? (
+            {viewMode === 'tobe' && report?.error ? (
               <tr>
                 <td
                   colSpan={rows.length + 1}
@@ -3499,7 +4942,7 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
                   <button
                     type="button"
                     onClick={() => { void copyText(buildReportErrorMessage(report, t)); }}
-                    title="에러 메시지를 클립보드에 복사"
+                    title={t('mapping.tooltip.copyError')}
                     style={{
                       position: 'absolute', top: 8, right: 10,
                       padding: '2px 8px', fontSize: 10.5,
@@ -3517,7 +4960,7 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
               return (
                 <tr key={i}>
                   <td style={styles.dbvRowNum}>{i + 1}</td>
-                  {rows.map((r) => {
+                  {viewMode === 'tobe' ? rows.map((r) => {
                     // TO-BE 컬럼명으로 report 결과에서 lookup
                     let v = '';
                     if (report && reportColIdx) {
@@ -3533,6 +4976,23 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
                           ...styles.dbvCell,
                           ...(zebra ? styles.dbvCellZebra : {}),
                           ...(numeric ? styles.dbvCellNum : {}),
+                        }}
+                      >
+                        {isNull
+                          ? <span style={styles.dbvCellNull}>[NULL]</span>
+                          : v}
+                      </td>
+                    );
+                  }) : (asisPreview?.headers ?? []).map((h, hi) => {
+                    // AS-IS raw csv 의 row 값 — string 그대로
+                    const v = asisPreview?.rows[i]?.[hi] ?? '';
+                    const isNull = v === '' || v === 'NULL';
+                    return (
+                      <td
+                        key={h}
+                        style={{
+                          ...styles.dbvCell,
+                          ...(zebra ? styles.dbvCellZebra : {}),
                         }}
                       >
                         {isNull
@@ -3563,7 +5023,9 @@ function ReportView({ table, rows, onClose, onPickColumn }: {
         <span style={{ ...styles.dbvStatusBtn, ...styles.dbvStatusBtnDropdown }}>Export data</span>
         <span style={styles.dbvStatusSep} />
         <span style={styles.dbvStatusCenter}>
-          {rows.length} column(s), {dataRowCount} row(s) fetched - 0.0s, on {fmtDate(new Date())} at {fmtTime(new Date())}
+          {rows.length} column(s), {dataRowCount} row(s) fetched
+          {reportDurationMs != null ? ` - ${(reportDurationMs / 1000).toFixed(3)}s` : ''}
+          {reportExecutedAt ? `, on ${fmtDate(reportExecutedAt)} at ${fmtTime(reportExecutedAt)}` : ''}
         </span>
       </div>
 
@@ -3620,6 +5082,12 @@ function buildReportErrorMessage(
   if (report.errorKind === 'NO_RULES') {
     return t('mapping.report.error.noRules');
   }
+  if (report.errorKind === 'NO_RULES_LINKED') {
+    // backend 가 errorColumn 자리에 master project_id 를 실어보냄 — name 으로 lookup.
+    const masterId = report.errorColumn ?? '';
+    const master = useWorkspaceStore.getState().projects.find((p) => p.id === masterId);
+    return t('mapping.report.error.noRulesLinked', { project: master?.name ?? masterId });
+  }
   // UNKNOWN 또는 누락 — 일반 메시지 + 분류 라벨 + 힌트
   return `${t('mapping.report.error.unknown')}\n${typeLine}${hintLine}`;
 }
@@ -3668,7 +5136,8 @@ function computeAsisMappings(
 ): Record<string, AsisColMapping[]> {
   const out: Record<string, AsisColMapping[]> = {};
   for (const tobe of effectiveTobe) {
-    const aliases = new Set(tobe.sources.filter((s) => s.table === asisTableName).map((s) => s.alias));
+    // schema-lenient — binding source 와 AS-IS DDL 의 schema 유무가 달라도 physical 이름으로 매칭.
+    const aliases = new Set(tobe.sources.filter((s) => bareTable(s.table) === bareTable(asisTableName)).map((s) => s.alias));
     if (aliases.size === 0) continue;
     const rows = MAPPING_BY_TOBE[tobe.internalName] || [];
     const edits = rowEditsByTobe[tobe.internalName] || {};
@@ -3709,7 +5178,7 @@ function computeAsisMappings(
       // alias 가 있으면 그 alias 가 현재 AS-IS 테이블의 alias 중 하나여야 함
       if (sourceAlias && !aliases.has(sourceAlias)) continue;
       // alias 가 없으면, srcCol 이 현재 AS-IS 테이블에 실제로 존재해야 함
-      if (!sourceAlias && !(ASIS_COLUMNS[asisTableName] || []).some((c) => c.name === srcCol)) continue;
+      if (!sourceAlias && !lookupAsisCols(asisTableName).some((c) => c.name === srcCol)) continue;
 
       (out[srcCol] ||= []).push({
         tobeInternalName: tobe.internalName,
@@ -3734,13 +5203,21 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
   onJumpTobe: (internalName: string, name: string) => void;
 }) {
   const readOnly = useActiveProjectReadOnly();
-  const cols = ASIS_COLUMNS[table.name] || [];
+  const cols = lookupAsisCols(table.name);
   const [colFilter, setColFilter] = useState<AsisColFilter>('all');
-  const routedTobe = effectiveTobe.filter((t) => t.sources.some((s) => s.table === table.name));
+  const routedTobe = effectiveTobe.filter((t) => t.sources.some((s) => bareTable(s.table) === bareTable(table.name)));
 
   const activeProjectIdForAsis = useWorkspaceStore((s) => s.activeProjectId);
+  const navigate = useNavigate();
   const rowEditsByTobe = useMappingEditsStore(
     (s) => (activeProjectIdForAsis ? s.rowEdits[activeProjectIdForAsis] : undefined) || EMPTY_ROW_EDITS_BY_TOBE,
+  );
+  // baseline snapshot pin chip (TobeMappingDetail 과 동일 패턴) — AS-IS 화면도 표시.
+  const snapshots = useSnapshotsStore((s) => s.snapshots);
+  const pinnedIds = usePinnedSnapshotsStore((s) => s.pinnedIds);
+  const baselineSnapshot = useMemo(
+    () => snapshots.find((s) => s.projectId === activeProjectIdForAsis && pinnedIds.includes(s.id)),
+    [snapshots, activeProjectIdForAsis, pinnedIds],
   );
 
   const mappings = useMemo(
@@ -3778,6 +5255,17 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
       <div style={styles.contextBar}>
         <span style={{ ...styles.sidePill, color: 'var(--amber)', background: 'var(--amber-50)', borderColor: 'var(--amber)' }}>AS-IS</span>
         <div style={styles.tableChip}>{table.short}</div>
+        {baselineSnapshot && (
+          <button
+            type="button"
+            onClick={() => navigate('/versions', { state: { selectSnapshotId: baselineSnapshot.id } })}
+            style={styles.baselinePinChip}
+            title={`Pinned baseline: ${baselineSnapshot.name}  (click → Versions)`}
+          >
+            <PinIconSvg size={11} />
+            {baselineSnapshot.version}
+          </button>
+        )}
         <div style={{ flex: 1 }} />
       </div>
 
@@ -3796,7 +5284,7 @@ function AsisTableDetail({ table, effectiveTobe, skippedCols, onToggleSkip, onJu
                 <span style={{ color: 'var(--navy)', fontWeight: 500 }}>{to.short}</span>
                 {to.whereFilter && (
                   <span style={styles.whereTag} title={`WHERE: ${to.whereFilter}`}>
-                    WHERE {to.whereFilter.length > 40 ? to.whereFilter.slice(0, 40) + '…' : to.whereFilter}
+                    WHERE {to.whereFilter.length > 40 ? to.whereFilter.slice(0, 40) : to.whereFilter}
                   </span>
                 )}
                 <span style={{ flex: 1 }} />
@@ -3979,11 +5467,13 @@ const TOBE_RULE_COLORS: Record<Exclude<TobeRuleFilter, 'all'>, string> = {
   null:     '#8AEDC3',  // step 3/3 — lightest
 };
 
-function TobeCoverageBar({ total, ruleCounts, filter, onFilter }: {
+function TobeCoverageBar({ total, ruleCounts, filter, onFilter, hideFilters }: {
   total: number;
   ruleCounts: { unmapped: number; auto: number; rule: number; null: number; default: number };
   filter: TobeRuleFilter;
   onFilter: (f: TobeRuleFilter) => void;
+  /** 자식 link 시 필터 chip 들만 숨김 (progress track / state 라벨은 유지). */
+  hideFilters?: boolean;
 }) {
   const pct = (n: number) => (total === 0 ? 0 : (n / total) * 100);
   const btn = (key: TobeRuleFilter, label: string, count: number, dotColor?: string) => {
@@ -4010,7 +5500,7 @@ function TobeCoverageBar({ total, ruleCounts, filter, onFilter }: {
     <div style={{ ...styles.coverageWrap, minWidth: 980 }}>
       <div style={styles.coverageHeader}>
         <span style={styles.coverageLabel}>State</span>
-        <div style={styles.coverageFilters}>
+        <div style={{ ...styles.coverageFilters, visibility: hideFilters ? 'hidden' : 'visible' }}>
           {btn('all',      'All',         total)}
           {btn('unmapped', 'Unmapped',    ruleCounts.unmapped, TOBE_RULE_COLORS.unmapped)}
           {btn('auto',     'Pass',        ruleCounts.auto,     TOBE_RULE_COLORS.auto)}
@@ -4074,8 +5564,9 @@ function StatusBadge({ tone, children }: { tone: 'ok' | 'warn' | 'err' | 'info' 
 function RuleTag({ rule, status }: { rule: MappingRow['rule']; status?: MappingRow['status'] }) {
   const labels: Record<MappingRow['rule'], string> = {
     auto: 'Pass', rule: 'Rule', null: 'Null', default: 'Default',
-    unmapped: 'Unmapped', added: 'New', skip: 'Skip',
+    unmapped: 'Unmapped', added: 'New', skip: 'Skip', link: 'Link',
   };
+  if (rule === 'link') return <StatusBadge tone="info">Linked</StatusBadge>;
   // status err/warn 은 색을 덮어쓴다 (룰과 무관하게 위험 신호 우선).
   if (status === 'err') return <StatusBadge tone="err">{labels[rule]}</StatusBadge>;
   if (status === 'warn') return <StatusBadge tone="warn">{labels[rule]}</StatusBadge>;
@@ -4216,7 +5707,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex', alignItems: 'center', gap: 6,
     fontFamily: 'var(--mono)', fontSize: 11.5,
   },
-  invItemName: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 },
+  invItemName: { fontSize: 12.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 },
   invItemBadge: {
     fontSize: 9, fontFamily: 'var(--mono)', fontWeight: 600,
     padding: '0 4px', borderRadius: 2,
@@ -4230,6 +5721,13 @@ const styles: Record<string, React.CSSProperties> = {
 
   // Workspace
   workspace: { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 },
+
+  /* Quarantine 강조 row 의 종료(skip) 버튼 — State 칼럼, 빨강 톤. */
+  rowSkipBtn: {
+    padding: '2px 9px', border: '1px solid #e85d75', borderRadius: 999,
+    background: 'var(--panel)', color: '#c92a3f',
+    fontSize: 10.5, fontWeight: 700, cursor: 'pointer', lineHeight: 1.4,
+  },
 
   contextBar: {
     display: 'flex', alignItems: 'center', gap: 10,

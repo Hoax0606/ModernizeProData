@@ -53,6 +53,10 @@ public class WorkerNode {
     @Column(name = "last_seen_at")
     private OffsetDateTime lastSeenAt;
 
+    /** Worker daemon 이 보고한 설치 앱 버전 (예: 1.0.25). 구버전 워커는 NULL. */
+    @Column(name = "app_version", length = 32)
+    private String appVersion;
+
     @Column(name = "created_at", nullable = false)
     private OffsetDateTime createdAt;
 
@@ -60,7 +64,7 @@ public class WorkerNode {
     private String createdBy;
 
     static WorkerNode createForUser(String userId, String siteId, String hostname,
-                                    String createdBy) {
+                                    String createdBy, String appVersion) {
         WorkerNode w = new WorkerNode();
         w.workerId = "w-" + UUID.randomUUID().toString().substring(0, 8);
         w.name = hostname;
@@ -69,6 +73,7 @@ public class WorkerNode {
         w.status = WorkerStatus.REGISTERED;
         w.registeredAt = OffsetDateTime.now();
         w.lastSeenAt = w.registeredAt;
+        w.appVersion = appVersion;
         w.createdAt = w.registeredAt;
         w.createdBy = createdBy;
         return w;

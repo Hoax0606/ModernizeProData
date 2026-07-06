@@ -34,34 +34,43 @@ import java.util.List;
 public class WorkerController {
 
     private final WorkerNodeService workerNodeService;
+    private final com.ksinfo.modernize_pro_data.coordinator.user.UserRepository userRepository;
 
     public record WorkerSummaryDto(
             String workerId,
             String name,
             String siteId,
             String userId,
+            /** worker_node.userId 의 username — FE 가 executionAssignee (username) 와 매칭할 때 사용. */
+            String username,
             WorkerStatus status,
             OffsetDateTime registeredAt,
             OffsetDateTime lastSeenAt,
+            /** Worker daemon 이 보고한 설치 앱 버전 (예: 1.0.25). 미보고/구버전은 null. */
+            String appVersion,
             OffsetDateTime createdAt,
             String createdBy
-    ) {
-        static WorkerSummaryDto from(WorkerNode w) {
-            return new WorkerSummaryDto(
-                    w.getWorkerId(), w.getName(), w.getSiteId(), w.getUserId(),
-                    w.getStatus(),
-                    w.getRegisteredAt(), w.getLastSeenAt(),
-                    w.getCreatedAt(), w.getCreatedBy());
-        }
+    ) {}
+
+    private WorkerSummaryDto toDto(WorkerNode w) {
+        String username = w.getUserId() == null ? null
+                : userRepository.findById(w.getUserId())
+                        .map(com.ksinfo.modernize_pro_data.coordinator.user.User::getUsername)
+                        .orElse(null);
+        return new WorkerSummaryDto(
+                w.getWorkerId(), w.getName(), w.getSiteId(), w.getUserId(), username,
+                w.getStatus(),
+                w.getRegisteredAt(), w.getLastSeenAt(), w.getAppVersion(),
+                w.getCreatedAt(), w.getCreatedBy());
     }
 
-    public record RegisterRequest(String hostname) {}
+    public record RegisterRequest(String hostname, String appVersion) {}
 
     @GetMapping
     @PreAuthorize("hasRole('MASTER')")
     public ApiResponse<List<WorkerSummaryDto>> list() {
         return ApiResponse.ok(workerNodeService.list().stream()
-                .map(WorkerSummaryDto::from)
+                .map(this::toDto)
                 .toList());
     }
 
@@ -82,8 +91,8 @@ public class WorkerController {
             @RequestBody RegisterRequest req,
             Authentication auth
     ) {
-        WorkerNode w = workerNodeService.selfRegister(auth.getName(), req.hostname());
-        return ApiResponse.ok(WorkerSummaryDto.from(w));
+        WorkerNode w = workerNodeService.selfRegister(auth.getName(), req.hostname(), req.appVersion());
+        return ApiResponse.ok(toDto(w));
     }
 
     @PostMapping("/heartbeat")
@@ -91,7 +100,7 @@ public class WorkerController {
             @RequestBody RegisterRequest req,
             Authentication auth
     ) {
-        workerNodeService.touchLastSeen(auth.getName(), req.hostname());
+        workerNodeService.touchLastSeen(auth.getName(), req.hostname(), req.appVersion());
         return ApiResponse.ok(null);
     }
 }

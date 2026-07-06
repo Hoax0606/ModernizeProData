@@ -16,6 +16,8 @@ export interface WorkerNode {
   createdBy: string;
   registeredAt: string | null;
   lastHeartbeatAt: string | null;
+  /** 설치 앱 버전 (예: 1.0.25). 미보고/구버전은 null. */
+  appVersion: string | null;
 }
 
 interface WorkerNodesState {
@@ -47,6 +49,7 @@ function toNode(dto: WorkerSummaryDto): WorkerNode {
     createdBy: dto.createdBy,
     registeredAt: dto.registeredAt,
     lastHeartbeatAt: dto.lastSeenAt,
+    appVersion: dto.appVersion ?? null,
   };
 }
 

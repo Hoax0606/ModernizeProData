@@ -1,11 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authApi } from '../api/auth';
 import { ApiError } from '../api/client';
 import { useAuthStore } from '../store/auth';
-import { useSettingsStore, type Language } from '../store/settings';
+import { useSettingsStore } from '../store/settings';
 import { BrandName } from '../components/BrandName';
-import { useT, LANGUAGE_LABELS } from '../i18n';
+import { LanguageDropdown } from '../components/LanguageDropdown';
+import { useT } from '../i18n';
+import { APP_VERSION } from '../lib/appVersion';
 
 export function LoginPage() {
   const t = useT();
@@ -23,6 +25,8 @@ export function LoginPage() {
   // 때까지 LoginPage 폼을 *절대* 노출하지 않는다 → 어떤 race 가 있어도
   // license MISSING 상태에서 user 가 login 폼을 볼 가능성 차단.
   const [licenseChecked, setLicenseChecked] = useState(false);
+  const [isWorkerMode, setIsWorkerMode] = useState(false);
+  const [forgetting, setForgetting] = useState(false);
 
   useEffect(() => {
     fetch('/api/v1/health/info?_=' + Date.now(), { cache: 'no-store' })
@@ -32,10 +36,28 @@ export function LoginPage() {
           navigate('/license-setup', { replace: true });
           return;
         }
+        if (d?.data?.mode === 'worker') setIsWorkerMode(true);
         setLicenseChecked(true);
       })
       .catch(() => setLicenseChecked(true));
   }, [navigate]);
+
+  /** Worker 가 저장된 Coordinator URL 잊기 — backend 가 HKCU 삭제 후 process 종료.
+      사용자 다시 launch 시 wizard 의 URL 입력 step 부터 재시작. */
+  const handleForgetUrl = async () => {
+    if (!window.confirm(t('login.forgetUrl.confirm'))) return;
+    setForgetting(true);
+    try {
+      await fetch('/api/v1/worker-self/forget-url', { method: 'POST' });
+      // backend 가 곧 종료. 사용자에게 안내 후 reload (response 후 그래도 종료 발생).
+      alert(t('login.forgetUrl.done'));
+    } catch (e) {
+      console.error('[login] forget-url failed', e);
+      alert(`Forget URL failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+    } finally {
+      setForgetting(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -107,12 +129,33 @@ export function LoginPage() {
         </div>
 
         {/* 로그인 카드 */}
-        <form style={styles.card} onSubmit={handleSubmit}>
+        <form style={styles.card} onSubmit={handleSubmit} autoComplete="off">
+          {/* 상단 보조 row — 언어 드랍다운 + mode 별 보조 액션 (Re-enter license / Disconnect URL).
+              버튼 클릭으로 인한 form submit 회피 위해 type="button" 명시. */}
+          <div style={styles.topRow}>
+            {isWorkerMode ? (
+              <button
+                type="button"
+                onClick={handleForgetUrl}
+                disabled={forgetting}
+                style={{ ...styles.miniLinkBtn, ...(forgetting ? styles.buttonDisabled : {}) }}
+              >
+                {forgetting ? t('login.forgetUrl.busy') : t('login.forgetUrl')}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => navigate('/license-setup')}
+                style={styles.miniLinkBtn}
+              >
+                {t('login.relicense')}
+              </button>
+            )}
+            <LanguageDropdown language={language} onChange={setLanguage} />
+          </div>
+
           <label style={styles.label}>
-            <div style={styles.labelRow}>
-              <span style={styles.labelText}>{t('login.username')}</span>
-              <LanguageDropdown language={language} onChange={setLanguage} />
-            </div>
+            <span style={styles.labelText}>{t('login.username')}</span>
             <input
               type="text"
               value={username}
@@ -120,7 +163,7 @@ export function LoginPage() {
               style={styles.input}
               autoFocus
               required
-              autoComplete="username"
+              autoComplete="off"
             />
           </label>
 
@@ -132,7 +175,7 @@ export function LoginPage() {
               onChange={(e) => setPassword(e.target.value)}
               style={styles.input}
               required
-              autoComplete="current-password"
+              autoComplete="new-password"
             />
           </label>
 
@@ -181,140 +224,17 @@ export function LoginPage() {
             </button>
           )}
 
-          <div style={styles.hint}>
-            {t('login.devHint.role')}: <code style={styles.code}>master</code> / <code style={styles.code}>admin</code> / <code style={styles.code}>viewer</code>
-            &nbsp;·&nbsp; {t('login.devHint.password')} <code style={styles.code}>password</code>
-          </div>
         </form>
 
         {/* 푸터 */}
         <div style={styles.footer}>
-          © KS Info System Co., Ltd. <span style={styles.footerVersion}>v0.1.0-dev</span>
+          © KS Info System Co., Ltd. <span style={styles.footerVersion}>v{APP_VERSION}</span>
         </div>
       </div>
     </div>
   );
 }
 
-function LanguageDropdown({ language, onChange }: { language: Language; onChange: (l: Language) => void }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDocClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
-    document.addEventListener('mousedown', onDocClick);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
-
-  const langs = Object.keys(LANGUAGE_LABELS) as Language[];
-
-  return (
-    <div ref={ref} style={dropdownStyles.wrap}>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        style={{ ...dropdownStyles.trigger, ...(open ? dropdownStyles.triggerOpen : {}) }}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-      >
-        <span>{LANGUAGE_LABELS[language]}</span>
-        <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ transform: open ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform .12s' }}>
-          <path d="M2 3.5L5 6.5L8 3.5" />
-        </svg>
-      </button>
-      {open && (
-        <div role="listbox" style={dropdownStyles.menu}>
-          {langs.map((k) => {
-            const active = k === language;
-            return (
-              <button
-                key={k}
-                type="button"
-                role="option"
-                aria-selected={active}
-                onClick={() => { onChange(k); setOpen(false); }}
-                style={{ ...dropdownStyles.item, ...(active ? dropdownStyles.itemActive : {}) }}
-              >
-                {LANGUAGE_LABELS[k]}
-                {active && (
-                  <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M2 6L5 9L10 3" />
-                  </svg>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-const dropdownStyles: Record<string, React.CSSProperties> = {
-  wrap: { position: 'relative', display: 'inline-block' },
-  trigger: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 6,
-    padding: '3px 8px',
-    border: '1px solid var(--border)',
-    borderRadius: 3,
-    background: 'var(--panel)',
-    color: 'var(--text-2)',
-    fontSize: 11,
-    fontWeight: 500,
-    cursor: 'pointer',
-    lineHeight: 1.3,
-  },
-  triggerOpen: {
-    borderColor: 'var(--navy)',
-    color: 'var(--navy)',
-    background: 'var(--navy-50)',
-  },
-  menu: {
-    position: 'absolute',
-    top: 'calc(100% + 4px)',
-    right: 0,
-    minWidth: 120,
-    background: 'var(--panel)',
-    border: '1px solid var(--border-strong)',
-    borderRadius: 4,
-    boxShadow: '0 6px 18px rgba(12,31,27,0.12)',
-    padding: 3,
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 1,
-    zIndex: 50,
-  },
-  item: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 8,
-    padding: '6px 10px',
-    border: 'none',
-    background: 'transparent',
-    color: 'var(--text)',
-    fontSize: 11.5,
-    fontWeight: 500,
-    cursor: 'pointer',
-    borderRadius: 3,
-    textAlign: 'left',
-  },
-  itemActive: {
-    background: 'var(--navy-50)',
-    color: 'var(--navy)',
-    fontWeight: 700,
-  },
-};
 
 const styles: Record<string, React.CSSProperties> = {
   wrap: {
@@ -332,7 +252,7 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    gap: 22,
+    gap: 12,
   },
   brandBlock: {
     display: 'flex',
@@ -352,14 +272,14 @@ const styles: Record<string, React.CSSProperties> = {
   },
   card: {
     width: '100%',
-    padding: 24,
+    padding: '14px 24px 20px',
     background: 'var(--panel)',
     border: '1px solid var(--border)',
     borderRadius: 6,
     boxShadow: '0 1px 3px rgba(12,31,27,0.04)',
     display: 'flex',
     flexDirection: 'column',
-    gap: 14,
+    gap: 12,
   },
   label: {
     display: 'flex',
@@ -486,5 +406,36 @@ const styles: Record<string, React.CSSProperties> = {
   footerVersion: {
     fontSize: 11,
     color: 'var(--text-4)',
+  },
+  linkBtn: {
+    marginTop: 4,
+    padding: '8px 10px',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 4,
+    background: 'transparent',
+    color: 'var(--navy)',
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+  },
+  topRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 6,
+    marginBottom: -4,
+  },
+  miniLinkBtn: {
+    padding: '3px 8px',
+    border: '1px solid var(--border)',
+    borderRadius: 3,
+    background: 'var(--panel-2)',
+    color: 'var(--text-2)',
+    fontSize: 11,
+    fontWeight: 500,
+    cursor: 'pointer',
+    fontFamily: 'inherit',
+    lineHeight: 1.3,
   },
 };

@@ -11,7 +11,7 @@ export interface RunLogLine {
   level: number;         // 0=INFO 1=WARN 2=ERROR (raw from BE)
   stage: string;
   message: string;
-  suggestion?: string | null;
+  // suggestion 필드는 BE worker stage 가 채우지 않아(미래 예약) 항상 null — FE 미사용이라 제거.
 }
 
 export interface RunLogPage {

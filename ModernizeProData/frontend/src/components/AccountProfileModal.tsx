@@ -79,7 +79,13 @@ export function AccountProfileModal({ open, onClose }: Props) {
     <Modal open={open} onClose={onClose} width={520} title={t('account.title')}>
       {/* 사용자 행 */}
       <div style={styles.userRow}>
-        <div style={styles.avatar}>{user?.username?.[0]?.toUpperCase() ?? '?'}</div>
+        {(() => {
+          const src = user?.role === 'master' ? '/master.png'
+                    : user?.role === 'admin'  ? '/admin.jpg'
+                    : null;
+          if (src) return <img src={src} alt={user?.role} style={styles.avatarImg} />;
+          return <div style={styles.avatar}>{user?.username?.[0]?.toUpperCase() ?? '?'}</div>;
+        })()}
         <div>
           <div style={styles.name}>{user?.username}</div>
         </div>
@@ -177,6 +183,14 @@ const styles: Record<string, React.CSSProperties> = {
     placeItems: 'center',
     fontSize: 18,
     fontWeight: 700,
+    flexShrink: 0,
+  },
+  avatarImg: {
+    width: 44,
+    height: 44,
+    borderRadius: '50%',
+    objectFit: 'contain',
+    background: 'var(--panel-2)',
     flexShrink: 0,
   },
   name: { fontSize: 15, fontWeight: 700, color: 'var(--text)' },

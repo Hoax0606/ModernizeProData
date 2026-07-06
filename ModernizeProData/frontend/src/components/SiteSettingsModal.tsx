@@ -112,16 +112,19 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
       const scrollT = window.setTimeout(() => {
         tobeDbRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }, 50);
-      const pulseT = window.setTimeout(() => setTobeDbPulse(false), 1500);
-      return () => { window.clearTimeout(scrollT); window.clearTimeout(pulseT); };
+      /* pulse-off タイマーは cleanup 으로 cancel 하지 않는다 — AppShell 측이 focus
+         값을 1 초후에 reset 하기 때문에 cleanup が走り pulse-off が cancel されて
+         pulse が永続표시되는 bug 가 出る. scroll 만 cancel し、pulse-off は自然 fire. */
+      window.setTimeout(() => setTobeDbPulse(false), 1500);
+      return () => { window.clearTimeout(scrollT); };
     }
     if (focus === 'asis-csv') {
       setCsvPathPulse(true);
       const scrollT = window.setTimeout(() => {
         csvPathRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }, 50);
-      const pulseT = window.setTimeout(() => setCsvPathPulse(false), 1500);
-      return () => { window.clearTimeout(scrollT); window.clearTimeout(pulseT); };
+      window.setTimeout(() => setCsvPathPulse(false), 1500);
+      return () => { window.clearTimeout(scrollT); };
     }
   }, [open, focus]);
 
@@ -145,6 +148,14 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
     setTestMessage(null);
     setSiteUnlocked(false);
   }, [open, site]);
+
+  // stage 가 바뀌면 이전 stage 의 test 결과가 잔류하지 않도록 reset.
+  // 각 stage 는 자기 stage 에서 test → ok → lock 흐름을 따로 거쳐야 한다.
+  // (early return 보다 위에서 호출 — hooks 순서 안정성.)
+  useEffect(() => {
+    setTestStatus('idle');
+    setTestMessage(null);
+  }, [stage]);
 
   if (!site) return null;
 
@@ -173,7 +184,7 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
       const result = await tobeDbApi.testConnection(site.id, {
         dbType:   tobeDb.type,
         host:     tobeDb.host.trim(),
-        port:     tobeDb.port.trim() || '5432',
+        port:     tobeDb.port.trim(),
         database: tobeDb.database.trim(),
         username: tobeDb.username.trim(),
         password: tobeDb.password,
@@ -188,6 +199,14 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
 
   const toggleStageLock = () => {
     if (!isMaster) return;
+    // DB lock 토글은 site unlock 상태에서만 가능 — 이중 보안 유지. site lock 인 상태에서
+    // DB unlock 만 풀리면 site lock 의 의미가 사라짐.
+    if (!siteUnlocked) return;
+    const isLocking = !tobeDbLocks[stage];
+    // 잠그려는 시도면 connection test 가 'ok' 일 때만 허용 — fail/미테스트 면 차단.
+    // 잘못된 정보가 DB 에 저장되지 않도록 lock 자체를 막는다 (testStatus 가 ok 가
+    // 아니면 silently 무시).
+    if (isLocking && testStatus !== 'ok') return;
     setTobeDbLocks((cur) => ({ ...cur, [stage]: !cur[stage] }));
   };
 
@@ -199,18 +218,20 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
 
   const toggleSiteLock = () => {
     if (siteUnlocked) {
-      // 잠그려는 시도
-      if (siteLockBlocked) {
-        window.alert(
-          nameMissing
-            ? t('siteSettings.siteLock.blockedNameMissing')
-            : t('siteSettings.siteLock.blockedDbUnlocked')
-        );
-        return;
-      }
+      // 잠그려는 시도 — 차단 조건이면 silently 무시 (브라우저 alert 안 씀).
+      if (siteLockBlocked) return;
       setSiteUnlocked(false);
     } else {
+      // site unlock 시점에 모든 stage 의 DB lock 을 강제 true 로 — 이중 보안.
+      // DB 를 편집하려면 site unlock 후에도 stage 별 DB lock 을 사용자가 따로 풀어야 함.
       setSiteUnlocked(true);
+      setTobeDbLocks((cur) => {
+        const next: TobeDbLocks = { ...cur };
+        for (const env of PROJECT_ENVIRONMENTS) {
+          next[env] = true;
+        }
+        return next;
+      });
     }
   };
 
@@ -234,6 +255,7 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
   // lock 상태에서도 저장된 값으로 connection test 는 항상 허용 (편집만 잠금).
   const canTestConnection =
     !!tobeDb.host.trim() &&
+    !!tobeDb.port.trim() &&
     !!tobeDb.username.trim() &&
     !!tobeDb.database.trim() &&
     testStatus !== 'testing';
@@ -247,24 +269,19 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
   const handleSave = async () => {
     if (!canSave) return;
     // scope 'site' → 'project' 전환 시 backend 가 Site 의 DB 설정을 그 Site 의 모든
-    // Project 에 복사한다. 사용자에게 확인.
-    const prevScope = site.tobeDbScope === 'project' ? 'project' : 'site';
-    if (prevScope === 'site' && tobeDbScope === 'project') {
-      const ok = window.confirm(
-        '프로젝트별 모드로 바꾸면 이 사이트의 모든 프로젝트에 현재 TO-BE DB 설정이 복사됩니다. 진행할까요?',
-      );
-      if (!ok) return;
-    }
-    // type 이 비어있는 단계는 저장하지 않음.
+    // Project 에 복사한다 (사용자에게 별도 confirm UI 는 안 띄움 — 브라우저 네이티브
+    // 팝업을 안 쓰는 정책. Site Setting 의 scope 토글 옆 hint 로 안내한다).
+    // type 이 비어있거나 사용자가 명시적으로 lock 하지 않은 stage 는 저장하지 않음.
+    // lock 시점에 connection test ok 가 검증되므로, lock 된 stage = 검증된 stage.
+    // 미검증/실패 stage 의 입력은 backend 로 보내지 않는다 — 잘못된 정보 저장 방지.
     const finalByEnv: TobeDbByEnv = {};
-    for (const env of PROJECT_ENVIRONMENTS) {
-      const c = tobeDbByEnv[env];
-      if (c && c.type.trim()) finalByEnv[env] = c;
-    }
-    // 저장 시 데이터 있는 모든 stage 는 자동 lock — unlock 상태인 채로 저장되지 않도록.
     const finalLocks: TobeDbLocks = {};
     for (const env of PROJECT_ENVIRONMENTS) {
-      if (finalByEnv[env]) finalLocks[env] = true;
+      const c = tobeDbByEnv[env];
+      if (c && c.type.trim() && tobeDbLocks[env]) {
+        finalByEnv[env] = c;
+        finalLocks[env] = true;
+      }
     }
 
     await updateSite(site.id, {

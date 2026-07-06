@@ -54,8 +54,32 @@ public class MappingTableBinding {
     @Column(name = "where_filter", columnDefinition = "TEXT")
     private String whereFilter;
 
+    /**
+     * Row N:1 집계용 GROUP BY 절. null / blank 이면 GROUP BY 없음 (1:1 변환).
+     * 예: "EXTRACT(MONTH FROM t.txn_date), t.account" — 일계 → 월계.
+     * buildSql 가 WHERE 뒤 LIMIT 앞에 그대로 인젝션.
+     */
+    @Column(name = "group_by_expr", columnDefinition = "TEXT")
+    private String groupByExpr;
+
+    /**
+     * Row 1:N 펼침용 free SQL fragment. null / blank 이면 펼침 없음 (1:1 변환).
+     * 예: "CROSS JOIN LATERAL (VALUES ('phone', t.PHONE), ('email', t.EMAIL)) AS u(channel, value)"
+     * buildSql 가 sources/JOIN 뒤, WHERE 앞에 그대로 인젝션.
+     */
+    @Column(name = "expand_expr", columnDefinition = "TEXT")
+    private String expandExpr;
+
     @Column(name = "binding_origin", nullable = false, length = 16)
     private String bindingOrigin = "imported";
+
+    /**
+     * 자식 link 마킹. null = 자체 정의 (기본). 값 있음 = master project_id —
+     * 그 project 의 같은 (tobe_schema, tobe_table) 의 binding sources + mapping_rules 를
+     * read 시점에 inherit. row editor 는 read-only.
+     */
+    @Column(name = "shared_from_project_id", length = 40)
+    private String sharedFromProjectId;
 
     @Column(name = "created_by", nullable = false, length = 64)
     private String createdBy;

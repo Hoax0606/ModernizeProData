@@ -5,32 +5,19 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ksinfo.modernize_pro_data.ModernizeProDataApplication;
 import javafx.application.Application;
 import javafx.application.Platform;
-import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
-import javafx.scene.control.Alert;
-import javafx.scene.control.Alert.AlertType;
 import javafx.scene.control.Button;
-import javafx.scene.control.ButtonType;
 import javafx.scene.control.Label;
 import javafx.scene.control.PasswordField;
 import javafx.scene.control.TextField;
-import javafx.scene.control.TextInputDialog;
 import javafx.scene.image.Image;
 import javafx.scene.layout.BorderPane;
-import javafx.scene.layout.GridPane;
 import javafx.scene.layout.VBox;
-import javafx.scene.web.WebEngine;
-import javafx.scene.web.WebView;
-import javafx.stage.FileChooser;
 import javafx.stage.Stage;
-import javafx.stage.StageStyle;
-import netscape.javascript.JSObject;
 
-import java.util.Optional;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.builder.SpringApplicationBuilder;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.ConfigurableApplicationContext;
 
 import java.io.File;
@@ -66,12 +53,17 @@ public class Launcher {
         redirectStdoutToFile();
         readInstallerChoicesFromRegistry();
 
+        // pending update 있으면 jar / host swap (Spring 부팅 전). 실패는 silent log.
+        UpdateApplier.applyPendingIfAny();
+
         if (Boolean.getBoolean("mpd.gui.enabled")) {
             String mode = System.getProperty("MPD_MODE", "coordinator");
             if ("worker".equalsIgnoreCase(mode)) {
                 WorkerApp.launch(args);
             } else {
-                GuiApp.launch(args);
+                // 2026-05-30 — Coordinator GUI 를 JavaFX WebView (옛 WebKit) 에서 JCEF
+                // (Chromium) 기반 Swing 으로 교체. modern React 앱 안정 + crash 차단.
+                new SwingGuiApp().start(args);
             }
         } else {
             SpringApplication app = new SpringApplication(ModernizeProDataApplication.class);
@@ -104,21 +96,8 @@ public class Launcher {
         } catch (Exception ignored) {}
     }
 
-    /** Build a fresh, temporary user-data-directory for the WebView so its
-     *  WebKit cache / localStorage / cookies don't leak between runs.
-     *  Without this, a stale /api/v1/health/info response from a previous
-     *  session can pin the UI to /login even after the server changed to
-     *  licenseStatus=MISSING. */
-    private static void wireFreshUserData(WebView webView) {
-        try {
-            File dir = Files.createTempDirectory("mpd-webview-").toFile();
-            dir.deleteOnExit();
-            webView.getEngine().setUserDataDirectory(dir);
-            System.out.println("WebView userDataDir = " + dir.getAbsolutePath());
-        } catch (Exception e) {
-            System.out.println("setUserDataDirectory failed: " + e.getMessage());
-        }
-    }
+    // wireFreshUserData 제거 (2026-05-30) — JavaFX WebView 폐기. Edge `--app` 의
+    // --user-data-dir 가 동일 역할 (EdgeAppLauncher 안).
 
     private static void readInstallerChoicesFromRegistry() {
         if (!System.getProperty("os.name", "").toLowerCase().contains("win")) return;
@@ -170,188 +149,11 @@ public class Launcher {
         } catch (Exception ignored) { /* default Windows icon is fine */ }
     }
 
-    /**
-     * JavaFX WebView's defaults silently swallow {@code window.confirm()} /
-     * {@code window.alert()} / {@code window.prompt()} -- confirm returns
-     * false, alert is dropped on the floor. Without these handlers every
-     * confirm() in the React app behaves as if the user clicked Cancel,
-     * which is why buttons like "Clear license" appeared to do nothing.
-     */
-    private static void wireJsDialogs(WebEngine engine, Stage owner) {
-        engine.setConfirmHandler(message -> {
-            Alert a = new Alert(AlertType.CONFIRMATION, message, ButtonType.OK, ButtonType.CANCEL);
-            a.setHeaderText(null);
-            a.initOwner(owner);
-            Optional<ButtonType> r = a.showAndWait();
-            return r.isPresent() && r.get() == ButtonType.OK;
-        });
-        engine.setOnAlert(evt -> {
-            Alert a = new Alert(AlertType.INFORMATION, evt.getData(), ButtonType.OK);
-            a.setHeaderText(null);
-            a.initOwner(owner);
-            a.showAndWait();
-        });
-        engine.setPromptHandler(data -> {
-            // Bridge — JS calls window.prompt('OPEN_LICENSE_FILE') to trigger
-            // a native FileChooser. We hijack the prompt handler because
-            // JavaFX 21's JSObject.setMember() exposes Java instances but
-            // does not surface their methods to JS (deep-reflection limit on
-            // unnamed modules). The prompt handler is the simplest channel
-            // that lets us synchronously return a String to JS.
-            if ("OPEN_LICENSE_FILE".equals(data.getMessage())) {
-                FileChooser fc = new FileChooser();
-                fc.setTitle("Select license file");
-                fc.getExtensionFilters().addAll(
-                        new FileChooser.ExtensionFilter("License (*.lic)", "*.lic"),
-                        new FileChooser.ExtensionFilter("JSON (*.json)", "*.json"),
-                        new FileChooser.ExtensionFilter("All files", "*.*"));
-                File f = fc.showOpenDialog(owner);
-                if (f == null) return null;
-                try {
-                    return Files.readString(f.toPath());
-                } catch (Exception ex) {
-                    System.out.println("readString failed: " + ex.getMessage());
-                    return null;
-                }
-            }
-            TextInputDialog d = new TextInputDialog(data.getDefaultValue());
-            d.setHeaderText(null);
-            d.setContentText(data.getMessage());
-            d.initOwner(owner);
-            return d.showAndWait().orElse(null);
-        });
-    }
+    // wireJsDialogs / wireJavaBridge / JavaConnector / loadingHtml 모두 제거 (2026-05-30).
+    // 옛 JavaFX WebView 의 JS dialog handler / license file bridge — Edge `--app` 의 Chromium
+    // 가 native dialog + file input 직접 처리.
 
-    /**
-     * Exposes a `window.javaConnector` JS object so the React UI can invoke
-     * native JavaFX dialogs (e.g. FileChooser). JavaFX 21 WebView does not
-     * surface a native file picker on `<input type="file">`, so we bridge it
-     * explicitly. Re-attached on every document load so SPA + full reloads
-     * both retain the binding.
-     */
-    private static void wireJavaBridge(WebEngine engine, Stage owner) {
-        engine.documentProperty().addListener((obs, oldDoc, newDoc) -> {
-            if (newDoc == null) return;
-            try {
-                JSObject window = (JSObject) engine.executeScript("window");
-                window.setMember("javaConnector", new JavaConnector(owner));
-                System.out.println("javaConnector bridge attached");
-            } catch (Exception e) {
-                System.out.println("javaConnector wiring failed: " + e.getMessage());
-            }
-        });
-    }
-
-    /**
-     * Public surface called from JS via {@code window.javaConnector.<method>()}.
-     * Methods run on the JavaFX Application Thread (the WebView JS engine
-     * already executes there), so we can open dialogs synchronously and
-     * return the chosen value.
-     */
-    public static class JavaConnector {
-        private final Stage owner;
-        JavaConnector(Stage owner) { this.owner = owner; }
-
-        /** Opens a native FileChooser, reads the selected file as UTF-8,
-         *  returns its content. Returns null if the user cancels. */
-        public String openLicenseFile() {
-            try {
-                FileChooser fc = new FileChooser();
-                fc.setTitle("Select license file");
-                fc.getExtensionFilters().addAll(
-                        new FileChooser.ExtensionFilter("License (*.lic)", "*.lic"),
-                        new FileChooser.ExtensionFilter("JSON (*.json)", "*.json"),
-                        new FileChooser.ExtensionFilter("All files", "*.*"));
-                File f = fc.showOpenDialog(owner);
-                if (f == null) return null;
-                return Files.readString(f.toPath());
-            } catch (Exception e) {
-                System.out.println("openLicenseFile error: " + e.getMessage());
-                return null;
-            }
-        }
-    }
-
-    /** Coordinator / Standalone -- own Spring Boot + PG + WebView 가 localhost. */
-    public static class GuiApp extends Application {
-        private static String[] startArgs = new String[0];
-
-        public static void launch(String[] args) {
-            startArgs = args;
-            Application.launch(GuiApp.class, args);
-        }
-
-        private ConfigurableApplicationContext springCtx;
-
-        @Override
-        public void start(Stage stage) {
-            WebView webView = new WebView();
-            wireFreshUserData(webView);
-            webView.getEngine().locationProperty().addListener((o, oldUrl, newUrl) ->
-                    System.out.println("WebView nav: " + newUrl));
-            webView.getEngine().loadContent(loadingHtml());
-            wireJsDialogs(webView.getEngine(), stage);
-            wireJavaBridge(webView.getEngine(), stage);
-
-            stage.setTitle("ModernizeProData");
-            tryLoadIcon(stage);
-            BorderPane root = new BorderPane(webView);
-            root.setStyle("-fx-font-family: 'Hoax Mono JP', 'Segoe UI', sans-serif;");
-            stage.setScene(new Scene(root, 1200, 760));
-            applyStandardWindowChrome(stage);
-            stage.setOnCloseRequest(e -> shutdown());
-            stage.show();
-            stage.centerOnScreen();
-
-            Thread bootThread = new Thread(() -> {
-                springCtx = new SpringApplicationBuilder(ModernizeProDataApplication.class)
-                        .headless(false)
-                        .listeners((ApplicationReadyEvent ev) ->
-                                Platform.runLater(() ->
-                                        // Cache-bust query so JavaFX WebView's WebKit cache can't
-                                        // serve a stale LICENSE_MISSING JSON from a previous run.
-                                        webView.getEngine().load(
-                                                "http://localhost:8080/?_=" + System.currentTimeMillis())))
-                        .run(startArgs);
-            }, "spring-boot-launcher");
-            bootThread.setDaemon(false);
-            bootThread.start();
-        }
-
-        private void shutdown() {
-            if (springCtx != null) {
-                try { SpringApplication.exit(springCtx, () -> 0); } catch (Exception ignored) {}
-            }
-            Platform.exit();
-            System.exit(0);
-        }
-
-        private String loadingHtml() {
-            return """
-                    <!doctype html>
-                    <html><head><meta charset="utf-8"><title>ModernizeProData</title>
-                    <style>
-                      body { font-family: 'Segoe UI', system-ui, sans-serif;
-                        display: flex; align-items: center; justify-content: center;
-                        height: 100vh; margin: 0; background: #f9fafb; color: #0e7268; }
-                      .panel { text-align: center; }
-                      .brand { margin: 0 0 24px; font-weight: 600; font-size: 28px; }
-                      .spinner { width: 48px; height: 48px; margin: 0 auto 18px;
-                        border: 4px solid #d4eae6; border-top-color: #0e7268;
-                        border-radius: 50%; animation: spin 0.9s linear infinite; }
-                      @keyframes spin { to { transform: rotate(360deg); } }
-                      .status { margin: 0; color: #678b86; font-size: 14px; }
-                      .hint { margin-top: 18px; color: #9bb5b0; font-size: 12px; max-width: 340px; }
-                    </style></head>
-                    <body><div class="panel">
-                      <div class="spinner"></div>
-                      <h1 class="brand">ModernizeProData</h1>
-                      <p class="status">Starting…</p>
-                      <p class="hint">backend, database, and UI are warming up.</p>
-                    </div></body></html>
-                    """;
-        }
-    }
+    // Coordinator / Standalone GUI = SwingGuiApp (2026-05-30).
 
     /**
      * Tiny i18n bag for the Worker wizard. WorkerApp is not part of the
@@ -374,6 +176,14 @@ public class Launcher {
                         java.util.Map.entry("url.timeout",     "Timed out connecting to {url}."),
                         java.util.Map.entry("url.probeFailed", "Probe failed: {reason}"),
                         java.util.Map.entry("url.httpStatus",  "Coordinator responded HTTP {status}."),
+                        java.util.Map.entry("url.checkUpdates",      "Check for updates"),
+                        java.util.Map.entry("url.checkingUpdates",   "Checking for updates…"),
+                        java.util.Map.entry("url.update.availableTitle", "Update available"),
+                        java.util.Map.entry("url.update.availableBody",  "A newer version ({latest}) is available (current: {current}). The new binary is being downloaded in the background. Restart this application once to finish applying."),
+                        java.util.Map.entry("url.update.upToDateTitle",  "Up to date"),
+                        java.util.Map.entry("url.update.upToDateBody",   "Current version {current} is the latest."),
+                        java.util.Map.entry("url.update.failTitle",      "Update check failed"),
+                        java.util.Map.entry("url.update.failBody",       "Could not reach the update server. If you are on a closed network, this is expected."),
                         java.util.Map.entry("creds.title",       "Sign in"),
                         java.util.Map.entry("creds.hint",        "Use the Coordinator account your master created for you."),
                         java.util.Map.entry("creds.coordinator", "Coordinator: {url}"),
@@ -389,7 +199,9 @@ public class Launcher {
                         java.util.Map.entry("creds.tokenMissing","Login response missing token."),
                         java.util.Map.entry("creds.refused",     "Account refused (license / role)."),
                         java.util.Map.entry("creds.connectFailed","Connect failed: {reason}"),
-                        java.util.Map.entry("worker.loadFailed",  "Failed to load Coordinator UI: {reason}")
+                        java.util.Map.entry("worker.loadFailed",  "Failed to load Coordinator UI: {reason}"),
+                        java.util.Map.entry("instance.alreadyTitle", "Already running"),
+                        java.util.Map.entry("instance.alreadyBody",  "Another ModernizeProData Worker instance is already running on this PC. Close it first (check Task Manager for java.exe if no window is visible), then launch again.")
                 ),
                 "ko", java.util.Map.ofEntries(
                         java.util.Map.entry("url.title",       "Coordinator 에 연결"),
@@ -403,6 +215,14 @@ public class Launcher {
                         java.util.Map.entry("url.timeout",     "{url} 연결 시간이 초과됐습니다."),
                         java.util.Map.entry("url.probeFailed", "연결 확인 실패: {reason}"),
                         java.util.Map.entry("url.httpStatus",  "Coordinator 가 HTTP {status} 로 응답했습니다."),
+                        java.util.Map.entry("url.checkUpdates",      "업데이트 확인"),
+                        java.util.Map.entry("url.checkingUpdates",   "업데이트 확인 중…"),
+                        java.util.Map.entry("url.update.availableTitle", "업데이트 가능"),
+                        java.util.Map.entry("url.update.availableBody",  "새 버전 {latest} 이 있습니다 (현재: {current}). 새 binary 는 백그라운드에서 다운로드 중입니다. 도구를 한 번 재실행하시면 적용이 완료됩니다."),
+                        java.util.Map.entry("url.update.upToDateTitle",  "최신 상태"),
+                        java.util.Map.entry("url.update.upToDateBody",   "현재 버전 {current} 이 최신입니다."),
+                        java.util.Map.entry("url.update.failTitle",      "업데이트 확인 실패"),
+                        java.util.Map.entry("url.update.failBody",       "업데이트 서버에 연결할 수 없습니다. 폐쇄망 환경이라면 정상입니다."),
                         java.util.Map.entry("creds.title",       "로그인"),
                         java.util.Map.entry("creds.hint",        "master 가 생성해 준 Coordinator 계정으로 로그인하세요."),
                         java.util.Map.entry("creds.coordinator", "Coordinator: {url}"),
@@ -418,7 +238,9 @@ public class Launcher {
                         java.util.Map.entry("creds.tokenMissing","로그인 응답에 토큰이 없습니다."),
                         java.util.Map.entry("creds.refused",     "계정이 거부됐습니다 (라이선스 / 권한)."),
                         java.util.Map.entry("creds.connectFailed","연결 실패: {reason}"),
-                        java.util.Map.entry("worker.loadFailed",  "Coordinator UI 로드 실패: {reason}")
+                        java.util.Map.entry("worker.loadFailed",  "Coordinator UI 로드 실패: {reason}"),
+                        java.util.Map.entry("instance.alreadyTitle", "이미 실행 중"),
+                        java.util.Map.entry("instance.alreadyBody",  "이 PC 에서 ModernizeProData Worker 가 이미 실행 중입니다. 먼저 종료한 뒤 다시 실행하세요 (창이 안 보이면 작업관리자에서 java.exe 확인).")
                 ),
                 "ja", java.util.Map.ofEntries(
                         java.util.Map.entry("url.title",       "Coordinator に接続"),
@@ -432,6 +254,14 @@ public class Launcher {
                         java.util.Map.entry("url.timeout",     "{url} への接続がタイムアウトしました。"),
                         java.util.Map.entry("url.probeFailed", "接続確認に失敗しました: {reason}"),
                         java.util.Map.entry("url.httpStatus",  "Coordinator が HTTP {status} を返しました。"),
+                        java.util.Map.entry("url.checkUpdates",      "更新を確認"),
+                        java.util.Map.entry("url.checkingUpdates",   "更新を確認中…"),
+                        java.util.Map.entry("url.update.availableTitle", "更新あり"),
+                        java.util.Map.entry("url.update.availableBody",  "新しいバージョン {latest} があります (現在: {current})。バックグラウンドで新しい binary をダウンロード中です。アプリを一度再起動すると適用が完了します。"),
+                        java.util.Map.entry("url.update.upToDateTitle",  "最新"),
+                        java.util.Map.entry("url.update.upToDateBody",   "現在のバージョン {current} が最新です。"),
+                        java.util.Map.entry("url.update.failTitle",      "更新確認に失敗"),
+                        java.util.Map.entry("url.update.failBody",       "更新サーバーに到達できませんでした。閉じたネットワーク環境では正常です。"),
                         java.util.Map.entry("creds.title",       "サインイン"),
                         java.util.Map.entry("creds.hint",        "master が発行した Coordinator アカウントでサインインしてください。"),
                         java.util.Map.entry("creds.coordinator", "Coordinator: {url}"),
@@ -447,7 +277,9 @@ public class Launcher {
                         java.util.Map.entry("creds.tokenMissing","ログイン応答にトークンがありません。"),
                         java.util.Map.entry("creds.refused",     "アカウントが拒否されました (ライセンス / 権限)。"),
                         java.util.Map.entry("creds.connectFailed","接続失敗: {reason}"),
-                        java.util.Map.entry("worker.loadFailed",  "Coordinator UI の読み込みに失敗: {reason}")
+                        java.util.Map.entry("worker.loadFailed",  "Coordinator UI の読み込みに失敗: {reason}"),
+                        java.util.Map.entry("instance.alreadyTitle", "すでに実行中"),
+                        java.util.Map.entry("instance.alreadyBody",  "この PC では ModernizeProData Worker がすでに実行中です。先に終了してから再起動してください (ウィンドウが見えない場合はタスクマネージャーで java.exe を確認)。")
                 )
         );
 
@@ -492,6 +324,11 @@ public class Launcher {
          *  logout 을 보내거나 React Sign out 후 credentials 화면으로 돌아갈 때 쓴다. */
         private volatile String coordUrl;
         private volatile String username;
+        /** Spring 은 한 프로세스에서 한 번만 부팅. React Sign out 후 재 login 으로
+         *  swapToWebView 가 다시 불려도 Spring 컨텍스트는 그대로 재사용. credentials 가
+         *  바뀌었으면 사용자가 앱 재시작해야 새 credentials 가 datasource / WorkerBootstrap 에 적용. */
+        private final java.util.concurrent.atomic.AtomicBoolean springStarted =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
 
         /** backend 세션 정리 — currentSessionId 를 null 로. 실패해도 무시 (best-effort). */
         private void serverLogout() {
@@ -504,8 +341,53 @@ public class Launcher {
             Application.launch(WorkerApp.class, args);
         }
 
+        /** 다중 실행 차단 — Worker 프로세스 단일 인스턴스 보장 (2026-06-03).
+         *  %LOCALAPPDATA%\ModernizeProData\worker.lock 에 OS file lock 을 잡고
+         *  프로세스 수명 동안 유지 (static 참조로 GC 방지, 프로세스 종료 시 OS 가
+         *  자동 해제 — 좀비/크래시에도 stale lock 안 남음). 두 번째 인스턴스는
+         *  tryLock 실패 → 안내 후 즉시 종료. port 8081 충돌의 2차 방어선. */
+        private static java.nio.channels.FileChannel instanceLockChannel;
+        private static java.nio.channels.FileLock instanceLock;
+
+        private static boolean acquireSingleInstanceLock() {
+            try {
+                String localAppData = System.getenv("LOCALAPPDATA");
+                File dir = new File(
+                        (localAppData == null || localAppData.isBlank())
+                                ? System.getProperty("java.io.tmpdir") : localAppData,
+                        "ModernizeProData");
+                if (!dir.exists() && !dir.mkdirs()) return true; // lock 불가 환경 — 차단하지 않음
+                File lockFile = new File(dir, "worker.lock");
+                instanceLockChannel = java.nio.channels.FileChannel.open(
+                        lockFile.toPath(),
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.WRITE);
+                instanceLock = instanceLockChannel.tryLock();
+                if (instanceLock == null) {
+                    System.out.println("worker single-instance lock held by another process — exiting");
+                    return false;
+                }
+                return true;
+            } catch (Exception e) {
+                // lock 메커니즘 자체 실패 (권한 등) 는 실행 차단 사유가 아님.
+                System.out.println("worker instance lock skipped: " + e.getMessage());
+                return true;
+            }
+        }
+
         @Override
         public void start(Stage stage) {
+            if (!acquireSingleInstanceLock()) {
+                javafx.scene.control.Alert a =
+                        new javafx.scene.control.Alert(javafx.scene.control.Alert.AlertType.WARNING);
+                a.setTitle("ModernizeProData");
+                a.setHeaderText(WorkerI18n.t("instance.alreadyTitle"));
+                a.setContentText(WorkerI18n.t("instance.alreadyBody"));
+                a.showAndWait();
+                Platform.exit();
+                System.exit(0);
+                return;
+            }
             this.stage = stage;
             root = new BorderPane();
             // Match the React app's brand font. If Hoax Mono JP isn't installed
@@ -572,7 +454,10 @@ public class Launcher {
             brand.setTextAlignment(javafx.scene.text.TextAlignment.CENTER);
             brandBlock.getChildren().add(brand);
 
-            Label footer = new Label("© KS Info System Co., Ltd.   v0.1.0-dev");
+            // 버전 단일 소스 — jpackage 가 --java-options 로 박은 modernize.version
+            // (build.ps1 auto-bump). dev 콘솔 실행 등 미설정 시 "dev".
+            Label footer = new Label("© KS Info System Co., Ltd.   v"
+                    + System.getProperty("modernize.version", "dev"));
             footer.setStyle("-fx-font-size: 12px; -fx-text-fill: " + C_MUTED + ";");
 
             VBox column = new VBox(22, brandBlock, card, footer);
@@ -669,9 +554,35 @@ public class Launcher {
             Button testBtn = primaryButton(WorkerI18n.t("url.test"));
             testBtn.setDefaultButton(true);
 
+            // Check for updates — ghost button. click → 별 thread 에서 manifest 받기.
+            Button updateBtn = new Button(WorkerI18n.t("url.checkUpdates"));
+            updateBtn.setMaxWidth(Double.MAX_VALUE);
+            updateBtn.setStyle(
+                "-fx-background-color: transparent;" +
+                "-fx-border-color: " + C_BORDER_STRONG + ";" +
+                "-fx-text-fill: " + C_MUTED + ";" +
+                "-fx-font-size: 12px;" +
+                "-fx-padding: 8 12;" +
+                "-fx-background-radius: 4;" +
+                "-fx-border-radius: 4;" +
+                "-fx-cursor: hand;");
+            updateBtn.setOnAction(ev -> {
+                updateBtn.setDisable(true);
+                updateBtn.setText(WorkerI18n.t("url.checkingUpdates"));
+                new Thread(() -> {
+                    WorkerUpdateProbe.Result r = WorkerUpdateProbe.probe();
+                    Platform.runLater(() -> {
+                        updateBtn.setDisable(false);
+                        updateBtn.setText(WorkerI18n.t("url.checkUpdates"));
+                        showUpdateDialog(r);
+                    });
+                }, "worker-update-probe").start();
+            });
+
             card.getChildren().add(labeledField(WorkerI18n.t("url.field"), urlField));
             if (errorMsg != null) card.getChildren().add(errorLabel(errorMsg));
             card.getChildren().add(testBtn);
+            card.getChildren().add(updateBtn);
 
             testBtn.setOnAction(ev -> {
                 String u = urlField.getText().trim();
@@ -823,6 +734,33 @@ public class Launcher {
             }
         }
 
+        /** Update probe 결과 dialog. JavaFX Alert 단순 표시. */
+        private void showUpdateDialog(WorkerUpdateProbe.Result r) {
+            javafx.scene.control.Alert alert;
+            String header;
+            String body;
+            if (!r.ok) {
+                alert = new javafx.scene.control.Alert(javafx.scene.control.Alert.AlertType.WARNING);
+                header = WorkerI18n.t("url.update.failTitle");
+                body = WorkerI18n.t("url.update.failBody") + "\n\n" + (r.error == null ? "" : r.error);
+            } else if (r.updateAvailable) {
+                alert = new javafx.scene.control.Alert(javafx.scene.control.Alert.AlertType.INFORMATION);
+                header = WorkerI18n.t("url.update.availableTitle");
+                body = WorkerI18n.t("url.update.availableBody",
+                        java.util.Map.of("current", String.valueOf(r.currentVersion),
+                                          "latest",  String.valueOf(r.latestVersion)));
+            } else {
+                alert = new javafx.scene.control.Alert(javafx.scene.control.Alert.AlertType.INFORMATION);
+                header = WorkerI18n.t("url.update.upToDateTitle");
+                body = WorkerI18n.t("url.update.upToDateBody",
+                        java.util.Map.of("current", String.valueOf(r.currentVersion)));
+            }
+            alert.setTitle("ModernizeProData");
+            alert.setHeaderText(header);
+            alert.setContentText(body);
+            alert.showAndWait();
+        }
+
         /** Persist the URL (only) so the next launch pre-fills it. Username
          *  and password are typed in every launch and never stored. */
         private void persistRegistry(String url, String username, String password) {
@@ -842,109 +780,101 @@ public class Launcher {
         }
 
         /** Swap the form for a WebView pointed at the Coordinator UI + start
-         *  the self-register / heartbeat loop. */
+         *  the Spring worker backend (분산 실행).
+         *
+         *  <p>2026-05-29 변경: 기존엔 Spring 안 띄우고 JavaFX-side 의 selfRegister/heartbeat
+         *  만 돌렸다. 분산 실행 (RUN_START WS push → executeRun) 을 위해서는 Spring
+         *  컨텍스트가 떠 있어야 WorkerBootstrap + STOMP subscribe + RunExecutionListener 가
+         *  살아난다. 그래서 credentials 확정 후 SpringApplicationBuilder 로 backend 시작.
+         *  selfRegister/heartbeat 은 Spring WorkerBootstrap 이 담당. */
         private void swapToWebView(String coordUrl, String username, String password) {
             this.coordUrl = coordUrl;
             this.username = username;
-            WebView webView = new WebView();
-            wireFreshUserData(webView);
-            wireJsDialogs(webView.getEngine(), stage);
 
-            // worker 의 로그아웃은 WebView 안 React 의 "Sign out" 하나로 통일.
-            // React 가 Sign out → authApi.logout() (backend 세션 정리) → /login 으로
-            // 이동하는데, JavaFX 쪽 heartbeat 가 살아 있으면 60초 후 401 → 자동
-            // 재로그인으로 세션이 되살아난다. 그래서 WebView 가 /login 으로 가는
-            // 순간 (단, 한 번 앱에 진입한 뒤) heartbeat 를 끊고 credentials 화면으로
-            // 되돌린다. reachedApp 플래그로 초기 부팅 중 잠깐 스치는 /login 은 무시.
-            final boolean[] reachedApp = {false};
-            webView.getEngine().locationProperty().addListener((o, oldUrl, newUrl) -> {
-                System.out.println("WorkerWebView nav: " + newUrl);
-                if (newUrl == null || !newUrl.startsWith("http")) return;
-                if (newUrl.contains("/login")) {
-                    if (reachedApp[0]) {
-                        Platform.runLater(() -> {
-                            if (heartbeatThread != null) heartbeatThread.interrupt();
-                            jwt = null;
-                            authData = null;
-                            showCredentialsStep(coordUrl, username, null);
-                        });
+            // ── Spring 부팅 전: wizard 입력값을 system property 로 박아 application-worker.yml
+            //    의 ${COORDINATOR_URL} / ${WORKER_USERNAME} / ${WORKER_PASSWORD} /
+            //    ${COORDINATOR_DB_URL} / ${WORKER_HOSTNAME} placeholder 가 채워지게 한다.
+            String host = "localhost";
+            try {
+                java.net.URI u = new java.net.URI(coordUrl);
+                if (u.getHost() != null) host = u.getHost();
+            } catch (Exception ignored) {}
+            String hostname = "worker-pc";
+            try { hostname = InetAddress.getLocalHost().getHostName(); }
+            catch (Exception ignored) {}
+
+            System.setProperty("modernize.coordinator.url", coordUrl);
+            System.setProperty("COORDINATOR_URL",     coordUrl);
+            System.setProperty("WORKER_USERNAME",     username);
+            System.setProperty("WORKER_PASSWORD",     password);
+            System.setProperty("WORKER_HOSTNAME",     hostname);
+            // wizard 가 이미 발급받은 JWT 를 WorkerBootstrap 가 재사용 — backend 자체
+            // login 시 새 sid 가 발급돼 UI 의 wizard session 을 evict 하는 cycle 회피.
+            if (jwt != null) System.setProperty("WORKER_BOOTSTRAP_JWT", jwt);
+            // Coordinator app 과 메타 PG 가 같은 host 라는 가정 — 다른 host 면 운영자가
+            // 환경 변수 COORDINATOR_DB_URL 으로 override (Launcher 가 set 한 뒤라도
+            // Spring 의 -D > 환경 변수 우선순위 따라 envvar 가 이김).
+            // port 5432 = installer 동봉 PG (application-prod.yml 과 일치).
+            System.setProperty("COORDINATOR_DB_URL",
+                    "jdbc:postgresql://" + host + ":5432/mpd_meta");
+            // spring.profiles.active 는 jpackage args 의 --java-options 에서 prod,worker 로
+            // 이미 박혔다. 추가 설정 불요.
+
+            // ── Spring 시작 (background thread). PG 접속 실패 등은 launcher.log 에서 확인.
+            //    프로세스 수명 동안 1회만 — 재 login 시 Spring 재시작은 사용자 manual.
+            if (springStarted.compareAndSet(false, true)) {
+                new Thread(() -> {
+                    try {
+                        new SpringApplicationBuilder(ModernizeProDataApplication.class)
+                                .headless(false)
+                                .run();
+                    } catch (Exception e) {
+                        System.err.println("Worker Spring boot failed: " + e.getMessage());
+                        e.printStackTrace();
                     }
-                } else {
-                    reachedApp[0] = true;
-                }
-            });
+                }, "worker-spring-boot").start();
+            }
 
-            // If the WebView fails to load the Coordinator URL (process died,
-            // network dropped mid-handshake, …), bail back to the credentials
-            // step with the failure reason — otherwise the user just sees a
-            // blank white panel.
-            webView.getEngine().getLoadWorker().stateProperty().addListener((o, oldS, newS) -> {
-                if (newS == javafx.concurrent.Worker.State.FAILED) {
-                    Throwable ex = webView.getEngine().getLoadWorker().getException();
-                    String reason = ex == null ? "unknown"
-                            : (ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage());
-                    Platform.runLater(() -> {
-                        if (heartbeatThread != null) heartbeatThread.interrupt();
-                        showCredentialsStep(coordUrl, username,
-                                WorkerI18n.t("worker.loadFailed", java.util.Map.of("reason", reason)));
-                    });
-                }
-            });
-
-            root.setCenter(webView);
-            // Cache-bust so a previously-blocked LICENSE_MISSING response can't
-            // be served by the WebView cache. bootstrap_* params hand the
-            // JWT/user info from the JavaFX form's login over to the React
-            // app's zustand store (read by src/bootstrap-from-url.ts) so
-            // the user doesn't have to sign in a second time.
+            // 2026-05-30 — JavaFX WebView 폐기, OS Edge `--app` (Chromium chrome-less window) 사용.
+            // bootstrap_* query 로 JWT/user 핸드오프 (React 의 bootstrap-from-url.ts 가 read).
             String sep = coordUrl.contains("?") ? "&" : "?";
             String bootstrap = buildBootstrapQuery();
-            webView.getEngine().load(coordUrl + sep + "_=" + System.currentTimeMillis() + bootstrap);
+            String fullUrl = coordUrl + sep + "_=" + System.currentTimeMillis() + bootstrap;
 
-            // Background: self-register once, then 60s heartbeat. On 401 we
-            // fall back to the URL step so the user can fix things.
-            heartbeatThread = new Thread(() -> {
-                try {
-                    selfRegister();
-                    while (true) {
-                        Thread.sleep(60_000);
-                        try { heartbeat(coordUrl); }
-                        catch (Exception e) {
-                            jwt = null;
-                            String err = tryLogin(coordUrl, username, password);
-                            if (err != null) {
-                                Platform.runLater(() -> showCredentialsStep(coordUrl, username, err));
-                                return;
-                            }
-                            selfRegister();
-                        }
+            // wizard Stage 숨김 — Edge 가 main UI. taskbar 에 wizard window 도 남지
+            // 않도록 hide. Edge 종료 시 backend 도 stop (edge-watcher).
+            Platform.runLater(() -> stage.hide());
+            Process edgeProc = WebViewHostLauncher.launch(
+                    fullUrl,
+                    "edge-app-worker",
+                    "ModernizeProData - Worker",
+                    WebViewHostLauncher.WORKER_APP_ID);
+            if (edgeProc != null) {
+                new Thread(() -> {
+                    try {
+                        edgeProc.waitFor();
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                        return;
                     }
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
-                }
-            }, "worker-daemon");
-            heartbeatThread.setDaemon(true);
-            heartbeatThread.start();
-        }
-
-        private void selfRegister() {
-            try {
-                String hostname;
-                try { hostname = InetAddress.getLocalHost().getHostName(); }
-                catch (Exception e) { hostname = "unknown-host"; }
-                String body = "{\"hostname\":\"" + esc(hostname) + "\"}";
-                post(System.getProperty("modernize.coordinator.url", ""), "/api/v1/workers/self-register", body, true);
-            } catch (Exception e) {
-                System.err.println("self-register failed: " + e.getMessage());
+                    System.out.println("Worker Edge process exited, shutting down");
+                    // 2026-06-03 — Platform.runLater() 의존 제거. stage.hide() 후 JavaFX 가
+                    // implicitExit 으로 toolkit 을 내려버리면 runLater 콜백이 영영 실행되지
+                    // 않아 System.exit 미도달 → Spring JVM 좀비가 port 8081 을 계속 점유
+                    // (재실행 시 PortInUseException 무한 루프의 원인). serverLogout 은 plain
+                    // HTTP 라 FX thread 불요 — watcher thread 에서 직접 호출 후 즉시 exit.
+                    // System.exit 은 Spring Boot 의 shutdown hook 을 발동시켜 context 도
+                    // 깨끗이 닫힌다 (Undertow stop + HikariCP shutdown).
+                    serverLogout();
+                    try { Platform.exit(); } catch (Throwable ignored) { /* toolkit 이미 종료 가능 */ }
+                    System.exit(0);
+                }, "worker-edge-watcher").start();
+            } else {
+                // Edge/Chrome 미발견 + default browser fallback. Stage 유지 (Stop 용).
+                Platform.runLater(() -> stage.show());
             }
-        }
 
-        private void heartbeat(String coordUrl) throws Exception {
-            String hostname;
-            try { hostname = InetAddress.getLocalHost().getHostName(); }
-            catch (Exception e) { hostname = "unknown-host"; }
-            String body = "{\"hostname\":\"" + esc(hostname) + "\"}";
-            post(coordUrl, "/api/v1/workers/heartbeat", body, true);
+            // selfRegister / heartbeat 은 Spring WorkerBootstrap 이 담당 (분산 실행 모드).
         }
 
         private JsonNode post(String coordUrl, String path, String body, boolean authed) throws Exception {
