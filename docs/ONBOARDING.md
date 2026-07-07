@@ -363,18 +363,18 @@ On top of the existing `site` / `project` (V4–V6):
 
 ### 11.3 Building the installer (current state)
 
-Lives under `ModernizeProData/installer/`. Three-step pipeline produces a single `setup.exe` (7-Zip SFX) that bundles a C# language dispatcher and three per-language .msi payloads. End users run `setup.exe`; the dispatcher reads their language pick and invokes the matching .msi via `msiexec /i`.
+Lives under `ModernizeProDataBridge/installer/`. Three-step pipeline produces a single `setup.exe` (7-Zip SFX) that bundles a C# language dispatcher and three per-language .msi payloads. End users run `setup.exe`; the dispatcher reads their language pick and invokes the matching .msi via `msiexec /i`.
 
 **Prerequisites on the build host**: JDK 21+ on PATH (ships `jpackage`), WiX Toolset 3.14 under `C:\Program Files (x86)\WiX Toolset v3.14\bin\`, Node 18+ with npm, PowerShell 5.1+.
 
 ```powershell
-cd ModernizeProData\installer
-.\build.ps1 -Language all       # dist\ModernizeProData-{en,ko,ja}-1.0.0.msi (~274 MB each)
+cd ModernizeProDataBridge\installer
+.\build.ps1 -Language all       # dist\ModernizeProDataBridge-{en,ko,ja}-1.0.0.msi (~274 MB each)
 .\launcher\build-launcher.ps1   # dist\Launcher.exe (~200 KB)
-.\package-sfx.ps1               # dist\ModernizeProData-1.0.0-setup.exe (~818 MB)
+.\package-sfx.ps1               # dist\ModernizeProDataBridge-1.0.0-setup.exe (~818 MB)
 ```
 
-Each .msi is jpackage-produced with `--win-per-user-install` so the install goes into `%LOCALAPPDATA%\ModernizeProData\` with no UAC prompt. The three .msi files differ only in `JpProductLanguage` / bundled `MsiInstallerStrings_<lang>.wxl`; runtime image, fat jar and React bundle are identical across them.
+Each .msi is jpackage-produced with `--win-per-user-install` so the install goes into `%LOCALAPPDATA%\ModernizeProDataBridge\` with no UAC prompt. The three .msi files differ only in `JpProductLanguage` / bundled `MsiInstallerStrings_<lang>.wxl`; runtime image, fat jar and React bundle are identical across them.
 
 **What the installer asks**: Role (Coordinator / Worker / Standalone), Language, and a read-only display of the Hardware ID. Coordinator URL, license file and admin credentials are entered in-app on first boot, not by the installer.
 
@@ -1220,7 +1220,7 @@ the sealed value by more than 5 minutes, the verifier flips the status to
   only `Update license` button triggers a hidden file picker. In Vite dev
   builds, an extra red `Clear (dev)` button wipes the license server-side.
 
-### 18.9 Issuer module (`ModernizeProData/issuer/`)
+### 18.9 Issuer module (`ModernizeProDataBridge/issuer/`)
 
 A standalone Maven module (Spring-free, Jackson only) that produces both a
 CLI and a Swing GUI for issuing `.lic` files. Build script `build-exe.ps1`
@@ -1267,15 +1267,15 @@ remain Phase 2 — a first-boot wizard branches there from the same installer.
 ### 19.2 Architecture (single fat jar inside JavaFX shell)
 
 ```
-%LOCALAPPDATA%\ModernizeProData\                   (per-user install)
-├── ModernizeProData.exe          ← jpackage launcher
+%LOCALAPPDATA%\ModernizeProDataBridge\                   (per-user install)
+├── ModernizeProDataBridge.exe          ← jpackage launcher
 ├── app\modernize-pro-data-*.jar  ← Spring Boot fat jar (BOOT-INF/classes/static/
 │                                   = Vite dist)
 └── runtime\                       ← bundled JRE + JavaFX modules (jlink)
 ```
 
 ```
-double-click ModernizeProData.exe
+double-click ModernizeProDataBridge.exe
   -> Launcher.main (jpackage sets -Dmpd.gui.enabled=true)
   -> GuiApp.launch (JavaFX Application)
        -> Stage opens with "Starting..." HTML
@@ -1367,7 +1367,7 @@ nothing the user has to care about — only:
    <javafx-sdk-lib> --add-modules javafx.controls,javafx.web,...`. Adds
    shortcut + Start Menu group + dir chooser.
 
-Output: `installer/dist/ModernizeProData-1.0.0.msi`, ~130–160MB (JRE + JavaFX
+Output: `installer/dist/ModernizeProDataBridge-1.0.0.msi`, ~130–160MB (JRE + JavaFX
 modules + fat jar).
 
 ### 19.8 Critical rules carried over from issuer
@@ -1386,14 +1386,14 @@ modules + fat jar).
 
 ### 19.9 Verification flow
 
-Build: `cd ModernizeProData\installer; .\build.ps1`. Output is the .msi under
+Build: `cd ModernizeProDataBridge\installer; .\build.ps1`. Output is the .msi under
 `installer\dist\`.
 
 Smoke test (clean Windows account or VM):
 
 1. PG 18 running on `localhost:5433/mpd_meta` (user/pw `mpd`/`mpd`).
 2. Double-click .msi → next/next/install. No UAC prompt expected.
-3. Start Menu → ModernizeProData → window opens "Starting...", then loads the
+3. Start Menu → ModernizeProDataBridge → window opens "Starting...", then loads the
    login page within ~10s.
 4. master/password (UserBootstrap default) → Dashboard.
 5. Close window → no orphan processes.

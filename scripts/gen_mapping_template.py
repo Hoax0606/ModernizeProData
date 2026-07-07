@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""ModernizeProData — Mapping Definition CSV generator.
+"""ModernizeProDataBridge — Mapping Definition CSV generator.
 
-Emits two files at ModernizeProData/frontend/public/templates/:
+Emits two files at ModernizeProDataBridge/frontend/public/templates/:
 
   mapping_definition_template.csv   header row only — for users to download and fill in
   mapping_definition_sample.csv     header + body — populated from db/asis/oracle_ddl.sql
@@ -21,7 +21,7 @@ import os
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PUBLIC_DIR = REPO_ROOT / "ModernizeProData" / "frontend" / "public" / "templates"
+PUBLIC_DIR = REPO_ROOT / "ModernizeProDataBridge" / "frontend" / "public" / "templates"
 
 # ───────────────────────────────────────────────────────────────────────────
 # Header row — Japanese visible label + (english_key) for machine parsing.

@@ -331,7 +331,7 @@
 ### 4-1. 디렉터리 트리 (요약)
 
 ```
-ModernizeProData/
+ModernizeProDataBridge/
 ├── backend/                    # Spring Boot 3 + Java 21
 │   ├── pom.xml + mvnw
 │   └── src/main/

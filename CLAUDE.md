@@ -32,7 +32,7 @@
 ## 디렉터리 맵
 
 ```
-ModernizeProData/
+ModernizeProDataBridge/
 ├── backend/                    # Spring Boot
 │   └── src/main/
 │       ├── java/com/ksinfo/modernize_pro_data/
@@ -116,7 +116,7 @@ docker compose up -d postgres   # 포트 5433
 
 # 실행
 $env:SPRING_PROFILES_ACTIVE = "local"
-cd ModernizeProData/backend
+cd ModernizeProDataBridge/backend
 ./mvnw spring-boot:run
 ```
 - 로컬 설정: `application-local.yml` (gitignore 됨 — 각자 작성)
@@ -124,14 +124,14 @@ cd ModernizeProData/backend
 
 ### Frontend
 ```powershell
-cd ModernizeProData/frontend
+cd ModernizeProDataBridge/frontend
 npm install
 npm run dev   # Vite proxy /api → localhost:8080
 ```
 
 ### 타입체크
 ```powershell
-cd ModernizeProData/frontend; npx tsc --noEmit
+cd ModernizeProDataBridge/frontend; npx tsc --noEmit
 ```
 
 ## 도메인 용어

@@ -1,0 +1,175 @@
+spring:
+  application:
+    name: modernize-pro-data
+
+  # ── Docker Compose 자동 기동 비활성 ───────────────────────────────────
+  # 기본 PG 경로는 인스톨러 동봉 (production) / 로컬 설치본 (dev). compose
+  # 는 명시적으로 `docker compose up` 으로만 사용. compose 사용 원하면
+  # profile/env 에서 enabled=true 로 overrride.
+  docker:
+    compose:
+      enabled: false
+
+  # ── 메타 DB (Coordinator 가 보관하는 매핑·사용자·audit log 등) ─────────
+  # PostgreSQL 18. 운영 시 인스톨러가 동봉 PG 를 별도 포트로 설치.
+  # 접속 정보는 환경 변수로 주입 (12-factor).
+  datasource:
+    url:      ${DB_URL:jdbc:postgresql://localhost:5432/mpd_meta}
+    username: ${DB_USER:mpd}
+    password: ${DB_PASSWORD:mpd}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      # Coord = LoadStage 병렬 4 thread + Quartz 5 thread + REST handler 여유.
+      # 5 user 동시 polling peak = lightSync 5s + heavySync 30s + 화면별 polling
+      # + csv-row-count + LoadStage/Quartz → 25-35 동시 req. pool 50 안전 마진.
+      # PG default max_connections=100 의 절반 — Coord 1 노드만 PG 점유 (Worker 는
+      # REST only). 5 user × master setBaseline 같은 burst 시 pool exhaust 방지로
+      # 30→50 으로 확장. 현장 PG max_connections 가 낮으면 HIKARI_POOL_MAX 로
+      # site 별 override.
+      maximum-pool-size: ${HIKARI_POOL_MAX:50}
+      connection-timeout: 5000
+      # 5분 idle 이후 회수. 작업 burst 후 connection slot 빠르게 반환.
+      idle-timeout: 300000
+      # 30분 max-lifetime — PG 의 server-side timeout 보다 짧게.
+      max-lifetime: 1800000
+
+  jpa:
+    # Flyway 가 스키마 단일 책임. Hibernate 는 검증만.
+    hibernate:
+      ddl-auto: validate
+    # SQL log — bottleneck 진단 시 env var SPRING_JPA_SHOW_SQL=true 로 toggle.
+    # production default = false (overhead 큼).
+    show-sql: ${SPRING_JPA_SHOW_SQL:false}
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        # query count/time 통계 — 측정 cycle 에만 HIBERNATE_STATS=true 로 켠다.
+        # 항상 켜면 5-10% overhead (Heisenberg). default false.
+        generate_statistics: ${HIBERNATE_STATS:false}
+        # JDBC batch — mapping import 의 saveAll(rules/codes/bindings) 이 행마다 개별
+        # INSERT 왕복하던 병목 해소 (2026-06-04). 엔티티 ID 가 앱-할당 String 이라
+        # (IDENTITY/SEQUENCE 아님) batch insert 가 그대로 적용된다. order_* 는 같은
+        # 테이블/문장끼리 묶어 batch 효율을 높인다.
+        jdbc:
+          batch_size: 500
+        order_inserts: true
+        order_updates: true
+
+  # ── Flyway — 스키마 마이그레이션 단독 관리 ───────────────────────────
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+    out-of-order: true
+
+  # ── Spring Batch — 자체 init 끔. Flyway 가 V1 로 스키마 적용. ──────
+  batch:
+    jdbc:
+      initialize-schema: never
+
+  # ── Quartz 스케줄러 ──────────────────────────────────────────────────
+  # PoC: memory job-store (재시작 시 job 초기화).
+  # production: jdbc 로 전환 시 Flyway 마이그레이션에 Quartz 스크립트 추가 필요.
+  quartz:
+    job-store-type: memory
+    properties:
+      org.quartz.threadPool.threadCount: 5
+
+  # 기본 자동 사용자 생성 비활성 (JWT 직접 처리)
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration
+
+# ── 서버 설정 ───────────────────────────────────────────────────────────
+server:
+  address: 0.0.0.0
+  port: 8080
+  # Undertow (tomcat 대신). worker = blocking servlet 처리 thread.
+  # 기본값은 io-threads(코어 수) × 8 이라 저코어 PC 에선 빠듯할 수 있어 하한을 명시한다.
+  # 동시 run(별도 run-exec- 풀) 와 무관하게, 다중 사용자 polling(5s/30s) + 진행 조회 peak 흡수용.
+  # 메타 DB 를 쓰는 req 는 결국 Hikari pool(50)에 묶이므로 worker 를 과하게 키워도 DB 동시성은 pool 이 cap.
+  undertow:
+    threads:
+      worker: ${UNDERTOW_WORKER_THREADS:128}
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+# ── ModernizeProDataBridge 자체 설정 ──────────────────────────────────────────
+modernize:
+  # 빌드 시점 version (pom.xml 의 <version>). Spring Boot 의 application.yml
+  # resource filtering 이 @project.version@ 을 maven build 때 실 값으로 치환.
+  # UpdateService 가 jar manifest 의 Implementation-Version 대신 이 값을 우선
+  # 사용 → mvnw spring-boot:run (dev) 에서도 정상 표시.
+  version: @project.version@
+
+  # 도구 동작 모드: coordinator | worker | standalone
+  # 인스톨러가 사용자 선택을 MPD_MODE env 로 전달하면 그 값이 우선.
+  mode: ${MPD_MODE:coordinator}
+
+  # JWT
+  # PoC secret. Production 직전 rotate. 환경 변수 JWT_SECRET 로 override 가능.
+  # 생성: openssl rand -base64 64
+  jwt:
+    secret: ${JWT_SECRET:2h0DvU8r0PfHRT3RoGw3m/qSe+4EYMDY3IfwVeDdnOKm8cmOGvhQDKv/IS1Wr/bHmn0vVfv+eDbVuWyMl3IqkQ==}
+    expiration-hours: 8
+
+  # CORS (개발 시 Vite dev server 허용)
+  cors:
+    allowed-origins: ${CORS_ORIGINS:http://localhost:5173,http://localhost:8080}
+
+  # Coordinator 정보 (Worker 모드일 때 사용)
+  coordinator:
+    url: ${COORDINATOR_URL:http://localhost:8080}
+    # Coordinator 가 자기 자신을 master 로 운영할 때의 username — 이 user 가 어떤 project 의
+    # assignee 로 잡혀있으면 Worker 등록 검사를 건너뛰고 Coordinator 자기 backend 에서 local
+    # 실행한다 (자기는 Worker daemon 으로 self-register 할 일이 없으니).
+    self-username: ${COORDINATOR_SELF_USERNAME:master}
+
+  # DuckDB — 각 노드의 local 디스크 (Coordinator·Worker 각자 사용). envvar override 가능.
+  duckdb:
+    memory-mode: true # false 면 파일 모드 (사이트=prod 는 application-prod.yml 에서 false)
+    file-path:      ${MPD_DUCKDB_PATH:./data/duckdb.db}
+    temp-directory: ${MPD_DUCKDB_TEMP:./data/duckdb-tmp} # 대용량 spill 위치
+
+  # Run 산출물 (parquet1 / parquet2 / quarantine) — 각 노드의 local 디스크.
+  # 4대 분산 시 각 PC 마다 SSD 위치 등을 다르게 잡고 싶으면 MPD_OUTPUT_BASE_PATH 환경 변수로 override.
+  # default: C:/modernize/output (PR run-output 결정 — system-wide, user-independent).
+  output:
+    base-path: ${MPD_OUTPUT_BASE_PATH:C:/modernize/output}
+
+  # ── perf 측정 인프라 (dev 진단 한정) ─────────────────────────────────
+  # true 일 때만 DuckDB lock 계측 + Hibernate generate_statistics 주기 dump +
+  # /actuator/metrics 노출. application-dev.yml 에서 override.
+  # prod default false → 측정 코드는 if (perfEnabled) 분기 한 줄만 진입, 오버헤드 사실상 0.
+  perf:
+    enabled: ${MPD_PERF:false}
+
+  # Run 실행 튜닝 — LoadStage 의 binding 단위 병렬도. 1 = 순차 (옛 default).
+  # HikariCP pool size 10 + Hikari connection-timeout 5s 라 worker 노드 안에서
+  # 4 thread 까지 안전. 대용량 BANKSYS 데모에선 thread overhead < I/O wait 이라
+  # 거의 항상 이득. LOAD_PARALLELISM 환경 변수로 site 별 override 가능.
+  run:
+    load-parallelism: ${LOAD_PARALLELISM:4}
+
+# ── 로깅 ────────────────────────────────────────────────────────────────
+logging:
+  level:
+    root: INFO
+    com.ksinfo.modernize_pro_data: DEBUG
+    org.springframework.security: INFO
+    org.springframework.web: INFO
+    # HikariCP pool stat — DEBUG 면 매 connection acquire / release 로깅 부담.
+    # INFO 면 startup banner + leak / failure 만. P3-7 검증 시 stress 환경에서만 DEBUG.
+    com.zaxxer.hikari: INFO
+    # SQL trace — env var SPRING_JPA_SHOW_SQL=true 와 같이 toggle 해야 의미.
+    # bottleneck 진단 시 LOG_SQL_LEVEL=DEBUG 로 reproduce → query + binding 확인.
+    org.hibernate.SQL: ${LOG_SQL_LEVEL:WARN}
+    org.hibernate.orm.jdbc.bind: ${LOG_SQL_LEVEL:WARN}
+  pattern:
+    # %X{traceId} = PerfTraceFilter 가 요청별로 넣는 짧은 id. 5-user 동시 측정 시
+    # 같은 요청의 로그 묶기 (correlation) 용. 비-요청 thread 는 빈 값.
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] [%X{traceId}] %logger{36} - %msg%n"

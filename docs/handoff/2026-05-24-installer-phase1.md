@@ -5,7 +5,7 @@
 A single-script Windows .msi pipeline for the main tool. `installer/build.ps1`
 takes the project from `git pull` to a one-double-click installer that drops a
 JavaFX-shelled Spring Boot + Vite-built React app under
-`%LOCALAPPDATA%\ModernizeProData\`.
+`%LOCALAPPDATA%\ModernizeProDataBridge\`.
 
 Phase 1 scope is Coordinator-only. Phase 2 (first-boot mode wizard for
 Client / Standalone) and Phase 3 (license hardening) are deferred.
@@ -20,7 +20,7 @@ operational primer.
   SpaFallbackController.java`, `application-prod.yml`, SecurityConfig static
   permitAll, JavaFX `provided` deps + `<start-class>` in pom.
 - Frontend: `.env.production` with empty `VITE_API_BASE_URL` (same-origin).
-- New module: `ModernizeProData/installer/` — `build.ps1`, `make-ico.ps1`,
+- New module: `ModernizeProDataBridge/installer/` — `build.ps1`, `make-ico.ps1`,
   `assets/` (icon staging).
 - Documentation: ONBOARDING §19, this handoff.
 
@@ -47,9 +47,9 @@ operational primer.
 2. Ensure PostgreSQL 18 is running on `localhost:5433` with DB `mpd_meta`
    accessible by user `mpd` / password `mpd` (matches CLAUDE.md default and
    `application-prod.yml`).
-3. `cd ModernizeProData\installer; .\build.ps1`. First run also downloads
+3. `cd ModernizeProDataBridge\installer; .\build.ps1`. First run also downloads
    ~30MB JavaFX SDK 21.0.4 into `installer\cache\` — subsequent runs reuse.
-4. Output: `installer\dist\ModernizeProData-1.0.0.msi`.
+4. Output: `installer\dist\ModernizeProDataBridge-1.0.0.msi`.
 
 ## Operational rules (read before touching)
 
@@ -77,7 +77,7 @@ operational primer.
 6. **`<start-class>` in `backend/pom.xml` controls both the spring-boot-
    maven-plugin `run` goal AND the repackaged manifest's `Start-Class`.**
    Changing it changes dev behavior too. If you need dev to keep using
-   `ModernizeProDataApplication`, override the plugin's `mainClass` separately
+   `ModernizeProDataBridgeApplication`, override the plugin's `mainClass` separately
    for the `run` goal.
 
 ## Known gotchas

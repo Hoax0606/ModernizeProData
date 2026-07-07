@@ -4,7 +4,7 @@
 
 ## 한 일
 
-- **`Launcher.redirectStdoutToFile()` 첫 줄에 `if (System.console() != null) return;`** 추가. `mvnw spring-boot:run` / `java -jar` 처럼 콘솔이 있는 실행에서는 stdout/stderr 를 그대로 콘솔로 흘려보내고, jpackage WinExe (console=null) 일 때만 `%LOCALAPPDATA%\ModernizeProData\launcher.log` 로 redirect.
+- **`Launcher.redirectStdoutToFile()` 첫 줄에 `if (System.console() != null) return;`** 추가. `mvnw spring-boot:run` / `java -jar` 처럼 콘솔이 있는 실행에서는 stdout/stderr 를 그대로 콘솔로 흘려보내고, jpackage WinExe (console=null) 일 때만 `%LOCALAPPDATA%\ModernizeProDataBridge\launcher.log` 로 redirect.
 
 ## 함정 / 결정 이력
 

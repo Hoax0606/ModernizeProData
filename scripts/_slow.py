@@ -1,4 +1,4 @@
-p = "C:/Users/Hoax Japan/AppData/Local/ModernizeProData/launcher.log"
+p = "C:/Users/Hoax Japan/AppData/Local/ModernizeProDataBridge/launcher.log"
 rows = []
 for line in open(p, encoding="utf-8", errors="ignore"):
     if "perf" not in line or "ms)" not in line:
