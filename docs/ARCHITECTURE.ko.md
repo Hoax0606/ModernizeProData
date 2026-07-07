@@ -1,4 +1,4 @@
-# ModernizeProData — 아키텍처 문서
+# ModernizeProDataBridge — 아키텍처 문서
 
 작성일: 2026-05-12
 대상: 개발팀 (BE: 임지영·배성민·오현호 / FE: 恩田·진수현)
@@ -9,7 +9,7 @@
 
 ### 1.1 도구 소개
 
-**ModernizeProData** 는 대형 금융권의 데이터베이스 이행(Migration) 을 지원하는 도구. AS-IS 운영 시스템의 데이터를 TO-BE 신 시스템으로 정확하고 빠르게 옮기는 것이 목적.
+**ModernizeProDataBridge** 는 대형 금융권의 데이터베이스 이행(Migration) 을 지원하는 도구. AS-IS 운영 시스템의 데이터를 TO-BE 신 시스템으로 정확하고 빠르게 옮기는 것이 목적.
 
 ### 1.2 데이터 이행의 과제
 
@@ -19,7 +19,7 @@
 - **폐쇄망 제약** — 외부 서비스·도구 사용 불가
 - **협업** — N명이 매핑·실행 분담 필요
 
-ModernizeProData 는 폐쇄망에서 단일 설치 패키지로 동작하며, N대 PC가 협업해 운영할 수 있도록 설계.
+ModernizeProDataBridge 는 폐쇄망에서 단일 설치 패키지로 동작하며, N대 PC가 협업해 운영할 수 있도록 설계.
 
 ### 1.3 1차 목표
 
@@ -220,7 +220,7 @@ sockjs-client + stompjs          WebSocket (STOMP)
   ┌──────────────────────────────────────────────────┐
   │ Coordinator PC (1대)                              │
   │  ┌─────────────────────────────────────────────┐ │
-  │  │ ModernizeProData.exe (네이티브 앱)            │ │
+  │  │ ModernizeProDataBridge.exe (네이티브 앱)            │ │
   │  │  - 네이티브 창 + React UI (webview 내장)     │ │
   │  │  - Spring Boot (같은 프로세스)               │ │
   │  │  - DuckDB (임베디드)                         │ │
@@ -238,7 +238,7 @@ sockjs-client + stompjs          WebSocket (STOMP)
   │  │        │            │        │                │
   │ [W1]   [W2]         [W3]   ...                   │
   │  Worker PC (N-1대)                               │
-  │  - ModernizeProData.exe (같은 앱, worker 모드)    │
+  │  - ModernizeProDataBridge.exe (같은 앱, worker 모드)    │
   │  - Spring Boot + DuckDB 임베디드                 │
   │  - 추출·변환·적재·검증                            │
   └──────────────────────────────────────────────────┘
@@ -708,7 +708,7 @@ PoC 2차 deferred: ID 만료일 설정·연장.
 
 ### 7.1 목적
 
-- ModernizeProData 의 end-to-end 동작 검증
+- ModernizeProDataBridge 의 end-to-end 동작 검증
 - 5/31 마감 시점 합격 기준 확인
 
 ### 7.2 사전 준비
@@ -718,7 +718,7 @@ PoC 2차 deferred: ID 만료일 설정·연장.
 - Worker PC 4대 (총 5대)
 - 모든 PC: Windows, 8 core / 16GB / SSD
 - LAN 연결
-- 모든 PC 에 `ModernizeProData.exe` 설치
+- 모든 PC 에 `ModernizeProDataBridge.exe` 설치
 - Worker config 에 Coordinator URL 입력
 
 **데이터:**
@@ -756,7 +756,7 @@ PoC 2차 deferred: ID 만료일 설정·연장.
 2. CSV 를 Worker 디스크 또는 공유 폴더에 배치
 
 **Step 2 — 로그인·등록:**
-1. Coordinator PC 에서 `ModernizeProData.exe` 실행
+1. Coordinator PC 에서 `ModernizeProDataBridge.exe` 실행
 2. master 로그인
 3. Worker PC 4대 각자 실행 → Coordinator 자동 등록 확인
 4. master 가 admin 4명 계정 발급 (만료일 지정)
@@ -822,7 +822,7 @@ PoC 2차 deferred: ID 만료일 설정·연장.
 
 ## 8. 고객 협의 사항
 
-다음 항목은 ModernizeProData 도구 자체 결정이 아니라 **고객사(일본 금융권) 와 협의** 해서 정해야 한다.
+다음 항목은 ModernizeProDataBridge 도구 자체 결정이 아니라 **고객사(일본 금융권) 와 협의** 해서 정해야 한다.
 
 ### 8.1 시스템 환경
 

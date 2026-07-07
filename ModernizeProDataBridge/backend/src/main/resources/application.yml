@@ -98,7 +98,7 @@ server:
       enabled: true
       force: true
 
-# ── ModernizeProData 자체 설정 ──────────────────────────────────────────
+# ── ModernizeProDataBridge 자체 설정 ──────────────────────────────────────────
 modernize:
   # 빌드 시점 version (pom.xml 의 <version>). Spring Boot 의 application.yml
   # resource filtering 이 @project.version@ 을 maven build 때 실 값으로 치환.

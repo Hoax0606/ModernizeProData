@@ -22,7 +22,7 @@ public final class KeyManager {
 
     /**
      * Key 저장 위치 — LicenseIssuer.exe 와 같은 폴더 안의 {@code license/} 서브폴더.
-     * 인수인계 시 install 폴더 (예: {@code C:\ksinfo\ModernizeProData\LicenseIssuer\}) 전체를
+     * 인수인계 시 install 폴더 (예: {@code C:\ksinfo\ModernizeProDataBridge\LicenseIssuer\}) 전체를
      * USB 로 옮기면 키도 함께 따라감.
      *
      * <p>jpackage 가 아닌 dev 모드 (IDE / mvn) 일 때는 user home 으로 fallback.

@@ -1,4 +1,4 @@
-# ModernizeProData — 설계 및 개발 계획
+# ModernizeProDataBridge — 설계 및 개발 계획
 
 작성일: 2026-05-11
 
@@ -212,7 +212,7 @@ ZIP 한 개
 Spring Boot multi-module project:
 
 ```
-ModernizeProData/
+ModernizeProDataBridge/
  ├ coordinator/          ← REST API, 매핑 보관, UI 호스팅
  ├ worker/               ← Spring Batch job, DuckDB, TO-BE 적재
  ├ common/               ← 모델·매핑 파서 공유

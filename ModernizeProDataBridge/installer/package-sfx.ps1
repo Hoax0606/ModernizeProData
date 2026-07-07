@@ -5,7 +5,7 @@
 # Why not IExpress: IExpress's makecab silently fails on ~800MB inputs on
 # our build host. 7-Zip's GUI SFX has no such limit and gives a cleaner UX.
 #
-# Output: dist\ModernizeProData-1.0.0-setup.exe
+# Output: dist\ModernizeProDataBridge-1.0.0-setup.exe
 
 #requires -Version 5.1
 $ErrorActionPreference = 'Stop'
@@ -23,8 +23,8 @@ if (-not (Test-Path $launcher)) { throw "Missing: $launcher. Run build-launcher.
 # Bundle whatever MSI subset build.ps1 produced (Combo can omit some locales).
 # ProductVersion 은 build.ps1 의 .build-counter 로 매 빌드 auto-bump (1.0.<N>) 되므로
 # 파일명 hardcode 불가 — wildcard 매칭 후 (role, lang) 별 최신 mtime 1개씩 채택 (2026-06-03).
-$msiCandidates = Get-ChildItem $dist -Filter 'ModernizeProData-*.msi' |
-    Where-Object { $_.Name -match '^ModernizeProData-(Worker-)?(en|ko|ja)-\d+\.\d+\.\d+\.msi$' } |
+$msiCandidates = Get-ChildItem $dist -Filter 'ModernizeProDataBridge-*.msi' |
+    Where-Object { $_.Name -match '^ModernizeProDataBridge-(Worker-)?(en|ko|ja)-\d+\.\d+\.\d+\.msi$' } |
     Group-Object { $_.Name -replace '-\d+\.\d+\.\d+\.msi$', '' } |
     ForEach-Object { ($_.Group | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName }
 if ($msiCandidates.Count -eq 0) { throw "No MSI in $dist. Run build.ps1 first." }
@@ -50,7 +50,7 @@ $config = Join-Path $staging 'config.txt'
 $configContent = @"
 ;!@Install@!UTF-8!
 GUIMode="2"
-Title="ModernizeProData Setup"
+Title="ModernizeProDataBridge Setup"
 BeginPrompt="Extract setup files and launch installer?"
 ExecuteFile="Launcher.exe"
 ;!@InstallEnd@!
@@ -61,7 +61,7 @@ ExecuteFile="Launcher.exe"
 
 # MSI 파일명의 auto-bump 버전 (1.0.<N>) 을 setup.exe 이름에도 반영.
 $ver = if ((Split-Path $msiCandidates[0] -Leaf) -match '(\d+\.\d+\.\d+)\.msi$') { $Matches[1] } else { '1.0.0' }
-$out = Join-Path $dist "ModernizeProData-$ver-setup.exe"
+$out = Join-Path $dist "ModernizeProDataBridge-$ver-setup.exe"
 if (Test-Path $out) { Remove-Item -Force $out }
 
 Write-Host "Concatenating SFX module + config + archive..." -ForegroundColor Cyan

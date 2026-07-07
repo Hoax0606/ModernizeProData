@@ -1,7 +1,7 @@
 ﻿#requires -Version 5.1
 <#
 .SYNOPSIS
-  Build ModernizeProData License Issuer as a Windows .exe bundle.
+  Build ModernizeProDataBridge License Issuer as a Windows .exe bundle.
 
 .DESCRIPTION
   Steps:

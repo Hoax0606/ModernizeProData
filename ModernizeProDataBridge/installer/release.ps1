@@ -11,7 +11,7 @@
     1. build.ps1 호출 (jpackage MSI 까지 full build — fat jar / host exe / Flyway sql 산출).
     2. delta package 만들기 — staging/app 의 핵심 파일만 zip:
          - <fat jar>.jar          (Spring Boot 의 모든 application class + dep)
-         - ModernizeProDataUI.exe (WebView2 host)
+         - ModernizeProDataBridgeUI.exe (WebView2 host)
          - Flyway sql/             (db/migration/V*.sql)
        PG portable / JFX DLL / jlink runtime 은 제외 — 그 부분은 본 install 시 한 번만.
     3. SHA-256 hash 계산.
@@ -84,7 +84,7 @@ if (-not $fatJar) { throw "Fat jar not found in $staging" }
 Copy-Item -Force $fatJar.FullName $relDir
 
 # WebView2 host
-$hostExe = Join-Path $staging 'ModernizeProDataUI.exe'
+$hostExe = Join-Path $staging 'ModernizeProDataBridgeUI.exe'
 if (Test-Path $hostExe) { Copy-Item -Force $hostExe $relDir }
 
 # Flyway migrations (도구가 어떤 V_xxx 가 들어있는지 후행 apply 가 판단 가능).
@@ -141,7 +141,7 @@ $ghArgs = @(
     'release','create',$Tag,
     $zipPath, $manifestPath,
     '--repo', $githubRepo,
-    '--title', "ModernizeProData $Tag"
+    '--title', "ModernizeProDataBridge $Tag"
 )
 if ($Notes -and (Test-Path $Notes)) {
     $ghArgs += @('--notes-file', $Notes)

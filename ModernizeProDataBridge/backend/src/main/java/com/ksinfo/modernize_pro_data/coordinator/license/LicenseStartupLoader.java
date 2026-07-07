@@ -67,12 +67,12 @@ public class LicenseStartupLoader {
     }
 
     /** Hidden config dir under the install location so a user browsing
-     *  {@code %LOCALAPPDATA%\ModernizeProData\} does not stumble on the .lic.
+     *  {@code %LOCALAPPDATA%\ModernizeProDataBridge\} does not stumble on the .lic.
      *  Launcher.exe writes to the exact same path; both sides must agree. */
     private Path bootstrapPath() {
         String localAppData = System.getenv("LOCALAPPDATA");
         if (localAppData != null && !localAppData.isBlank()) {
-            return Paths.get(localAppData, "ModernizeProData", ".config", "license.lic");
+            return Paths.get(localAppData, "ModernizeProDataBridge", ".config", "license.lic");
         }
         String home = System.getProperty("user.home");
         if (home != null) return Paths.get(home, ".modernize", "license.lic");

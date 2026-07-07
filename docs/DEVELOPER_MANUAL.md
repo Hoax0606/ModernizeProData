@@ -1,5 +1,5 @@
 ---
-title: "ModernizeProData 개발 매뉴얼"
+title: "ModernizeProDataBridge 개발 매뉴얼"
 subtitle: "Developer Manual · Enterprise Edition"
 author: "KS Info System Co., Ltd."
 date: "2026"
@@ -37,7 +37,7 @@ lang: ko
 
 ## 1. 머리말
 
-본 매뉴얼은 ModernizeProData(이하 “본 도구”)의 시스템 구조·구현 방식·확장 절차를 정의합니다. 본 매뉴얼을 따른 구현은 본사 표준 산출물로 간주되며, 본사 검토를 통과해야 릴리즈 후보가 됩니다.
+본 매뉴얼은 ModernizeProDataBridge(이하 “본 도구”)의 시스템 구조·구현 방식·확장 절차를 정의합니다. 본 매뉴얼을 따른 구현은 본사 표준 산출물로 간주되며, 본사 검토를 통과해야 릴리즈 후보가 됩니다.
 
 본 도구는 단일 사이트(고객사 데이터센터) 안에 설치되어 운영되는 **온프레미스 데스크탑 설치형 제품**이며, 인터넷 접근이 불가한 폐쇄망 환경에서도 모든 기능이 동작해야 합니다. 따라서 외부 SaaS 의존성·런타임 모듈 다운로드·자동 업데이트 채널은 채택하지 않습니다.
 
@@ -172,7 +172,7 @@ lang: ko
 저장소는 *백엔드 / 프론트엔드 / 설치 패키저* 3개 영역으로 나눠 책임 단위로 다음과 같이 구성합니다. 구체 모듈 디렉토리명은 본 개발 시점에 확정합니다.
 
 ```
-ModernizeProData/
+ModernizeProDataBridge/
 ├── backend/                           Gradle 멀티 모듈 루트
 │   ├── (Gradle 빌드 정의 파일)
 │   ├── 앱 부트스트랩 모듈/             Spring Boot 진입점 + 구성 통합
@@ -1228,7 +1228,7 @@ API 측 인가는 *Spring Security 의 메서드 단위 사전 권한 검사* �
 `jpackage` 빌드는 다음 옵션을 결정 사양으로 사용합니다 (jar 파일명은 §19.1 의 fat jar 산출물에 맞춰 치환).
 
 ```bash
-jpackage --type msi --name ModernizeProData \
+jpackage --type msi --name ModernizeProDataBridge \
   --input dist/ \
   --main-jar <fat-jar 파일명>.jar \
   --main-class org.springframework.boot.loader.launch.JarLauncher \
@@ -1297,7 +1297,7 @@ v1.0.0 · build 2026.04.18-a9f3c1
 
 ```
 [Unit]
-Description=ModernizeProData
+Description=ModernizeProDataBridge
 After=network.target
 
 [Service]

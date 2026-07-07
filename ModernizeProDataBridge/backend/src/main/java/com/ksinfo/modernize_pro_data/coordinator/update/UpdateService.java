@@ -123,7 +123,7 @@ public class UpdateService {
     }
 
     private Path cacheFile() {
-        return Path.of(stagingDirBase, "ModernizeProData", "update-cache", "last-status.json");
+        return Path.of(stagingDirBase, "ModernizeProDataBridge", "update-cache", "last-status.json");
     }
 
     /**
@@ -284,8 +284,8 @@ public class UpdateService {
     }
 
     private Path resolveStagingRoot() {
-        // %LOCALAPPDATA%\ModernizeProData (인스톨 root 와 동일 위치). Launcher 가 같은 root 기준 swap.
-        return Path.of(stagingDirBase, "ModernizeProData");
+        // %LOCALAPPDATA%\ModernizeProDataBridge (인스톨 root 와 동일 위치). Launcher 가 같은 root 기준 swap.
+        return Path.of(stagingDirBase, "ModernizeProDataBridge");
     }
 
     private static String sha256Hex(byte[] data) throws Exception {

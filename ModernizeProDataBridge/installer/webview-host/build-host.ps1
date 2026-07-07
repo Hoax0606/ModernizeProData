@@ -1,6 +1,6 @@
-# Build the .NET 8 WebView2 host (ModernizeProDataUI.exe).
+# Build the .NET 8 WebView2 host (ModernizeProDataBridgeUI.exe).
 #
-# Output: installer/webview-host/dist/ModernizeProDataUI.exe (self-contained single-file).
+# Output: installer/webview-host/dist/ModernizeProDataBridgeUI.exe (self-contained single-file).
 # Consumed by installer/build.ps1 which copies it into the jpackage staging dir
 # so it's bundled into the .msi alongside the JVM image.
 
@@ -16,10 +16,10 @@ $dist = Join-Path $PSScriptRoot 'dist'
 if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
 New-Item -ItemType Directory -Path $dist | Out-Null
 
-Write-Host "Restoring + publishing ModernizeProDataUI (net8.0-windows, win-x64, self-contained)..." -ForegroundColor Cyan
+Write-Host "Restoring + publishing ModernizeProDataBridgeUI (net8.0-windows, win-x64, self-contained)..." -ForegroundColor Cyan
 $prev = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
-& dotnet publish ModernizeProDataUI.csproj `
+& dotnet publish ModernizeProDataBridgeUI.csproj `
     -c Release `
     -r win-x64 `
     --self-contained true `
@@ -33,7 +33,7 @@ $ec = $LASTEXITCODE
 $ErrorActionPreference = $prev
 if ($ec -ne 0) { throw "dotnet publish failed (exit $ec)" }
 
-$exe = Join-Path $dist 'ModernizeProDataUI.exe'
+$exe = Join-Path $dist 'ModernizeProDataBridgeUI.exe'
 if (-not (Test-Path $exe)) { throw "Expected $exe not produced." }
 
 $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)

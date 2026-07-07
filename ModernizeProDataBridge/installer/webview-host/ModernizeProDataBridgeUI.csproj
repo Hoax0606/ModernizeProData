@@ -6,16 +6,16 @@
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <RootNamespace>KsInfo.ModernizeProData.UI</RootNamespace>
-    <AssemblyName>ModernizeProDataUI</AssemblyName>
+    <RootNamespace>KsInfo.ModernizeProDataBridge.UI</RootNamespace>
+    <AssemblyName>ModernizeProDataBridgeUI</AssemblyName>
     <ApplicationIcon>..\assets\mpd.ico</ApplicationIcon>
     <!-- Edge app-mode 대체 host. taskbar / 우클릭 메뉴 / context menu 를 우리가 결정. -->
     <Version>1.0.0</Version>
     <AssemblyVersion>1.0.0.0</AssemblyVersion>
     <FileVersion>1.0.0.0</FileVersion>
-    <Product>ModernizeProData</Product>
+    <Product>ModernizeProDataBridge</Product>
     <Company>KS Info System Co., Ltd.</Company>
-    <Description>ModernizeProData UI host (WebView2)</Description>
+    <Description>ModernizeProDataBridge UI host (WebView2)</Description>
     <!-- self-contained + single file 로 .NET runtime 동봉. 사용자 PC 의 .NET 의존 0. -->
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>

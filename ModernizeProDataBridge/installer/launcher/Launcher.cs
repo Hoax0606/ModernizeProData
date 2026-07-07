@@ -1,4 +1,4 @@
-// ModernizeProData installer launcher.
+// ModernizeProDataBridge installer launcher.
 //
 // Pops a single setup dialog asking for:
 //   - UI language (en/ko/ja)
@@ -8,7 +8,7 @@
 //   - Optional .lic file to install at the same time
 //
 // On OK it runs msiexec for the matching per-language .msi, then -- if the
-// user picked a .lic -- copies it into %LOCALAPPDATA%\ModernizeProData\
+// user picked a .lic -- copies it into %LOCALAPPDATA%\ModernizeProDataBridge\
 // license.lic. The backend's LicenseStartupLoader picks that file up on the
 // first boot and imports it.
 //
@@ -42,26 +42,26 @@ internal static class Launcher
             string exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? ".";
             // role 별 msi prefix. worker 만 별 jpackage build (build.ps1 -Role worker).
             // standalone = coordinator 와 동일 jar / 동일 msi — 첫 boot 시 APP_MODE 로 분기.
-            string msiPrefix = mode == "worker" ? "ModernizeProData-Worker-" : "ModernizeProData-";
+            string msiPrefix = mode == "worker" ? "ModernizeProDataBridge-Worker-" : "ModernizeProDataBridge-";
             // ProductVersion 이 매 빌드 bump (1.0.<counter>) — 고정 file 이름 hardcode
             // 안 됨. wildcard 검색 + 최신 mtime 의 msi 사용.
             // Coordinator pattern 은 worker prefix 와 충돌 — 명시적으로 'Worker-' 포함
             // 여부로 필터링.
-            string[] allMsis = Directory.GetFiles(exeDir, "ModernizeProData-*-" + lang + "-*.msi");
+            string[] allMsis = Directory.GetFiles(exeDir, "ModernizeProDataBridge-*-" + lang + "-*.msi");
             string[] candidates;
             if (mode == "worker") {
-                candidates = Array.FindAll(allMsis, f => Path.GetFileName(f).StartsWith("ModernizeProData-Worker-", StringComparison.OrdinalIgnoreCase));
+                candidates = Array.FindAll(allMsis, f => Path.GetFileName(f).StartsWith("ModernizeProDataBridge-Worker-", StringComparison.OrdinalIgnoreCase));
             } else {
                 // Coordinator / standalone — exclude Worker variants explicitly.
-                candidates = Array.FindAll(allMsis, f => !Path.GetFileName(f).StartsWith("ModernizeProData-Worker-", StringComparison.OrdinalIgnoreCase));
-                // Coord 의 정확한 이름은 'ModernizeProData-<lang>-<ver>.msi' (segment 3) 라
+                candidates = Array.FindAll(allMsis, f => !Path.GetFileName(f).StartsWith("ModernizeProDataBridge-Worker-", StringComparison.OrdinalIgnoreCase));
+                // Coord 의 정확한 이름은 'ModernizeProDataBridge-<lang>-<ver>.msi' (segment 3) 라
                 // 위 glob 가 매치 안 함. 별 glob 로 다시 잡음.
                 candidates = Directory.GetFiles(exeDir, msiPrefix + lang + "-*.msi");
             }
             if (candidates.Length == 0) {
                 MessageBox.Show(
                     "Localized installer not found next to Launcher.exe.\n\nExpected pattern:\n" + Path.Combine(exeDir, msiPrefix + lang + "-*.msi"),
-                    "ModernizeProData",
+                    "ModernizeProDataBridge",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
                 return 2;
@@ -89,7 +89,7 @@ internal static class Launcher
             {
                 MessageBox.Show(
                     "Failed to start the installer:\n\n" + ex.Message,
-                    "ModernizeProData",
+                    "ModernizeProDataBridge",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
                 return 3;
@@ -101,7 +101,7 @@ internal static class Launcher
             // msi 로 덮이면 1612 (Source out of sync). dist 와 무관한 영구 위치에
             // 사본 두면 사용자가 dialog 의 Browse 로 거기 지정 → 통과.
             //
-            // 위치: install dir 밖 (%LOCALAPPDATA%\ModernizeProDataInstallCache\) —
+            // 위치: install dir 밖 (%LOCALAPPDATA%\ModernizeProDataBridgeInstallCache\) —
             // install dir 안에 두면 uninstall 시 같이 사라져 무용. permission 불필요
             // (LocalAppData = user-writable).
             if (exitCode == 0)
@@ -121,7 +121,7 @@ internal static class Launcher
         {
             string cacheDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "ModernizeProDataInstallCache");
+                "ModernizeProDataBridgeInstallCache");
             Directory.CreateDirectory(cacheDir);
             string preserved = Path.Combine(cacheDir, Path.GetFileName(msiPath));
             File.Copy(msiPath, preserved, true);
@@ -131,7 +131,7 @@ internal static class Launcher
                 "MSI source preserved at:\n" + preserved + "\n\n" +
                 "If Windows asks for installation media during uninstall,\n" +
                 "click Browse and select this file.",
-                "ModernizeProData",
+                "ModernizeProDataBridge",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
         }
@@ -142,7 +142,7 @@ internal static class Launcher
             MessageBox.Show(
                 "Note: MSI source preservation failed.\n\n" + ex.Message +
                 "\n\nKeep the setup.zip handy for future uninstall.",
-                "ModernizeProData",
+                "ModernizeProDataBridge",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
         }
@@ -197,7 +197,7 @@ internal sealed class SetupDialog : Form
         SelectedLanguage = "en";
         SelectedMode = "coordinator";
 
-        Text = "ModernizeProData Setup";
+        Text = "ModernizeProDataBridge Setup";
         Width = 520;
         Height = 420;
         StartPosition = FormStartPosition.CenterScreen;
@@ -214,7 +214,7 @@ internal sealed class SetupDialog : Form
         // ---- Title strip (no accent bar; match WiX wizard's plain white header) ----
         var title = new Label
         {
-            Text = "ModernizeProData",
+            Text = "ModernizeProDataBridge",
             Top = 18, Left = padLeft, Width = width, Height = 24,
             Font = TitleFont,
             ForeColor = Accent

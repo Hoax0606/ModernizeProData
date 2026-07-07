@@ -2,7 +2,7 @@
 #
 # csc.exe ships with .NET Framework (always present on Windows 10/11 under
 # %WINDIR%\Microsoft.NET\Framework64\v4.0.*\), so this requires no extra SDK
-# install. Output is dropped into ../dist/ alongside ModernizeProData.msi so
+# install. Output is dropped into ../dist/ alongside ModernizeProDataBridge.msi so
 # Launcher.exe finds the MSI by relative path at runtime.
 
 #requires -Version 5.1

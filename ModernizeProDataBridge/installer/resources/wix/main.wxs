@@ -2,7 +2,7 @@
 <!--
   Modified copy of jpackage's default main.wxs (JDK 21).
   Only change: WixVariable entries inside <Product> to override the
-  default WixUI banner / dialog bitmaps with ModernizeProData branding.
+  default WixUI banner / dialog bitmaps with ModernizeProDataBridge branding.
   All other jpackage variables ($(var.JpProductCode), etc.) are still
   defined by jpackage when it invokes candle.exe.
 -->
@@ -48,7 +48,7 @@
       InstallScope="$(var.JpInstallScope)" Platform="x64"
     />
 
-    <!-- ModernizeProData branding: custom installer banner (493x58) and
+    <!-- ModernizeProDataBridge branding: custom installer banner (493x58) and
          welcome/exit dialog bitmap (493x312). jpackage only stages .wxl/.wxs
          files from the resource-dir, so we reference the .bmp's by absolute
          path via the MPD_BMP_DIR environment variable set by build.ps1. -->
@@ -91,7 +91,7 @@
       <ComponentGroupRef Id="FileAssociations"/>
       <!-- Language preference written by launcher.exe via APP_LANG property,
            or omitted when the user runs the .msi directly. -->
-      <ComponentRef Id="ModernizeProDataLanguagePref"/>
+      <ComponentRef Id="ModernizeProDataBridgeLanguagePref"/>
     </Feature>
 
     <!-- Persist installer-time choices into HKCU. Launcher.java reads these
@@ -101,8 +101,8 @@
     <Property Id="APP_LANG" Value="en" />
     <Property Id="APP_MODE" Value="coordinator" />
     <DirectoryRef Id="TARGETDIR">
-      <Component Id="ModernizeProDataLanguagePref" Guid="*">
-        <RegistryKey Root="HKCU" Key="Software\ModernizeProData">
+      <Component Id="ModernizeProDataBridgeLanguagePref" Guid="*">
+        <RegistryKey Root="HKCU" Key="Software\ModernizeProDataBridge">
           <RegistryValue Name="Language" Type="string" Value="[APP_LANG]" KeyPath="yes" />
           <RegistryValue Name="Mode"     Type="string" Value="[APP_MODE]" />
         </RegistryKey>

@@ -17,7 +17,7 @@ import java.util.concurrent.Executor;
  *
  * 동시 run 상한은 RunCapacityPlanner 가 PC 의 RAM/CPU 로 산정한 값을 그대로 쓴다.
  * core==max → queue 가 차길 기다리지 않고 즉시 max 개까지 동시 실행. 초과분은 queue 대기.
- * {@code @EnableAsync} 는 ModernizeProDataApplication 에 이미 있음.
+ * {@code @EnableAsync} 는 ModernizeProDataBridgeApplication 에 이미 있음.
  */
 @Slf4j
 @Configuration

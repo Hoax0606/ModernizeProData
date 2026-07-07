@@ -1,4 +1,4 @@
-# ModernizeProData cleanup -- run as admin
+# ModernizeProDataBridge cleanup -- run as admin
 $packed  = "FB10E024EE495CE3F991394C3C37A397"
 $sid     = "S-1-5-21-3322844094-1642998784-2093105868-1001"
 $product = "{420E01BF-94EE-3EC5-9F19-93C4C3733A79}"
@@ -26,7 +26,7 @@ Get-ChildItem $compRoot -ErrorAction SilentlyContinue | ForEach-Object {
 }
 Write-Output "components cleaned = $cleaned (skipped/denied = $denied — harmless)"
 
-Remove-Item "$env:LOCALAPPDATA\ModernizeProData" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:LOCALAPPDATA\ModernizeProDataBridge" -Recurse -Force -ErrorAction SilentlyContinue
 
 Get-ChildItem "C:\Windows\Installer" -Filter "*.msi" -ErrorAction SilentlyContinue | ForEach-Object {
     try {
@@ -38,12 +38,12 @@ Get-ChildItem "C:\Windows\Installer" -Filter "*.msi" -ErrorAction SilentlyContin
         $rec = $view.GetType().InvokeMember("Fetch","InvokeMethod",$null,$view,$null)
         if ($rec) {
             $name = $rec.GetType().InvokeMember("StringData","GetProperty",$null,$rec,@(1))
-            if ($name -like "*ModernizeProData*") { Remove-Item $_.FullName -Force }
+            if ($name -like "*ModernizeProDataBridge*") { Remove-Item $_.FullName -Force }
         }
     } catch {}
 }
 
-Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\ModernizeProData" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\ModernizeProDataBridge" -Recurse -Force -ErrorAction SilentlyContinue
 
 $wshell = New-Object -ComObject WScript.Shell
 $desktops = @(
@@ -55,7 +55,7 @@ foreach ($d in $desktops) {
     Get-ChildItem $d -Filter "*.lnk" -ErrorAction SilentlyContinue | ForEach-Object {
         try {
             $lnk = $wshell.CreateShortcut($_.FullName)
-            if ($lnk.TargetPath -match 'ModernizeProData') {
+            if ($lnk.TargetPath -match 'ModernizeProDataBridge') {
                 Remove-Item $_.FullName -Force
                 Write-Output "removed shortcut: $($_.FullName)"
             }
@@ -63,10 +63,10 @@ foreach ($d in $desktops) {
     }
 }
 
-Remove-Item "C:\KSINFO\DataMigrationTool\ModernizeProData\installer\dist\ModernizeProData-en-1.0.0.msi" -Force -ErrorAction SilentlyContinue
-Remove-Item "C:\KSINFO\DataMigrationTool\ModernizeProData\installer\dist\ModernizeProData-Worker-en-1.0.0.msi" -Force -ErrorAction SilentlyContinue
+Remove-Item "C:\KSINFO\DataMigrationTool\ModernizeProDataBridge\installer\dist\ModernizeProDataBridge-en-1.0.0.msi" -Force -ErrorAction SilentlyContinue
+Remove-Item "C:\KSINFO\DataMigrationTool\ModernizeProDataBridge\installer\dist\ModernizeProDataBridge-Worker-en-1.0.0.msi" -Force -ErrorAction SilentlyContinue
 
 Write-Output "---verify---"
-$r = Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* -ErrorAction SilentlyContinue | Where-Object DisplayName -like "*ModernizeProData*"
+$r = Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* -ErrorAction SilentlyContinue | Where-Object DisplayName -like "*ModernizeProDataBridge*"
 if ($r) { Write-Output "STILL: $($r.PSChildName)" } else { Write-Output "OK: uninstall entry gone" }
-if (Test-Path "$env:LOCALAPPDATA\ModernizeProData") { Write-Output "STILL: install dir" } else { Write-Output "OK: install dir gone" }
+if (Test-Path "$env:LOCALAPPDATA\ModernizeProDataBridge") { Write-Output "STILL: install dir" } else { Write-Output "OK: install dir gone" }

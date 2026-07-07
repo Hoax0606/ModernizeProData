@@ -6,7 +6,7 @@ using System.Windows.Forms;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
-namespace KsInfo.ModernizeProData.UI;
+namespace KsInfo.ModernizeProDataBridge.UI;
 
 /// <summary>
 /// WebView2 호스트 폼. Edge `--app=URL` 대체.
@@ -124,9 +124,9 @@ internal sealed class MainForm : Form
 
     private async Task InitWebViewAsync()
     {
-        // user-data dir = LOCALAPPDATA\ModernizeProData\webview2\<profile> .
+        // user-data dir = LOCALAPPDATA\ModernizeProDataBridge\webview2\<profile> .
         string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        string userDataDir = Path.Combine(localAppData, "ModernizeProData", "webview2", _opts.Profile);
+        string userDataDir = Path.Combine(localAppData, "ModernizeProDataBridge", "webview2", _opts.Profile);
         Directory.CreateDirectory(userDataDir);
 
         var env = await CoreWebView2Environment.CreateAsync(null, userDataDir, null);

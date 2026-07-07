@@ -2,7 +2,7 @@ package com.ksinfo.modernize_pro_data.launcher;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.ksinfo.modernize_pro_data.ModernizeProDataApplication;
+import com.ksinfo.modernize_pro_data.ModernizeProDataBridgeApplication;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.geometry.Pos;
@@ -66,14 +66,14 @@ public class Launcher {
                 new SwingGuiApp().start(args);
             }
         } else {
-            SpringApplication app = new SpringApplication(ModernizeProDataApplication.class);
+            SpringApplication app = new SpringApplication(ModernizeProDataBridgeApplication.class);
             app.setHeadless(false);
             app.run(args);
         }
     }
 
     /** GUI-only diagnostics: jpackage's WinExe drops stdout/stderr by default,
-     *  so we redirect both to %LOCALAPPDATA%\ModernizeProData\launcher.log.
+     *  so we redirect both to %LOCALAPPDATA%\ModernizeProDataBridge\launcher.log.
      *  Lets us see Spring boot errors and WebView events when the GUI seems
      *  stuck.
      *
@@ -86,7 +86,7 @@ public class Launcher {
         try {
             String localAppData = System.getenv("LOCALAPPDATA");
             if (localAppData == null || localAppData.isBlank()) return;
-            File dir = new File(localAppData, "ModernizeProData");
+            File dir = new File(localAppData, "ModernizeProDataBridge");
             if (!dir.exists() && !dir.mkdirs()) return;
             File log = new File(dir, "launcher.log");
             PrintStream ps = new PrintStream(new FileOutputStream(log, true), true);
@@ -103,7 +103,7 @@ public class Launcher {
         if (!System.getProperty("os.name", "").toLowerCase().contains("win")) return;
         try {
             Process p = new ProcessBuilder(
-                    "reg", "query", "HKCU\\Software\\ModernizeProData"
+                    "reg", "query", "HKCU\\Software\\ModernizeProDataBridge"
             ).redirectErrorStream(true).start();
             byte[] out = p.getInputStream().readAllBytes();
             p.waitFor();
@@ -201,7 +201,7 @@ public class Launcher {
                         java.util.Map.entry("creds.connectFailed","Connect failed: {reason}"),
                         java.util.Map.entry("worker.loadFailed",  "Failed to load Coordinator UI: {reason}"),
                         java.util.Map.entry("instance.alreadyTitle", "Already running"),
-                        java.util.Map.entry("instance.alreadyBody",  "Another ModernizeProData Worker instance is already running on this PC. Close it first (check Task Manager for java.exe if no window is visible), then launch again.")
+                        java.util.Map.entry("instance.alreadyBody",  "Another ModernizeProDataBridge Worker instance is already running on this PC. Close it first (check Task Manager for java.exe if no window is visible), then launch again.")
                 ),
                 "ko", java.util.Map.ofEntries(
                         java.util.Map.entry("url.title",       "Coordinator 에 연결"),
@@ -240,7 +240,7 @@ public class Launcher {
                         java.util.Map.entry("creds.connectFailed","연결 실패: {reason}"),
                         java.util.Map.entry("worker.loadFailed",  "Coordinator UI 로드 실패: {reason}"),
                         java.util.Map.entry("instance.alreadyTitle", "이미 실행 중"),
-                        java.util.Map.entry("instance.alreadyBody",  "이 PC 에서 ModernizeProData Worker 가 이미 실행 중입니다. 먼저 종료한 뒤 다시 실행하세요 (창이 안 보이면 작업관리자에서 java.exe 확인).")
+                        java.util.Map.entry("instance.alreadyBody",  "이 PC 에서 ModernizeProDataBridge Worker 가 이미 실행 중입니다. 먼저 종료한 뒤 다시 실행하세요 (창이 안 보이면 작업관리자에서 java.exe 확인).")
                 ),
                 "ja", java.util.Map.ofEntries(
                         java.util.Map.entry("url.title",       "Coordinator に接続"),
@@ -279,7 +279,7 @@ public class Launcher {
                         java.util.Map.entry("creds.connectFailed","接続失敗: {reason}"),
                         java.util.Map.entry("worker.loadFailed",  "Coordinator UI の読み込みに失敗: {reason}"),
                         java.util.Map.entry("instance.alreadyTitle", "すでに実行中"),
-                        java.util.Map.entry("instance.alreadyBody",  "この PC では ModernizeProData Worker がすでに実行中です。先に終了してから再起動してください (ウィンドウが見えない場合はタスクマネージャーで java.exe を確認)。")
+                        java.util.Map.entry("instance.alreadyBody",  "この PC では ModernizeProDataBridge Worker がすでに実行中です。先に終了してから再起動してください (ウィンドウが見えない場合はタスクマネージャーで java.exe を確認)。")
                 )
         );
 
@@ -342,7 +342,7 @@ public class Launcher {
         }
 
         /** 다중 실행 차단 — Worker 프로세스 단일 인스턴스 보장 (2026-06-03).
-         *  %LOCALAPPDATA%\ModernizeProData\worker.lock 에 OS file lock 을 잡고
+         *  %LOCALAPPDATA%\ModernizeProDataBridge\worker.lock 에 OS file lock 을 잡고
          *  프로세스 수명 동안 유지 (static 참조로 GC 방지, 프로세스 종료 시 OS 가
          *  자동 해제 — 좀비/크래시에도 stale lock 안 남음). 두 번째 인스턴스는
          *  tryLock 실패 → 안내 후 즉시 종료. port 8081 충돌의 2차 방어선. */
@@ -355,7 +355,7 @@ public class Launcher {
                 File dir = new File(
                         (localAppData == null || localAppData.isBlank())
                                 ? System.getProperty("java.io.tmpdir") : localAppData,
-                        "ModernizeProData");
+                        "ModernizeProDataBridge");
                 if (!dir.exists() && !dir.mkdirs()) return true; // lock 불가 환경 — 차단하지 않음
                 File lockFile = new File(dir, "worker.lock");
                 instanceLockChannel = java.nio.channels.FileChannel.open(
@@ -380,7 +380,7 @@ public class Launcher {
             if (!acquireSingleInstanceLock()) {
                 javafx.scene.control.Alert a =
                         new javafx.scene.control.Alert(javafx.scene.control.Alert.AlertType.WARNING);
-                a.setTitle("ModernizeProData");
+                a.setTitle("ModernizeProDataBridge");
                 a.setHeaderText(WorkerI18n.t("instance.alreadyTitle"));
                 a.setContentText(WorkerI18n.t("instance.alreadyBody"));
                 a.showAndWait();
@@ -395,7 +395,7 @@ public class Launcher {
             // the wizard legible.
             root.setStyle("-fx-font-family: 'Hoax Mono JP', 'Segoe UI', sans-serif;"
                     + " -fx-background-color: #f9fafb;");
-            stage.setTitle("ModernizeProData — Worker");
+            stage.setTitle("ModernizeProDataBridge — Worker");
             tryLoadIcon(stage);
             stage.setScene(new Scene(root, 1200, 760));
             applyStandardWindowChrome(stage);
@@ -755,7 +755,7 @@ public class Launcher {
                 body = WorkerI18n.t("url.update.upToDateBody",
                         java.util.Map.of("current", String.valueOf(r.currentVersion)));
             }
-            alert.setTitle("ModernizeProData");
+            alert.setTitle("ModernizeProDataBridge");
             alert.setHeaderText(header);
             alert.setContentText(body);
             alert.showAndWait();
@@ -774,7 +774,7 @@ public class Launcher {
 
         private void runReg(String name, String value) throws Exception {
             new ProcessBuilder(
-                    "reg", "add", "HKCU\\Software\\ModernizeProData",
+                    "reg", "add", "HKCU\\Software\\ModernizeProDataBridge",
                     "/v", name, "/t", "REG_SZ", "/d", value, "/f"
             ).redirectErrorStream(true).start().waitFor();
         }
@@ -825,7 +825,7 @@ public class Launcher {
             if (springStarted.compareAndSet(false, true)) {
                 new Thread(() -> {
                     try {
-                        new SpringApplicationBuilder(ModernizeProDataApplication.class)
+                        new SpringApplicationBuilder(ModernizeProDataBridgeApplication.class)
                                 .headless(false)
                                 .run();
                     } catch (Exception e) {
@@ -847,7 +847,7 @@ public class Launcher {
             Process edgeProc = WebViewHostLauncher.launch(
                     fullUrl,
                     "edge-app-worker",
-                    "ModernizeProData - Worker",
+                    "ModernizeProDataBridge - Worker",
                     WebViewHostLauncher.WORKER_APP_ID);
             if (edgeProc != null) {
                 new Thread(() -> {

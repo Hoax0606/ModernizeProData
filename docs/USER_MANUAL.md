@@ -1,5 +1,5 @@
 ---
-title: "ModernizeProData 사용자 매뉴얼"
+title: "ModernizeProDataBridge 사용자 매뉴얼"
 subtitle: "User Manual · Enterprise Edition"
 author: "KS Info System Co., Ltd."
 date: "2026"
@@ -29,7 +29,7 @@ lang: ko
 
 ## 1. 머리말
 
-본 매뉴얼은 ModernizeProData(이하 “본 도구”)의 사용자 인터페이스를 통해 데이터 이행 작업을 수행하는 모든 작업자가 읽는 표준 안내서입니다.
+본 매뉴얼은 ModernizeProDataBridge(이하 “본 도구”)의 사용자 인터페이스를 통해 데이터 이행 작업을 수행하는 모든 작업자가 읽는 표준 안내서입니다.
 
 본 도구는 레거시(AS-IS) 데이터베이스의 데이터를 신규(TO-BE) 데이터베이스로 안전하게 이행하기 위한 워크플로우 기반 도구이며, 다음 단계를 표준화합니다.
 

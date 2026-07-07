@@ -1,6 +1,6 @@
 package com.ksinfo.modernize_pro_data.launcher;
 
-import com.ksinfo.modernize_pro_data.ModernizeProDataApplication;
+import com.ksinfo.modernize_pro_data.ModernizeProDataBridgeApplication;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.context.event.ApplicationEnvironmentPreparedEvent;
@@ -117,7 +117,7 @@ public class SwingGuiApp {
             }
         } catch (Exception ignored) {}
 
-        JLabel brand = new JLabel("ModernizeProData", SwingConstants.CENTER);
+        JLabel brand = new JLabel("ModernizeProDataBridge", SwingConstants.CENTER);
         brand.setAlignmentX(Component.CENTER_ALIGNMENT);
         brand.setFont(brand.getFont().deriveFont(Font.BOLD, 22f));
         brand.setForeground(new Color(0x0e, 0x72, 0x68));
@@ -236,7 +236,7 @@ public class SwingGuiApp {
             setProgress(Math.max(8, progressBar == null ? 0 : progressBar.getValue()));
             PgManagedLifecycle.ensureRunning();
 
-            ConfigurableApplicationContext ctx = new SpringApplicationBuilder(ModernizeProDataApplication.class)
+            ConfigurableApplicationContext ctx = new SpringApplicationBuilder(ModernizeProDataBridgeApplication.class)
                     .headless(false)
                     .listeners(
                             (ApplicationEnvironmentPreparedEvent ev) -> {
@@ -272,7 +272,7 @@ public class SwingGuiApp {
         Process p = WebViewHostLauncher.launch(
                 START_URL,
                 "edge-app-coordinator",
-                "ModernizeProData",
+                "ModernizeProDataBridge",
                 WebViewHostLauncher.COORDINATOR_APP_ID);
         if (p == null) {
             // Edge/Chrome 미발견 → default browser fallback. splash dispose + fallback frame.
@@ -310,7 +310,7 @@ public class SwingGuiApp {
     }
 
     private void showFallbackControlFrame() {
-        fallbackFrame = new JFrame("ModernizeProData");
+        fallbackFrame = new JFrame("ModernizeProDataBridge");
         fallbackFrame.setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
         fallbackFrame.setSize(380, 200);
         fallbackFrame.setLocationRelativeTo(null);
@@ -323,7 +323,7 @@ public class SwingGuiApp {
         center.setLayout(new BoxLayout(center, BoxLayout.Y_AXIS));
         center.setOpaque(false);
 
-        JLabel brand = new JLabel("ModernizeProData", SwingConstants.CENTER);
+        JLabel brand = new JLabel("ModernizeProDataBridge", SwingConstants.CENTER);
         brand.setAlignmentX(Component.CENTER_ALIGNMENT);
         brand.setFont(brand.getFont().deriveFont(Font.BOLD, 18f));
         brand.setForeground(new Color(0x0e, 0x72, 0x68));

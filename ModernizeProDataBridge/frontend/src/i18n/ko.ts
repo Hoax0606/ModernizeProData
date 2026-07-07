@@ -393,7 +393,7 @@ export const ko = {
   'licenseSetup.error.invalidSig':       '라이선스 서명이 유효하지 않습니다. 발급 본사에 확인하세요.',
   'licenseSetup.error.alreadyLoaded':    '현재 라이선스가 정상 동작 중입니다. 교체는 master 로 로그인 후 Settings 에서 진행하세요.',
   'licenseSetup.error.generic':          '라이선스 적용에 실패했습니다.',
-  'licenseSetup.error.bridgeUnavailable':'파일 선택기를 사용할 수 없습니다. ModernizeProData 를 재시작하세요.',
+  'licenseSetup.error.bridgeUnavailable':'파일 선택기를 사용할 수 없습니다. ModernizeProDataBridge 를 재시작하세요.',
   'licenseSetup.error.fileChooser':      '파일 선택 실패: {message}',
   'licenseSetup.error.unknown':          '오류: {message}',
   'licenseSetup.workerBlocked':          '이 Coordinator 에 아직 라이선스가 등록되지 않았습니다. master 관리자에게 라이선스 등록을 요청하세요.',
@@ -736,7 +736,7 @@ export const ko = {
   'cutover.bulk.desc':        '각 프로젝트는 최신 승인 스냅샷으로 시작됩니다.',
   'cutover.bulk.confirm':     'Confirm bulk start',
 
-  'onboarding.welcomeTitle': 'Welcome to ModernizeProData',
+  'onboarding.welcomeTitle': 'Welcome to ModernizeProDataBridge',
   'onboarding.welcomeDesc': '시작하려면 먼저 사이트를 만드세요. 사이트는 이행 작업이 진행될 고객 환경 (은행·증권 등) 단위입니다.',
   'onboarding.siteCta': '+ Create site',
   'onboarding.projectTitle': '— create your first project',

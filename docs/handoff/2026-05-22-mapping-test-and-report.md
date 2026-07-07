@@ -81,7 +81,7 @@
 - 옛 `.xlsx` 템플릿은 자동 삭제됨.
 
 **사용자 데스크탑 샘플**:
-- `C:/Users/.../Desktop/JIN/ModernizeProData/samples/mapping_definition_sample.csv` / `.yaml`
+- `C:/Users/.../Desktop/JIN/ModernizeProDataBridge/samples/mapping_definition_sample.csv` / `.yaml`
 
 **프로젝트 내 더미 DDL/CSV** (`samples/`):
 - `ddl/asis_oracle.sql` (3 tables: M_EMPLOYEE / M_DEPARTMENT / T_CONTACT_LOG)

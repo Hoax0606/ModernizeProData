@@ -2,16 +2,16 @@
 # multi-language MSI using only the Windows Installer COM API.
 #
 # Prerequisites: build.ps1 -Language all has produced three MSIs in dist/:
-#   - ModernizeProData-en-1.0.0.msi   (base; all transforms diff against this)
-#   - ModernizeProData-ko-1.0.0.msi
-#   - ModernizeProData-ja-1.0.0.msi
+#   - ModernizeProDataBridge-en-1.0.0.msi   (base; all transforms diff against this)
+#   - ModernizeProDataBridge-ko-1.0.0.msi
+#   - ModernizeProDataBridge-ja-1.0.0.msi
 #
 # Steps:
 #   1. For each non-base lang, open both DBs, call Database.GenerateTransform
 #      to produce a .mst file (no msitran.exe dependency).
 #   2. CreateTransformSummaryInformation to fill the transform's summary stream
 #      so Windows Installer accepts it at install time.
-#   3. Copy en.msi to ModernizeProData.msi (final shippable name).
+#   3. Copy en.msi to ModernizeProDataBridge.msi (final shippable name).
 #   4. Open it read-write, insert each .mst as a sub-storage row in _Storages
 #      with the LCID as the storage name (msiexec /TRANSFORMS=:1042 looks for
 #      a sub-storage named "1042").
@@ -22,9 +22,9 @@ $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
 $dist = Join-Path $PSScriptRoot 'dist'
-$baseMsi = Join-Path $dist 'ModernizeProData-en-1.0.0.msi'
-$koMsi   = Join-Path $dist 'ModernizeProData-ko-1.0.0.msi'
-$jaMsi   = Join-Path $dist 'ModernizeProData-ja-1.0.0.msi'
+$baseMsi = Join-Path $dist 'ModernizeProDataBridge-en-1.0.0.msi'
+$koMsi   = Join-Path $dist 'ModernizeProDataBridge-ko-1.0.0.msi'
+$jaMsi   = Join-Path $dist 'ModernizeProDataBridge-ja-1.0.0.msi'
 foreach ($f in @($baseMsi, $koMsi, $jaMsi)) {
     if (-not (Test-Path $f)) {
         throw "Missing: $f. Run .\build.ps1 -Language all first."
@@ -60,7 +60,7 @@ Write-Host "[1/3] Generating transforms via Windows Installer COM..." -Foregroun
 New-Transform -ReferenceMsi $baseMsi -LocalizedMsi $koMsi -OutMst $koMst
 New-Transform -ReferenceMsi $baseMsi -LocalizedMsi $jaMsi -OutMst $jaMst
 
-$finalMsi = Join-Path $dist 'ModernizeProData.msi'
+$finalMsi = Join-Path $dist 'ModernizeProDataBridge.msi'
 if (Test-Path $finalMsi) { Remove-Item -Force $finalMsi }
 Copy-Item -Force $baseMsi $finalMsi
 Write-Host "[2/3] Copied base .msi -> $finalMsi" -ForegroundColor Cyan
@@ -129,8 +129,8 @@ Write-Host "  Template = x64;1033,1042,1041" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "Multi-language MSI ready: $finalMsi" -ForegroundColor Green
-Write-Host "  msiexec /i ModernizeProData.msi                       # default = en"
-Write-Host "  msiexec /i ModernizeProData.msi TRANSFORMS=:1042      # Korean"
-Write-Host "  msiexec /i ModernizeProData.msi TRANSFORMS=:1041      # Japanese"
+Write-Host "  msiexec /i ModernizeProDataBridge.msi                       # default = en"
+Write-Host "  msiexec /i ModernizeProDataBridge.msi TRANSFORMS=:1042      # Korean"
+Write-Host "  msiexec /i ModernizeProDataBridge.msi TRANSFORMS=:1041      # Japanese"
 Write-Host ""
 Write-Host "Launcher.exe wraps this with a language-selection dialog (see launcher/)."

@@ -1,7 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 
-namespace KsInfo.ModernizeProData.UI;
+namespace KsInfo.ModernizeProDataBridge.UI;
 
 internal static class NativeMethods
 {

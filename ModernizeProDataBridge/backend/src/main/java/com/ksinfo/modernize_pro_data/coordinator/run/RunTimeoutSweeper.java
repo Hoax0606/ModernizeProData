@@ -15,7 +15,7 @@ import java.util.List;
  * 목적: hung/stuck run (thread 멈춤, 콜백 누락 등)이 영영 running 으로 남아 project 잠금이
  * 안 풀리는 상황 방지. 정상 대용량 run 을 끊지 않도록 임계는 넉넉히 + 설정 가능.
  *
- * @Scheduled — @EnableScheduling 은 ModernizeProDataApplication 에 이미 있음.
+ * @Scheduled — @EnableScheduling 은 ModernizeProDataBridgeApplication 에 이미 있음.
  */
 @Component
 @RequiredArgsConstructor

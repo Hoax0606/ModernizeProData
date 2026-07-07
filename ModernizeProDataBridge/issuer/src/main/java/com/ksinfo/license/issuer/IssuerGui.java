@@ -102,7 +102,7 @@ public final class IssuerGui {
     private long datePickerClosedAt;
 
     private JFrame build() {
-        frame = new JFrame("ModernizeProData License Creater");
+        frame = new JFrame("ModernizeProDataBridge License Creater");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.setSize(720, 680);
         frame.setResizable(false);
@@ -140,7 +140,7 @@ public final class IssuerGui {
 
         String html = "<html>"
                 + "<div style='font-family:Segoe UI;'>"
-                + "<span style='font-size:18pt;font-weight:bold;color:#0e7268;'>ModernizeProData</span><br>"
+                + "<span style='font-size:18pt;font-weight:bold;color:#0e7268;'>ModernizeProDataBridge</span><br>"
                 + "<span style='font-size:11pt;color:#678b86;'>License Creater</span>"
                 + "</div></html>";
         JLabel header = new JLabel(html);

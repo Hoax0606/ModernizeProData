@@ -1,7 +1,7 @@
 using System;
 using System.Windows.Forms;
 
-namespace KsInfo.ModernizeProData.UI;
+namespace KsInfo.ModernizeProDataBridge.UI;
 
 internal static class Program
 {
@@ -9,8 +9,8 @@ internal static class Program
     /// CLI args:
     ///   --url=&lt;http://localhost:8080&gt;
     ///   --profile=&lt;edge-app-coordinator&gt;       user-data dir 의 subdir 이름.
-    ///   --title=&lt;ModernizeProData&gt;             window 제목.
-    ///   --app-id=&lt;com.ksinfo.ModernizeProData&gt;  AppUserModelID (taskbar 그룹화 / brand).
+    ///   --title=&lt;ModernizeProDataBridge&gt;             window 제목.
+    ///   --app-id=&lt;com.ksinfo.ModernizeProDataBridge&gt;  AppUserModelID (taskbar 그룹화 / brand).
     /// </summary>
     [STAThread]
     static int Main(string[] args)
@@ -36,8 +36,8 @@ internal sealed record HostOptions(string Url, string Profile, string Title, str
     {
         string url = "http://localhost:8080";
         string profile = "edge-app-coordinator";
-        string title = "ModernizeProData";
-        string appId = "KsInfo.ModernizeProData";
+        string title = "ModernizeProDataBridge";
+        string appId = "KsInfo.ModernizeProDataBridge";
 
         foreach (var a in args)
         {

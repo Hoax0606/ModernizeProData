@@ -395,7 +395,7 @@ export const ja: Record<TranslationKey, string> = {
   'licenseSetup.error.invalidSig':       'ライセンス署名が無効です。発行本社へ確認してください。',
   'licenseSetup.error.alreadyLoaded':    '現在のライセンスは正常に動作中です。差し替えは master でサインイン後 Settings から行ってください。',
   'licenseSetup.error.generic':          'ライセンスの適用に失敗しました。',
-  'licenseSetup.error.bridgeUnavailable':'ファイルピッカーを利用できません。ModernizeProData を再起動してください。',
+  'licenseSetup.error.bridgeUnavailable':'ファイルピッカーを利用できません。ModernizeProDataBridge を再起動してください。',
   'licenseSetup.error.fileChooser':      'ファイル選択に失敗しました: {message}',
   'licenseSetup.error.unknown':          'エラー: {message}',
   'licenseSetup.workerBlocked':          'この Coordinator にはまだライセンスが登録されていません。master 管理者にライセンスの登録を依頼してください。',
@@ -738,7 +738,7 @@ export const ja: Record<TranslationKey, string> = {
   'cutover.bulk.desc':        '各プロジェクトは最新の承認済みスナップショットで開始されます。',
   'cutover.bulk.confirm':     'Confirm bulk start',
 
-  'onboarding.welcomeTitle': 'Welcome to ModernizeProData',
+  'onboarding.welcomeTitle': 'Welcome to ModernizeProDataBridge',
   'onboarding.welcomeDesc': '開始するにはまずサイトを作成してください。サイトは移行作業が行われる顧客環境 (銀行・証券など) の単位です。',
   'onboarding.siteCta': '+ Create site',
   'onboarding.projectTitle': '— create your first project',

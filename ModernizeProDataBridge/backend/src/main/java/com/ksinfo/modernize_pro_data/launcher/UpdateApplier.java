@@ -16,24 +16,24 @@ import java.util.stream.Stream;
  *
  * <p>Staging layout (UpdateService.applyLatest 가 만듦):
  * <pre>
- * %LOCALAPPDATA%/ModernizeProData/update-staging/
+ * %LOCALAPPDATA%/ModernizeProDataBridge/update-staging/
  *     pending-version.txt   (마커. 내용 = 새 version)
  *     next-1.0.1/
  *         modernize-pro-data-*.jar
- *         ModernizeProDataUI.exe
+ *         ModernizeProDataBridgeUI.exe
  *         db_migration/V*.sql   (정보용 — jar 안에도 동봉됨)
  * </pre>
  *
  * <p>Install layout (jpackage 가 만든 dir):
  * <pre>
- * %LOCALAPPDATA%/ModernizeProData/
+ * %LOCALAPPDATA%/ModernizeProDataBridge/
  *     app/
  *         modernize-pro-data-*.jar
- *         ModernizeProDataUI.exe
+ *         ModernizeProDataBridgeUI.exe
  *         ...
  *     runtime/
- *     ModernizeProData.exe
- *     ModernizeProData.cfg
+ *     ModernizeProDataBridge.exe
+ *     ModernizeProDataBridge.cfg
  * </pre>
  *
  * <p>이 클래스는 Spring 의존성 없는 plain Java — SpringApplication.run 호출 전에
@@ -73,7 +73,7 @@ public final class UpdateApplier {
             // 1. swap *.jar (Spring Boot fat jar)
             swapMatching(appDir, nextDir, backupDir, ".jar");
             // 2. swap host exe
-            swapByName(appDir, nextDir, backupDir, "ModernizeProDataUI.exe");
+            swapByName(appDir, nextDir, backupDir, "ModernizeProDataBridgeUI.exe");
             // db_migration 폴더 = jar 의 BOOT-INF/classes/db/migration 안에도 동봉됨. 별도 swap 안 함.
 
             // Marker 삭제 + staged next-X dir 정리. backup 은 보존 (수동 rollback 용).
@@ -121,7 +121,7 @@ public final class UpdateApplier {
         if (localAppData == null || localAppData.isBlank()) {
             localAppData = System.getProperty("user.home");
         }
-        return Paths.get(localAppData, "ModernizeProData");
+        return Paths.get(localAppData, "ModernizeProDataBridge");
     }
 
     private static void deleteRecursiveQuiet(Path p) {

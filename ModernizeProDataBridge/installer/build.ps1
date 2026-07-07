@@ -1,7 +1,7 @@
 ﻿#requires -Version 5.1
 <#
 .SYNOPSIS
-  Build ModernizeProData Windows .msi installer (Coordinator MVP).
+  Build ModernizeProDataBridge Windows .msi installer (Coordinator MVP).
 
 .PARAMETER Language
   Installer UI language. Affects MSI's JpProductLanguage (Windows Installer
@@ -21,7 +21,7 @@
     8. jlink runtime image (--bind-services for service-loader providers).
     9. jpackage --type msi with per-language overrides.wxi.
 
-  Output: installer/dist/ModernizeProData-1.0.0.msi (single-language MSI).
+  Output: installer/dist/ModernizeProDataBridge-1.0.0.msi (single-language MSI).
   Multi-language MSI (transform embedding + launcher.exe) is the next step.
 #>
 
@@ -233,11 +233,11 @@ if ($jfxDllCount -eq 0) {
 }
 Write-Host "  Bundled $jfxDllCount JavaFX native DLLs into staging" -ForegroundColor Green
 
-# WebView2 host (.NET 8) — Edge app-mode 대체. dist/ModernizeProDataUI.exe 가 없으면
+# WebView2 host (.NET 8) — Edge app-mode 대체. dist/ModernizeProDataBridgeUI.exe 가 없으면
 # 빌드하고 staging 에 복사. taskbar 우클릭에서 "Microsoft Edge" 잔향 제거 목적.
-$hostExe = Join-Path $PSScriptRoot 'webview-host\dist\ModernizeProDataUI.exe'
+$hostExe = Join-Path $PSScriptRoot 'webview-host\dist\ModernizeProDataBridgeUI.exe'
 if (-not (Test-Path $hostExe)) {
-    Write-Host "  Building WebView2 host (ModernizeProDataUI.exe)..." -ForegroundColor Cyan
+    Write-Host "  Building WebView2 host (ModernizeProDataBridgeUI.exe)..." -ForegroundColor Cyan
     & (Join-Path $PSScriptRoot 'webview-host\build-host.ps1')
     # build-host.ps1 가 Set-Location $PSScriptRoot (webview-host) 로 이동시키므로 원래 dir 복원.
     Set-Location $PSScriptRoot
@@ -247,9 +247,9 @@ if (Test-Path $hostExe) {
     $stagingAbs = Join-Path $PSScriptRoot $StagingApp
     Copy-Item -Force $hostExe $stagingAbs
     $uiMb = [math]::Round((Get-Item $hostExe).Length / 1MB, 1)
-    Write-Host "  Bundled ModernizeProDataUI.exe ($uiMb MB) into staging" -ForegroundColor Green
+    Write-Host "  Bundled ModernizeProDataBridgeUI.exe ($uiMb MB) into staging" -ForegroundColor Green
 } else {
-    Write-Host "  WARNING: ModernizeProDataUI.exe not built — Edge app-mode fallback will be used at runtime." -ForegroundColor Yellow
+    Write-Host "  WARNING: ModernizeProDataBridgeUI.exe not built — Edge app-mode fallback will be used at runtime." -ForegroundColor Yellow
 }
 
 # PostgreSQL 18 portable binaries — Coordinator MSI 에만 bundle. Worker 는 자기 PG
@@ -487,7 +487,7 @@ function Invoke-JpackageForLang {
     # Worker 는 같은 jar 를 --spring.profiles.active=worker 로 띄워 application-worker.yml 이
     # 적용되도록 하고, 표시명 / app name 만 분리한다 (Win-menu / install dir 충돌 회피).
     $isWorker  = ($RoleForBuild -eq 'worker')
-    $appName   = if ($isWorker) { 'ModernizeProData-Worker' } else { 'ModernizeProData' }
+    $appName   = if ($isWorker) { 'ModernizeProDataBridge-Worker' } else { 'ModernizeProDataBridge' }
     $appDesc   = if ($isWorker) { 'Modernize Pro Data - Worker' } else { 'Modernize Pro Data - Coordinator' }
     $profiles  = if ($isWorker) { 'prod,worker' } else { 'prod' }
     $mpdMode   = if ($isWorker) { 'worker' } else { 'coordinator' }
@@ -582,7 +582,7 @@ Get-ChildItem $Dest -Filter '*.msi' | ForEach-Object {
     "  {0}  ({1:N1} MB)" -f $_.FullName, ($_.Length / 1MB)
 }
 Write-Host ""
-Write-Host "Install: double-click a single-language .msi. Output -> %LOCALAPPDATA%\ModernizeProData\."
+Write-Host "Install: double-click a single-language .msi. Output -> %LOCALAPPDATA%\ModernizeProDataBridge\."
 Write-Host "Smoke test: PostgreSQL 18 must be running on localhost:5433 with database mpd_meta (user mpd/mpd)."
 
 # === [9] Package shippable artifact (Launcher.exe + 3 per-lang MSIs) into zip ===
@@ -592,9 +592,9 @@ Write-Host "Smoke test: PostgreSQL 18 must be running on localhost:5433 with dat
 # step is just for grouping, not size savings.
 $launcherExe = Join-Path $Dest 'Launcher.exe'
 if (Test-Path $launcherExe) {
-    $zipPath = Join-Path $Dest "ModernizeProData-$Version-setup.zip"
+    $zipPath = Join-Path $Dest "ModernizeProDataBridge-$Version-setup.zip"
     if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
-    $toBundle = @($launcherExe) + (Get-ChildItem $Dest -Filter 'ModernizeProData-*.msi' | ForEach-Object { $_.FullName })
+    $toBundle = @($launcherExe) + (Get-ChildItem $Dest -Filter 'ModernizeProDataBridge-*.msi' | ForEach-Object { $_.FullName })
     Write-Host ""
     Write-Host "[9/9] Packaging shippable zip..." -ForegroundColor Cyan
     Compress-Archive -Path $toBundle -DestinationPath $zipPath -CompressionLevel Optimal -Force

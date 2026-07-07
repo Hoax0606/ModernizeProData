@@ -6,7 +6,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Spawn the bundled {@code ModernizeProDataUI.exe} (.NET 8 WebView2 host) and
+ * Spawn the bundled {@code ModernizeProDataBridgeUI.exe} (.NET 8 WebView2 host) and
  * return the {@link Process}. Replaces the previous {@link EdgeAppLauncher}.
  *
  * <p>이 host process 는 우리 binary 라 OS taskbar / 우클릭 / AUMID 모두
@@ -14,9 +14,9 @@ import java.util.List;
  *
  * <p>위치 우선순위:
  * <ol>
- *   <li>{@code $APPDIR/ModernizeProDataUI.exe} (jpackage MSI 설치본)</li>
+ *   <li>{@code $APPDIR/ModernizeProDataBridgeUI.exe} (jpackage MSI 설치본)</li>
  *   <li>실행 jar 의 동일 디렉터리 (mvnw spring-boot:run 로컬 검증)</li>
- *   <li>{@code installer/webview-host/dist/ModernizeProDataUI.exe} (dev fallback)</li>
+ *   <li>{@code installer/webview-host/dist/ModernizeProDataBridgeUI.exe} (dev fallback)</li>
  * </ol>
  *
  * <p>발견 못 하면 {@link EdgeAppLauncher} 로 fallback (Edge `--app`).
@@ -25,8 +25,8 @@ public final class WebViewHostLauncher {
 
     private WebViewHostLauncher() {}
 
-    public static final String COORDINATOR_APP_ID = "KsInfo.ModernizeProData.Coordinator";
-    public static final String WORKER_APP_ID      = "KsInfo.ModernizeProData.Worker";
+    public static final String COORDINATOR_APP_ID = "KsInfo.ModernizeProDataBridge.Coordinator";
+    public static final String WORKER_APP_ID      = "KsInfo.ModernizeProDataBridge.Worker";
 
     /**
      * Launch UI host. fallback = Edge `--app` (host 미발견 시).
@@ -53,7 +53,7 @@ public final class WebViewHostLauncher {
                 System.err.println("WebViewHostLauncher: failed to spawn " + exe + ": " + e.getMessage());
             }
         } else {
-            System.err.println("WebViewHostLauncher: ModernizeProDataUI.exe not found. Falling back to Edge `--app`.");
+            System.err.println("WebViewHostLauncher: ModernizeProDataBridgeUI.exe not found. Falling back to Edge `--app`.");
         }
         // fallback — 옛 경로. Edge brand 가 다시 나타나지만 사용성은 유지.
         return EdgeAppLauncher.launch(url, profile);
@@ -63,13 +63,13 @@ public final class WebViewHostLauncher {
         java.util.List<String> candidates = new java.util.ArrayList<>();
 
         // 1. jpackage layout: launcher exe 의 sibling 인 `app/` subdir 에 위치.
-        //    `jpackage.app-path` = launcher exe full path (e.g. <install>\ModernizeProData.exe).
+        //    `jpackage.app-path` = launcher exe full path (e.g. <install>\ModernizeProDataBridge.exe).
         String appPath = System.getProperty("jpackage.app-path");
         if (appPath != null) {
             File launcherDir = new File(appPath).getParentFile();
             if (launcherDir != null) {
-                candidates.add(new File(launcherDir, "app/ModernizeProDataUI.exe").getAbsolutePath());
-                candidates.add(new File(launcherDir, "ModernizeProDataUI.exe").getAbsolutePath());
+                candidates.add(new File(launcherDir, "app/ModernizeProDataBridgeUI.exe").getAbsolutePath());
+                candidates.add(new File(launcherDir, "ModernizeProDataBridgeUI.exe").getAbsolutePath());
             }
         }
 
@@ -80,7 +80,7 @@ public final class WebViewHostLauncher {
             File runtimeDir = new File(javaHome);
             File installDir = runtimeDir.getParentFile();
             if (installDir != null) {
-                candidates.add(new File(installDir, "app/ModernizeProDataUI.exe").getAbsolutePath());
+                candidates.add(new File(installDir, "app/ModernizeProDataBridgeUI.exe").getAbsolutePath());
             }
         }
 
@@ -89,8 +89,8 @@ public final class WebViewHostLauncher {
         candidates.add(jarSiblingExe());
 
         // 4. dev workspace 절대/상대 fallback
-        candidates.add("ModernizeProData/installer/webview-host/dist/ModernizeProDataUI.exe");
-        candidates.add("installer/webview-host/dist/ModernizeProDataUI.exe");
+        candidates.add("ModernizeProDataBridge/installer/webview-host/dist/ModernizeProDataBridgeUI.exe");
+        candidates.add("installer/webview-host/dist/ModernizeProDataBridgeUI.exe");
 
         for (String p : candidates) {
             if (p == null) continue;
@@ -110,7 +110,7 @@ public final class WebViewHostLauncher {
                     .getCodeSource().getLocation().toURI());
             File dir = jar.getParentFile();
             if (dir == null) return null;
-            return new File(dir, "ModernizeProDataUI.exe").getAbsolutePath();
+            return new File(dir, "ModernizeProDataBridgeUI.exe").getAbsolutePath();
         } catch (Exception e) {
             return null;
         }

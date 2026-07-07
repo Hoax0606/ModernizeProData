@@ -7,9 +7,9 @@ Branch: `feature/notification-system`.
 전체 인앱 알림 시스템 구축 + 다수의 UI 리파인. `master` 와 다른 사용자 계정 (예: worker `aaaa`) 이 같은 브라우저에서 번갈아 쓰는 케이스, 그리고 Solution Settings ↔ Project Settings 간 cascade 동작이 핵심 동선.
 
 ### 새 파일
-- `ModernizeProData/frontend/src/store/notifications.ts` — 알림 read/dismissed 상태. **username 별로 키 분리** (Record\<username, string[]\>) — 한 브라우저에서 다른 계정으로 로그인해도 read 상태가 섞이지 않음.
-- `ModernizeProData/frontend/src/store/notificationPreferences.ts` — 프로젝트별 Event subscription 영속 저장. `actionToEventKey()` 로 audit log action 문자열 → event key 매핑.
-- `ModernizeProData/frontend/src/components/NotificationToast.tsx` — 우측 하단 toast. 마운트 시점에 기존 audit log entries 를 'seen' 으로 잡고 그 이후 새 entry 에만 4초 짜리 토스트 발사. **`globalNotifEnabled=false` 동안 새로 쌓인 entries 도 'seen' 으로 마킹** — 다시 켰을 때 한꺼번에 토스트로 쏟아지지 않도록.
+- `ModernizeProDataBridge/frontend/src/store/notifications.ts` — 알림 read/dismissed 상태. **username 별로 키 분리** (Record\<username, string[]\>) — 한 브라우저에서 다른 계정으로 로그인해도 read 상태가 섞이지 않음.
+- `ModernizeProDataBridge/frontend/src/store/notificationPreferences.ts` — 프로젝트별 Event subscription 영속 저장. `actionToEventKey()` 로 audit log action 문자열 → event key 매핑.
+- `ModernizeProDataBridge/frontend/src/components/NotificationToast.tsx` — 우측 하단 toast. 마운트 시점에 기존 audit log entries 를 'seen' 으로 잡고 그 이후 새 entry 에만 4초 짜리 토스트 발사. **`globalNotifEnabled=false` 동안 새로 쌓인 entries 도 'seen' 으로 마킹** — 다시 켰을 때 한꺼번에 토스트로 쏟아지지 않도록.
 
 ### 핵심 변경
 

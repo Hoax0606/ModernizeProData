@@ -19,7 +19,7 @@ the next session needs to know to continue.
 - Frontend: new `api/license.ts`, `store/license.ts`,
   `components/LicenseBanner.tsx`. `SolutionSettingsModal.LicenseCard`
   rewritten to call real backend.
-- New module: `ModernizeProData/issuer/` — Maven (Spring-free), CLI +
+- New module: `ModernizeProDataBridge/issuer/` — Maven (Spring-free), CLI +
   Swing GUI, jpackage build script.
 
 ## Built and verified

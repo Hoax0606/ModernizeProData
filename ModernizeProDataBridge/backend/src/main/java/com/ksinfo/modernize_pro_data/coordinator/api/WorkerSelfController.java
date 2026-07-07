@@ -36,9 +36,9 @@ public class WorkerSelfController {
             throw new ApiException("NOT_WORKER_MODE", "Only Worker processes can forget the Coordinator URL.");
         }
         try {
-            // HKCU\Software\ModernizeProData\CoordinatorUrl 값만 삭제 (다른 key 는 유지).
+            // HKCU\Software\ModernizeProDataBridge\CoordinatorUrl 값만 삭제 (다른 key 는 유지).
             Process p = new ProcessBuilder(
-                    "reg", "delete", "HKCU\\Software\\ModernizeProData",
+                    "reg", "delete", "HKCU\\Software\\ModernizeProDataBridge",
                     "/v", "CoordinatorUrl", "/f"
             ).redirectErrorStream(true).start();
             int rc = p.waitFor();

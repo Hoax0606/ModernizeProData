@@ -389,7 +389,7 @@ export const en: Record<TranslationKey, string> = {
   'licenseSetup.error.invalidSig':       'License signature is invalid. Contact your issuer.',
   'licenseSetup.error.alreadyLoaded':    'The current license is still valid. To replace it, sign in as master and use Settings.',
   'licenseSetup.error.generic':          'Failed to apply the license.',
-  'licenseSetup.error.bridgeUnavailable':'Native file picker is not available — restart ModernizeProData.',
+  'licenseSetup.error.bridgeUnavailable':'Native file picker is not available — restart ModernizeProDataBridge.',
   'licenseSetup.error.fileChooser':      'FileChooser error: {message}',
   'licenseSetup.error.unknown':          'Error: {message}',
   'licenseSetup.workerBlocked':          'This Coordinator has no license yet. Please ask your master administrator to apply the license.',
@@ -732,7 +732,7 @@ export const en: Record<TranslationKey, string> = {
   'cutover.bulk.desc':        'Each project starts with its latest approved snapshot.',
   'cutover.bulk.confirm':     'Confirm bulk start',
 
-  'onboarding.welcomeTitle': 'Welcome to ModernizeProData',
+  'onboarding.welcomeTitle': 'Welcome to ModernizeProDataBridge',
   'onboarding.welcomeDesc': 'To get started, first create a site. A site represents the customer environment (bank, brokerage, etc.) where migration work takes place.',
   'onboarding.siteCta': '+ Create site',
   'onboarding.projectTitle': '— create your first project',

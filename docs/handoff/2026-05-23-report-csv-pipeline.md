@@ -43,7 +43,7 @@ POST /api/v1/util/pick-directory  body: { startPath?, title? }
 - `SwingUtilities.invokeAndWait` 로 EDT 보장
 - `GraphicsEnvironment.isHeadless()` 면 `HEADLESS_BACKEND` 에러 (프론트가 prompt 폴백)
 
-**`ModernizeProDataApplication.main()` 에서 `app.setHeadless(false)`** — Spring Boot 기본값이 headless 라 안 끄면 AWT/Swing 못 띄움.
+**`ModernizeProDataBridgeApplication.main()` 에서 `app.setHeadless(false)`** — Spring Boot 기본값이 headless 라 안 끄면 AWT/Swing 못 띄움.
 
 배포 모델 (jpackage 로 사용자 PC 에 같이 깔리는 Coordinator) 라서 백엔드에서 다이얼로그 띄워도 사용자 시점에서 자연스러움. 서버 배포 시엔 자동으로 prompt 폴백.
 
@@ -109,7 +109,7 @@ const idx = csvColIdx.get(colName.trim().toLowerCase());
 - `src/api/fileDialog.ts`
 
 ### 수정 (backend)
-- `ModernizeProDataApplication.java` — `setHeadless(false)`
+- `ModernizeProDataBridgeApplication.java` — `setHeadless(false)`
 - `mvnw` — chmod +x (실수로 실행권한 빠져있던 거 복구)
 
 ### 수정 (frontend)

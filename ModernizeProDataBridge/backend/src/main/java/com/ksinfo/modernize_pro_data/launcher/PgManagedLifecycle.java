@@ -14,7 +14,7 @@ import java.util.concurrent.TimeUnit;
  * <p>흐름:
  * <ol>
  *   <li>port 5432 detect — 이미 누가 PG / 서비스 띄우고 있으면 skip (use existing).</li>
- *   <li>data dir ({@code %LOCALAPPDATA%/ModernizeProData/pg-data}) 확인.
+ *   <li>data dir ({@code %LOCALAPPDATA%/ModernizeProDataBridge/pg-data}) 확인.
  *       없으면 {@code initdb} 실행 + {@code CREATE DATABASE mpd_meta} + role 생성.</li>
  *   <li>{@code pg_ctl start} 로 PG 띄움.</li>
  *   <li>backend shutdown 시 {@code pg_ctl stop}.</li>
@@ -35,8 +35,8 @@ public final class PgManagedLifecycle {
     private static final int DB_PORT = 5432;
 
     private static File pgRoot;       // $APPDIR/postgresql/
-    private static File dataDir;      // %LOCALAPPDATA%/ModernizeProData/pg-data
-    private static File logFile;      // %LOCALAPPDATA%/ModernizeProData/pg.log
+    private static File dataDir;      // %LOCALAPPDATA%/ModernizeProDataBridge/pg-data
+    private static File logFile;      // %LOCALAPPDATA%/ModernizeProDataBridge/pg.log
     private static boolean managed;   // 우리가 띄운 PG 면 true (shutdown 시 stop)
 
     private PgManagedLifecycle() {}
@@ -51,7 +51,7 @@ public final class PgManagedLifecycle {
 
         String localAppData = System.getenv("LOCALAPPDATA");
         if (localAppData == null) localAppData = System.getProperty("user.home");
-        File baseDir = new File(localAppData, "ModernizeProData");
+        File baseDir = new File(localAppData, "ModernizeProDataBridge");
         if (!baseDir.exists() && !baseDir.mkdirs()) {
             System.err.println("PgManagedLifecycle: cannot create " + baseDir);
             return;
@@ -109,7 +109,7 @@ public final class PgManagedLifecycle {
     private static void writePgConf(File dataDir) throws IOException {
         File hba = new File(dataDir, "pg_hba.conf");
         String hbaContent = """
-                # Managed by ModernizeProData PgManagedLifecycle — do not edit by hand.
+                # Managed by ModernizeProDataBridge PgManagedLifecycle — do not edit by hand.
                 local   all             all                                     trust
                 host    all             all             127.0.0.1/32            trust
                 host    all             all             ::1/128                 trust
@@ -124,7 +124,7 @@ public final class PgManagedLifecycle {
         // build 의 잔존 line 가능 — idempotent rewrite 의 single source of truth 로
         // include_if_exists 사용.
         File mpdConf = new File(dataDir, "mpd-managed.conf");
-        String mpdContent = "# Managed by ModernizeProData. Auto-overwritten on each launch.\n"
+        String mpdContent = "# Managed by ModernizeProDataBridge. Auto-overwritten on each launch.\n"
                 + "port = " + DB_PORT + "\n"
                 + "listen_addresses = '*'\n";
         Files.writeString(mpdConf.toPath(), mpdContent, StandardCharsets.UTF_8);
@@ -149,7 +149,7 @@ public final class PgManagedLifecycle {
         // user dir 의 unpack 위치.
         String localAppData = System.getenv("LOCALAPPDATA");
         if (localAppData == null) localAppData = System.getProperty("user.home");
-        File unpackDir = new File(localAppData, "ModernizeProData/pg-binaries");
+        File unpackDir = new File(localAppData, "ModernizeProDataBridge/pg-binaries");
         File pgsql = new File(unpackDir, "pgsql");
         if (new File(pgsql, "bin/initdb.exe").isFile()) return pgsql;
 

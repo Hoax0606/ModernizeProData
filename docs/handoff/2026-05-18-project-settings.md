@@ -1,7 +1,7 @@
 # 2026-05-18 — project-settings (오현호)
 
 ## 한 일
-- `ModernizeProData/frontend/src/pages/SettingsPage.tsx` 를 프로토타입 `Prototype/src/projectsettings.jsx` 의 6-section 구조로 재작성. 좌측 sub-nav (220px) + 우측 컨텐츠. 섹션: General · AS-IS · TO-BE · Schedule · Notifications · Danger zone.
+- `ModernizeProDataBridge/frontend/src/pages/SettingsPage.tsx` 를 프로토타입 `Prototype/src/projectsettings.jsx` 의 6-section 구조로 재작성. 좌측 sub-nav (220px) + 우측 컨텐츠. 섹션: General · AS-IS · TO-BE · Schedule · Notifications · Danger zone.
 - **General + Danger zone** 만 백엔드 연결 — `PATCH /api/v1/projects/{id}` 로 이름·phase 변경, `DELETE` 로 삭제, duplicate 는 `createProject` + DDL 복사.
 - AS-IS / TO-BE 의 **DDL 카드** 는 기존 `addDdlFiles` / `removeDdlFile` store action 그대로 사용해 동작.
 - 나머지 카드 (AS-IS CSV·Staging, TO-BE Connection·Credentials, Schedule 전체, Notifications 전체) 는 **mock state 로 UI 만**. 각각에 amber `UI only` 배지를 붙여 표시했다.
@@ -10,7 +10,7 @@
 
 가장 큰 다음 단계는 백엔드 모델 확장이다. UI 가 mock 인 이유는 `Project` 엔티티에 해당 jsonb 필드가 없기 때문.
 
-1. `ModernizeProData/backend/src/main/java/com/ksinfo/modernize_pro_data/coordinator/site/Project.java` 에 jsonb 필드 추가:
+1. `ModernizeProDataBridge/backend/src/main/java/com/ksinfo/modernize_pro_data/coordinator/site/Project.java` 에 jsonb 필드 추가:
    - `connection` (TO-BE host/db/schema/encoding/collation/ssl)
    - `credentials` (username/authMethod/passwordSet/lastRotated — 비밀번호 **값은 저장 X**, 별도 vault 흐름은 추후)
    - `schedule` (nightlyRehearsal · startTime · maxDuration · cutoverWindow)
