@@ -44,6 +44,10 @@ public final class StageHelpers {
 
     /**
      * Resolve {baseDir}/{tableName}.csv. 대소문자 fallback. 없으면 null.
+     * bare 테이블명(점 없음)일 때는, 정확/대소문자 매칭이 없으면 {schema}.{tableName}.csv
+     * 형태의 스키마 접두 파일도 시도한다(유일할 때만). DDL 이 스키마 없이 import 됐는데 추출
+     * 파일은 스키마 포함(BANKSYS.CONTACT_INFO.csv)인 경우 대응 — SiteCsvPreviewController
+     * (preview/Trial 게이트)와 동일 규칙을 유지해 run 과 게이트가 같은 파일을 찾게 한다.
      */
     public static Path resolveCsvFile(Path baseDir, String tableName) {
         if (baseDir == null || !Files.isDirectory(baseDir)) return null;
@@ -53,14 +57,30 @@ public final class StageHelpers {
 
         String want = (tableName + ".csv").toLowerCase();
         try (Stream<Path> stream = Files.list(baseDir)) {
-            return stream
+            Path ci = stream
                     .filter(Files::isRegularFile)
                     .filter(p -> p.getFileName().toString().toLowerCase().equals(want))
                     .findFirst()
                     .orElse(null);
+            if (ci != null) return ci;
         } catch (IOException e) {
             return null;
         }
+        // bare 테이블명 → {schema}.{tableName}.csv (유일할 때만). 여러 스키마 중복 시 모호 → null.
+        if (tableName.indexOf('.') < 0) {
+            String suffix = ("." + tableName + ".csv").toLowerCase();
+            try (Stream<Path> stream = Files.list(baseDir)) {
+                List<Path> matches = stream
+                        .filter(Files::isRegularFile)
+                        .filter(p -> p.getFileName().toString().toLowerCase().endsWith(suffix))
+                        .limit(2)
+                        .toList();
+                if (matches.size() == 1) return matches.get(0);
+            } catch (IOException e) {
+                return null;
+            }
+        }
+        return null;
     }
 
     public static RunLogLine line(long seq, String runId, String stage, short level, String message) {

@@ -416,6 +416,9 @@ public class MappingReportService {
      * 우선순위:
      *   1) {schema}.{table}.csv  (예: RECRUIT.APPLICANTS.csv)
      *   2) {table}.csv           (예: m_employee.csv)
+     *   3) bare 테이블명(schema 없음)일 때 {anySchema}.{table}.csv (유일할 때만)
+     *      — DDL 이 스키마 없이(T_CONTACT_LOG) import 됐는데 추출 파일은 스키마 접두
+     *        (CRM.T_CONTACT_LOG.csv)인 경우. StageHelpers/SiteCsvPreviewController 와 동일 규칙.
      * 못 찾으면 fallback path 반환 — SQL 이 알아서 IO Error 던지도록 둠.
      */
     private String resolveCsvFile(Path baseDir, String asisSchema, String asisTable) {
@@ -433,6 +436,15 @@ public class MappingReportService {
                         return p.toString();
                     }
                 }
+            }
+            // bare 테이블명 → {schema}.{table}.csv (유일할 때만). 여러 스키마 중복 시 모호 → 미매칭.
+            if ((asisSchema == null || asisSchema.isBlank()) && asisTable.indexOf('.') < 0) {
+                String suffix = ("." + asisTable + ".csv").toLowerCase();
+                List<Path> prefixed = files.stream()
+                        .filter(p -> p.getFileName().toString().toLowerCase().endsWith(suffix))
+                        .limit(2)
+                        .toList();
+                if (prefixed.size() == 1) return prefixed.get(0).toString();
             }
         } catch (IOException e) {
             // fallthrough
