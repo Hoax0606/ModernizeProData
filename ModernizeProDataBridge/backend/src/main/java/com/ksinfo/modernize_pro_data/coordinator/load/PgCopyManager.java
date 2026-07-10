@@ -227,15 +227,26 @@ public class PgCopyManager {
     }
 
     /**
-     * Append one value to a CSV line.
+     * Append one value to a CSV line — the tool's load-time type serialization contract.
+     * The text produced here is what PG COPY {@code (FORMAT csv)} parses back into the
+     * target column type, so the rules below define the empty↔NULL / bool / date contract:
      * <ul>
-     *   <li>{@code null} → empty unquoted field. PG CSV default NULL representation.</li>
-     *   <li>empty String → {@code ""} (quoted empty). Distinguishes empty string from NULL.</li>
-     *   <li>otherwise → quote only when the value contains {@code , " \r \n}.
-     *       Inner {@code "} doubled per RFC 4180.</li>
+     *   <li>{@code null} → empty unquoted field → PG interprets as <b>NULL</b>
+     *       (PG CSV default NULL representation, an unquoted empty string).</li>
+     *   <li>empty {@code String} → {@code ""} (quoted empty) → PG interprets as an
+     *       <b>empty string</b>, NOT NULL. This is the one case that distinguishes the two.
+     *       Consequence: a Java empty string into a non-text column (numeric/date/bool)
+     *       makes COPY fail ("invalid input syntax") — the Transform stage must emit NULL
+     *       (e.g. {@code NULLIF(col,'')}) for such columns, not an empty string.</li>
+     *   <li>otherwise → {@code v.toString()}, quoted only when it contains {@code , " \r \n}
+     *       (inner {@code "} doubled per RFC 4180). Type text comes straight from the JDBC
+     *       driver's object rendering: {@code Boolean}→{@code "true"/"false"} (PG bool also
+     *       accepts y/n/1/0/t/f), {@code java.sql.Date}/{@code LocalDate}→{@code "yyyy-MM-dd"},
+     *       {@code BigDecimal}→plain decimal. No locale/format massaging is applied here.</li>
      * </ul>
+     * Package-private (not private) so {@code PgCopyManagerCsvFieldTest} can lock this contract.
      */
-    private static void appendCsvField(StringBuilder sb, Object v) {
+    static void appendCsvField(StringBuilder sb, Object v) {
         if (v == null) return;
         String s = v.toString();
         if (s.isEmpty()) {

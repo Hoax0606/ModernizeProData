@@ -284,6 +284,9 @@ public class PgSchemaExtractor {
         }
 
         List<ParsedConstraint> constraints = loadConstraints(conn, schema);
+        // 파티션 자식 테이블(loadTables 에서 제외됨)의 상속 제약도 함께 버린다. 안 그러면
+        // 부모와 같은 이름의 제약이 여러 table 로 들어와 중복/노이즈가 된다.
+        constraints.removeIf(pc -> !tableByName.containsKey(pc.getTableName()));
         for (ParsedConstraint pc : constraints) {
             if (ParsedConstraint.TYPE_FK.equals(pc.getType())) {
                 loadFkColumnsAndRef(conn, schema, pc);
@@ -295,6 +298,7 @@ public class PgSchemaExtractor {
         }
 
         List<ParsedIndex> indexes = loadIndexes(conn, schema, constraints);
+        indexes.removeIf(pi -> !tableByName.containsKey(pi.getTableName()));  // 파티션 자식 index 제외
         for (ParsedIndex pi : indexes) loadIndexColumns(conn, schema, pi);
 
         ParsedDdl result = new ParsedDdl(tables);
@@ -305,10 +309,15 @@ public class PgSchemaExtractor {
 
     private List<ParsedTable> loadTables(Connection conn, String schema) throws SQLException {
         List<ParsedTable> out = new ArrayList<>();
+        // relkind 'r'=ordinary table, 'p'=partitioned table(부모). NOT relispartition 으로
+        // 파티션 자식 테이블(예: transactions_2023)은 제외 — 파티션은 부모 한 테이블의 물리적
+        // 조각이라 매핑 대상이 아니고, 자식을 넣으면 상속 제약이 부모와 같은 이름이라 중복/노이즈.
+        // (information_schema.tables 는 부모+자식을 모두 'BASE TABLE' 로 돌려줬음.)
         try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT table_name FROM information_schema.tables "
-                        + "WHERE table_schema = ? AND table_type = 'BASE TABLE' "
-                        + "ORDER BY table_name")) {
+                "SELECT c.relname FROM pg_class c "
+                        + "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                        + "WHERE n.nspname = ? AND c.relkind IN ('r', 'p') AND NOT c.relispartition "
+                        + "ORDER BY c.relname")) {
             ps.setString(1, schema);
             try (ResultSet rs = ps.executeQuery()) {
                 int ord = 0;

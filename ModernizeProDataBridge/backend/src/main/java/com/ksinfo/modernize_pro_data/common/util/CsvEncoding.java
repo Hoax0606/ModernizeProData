@@ -15,18 +15,16 @@ public final class CsvEncoding {
 
     private CsvEncoding() {}
 
-    /** @param asisEncoding site.asisEncoding (예: "shift_jis", "EUC-JP", "UTF-8", null) */
+    /**
+     * @param asisEncoding site.asisEncoding — 무시된다(파이프라인 입력 계약 = UTF-8, 2026-07-08).
+     * @return 항상 빈 문자열. read_csv 는 UTF-8 native 로만 읽는다(encodings 확장 제거).
+     *
+     * <p>이전엔 shift_jis/euc-jp 를 DuckDB encodings 확장의 {@code encoding=} 으로 처리했으나,
+     * 그 확장 디코더가 빌드마다 유효 바이트를 오거부하는 upstream 버그(금융권 부적합)가 있어
+     * "입력을 UTF-8 로 고정 + 확장 제거" 로 방향을 바꿨다. 비-UTF-8 → UTF-8 변환은 외부 변환툴
+     * (추후 Source Reader SPI) 책임. 잘못된 인코딩 입력은 {@link CsvInputGuard} 가 reject 한다.
+     */
     public static String clause(String asisEncoding) {
-        if (asisEncoding == null || asisEncoding.isBlank()) return "";
-        String enc = asisEncoding.trim().toLowerCase();
-        if (enc.equals("utf-8") || enc.equals("utf8")) return "";
-        if (enc.equals("shift_jis") || enc.equals("shiftjis") || enc.equals("sjis")) {
-            return ", encoding='shift_jis'";
-        }
-        if (enc.equals("euc-jp") || enc.equals("euc_jp") || enc.equals("eucjp")) {
-            return ", encoding='EUC_JP'";
-        }
-        // pass-through — DuckDB encodings 확장이 인식 가능하면 통과, 아니면 read 시 throw.
-        return ", encoding='" + asisEncoding.trim().replace("'", "''") + "'";
+        return "";
     }
 }

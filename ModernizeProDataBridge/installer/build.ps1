@@ -276,7 +276,9 @@ $duckExtCache = Join-Path $PSScriptRoot "cache\duckdb-extensions\$DuckDbVer"
 $duckExtStaging = Join-Path $StagingApp 'duckdb-extensions'
 New-Item -ItemType Directory -Path $duckExtCache -Force | Out-Null
 New-Item -ItemType Directory -Path $duckExtStaging -Force | Out-Null
-$duckExtNames = @('encodings', 'icu')
+# encodings 확장 제거 (2026-07-08 UTF-8 입력 계약) — read_csv 는 UTF-8 native 로만 읽는다.
+# icu 만 동봉 (timezone offset 파싱용). 번들 바이너리 ~177MB 감량.
+$duckExtNames = @('icu')
 foreach ($name in $duckExtNames) {
     $extFile = Join-Path $duckExtCache "$name.duckdb_extension"
     if (-not (Test-Path $extFile)) {

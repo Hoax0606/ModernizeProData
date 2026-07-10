@@ -250,21 +250,11 @@ public class CheckStage implements StageRunner {
     }
 
     /**
-     * ExtractStage 의 encodingClause 와 동일 규칙. site.asisEncoding → read_csv 의 encoding 절.
-     * UTF-8 / null / blank → 빈 문자열 (DuckDB native).
+     * read_csv 의 encoding 절 — 항상 빈 문자열(파이프라인 입력 계약 = UTF-8, 2026-07-08).
+     * encodings 확장 제거로 encoding= 을 쓰지 않는다. 비-UTF-8 입력은 ExtractStage 의 CsvInputGuard 가 reject.
      */
     private static String encodingClauseFor(String asisEncoding) {
-        if (asisEncoding == null || asisEncoding.isBlank()) return "";
-        String enc = asisEncoding.trim().toLowerCase();
-        if (enc.equals("utf-8") || enc.equals("utf8")) return "";
-        if (enc.equals("shift_jis") || enc.equals("shiftjis") || enc.equals("sjis")) {
-            return ", encoding='shift_jis'";
-        }
-        if (enc.equals("euc-jp") || enc.equals("euc_jp") || enc.equals("eucjp")) {
-            return ", encoding='EUC_JP'";
-        }
-        // pass-through — DuckDB encodings 확장이 인식 가능하면 통과, 아니면 read 시 throw.
-        return ", encoding='" + asisEncoding.trim().replace("'", "''") + "'";
+        return "";
     }
 
     private void ingest(StageContext ctx, String message) {

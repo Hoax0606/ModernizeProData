@@ -92,8 +92,7 @@ public class DuckDbService {
                 log.info("DuckDB connection opened: {}", url);
                 // DuckDB 의 UDF 는 connection 별로 등록 — 새 connection 마다 일괄 register.
                 UdfRegistry.registerAll(connection);
-                // encodings 확장 — Shift-JIS/EUC-JP 등 비 UTF-8 CSV 적재용 (ExtractStage encoding=).
-                loadEncodingsExtension(connection);
+                // encodings 확장은 제거됨 (2026-07-08 UTF-8 입력 계약) — read_csv 는 UTF-8 native 로만 읽는다.
                 // icu 확장 — '+09:00' 같은 timezone offset 인식 (TransformStage 의 TIMESTAMPTZ CAST / STRPTIME).
                 // 없으면 DuckDB 가 'Unknown TimeZone "+09:00"' 로 reject → Transform / Audit / Load / Verify cascade ERROR.
                 loadIcuExtension(connection);
@@ -188,15 +187,6 @@ public class DuckDbService {
     }
 
     /**
-     * DuckDB encodings 확장 로드 — read_csv 의 encoding='shift_jis' 등을 가능하게 함.
-     * UTF-8/UTF-16/Latin-1 은 native 라 확장 없이도 동작하므로, 로드 실패해도 DuckDB 자체는 막지 않는다.
-     * 폐쇄망에서는 install 단계 의 인터넷 다운로드 불가 → 인스톨러 동봉 binary 의 LOAD '<full-path>'.
-     */
-    private void loadEncodingsExtension(Connection conn) {
-        loadBundledOrRemote(conn, "encodings", "비 UTF-8 CSV 적재 불가");
-    }
-
-    /**
      * DuckDB icu 확장 로드 — timezone offset 인식. {@code TIMESTAMP WITH TIME ZONE} CAST 또는
      * '+09:00' 같은 offset 포함 timestamp 문자열 파싱에 필요. 없으면
      * "Conversion Error: Unknown TimeZone '+09:00'!" 로 reject 됨.
@@ -270,13 +260,12 @@ public class DuckDbService {
 
     /**
      * run 전용 독립 DuckDB 인스턴스. dbFile=null 이면 in-memory, 아니면 file-backed(run.duckdb).
-     * 확장(encodings/icu)·UDF 를 새 인스턴스에 재등록.
+     * 확장(icu)·UDF 를 새 인스턴스에 재등록. (encodings 확장은 제거 — UTF-8 입력 계약.)
      */
     private Connection openRunInstance(String dbFile) throws SQLException {
         String url = (dbFile == null || dbFile.isBlank()) ? "jdbc:duckdb:" : "jdbc:duckdb:" + dbFile;
         Connection c = DriverManager.getConnection(url);
         UdfRegistry.registerAll(c);
-        loadEncodingsExtension(c);
         loadIcuExtension(c);
         return c;
     }
@@ -323,7 +312,6 @@ public class DuckDbService {
         Connection c = DriverManager.getConnection("jdbc:duckdb:");
         try {
             UdfRegistry.registerAll(c);
-            loadEncodingsExtension(c);
             loadIcuExtension(c);
         } catch (Exception e) {
             // 확장/UDF 등록 실패해도 connection 자체는 사용 가능.
