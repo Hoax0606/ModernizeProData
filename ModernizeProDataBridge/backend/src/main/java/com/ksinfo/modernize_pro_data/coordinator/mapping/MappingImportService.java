@@ -373,12 +373,24 @@ public class MappingImportService {
                 // alias 자동 할당 — (tobe_table 그룹 × asis_table) 마다 단일 alias.
                 Map<String, Map<String, String>> aliasMaps = buildAliasMaps(parsed.rules);
 
+                // expand binding 의 출력 컬럼 (notes 의 expand_expr 'AS u(a, b)') → tobe_table 별 집합.
+                Map<String, java.util.Set<String>> expandColsByTobe = buildExpandOutputCols(parsed.rules);
+
                 // expression 룰의 transform_sql 자동 생성
                 for (RuleRow row : parsed.rules) {
                     if (!"expression".equals(row.strategy)) continue;
                     if (row.transformSql != null && !row.transformSql.isBlank()) continue;
                     if (row.transformRule != null && !row.transformRule.isBlank()) {
                         row.transformSql = row.transformRule;
+                        continue;
+                    }
+                    // expand 출력 컬럼인데 명시 transform 이 없으면 → u.<col> (notes 에 태그 안 된 channel 등).
+                    String tobeKeyX = (row.tobeSchema == null ? "" : row.tobeSchema) + "|" + row.tobeTable;
+                    java.util.Set<String> expCols = expandColsByTobe.get(tobeKeyX);
+                    if (expCols != null && row.tobeColumn != null
+                            && expCols.contains(row.tobeColumn.toLowerCase())) {
+                        row.transformSql = "u." + row.tobeColumn;
+                        row.transformRule = row.transformSql;
                         continue;
                     }
                     if (row.asisColumn == null || row.asisColumn.length == 0 || row.asisTable == null) continue;
@@ -676,6 +688,18 @@ public class MappingImportService {
 
                 if (row.transformSql == null && "expression".equals(row.strategy)) {
                     row.transformSql = row.transformRule;
+                }
+
+                // 샘플 CSV 가 변환 로직을 notes 에 넣어둔 경우 대응 — 명시 transform 이 없으면
+                // notes 의 'transform_sql:' 를 실행 transform 으로 채택 (rule_sql/transform_sql 컬럼 우선).
+                // notesDirective 가 U+2001 마커·', where:'·'(GROUP BY …)' 주석을 정리.
+                if (row.transformRule == null || row.transformRule.isBlank()) {
+                    String fromNotes = notesDirective(row.notes, "transform_sql:");
+                    if (fromNotes != null && !fromNotes.isBlank()) {
+                        row.strategy = "expression";
+                        row.transformRule = fromNotes;
+                        row.transformSql = fromNotes;
+                    }
                 }
 
                 grouped.put(dedupKey, row);
@@ -1189,6 +1213,32 @@ public class MappingImportService {
                 // joinType / joinOn 은 null — UI 에서 사용자가 채움
                 b.addSource(s);
             }
+
+            // notes 기반 binding 지시자 (샘플 CSV 가 binding-level 설정을 notes 에 넣어둔 경우).
+            //  - expand_expr / where : 1:N 펼침 (CROSS JOIN LATERAL … , where: …)
+            for (RuleRow r : grp) {
+                String ee = notesDirective(r.notes, "expand_expr:");
+                if (ee != null && !ee.isBlank()) {
+                    b.setExpandExpr(ee);
+                    String wf = notesWhere(r.notes);
+                    if (wf != null && !wf.isBlank()) b.setWhereFilter(wf);
+                    break;
+                }
+            }
+            //  - 집계: aggregate 함수(SUM/COUNT/…) rule 이 있으면, 비집계 expression rule 들의
+            //    transform 을 GROUP BY 로 (SQL 상 비집계 select 컬럼은 GROUP BY 필수).
+            boolean hasAgg = grp.stream().anyMatch(r -> isAggregate(r.transformRule));
+            if (hasAgg) {
+                String gb = grp.stream()
+                        .filter(r -> "expression".equals(r.strategy))
+                        .filter(r -> r.transformRule != null && !r.transformRule.isBlank())
+                        .filter(r -> !isAggregate(r.transformRule))
+                        .map(r -> r.transformRule)
+                        .distinct()
+                        .collect(java.util.stream.Collectors.joining(", "));
+                if (!gb.isBlank()) b.setGroupByExpr(gb);
+            }
+
             result.add(b);
         }
         return result;
@@ -1393,6 +1443,68 @@ public class MappingImportService {
 
     private static String sqlEscape(String v) {
         return v == null ? "" : v.replace("'", "''");
+    }
+
+    /* ─── notes 기반 지시자 파서 (샘플 CSV 가 transform/expand/집계 로직을 notes 에 넣어둔 경우) ─── */
+
+    /** notes 셀 안의 마커 문자 (U+2001 EM QUAD). '<U+2001>E<key>: <value>' 형태. */
+    private static final char NOTES_MARKER = ' ';
+    /** 집계 함수로 시작하는 transform 판별 (GROUP BY 도출용). */
+    private static final Pattern AGG_FN = Pattern.compile(
+            "(?i)^\\s*(SUM|COUNT|AVG|MIN|MAX|STRING_AGG|ARRAY_AGG|BOOL_AND|BOOL_OR|STDDEV|VARIANCE)\\s*\\(");
+    /** expand_expr 의 출력 컬럼 목록 추출 — 'AS u(channel, value)' → "channel, value". */
+    private static final Pattern EXPAND_OUT = Pattern.compile("(?i)AS\\s+\\w+\\s*\\(([^)]*)\\)");
+
+    /**
+     * notes 에서 {@code key}(예: "transform_sql:", "expand_expr:") 뒤의 값을 추출.
+     * 인라인 ", where:" 이후·"(GROUP BY …)" 주석·다음 U+2001 마커는 잘라낸다. 없으면 null.
+     */
+    static String notesDirective(String notes, String key) {
+        if (notes == null) return null;
+        int i = notes.indexOf(key);
+        if (i < 0) return null;
+        String v = notes.substring(i + key.length()).trim();
+        int w = v.indexOf(", where:");
+        if (w >= 0) v = v.substring(0, w).trim();
+        int gb = v.indexOf("(GROUP BY");
+        if (gb >= 0) v = v.substring(0, gb).trim();
+        int sep = v.indexOf(NOTES_MARKER);
+        if (sep >= 0) v = v.substring(0, sep).trim();
+        return v.isEmpty() ? null : v;
+    }
+
+    /** notes 안의 인라인 ", where:" 필터 값 추출 (expand_expr 와 같은 셀). 없으면 null. */
+    static String notesWhere(String notes) {
+        if (notes == null) return null;
+        int i = notes.indexOf(", where:");
+        if (i < 0) return null;
+        String v = notes.substring(i + ", where:".length()).trim();
+        int sep = v.indexOf(NOTES_MARKER);
+        if (sep >= 0) v = v.substring(0, sep).trim();
+        return v.isEmpty() ? null : v;
+    }
+
+    /** transform 이 집계 함수로 시작하는가 (SUM/COUNT/…). */
+    static boolean isAggregate(String sql) {
+        return sql != null && AGG_FN.matcher(sql).find();
+    }
+
+    /** tobe_table 별 expand 출력 컬럼 집합 (소문자) — notes 의 expand_expr 'AS u(a, b)' 파싱. */
+    private static Map<String, java.util.Set<String>> buildExpandOutputCols(List<RuleRow> rules) {
+        Map<String, java.util.Set<String>> out = new HashMap<>();
+        for (RuleRow r : rules) {
+            String ee = notesDirective(r.notes, "expand_expr:");
+            if (ee == null || ee.isBlank()) continue;
+            Matcher m = EXPAND_OUT.matcher(ee);
+            if (!m.find()) continue;
+            String tobeKey = (r.tobeSchema == null ? "" : r.tobeSchema) + "|" + r.tobeTable;
+            java.util.Set<String> set = out.computeIfAbsent(tobeKey, k -> new HashSet<>());
+            for (String c : m.group(1).split(",")) {
+                String cc = c.trim().toLowerCase();
+                if (!cc.isEmpty()) set.add(cc);
+            }
+        }
+        return out;
     }
 
     private static Map<String, String> extractAliases(List<RuleRow> rules, Set<String> validTables) {
