@@ -1350,7 +1350,10 @@ function PipelineStages({ t, stages, stageViews, quarantineByTable }: {
               : [];
             const isWarn = st.tone === 'warn' && !!sv?.tables?.length;
             const warnCount = warnTables.length;
-            const expandable = hasFailed || isWarn;
+            // warn stage 는 보여줄 warning quarantine 이 있을 때만 펼침 가능. validation 의
+            // checksum WARN 등은 quarantine 을 만들지 않으므로 클릭해도 열리지 않는다
+            // (상세는 Artifacts 의 Validation report). 빈 "상세 없음" 박스를 없앤다.
+            const expandable = hasFailed || (isWarn && warnCount > 0);
             const isOpen = expanded === st.id;
             return (
             <Fragment key={st.id}>
