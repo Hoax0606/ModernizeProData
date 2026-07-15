@@ -35,6 +35,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -245,13 +246,55 @@ class EndToEndGreenIT {
         assertNoValidationFail(runId, "customer_full_profile");
     }
 
+    // ─────────────────── Shift-JIS 입력 (SPI 변환 seam) ───────────────────
+    @Test
+    void scenario_shiftJis_input_decodedToUtf8(@TempDir Path csvDir, @TempDir Path outDir) throws Exception {
+        // CSV 를 Shift-JIS(MS932) 로 인코딩 + site.asisEncoding=Shift_JIS → ExtractStage 의
+        // SourceReader SPI 가 UTF-8 로 변환한 뒤 파이프라인 진행 (일본어 데이터 보존 검증).
+        String csv = "ACCOUNT_ID,OWNER\n1,あ\n2,髙\n";   // 髙 = 機種依存文字 (MS932 벤더확장)
+        Files.write(csvDir.resolve("ACCOUNTS.csv"), csv.getBytes(Charset.forName("windows-31j")));
+
+        Project project = newProject(csvDir, "e2e-sjis", "Shift_JIS");
+        String pid = project.getId();
+        ddlImport.importDdl(pid, "asis", "asis.sql",
+                ("CREATE TABLE ACCOUNTS (ACCOUNT_ID NUMBER(10) NOT NULL, OWNER VARCHAR2(50));\n")
+                        .getBytes(StandardCharsets.UTF_8), "test");
+        ddlImport.importDdl(pid, "tobe", "tobe.sql",
+                ("CREATE TABLE accounts_sj (account_id BIGINT PRIMARY KEY, owner VARCHAR(50));\n")
+                        .getBytes(StandardCharsets.UTF_8), "test");
+        String columnCsv =
+                "asis_table,asis_column,asis_type,tobe_table,tobe_column,tobe_type,code_domain,default_value,transform_sql,notes\n" +
+                "ACCOUNTS,ACCOUNT_ID,NUMBER(10),accounts_sj,account_id,BIGINT,,,,\n" +
+                "ACCOUNTS,OWNER,VARCHAR2(50),accounts_sj,owner,\"VARCHAR(50)\",,,,\n";
+        importMapping(pid, columnCsv);
+
+        String runId = driveRun(project, outDir);
+        assertStagesGreen(runId);
+
+        try (Connection c = pgConn(); Statement st = c.createStatement()) {
+            assertRowCount(st, "accounts_sj", 2);
+            try (ResultSet rs = st.executeQuery(
+                    "SELECT account_id, owner FROM accounts_sj ORDER BY account_id")) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getString("owner")).isEqualTo("あ");          // SJIS 82A0 → UTF-8
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getString("owner")).isEqualTo("髙");          // 벤더문자 보존
+            }
+        }
+        assertNoValidationFail(runId, "accounts_sj");
+    }
+
     // ────────────────────────── 헬퍼 ──────────────────────────
 
     private Project newProject(Path csvDir, String name) {
+        return newProject(csvDir, name, "UTF-8");
+    }
+
+    private Project newProject(Path csvDir, String name, String asisEncoding) {
         Map<String, Object> tobeCfg = Map.of(
                 "host", pg.getHost(), "port", pg.getFirstMappedPort(),
                 "database", pg.getDatabaseName(), "username", pg.getUsername(), "password", pg.getPassword());
-        Site site = Site.create(name + "-site", "prod", "dev", "UTF-8", "UTF-8",
+        Site site = Site.create(name + "-site", "prod", "dev", asisEncoding, "UTF-8",
                 csvDir.toString(), null, "dev", Map.of("dev", tobeCfg), Map.of(), "test");
         siteRepo.save(site);
         Project p = Project.create(site.getId(), name, "test");

@@ -51,6 +51,7 @@ public class MappingReportService {
     private final SiteRepository siteRepository;
     private final MappingTableBindingRepository bindingRepo;
     private final MappingRuleRepository ruleRepo;
+    private final com.ksinfo.modernize_pro_data.coordinator.worker.source.SourceReaderRegistry sourceReaderRegistry;
 
     public record ReportResult(
             String tobeSchema,
@@ -135,36 +136,60 @@ public class MappingReportService {
                     kind, masterIdSlot, null, null, null);
         }
 
-        String sql = buildSql(binding, rules, baseDir, effLimit, site.getAsisEncoding());
-
-        List<String> headers = new ArrayList<>();
-        List<List<String>> outRows = new ArrayList<>();
-        boolean truncated = false;
-        // 요청별 격리 connection — 공유 connection 동시 사용 시 pending result 무효화
-        // ("Attempting to execute an unsuccessful or closed pending query result") 회피.
-        try (java.sql.Connection conn = duckDbService.requestConnection();
-             Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery(sql)) {
-            ResultSetMetaData md = rs.getMetaData();
-            int colCount = md.getColumnCount();
-            for (int i = 1; i <= colCount; i++) headers.add(md.getColumnLabel(i));
-            int n = 0;
-            while (rs.next()) {
-                if (n >= effLimit) { truncated = true; break; }
-                List<String> row = new ArrayList<>(colCount);
-                for (int i = 1; i <= colCount; i++) {
-                    String v = rs.getString(i);
-                    row.add(v != null ? v : "");
-                }
-                outRows.add(row);
-                n++;
-            }
-        } catch (SQLException e) {
-            log.warn("Report SQL failed: {}", e.getMessage());
-            return identifyFailingRule(schema, tobeTable, headers, sql, binding, rules, baseDir, e.getMessage(), site.getAsisEncoding());
+        // 인코딩 변환 seam 임시파일(SPI bounded)을 담을 run-local temp 디렉터리 — finally 에서 정리.
+        Path tempDir;
+        try {
+            tempDir = java.nio.file.Files.createTempDirectory("trial-utf8-");
+        } catch (java.io.IOException e) {
+            throw new com.ksinfo.modernize_pro_data.common.exception.ApiException(
+                    "CSV_ENCODING_FAILED", "임시 디렉터리 생성 실패: " + e.getMessage(),
+                    org.springframework.http.HttpStatus.INTERNAL_SERVER_ERROR);
         }
-        return new ReportResult(schema, tobeTable, headers, outRows, outRows.size(), truncated, sql, null,
-                null, null, null, null, null);
+        try {
+            String sql = buildSql(binding, rules, baseDir, effLimit, site.getAsisEncoding(), tempDir);
+
+            List<String> headers = new ArrayList<>();
+            List<List<String>> outRows = new ArrayList<>();
+            boolean truncated = false;
+            // 요청별 격리 connection — 공유 connection 동시 사용 시 pending result 무효화
+            // ("Attempting to execute an unsuccessful or closed pending query result") 회피.
+            try (java.sql.Connection conn = duckDbService.requestConnection();
+                 Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery(sql)) {
+                ResultSetMetaData md = rs.getMetaData();
+                int colCount = md.getColumnCount();
+                for (int i = 1; i <= colCount; i++) headers.add(md.getColumnLabel(i));
+                int n = 0;
+                while (rs.next()) {
+                    if (n >= effLimit) { truncated = true; break; }
+                    List<String> row = new ArrayList<>(colCount);
+                    for (int i = 1; i <= colCount; i++) {
+                        String v = rs.getString(i);
+                        row.add(v != null ? v : "");
+                    }
+                    outRows.add(row);
+                    n++;
+                }
+            } catch (SQLException e) {
+                log.warn("Report SQL failed: {}", e.getMessage());
+                return identifyFailingRule(schema, tobeTable, headers, sql, binding, rules, baseDir,
+                        e.getMessage(), site.getAsisEncoding(), tempDir);
+            }
+            return new ReportResult(schema, tobeTable, headers, outRows, outRows.size(), truncated, sql, null,
+                    null, null, null, null, null);
+        } finally {
+            deleteTempDirQuietly(tempDir);
+        }
+    }
+
+    /** SPI bounded 변환 임시 디렉터리 정리 (파일 + 디렉터리). 실패 무시. */
+    private static void deleteTempDirQuietly(Path dir) {
+        if (dir == null) return;
+        try (Stream<Path> s = Files.walk(dir)) {
+            s.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try { Files.deleteIfExists(p); } catch (java.io.IOException ignore) { /* skip */ }
+            });
+        } catch (java.io.IOException ignore) { /* temp 정리 실패는 무시 */ }
     }
 
     /**
@@ -180,14 +205,14 @@ public class MappingReportService {
     private ReportResult identifyFailingRule(String schema, String tobeTable, List<String> headers,
                                              String sql, MappingTableBinding binding,
                                              List<MappingRule> rules, Path baseDir, String origMessage,
-                                             String asisEncoding) {
+                                             String asisEncoding, Path tempDir) {
         String origType = classifyDuckDbErrorCode(origMessage);
         String origHint = extractHint(origMessage);
         if (binding == null || binding.getSources().isEmpty()) {
             return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType, origHint,
                     "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
         }
-        String fromClause = buildFromClause(binding, rules, baseDir, asisEncoding);
+        String fromClause = buildFromClause(binding, rules, baseDir, asisEncoding, tempDir);
         if (fromClause.isEmpty()) {
             return errorResult(schema, tobeTable, headers, sql, "UNKNOWN", null, null, origType, origHint,
                     "오류 종류: " + classifyDuckDbErrorMessage(origMessage));
@@ -288,7 +313,7 @@ public class MappingReportService {
      * 룰들의 transform_sql (없으면 transform_rule) 을 그대로 SELECT 식으로 인젝션 + AS tobeColumn.
      * 바인딩이 있으면 read_csv FROM + JOIN + WHERE 까지 붙임 (FROM 구성은 buildFromClause 에 위임).
      */
-    private String buildSql(MappingTableBinding binding, List<MappingRule> rules, Path baseDir, int limit, String asisEncoding) {
+    private String buildSql(MappingTableBinding binding, List<MappingRule> rules, Path baseDir, int limit, String asisEncoding, Path tempDir) {
         StringBuilder select = new StringBuilder("SELECT ");
         boolean first = true;
         for (MappingRule r : rules) {
@@ -302,7 +327,7 @@ public class MappingReportService {
             return "SELECT NULL LIMIT 0";
         }
 
-        String fromClause = buildFromClause(binding, rules, baseDir, asisEncoding);
+        String fromClause = buildFromClause(binding, rules, baseDir, asisEncoding, tempDir);
         if (fromClause.isEmpty()) {
             // No source → defaults only. 한 row 짜리 SELECT.
             return select.append(" LIMIT 1").toString();
@@ -321,7 +346,8 @@ public class MappingReportService {
      * binding 이 없거나 sources 가 비면 빈 문자열 반환.
      * identifyFailingRule 의 probe 쿼리도 이걸 재사용.
      */
-    private String buildFromClause(MappingTableBinding binding, List<MappingRule> rules, Path baseDir, String asisEncoding) {
+    private String buildFromClause(MappingTableBinding binding, List<MappingRule> rules, Path baseDir,
+                                   String asisEncoding, Path tempDir) {
         if (binding == null || binding.getSources().isEmpty()) return "";
         var sources = binding.getSources().stream()
                 .sorted(Comparator.comparingInt(MappingTableBindingSource::getOrdinal))
@@ -329,7 +355,20 @@ public class MappingReportService {
         StringBuilder from = new StringBuilder(" FROM ");
         for (int i = 0; i < sources.size(); i++) {
             var s = sources.get(i);
-            String csvPath = resolveCsvFile(baseDir, s.getAsisSchema(), s.getAsisTable());
+            String rawPath = resolveCsvFile(baseDir, s.getAsisSchema(), s.getAsisTable());
+            // 인코딩 변환 seam (계획서 A4) — 비-UTF-8 이면 SPI 가 앞부분만 UTF-8 로 (Trial 은 sample).
+            // 인코딩 로직은 SPI 한 곳에만 — 여기선 호출만. UTF-8 이면 passthrough(원본 그대로).
+            String csvPath;
+            try {
+                csvPath = sourceReaderRegistry
+                        .toUtf8Preview(java.nio.file.Path.of(rawPath), asisEncoding, tempDir, 8L << 20)
+                        .toString();
+            } catch (java.io.IOException e) {
+                throw new com.ksinfo.modernize_pro_data.common.exception.ApiException(
+                        "CSV_ENCODING_FAILED",
+                        "CSV 인코딩 변환 실패 (" + s.getAsisTable() + "): " + e.getMessage(),
+                        org.springframework.http.HttpStatus.BAD_REQUEST);
+            }
             String escPath = csvPath.replace("'", "''");
             String aliasQ = quoteIdent(s.getAlias());
             // all_varchar=true — ExtractStage 의 parquet1 생성과 동일한 input 형태 (모든 컬럼 VARCHAR).
@@ -345,7 +384,6 @@ public class MappingReportService {
             // (1000만 row CSV 의 schema 추론 default = 20480 row sample → 수십초 추가 비용 제거.)
             String readCsv = "(SELECT * FROM read_csv('" + escPath
                     + "', header=true, delim=',', null_padding=true, all_varchar=true, sample_size=100"
-                    + CsvEncoding.clause(asisEncoding)
                     + ") LIMIT " + TRIAL_SOURCE_SAMPLE + ") " + aliasQ;
             if (i == 0) {
                 from.append(readCsv);

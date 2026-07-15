@@ -62,6 +62,7 @@ public class ExtractStage implements StageRunner {
     private final QuarantineService quarantineService;
     private final RunLogIngestService runLogIngest;
     private final StageProgressBroadcaster broadcaster;
+    private final com.ksinfo.modernize_pro_data.coordinator.worker.source.SourceReaderRegistry sourceReaderRegistry;
 
     @Override
     public String stageKey() {
@@ -158,12 +159,23 @@ public class ExtractStage implements StageRunner {
                         /* fingerprint 수집 실패 — 추출은 그대로 진행, carry-over 만 비활성(안전). */
                     }
 
+                    // 인코딩 변환 seam (계획서 A4) — site.asisEncoding 이 비-UTF-8 이면 SourceReader 가
+                    // UTF-8 임시 파일로 변환. UTF-8 이면 원본 그대로(no-op). 이후 가드·read_csv 는 UTF-8 대상.
+                    Path utf8Csv;
+                    try {
+                        Path workDir = ctx.getOutputDir().resolve("source-utf8");
+                        utf8Csv = sourceReaderRegistry.toUtf8(csv, site.getAsisEncoding(), workDir);
+                    } catch (java.io.IOException e) {
+                        throw new IllegalStateException("AS-IS CSV 인코딩 변환 실패 (" + asisTable
+                                + ".csv): " + e.getMessage(), e);
+                    }
+
                     // 입력 가드 (2026-07-08 UTF-8 계약) — read_csv 로 넘기기 전에 파일을 1 회 스캔.
                     // NUL(0x00) / 깨진 UTF-8 은 fail-fast (그냥 넘기면 U+FFFD silent 치환 또는 PG 적재 시
                     // cryptic error). BOM 은 감지만 (DuckDB read_csv 가 strip).
                     try {
                         com.ksinfo.modernize_pro_data.common.util.CsvInputGuard.Result guard =
-                                com.ksinfo.modernize_pro_data.common.util.CsvInputGuard.inspect(csv);
+                                com.ksinfo.modernize_pro_data.common.util.CsvInputGuard.inspect(utf8Csv);
                         if (!guard.ok()) {
                             throw new IllegalStateException("AS-IS CSV 입력 가드 위반 (" + asisTable
                                     + ".csv, byte offset " + guard.offset() + "): " + guard.reason()
@@ -176,7 +188,7 @@ public class ExtractStage implements StageRunner {
                         throw new IllegalStateException("AS-IS CSV 읽기 실패 (" + asisTable + ".csv): " + e.getMessage(), e);
                     }
 
-                    String escapedPath = csv.toString().replace("'", "''");
+                    String escapedPath = utf8Csv.toString().replace("'", "''");
                     String fqTable = quoteIdent(schema) + "." + quoteIdent("asis_" + asisTable);
 
                     try (Statement st = duckDbService.statement()) {

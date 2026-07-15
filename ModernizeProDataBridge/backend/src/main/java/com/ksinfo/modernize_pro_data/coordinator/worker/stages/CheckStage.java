@@ -227,6 +227,9 @@ public class CheckStage implements StageRunner {
     private String probeBindingEncoding(StageContext ctx, Site site,
                                         MappingTableBinding binding, String tableLabel) {
         if (site.getCsvPath() == null || site.getCsvPath().isBlank()) return null;
+        // 비-UTF-8 사이트는 원본을 UTF-8 로 직접 못 읽으므로 이 probe 를 skip — 인코딩 검증은
+        // ExtractStage 의 SourceReader SPI(디코드) + CsvInputGuard(fail-fast) 가 담당 (계획서 A4).
+        if (isNonUtf8Encoding(site.getAsisEncoding())) return null;
         Path baseDir = Paths.get(site.getCsvPath()).toAbsolutePath().normalize();
         String encodingClause = encodingClauseFor(site.getAsisEncoding());
 
@@ -255,6 +258,13 @@ public class CheckStage implements StageRunner {
      */
     private static String encodingClauseFor(String asisEncoding) {
         return "";
+    }
+
+    /** UTF-8(또는 미지정)이 아닌 인코딩인가 — 비-UTF-8 이면 CheckStage probe skip (SPI 가 extract 에서 변환). */
+    private static boolean isNonUtf8Encoding(String enc) {
+        if (enc == null || enc.isBlank()) return false;
+        String e = enc.trim().toUpperCase();
+        return !(e.equals("UTF-8") || e.equals("UTF8"));
     }
 
     private void ingest(StageContext ctx, String message) {
