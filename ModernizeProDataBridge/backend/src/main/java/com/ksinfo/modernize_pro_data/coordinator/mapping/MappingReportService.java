@@ -335,7 +335,8 @@ public class MappingReportService {
         StringBuilder sql = new StringBuilder(select.toString()).append(fromClause);
         // Row N:1 집계 — binding 의 group_by_expr 이 있으면 WHERE 뒤 LIMIT 앞에 그대로 인젝션.
         if (binding != null && binding.getGroupByExpr() != null && !binding.getGroupByExpr().isBlank()) {
-            sql.append(" GROUP BY ").append(stripLeadingKeyword(binding.getGroupByExpr(), "GROUP BY"));
+            // GROUP BY 도 SELECT 식과 동일하게 CAST→TRY_CAST 정규화 (안 하면 binder error, normalizeCasts javadoc 참조).
+            sql.append(" GROUP BY ").append(normalizeCasts(stripLeadingKeyword(binding.getGroupByExpr(), "GROUP BY")));
         }
         sql.append(" LIMIT ").append(limit);
         return sql.toString();
@@ -396,7 +397,8 @@ public class MappingReportService {
                 from.append(" ").append(joinType).append(" ").append(readCsv);
                 String joinOn = s.getJoinOn();
                 if (joinOn != null && !joinOn.isBlank()) {
-                    from.append(" ON ").append(joinOn);
+                    // JOIN ON 도 SELECT 식과 동일하게 CAST→TRY_CAST 정규화 (일관성 + cast 실패 시 에러 대신 무매칭).
+                    from.append(" ON ").append(normalizeCasts(joinOn));
                 } else {
                     from.append(" ON 1=1");  // 미지정이면 cartesian (사용자가 채워야 함)
                 }
@@ -427,6 +429,16 @@ public class MappingReportService {
         return trimmed;
     }
 
+    /**
+     * 명시적 {@code CAST(} 를 {@code TRY_CAST(} 로 치환 — cast 실패를 에러가 아닌 NULL 로.
+     * SELECT / GROUP BY / JOIN ON 에 <b>동일하게</b> 적용해야 SELECT 식과 group key 의 텍스트가
+     * 일치해 DuckDB binder 가 group key 로 인식한다. 불일치(SELECT=TRY_CAST vs GROUP BY=CAST)면
+     * "column ... must appear in the GROUP BY clause" binder error 가 난다.
+     */
+    private static String normalizeCasts(String expr) {
+        return expr == null ? null : expr.replaceAll("(?i)\\bCAST\\s*\\(", "TRY_CAST(");
+    }
+
     private String exprForRule(MappingRule r) {
         String s = r.getStrategy();
         if ("null".equals(s)) return "NULL";
@@ -439,7 +451,7 @@ public class MappingReportService {
         String expr = r.getTransformSql();
         if (expr == null || expr.isBlank()) expr = r.getTransformRule();
         if (expr == null || expr.isBlank()) return "NULL";
-        String safe = expr.replaceAll("(?i)\\bCAST\\s*\\(", "TRY_CAST(");
+        String safe = normalizeCasts(expr);
         // 식에 라인 주석(--)이 있으면 SELECT 한 줄로 합쳐질 때 뒤따르는 ") AS col, ..." 까지
         // 주석 처리되어 SQL 이 깨진다. 앞뒤에 개행을 넣어 라인 주석이 그 줄에서만 끝나게 한다.
         return "(\n" + safe + "\n)";
