@@ -216,7 +216,7 @@ class PgSchemaExtractorIT {
         String oracleDdl = "CREATE TABLE t (id NUMBER(10) PRIMARY KEY, name VARCHAR2(50));";
         assertThatThrownBy(() -> extractor.extract(oracleDdl.getBytes()))
                 .isInstanceOf(PgSchemaExtractor.TobeDdlApplyException.class)
-                .hasMessageContaining("TO-BE DDL 적용 실패");
+                .hasMessageContaining("PostgreSQL DDL 이어야 합니다");
     }
 
     @Test

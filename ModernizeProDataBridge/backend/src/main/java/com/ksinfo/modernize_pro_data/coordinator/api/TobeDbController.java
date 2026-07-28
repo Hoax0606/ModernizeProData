@@ -2,6 +2,7 @@ package com.ksinfo.modernize_pro_data.coordinator.api;
 
 import com.ksinfo.modernize_pro_data.common.dto.ApiResponse;
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.coordinator.load.TobeJdbcConnect;
 import com.ksinfo.modernize_pro_data.coordinator.site.SiteRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.TobeDbHealthService;
 import jakarta.validation.Valid;
@@ -94,19 +95,24 @@ public class TobeDbController {
     }
 
     private TestConnectionResult tryConnect(TestConnectionRequest req, String ctx) {
-        if (!"PostgreSQL".equalsIgnoreCase(req.dbType())) {
+        Map<String, Object> cfg = new java.util.HashMap<>();
+        cfg.put("type", req.dbType());
+        cfg.put("host", req.host());
+        cfg.put("port", req.port());
+        cfg.put("database", req.database());
+        cfg.put("username", req.username());
+        cfg.put("password", req.password() == null ? "" : req.password());
+
+        String dialect = TobeJdbcConnect.dialect(cfg);
+        if (!TobeJdbcConnect.isSupported(dialect)) {
             return new TestConnectionResult(
                     false,
-                    "Only PostgreSQL is supported for now (dbType=" + req.dbType() + ")",
+                    "Unsupported DB type: " + req.dbType() + " (supported: PostgreSQL, Oracle)",
                     null);
         }
 
-        String url = "jdbc:postgresql://" + req.host() + ":" + req.port() + "/" + req.database();
-        Properties props = new Properties();
-        props.setProperty("user", req.username());
-        props.setProperty("password", req.password() == null ? "" : req.password());
-        props.setProperty("connectTimeout", String.valueOf(CONNECT_TIMEOUT_SEC));
-        props.setProperty("loginTimeout", String.valueOf(LOGIN_TIMEOUT_SEC));
+        String url = TobeJdbcConnect.url(cfg);
+        Properties props = TobeJdbcConnect.props(cfg, LOGIN_TIMEOUT_SEC);
 
         try (Connection conn = DriverManager.getConnection(url, props)) {
             boolean valid = conn.isValid(LOGIN_TIMEOUT_SEC);

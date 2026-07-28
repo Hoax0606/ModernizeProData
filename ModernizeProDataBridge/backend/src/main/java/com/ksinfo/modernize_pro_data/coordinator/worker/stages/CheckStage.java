@@ -2,6 +2,7 @@ package com.ksinfo.modernize_pro_data.coordinator.worker.stages;
 
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlImport;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlImportRepository;
+import com.ksinfo.modernize_pro_data.coordinator.load.TobeJdbcConnect;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
@@ -195,21 +196,15 @@ public class CheckStage implements StageRunner {
         if (byEnv == null) return "tobe_db_by_env not set";
         Map<String, Object> cfg = site.getActiveTobeDbConfig();
         if (cfg == null) return "tobe DB config not set for env=" + site.getEnvironment();
-        String host = (String) cfg.get("host");
-        Object portObj = cfg.get("port");
-        String database = (String) cfg.get("database");
-        String username = (String) cfg.get("username");
-        String password = (String) cfg.get("password");
-        if (host == null || database == null) return "host or database missing in tobe DB config";
-        int port = portObj instanceof Number ? ((Number) portObj).intValue()
-                : portObj instanceof String ? Integer.parseInt((String) portObj) : 5432;
-
-        String url = "jdbc:postgresql://" + host + ":" + port + "/" + database;
-        Properties props = new Properties();
-        if (username != null) props.setProperty("user", username);
-        if (password != null) props.setProperty("password", password);
-        props.setProperty("loginTimeout", String.valueOf(DB_CONNECT_TIMEOUT_SEC));
-        props.setProperty("connectTimeout", String.valueOf(DB_CONNECT_TIMEOUT_SEC));
+        if (cfg.get("host") == null || cfg.get("database") == null) {
+            return "host or database missing in tobe DB config";
+        }
+        String dialect = TobeJdbcConnect.dialect(cfg);
+        if (!TobeJdbcConnect.isSupported(dialect)) {
+            return "Unsupported TO-BE type: " + cfg.get("type") + " (supported: PostgreSQL, Oracle)";
+        }
+        String url = TobeJdbcConnect.url(cfg);
+        Properties props = TobeJdbcConnect.props(cfg, DB_CONNECT_TIMEOUT_SEC);
         try (Connection ignored = DriverManager.getConnection(url, props)) {
             return null;
         } catch (Exception e) {

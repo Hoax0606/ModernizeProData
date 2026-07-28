@@ -1,5 +1,8 @@
 package com.ksinfo.modernize_pro_data.coordinator.worker.stages;
 
+import com.ksinfo.modernize_pro_data.coordinator.load.PostgresLoaderAdapter;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.ForeignKeyMeta;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.UniqueConstraintMeta;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunHistory;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.worker.StageContext;
@@ -58,6 +61,7 @@ class LoadStageConstraintAttachIT {
     }
 
     @Autowired LoadStage loadStage;
+    @Autowired PostgresLoaderAdapter pgAdapter;
 
     private Connection conn;
     private String schema;
@@ -99,11 +103,11 @@ class LoadStageConstraintAttachIT {
             st.execute("CREATE TABLE " + schema + ".emp (id INTEGER PRIMARY KEY, email VARCHAR(100))");
         }
 
-        Map<String, List<LoadStage.UniqueConstraintMeta>> uniqueByTable = new HashMap<>();
+        Map<String, List<UniqueConstraintMeta>> uniqueByTable = new HashMap<>();
         uniqueByTable.put("emp", List.of(
-                new LoadStage.UniqueConstraintMeta("uq_emp_email", List.of("email"))));
+                new UniqueConstraintMeta("uq_emp_email", List.of("email"))));
 
-        loadStage.ensureUniqueConstraints(minimalCtx(), conn, schema, "emp", uniqueByTable);
+        loadStage.ensureUniqueConstraints(minimalCtx(), pgAdapter, conn, schema, "emp", uniqueByTable);
 
         // PG 에 UK 부착 확인
         try (Statement st = conn.createStatement();
@@ -134,13 +138,13 @@ class LoadStageConstraintAttachIT {
             st.execute("CREATE TABLE " + schema + ".child (id INTEGER PRIMARY KEY, parent_id INTEGER)");
         }
 
-        Map<String, List<LoadStage.ForeignKeyMeta>> fksByTable = new HashMap<>();
-        fksByTable.put("child", List.of(new LoadStage.ForeignKeyMeta(
+        Map<String, List<ForeignKeyMeta>> fksByTable = new HashMap<>();
+        fksByTable.put("child", List.of(new ForeignKeyMeta(
                 "fk_child_parent", List.of("parent_id"),
                 schema, "parent", List.of("id"),
                 "NO ACTION", "NO ACTION", null)));
 
-        loadStage.ensureForeignKeys(minimalCtx(), conn, schema, "child", fksByTable);
+        loadStage.ensureForeignKeys(minimalCtx(), pgAdapter, conn, schema, "child", fksByTable);
 
         // PG 에 FK 부착 확인
         try (Statement st = conn.createStatement();
@@ -168,13 +172,13 @@ class LoadStageConstraintAttachIT {
             st.execute("CREATE TABLE " + schema + ".child (id INTEGER PRIMARY KEY, parent_id INTEGER)");
         }
 
-        Map<String, List<LoadStage.ForeignKeyMeta>> fksByTable = new HashMap<>();
-        fksByTable.put("child", List.of(new LoadStage.ForeignKeyMeta(
+        Map<String, List<ForeignKeyMeta>> fksByTable = new HashMap<>();
+        fksByTable.put("child", List.of(new ForeignKeyMeta(
                 "fk_c", List.of("parent_id"),
                 schema, "parent", List.of("id"),
                 "CASCADE", "NO ACTION", null)));
 
-        loadStage.ensureForeignKeys(minimalCtx(), conn, schema, "child", fksByTable);
+        loadStage.ensureForeignKeys(minimalCtx(), pgAdapter, conn, schema, "child", fksByTable);
 
         // 부모 + 자식 데이터
         try (Statement st = conn.createStatement()) {
@@ -200,13 +204,13 @@ class LoadStageConstraintAttachIT {
             st.execute("CREATE TABLE " + schema + ".child (c1 INTEGER, c2 INTEGER, PRIMARY KEY (c1, c2))");
         }
 
-        Map<String, List<LoadStage.ForeignKeyMeta>> fksByTable = new HashMap<>();
-        fksByTable.put("child", List.of(new LoadStage.ForeignKeyMeta(
+        Map<String, List<ForeignKeyMeta>> fksByTable = new HashMap<>();
+        fksByTable.put("child", List.of(new ForeignKeyMeta(
                 "fk_composite", List.of("c1", "c2"),
                 schema, "parent", List.of("a", "b"),
                 "NO ACTION", "NO ACTION", null)));
 
-        loadStage.ensureForeignKeys(minimalCtx(), conn, schema, "child", fksByTable);
+        loadStage.ensureForeignKeys(minimalCtx(), pgAdapter, conn, schema, "child", fksByTable);
 
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(
@@ -233,12 +237,12 @@ class LoadStageConstraintAttachIT {
             st.execute("ALTER TABLE " + schema + ".emp ADD CONSTRAINT uq_emp_email UNIQUE (email)");
         }
 
-        Map<String, List<LoadStage.UniqueConstraintMeta>> uniqueByTable = new HashMap<>();
+        Map<String, List<UniqueConstraintMeta>> uniqueByTable = new HashMap<>();
         uniqueByTable.put("emp", List.of(
-                new LoadStage.UniqueConstraintMeta("uq_emp_email", List.of("email"))));
+                new UniqueConstraintMeta("uq_emp_email", List.of("email"))));
 
         // 재실행 — PG 가 "이미 존재" 에러 → catch + log.warn 만, 메서드는 정상 return
-        loadStage.ensureUniqueConstraints(minimalCtx(), conn, schema, "emp", uniqueByTable);
+        loadStage.ensureUniqueConstraints(minimalCtx(), pgAdapter, conn, schema, "emp", uniqueByTable);
 
         // UK 가 여전히 정확히 1개 (중복 부착 안 됨)
         try (Statement st = conn.createStatement();

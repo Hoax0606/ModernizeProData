@@ -78,15 +78,18 @@ public class DdlImportService {
                 .orElseThrow(() -> new ApiException("PROJECT_NOT_FOUND",
                         "프로젝트를 찾을 수 없습니다", HttpStatus.NOT_FOUND));
 
+        // DDL 파싱을 선언된 엔진 dialect 로 분기 (AS-IS/TO-BE 대칭). 저장용 dialect 도 이 값을 재사용.
+        //   postgresql → PgSchemaExtractor(staging apply), 그 외(oracle 등) → OracleDdlParser(정규식, DB 불필요).
+        String dialect = resolveDialect(project, side);
         ParsedDdl parsed;
         try {
-            if (SIDE_TOBE.equals(side)) {
-                // TO-BE 는 PG 라고 가정 (PoC). staging schema 에 적용해서 pg_catalog 로 메타 추출.
-                // Oracle 문법으로 작성된 경우 PG 가 거부 → TobeDdlApplyException → 400.
+            if (DialectUtil.POSTGRESQL.equals(dialect)) {
+                // PostgreSQL — staging schema 에 적용해 pg_catalog 로 메타 추출. 비-PG 문법이면 PG 가 거부
+                // → TobeDdlApplyException → 400.
                 parsed = pgSchemaExtractor.extract(content);
             } else {
-                String sql = new String(content, StandardCharsets.UTF_8);
-                parsed = parser.parse(sql);
+                // Oracle(및 load 미지원 엔진 fallback) — 정규식 파서.
+                parsed = parser.parse(new String(content, StandardCharsets.UTF_8));
             }
         } catch (PgSchemaExtractor.TobeDdlApplyException e) {
             log.error("TO-BE DDL apply failed for project {}: {}", projectId, e.getMessage());
@@ -118,10 +121,6 @@ public class DdlImportService {
             log.info("DDL import wiped mapping (re-import): project={}, side={}, rules={}, bindings={}, codeMaps={}",
                     projectId, side, rules, bindings, codes);
         }
-
-        // Site 의 DB type 정보로 dialect 결정 (없으면 "oracle" 폴백).
-        // AS-IS → site.asisDbType, TO-BE → site.tobeDbByEnv[site.environment].type
-        String dialect = resolveDialect(project, side);
 
         DdlImport ddlImport = DdlImport.create(
                 projectId, side, filename, content.length,
@@ -312,19 +311,27 @@ public class DdlImportService {
     }
 
     /**
-     * Project 의 Site 정보로 DDL dialect 를 결정한다.
-     *   side=asis → site.asisDbType
-     *   side=tobe → site.tobeDbByEnv[site.environment].type
-     * Site 가 없거나 type 이 비어있으면 "oracle" 폴백 (기존 동작 유지).
+     * Project 의 Site 정보로 DDL dialect 를 결정 (파서 선택 + 저장 공용).
+     *   side=asis → site.asisDbType, side=tobe → site.tobeDbByEnv[env].type
+     * <b>type 미설정 시 기본값은 side 별로 다르다(현재 동작·로더 규칙 보존)</b>:
+     *   AS-IS → oracle, TO-BE → postgresql ({@code LoaderAdapterRegistry} 의 "빈값→PG" 와 일치 —
+     *   기존 PG TO-BE 프로젝트가 Oracle 파서로 오라우팅되지 않게).
      */
     private String resolveDialect(Project project, String side) {
-        if (project.getSiteId() == null) return "oracle";
+        String raw = rawDbType(project, side);
+        if (raw == null || raw.isBlank()) {
+            return SIDE_TOBE.equals(side) ? DialectUtil.POSTGRESQL : DialectUtil.ORACLE;
+        }
+        return DialectUtil.normalize(raw);
+    }
+
+    /** Site/Project 설정에서 side 별 원본 DB type 문자열 (없으면 null). */
+    private String rawDbType(Project project, String side) {
+        if (project.getSiteId() == null) return null;
         Site site = siteRepo.findById(project.getSiteId()).orElse(null);
-        if (site == null) return "oracle";
-        String raw = null;
-        if (SIDE_ASIS.equals(side)) {
-            raw = site.getAsisDbType();
-        } else if (SIDE_TOBE.equals(side)) {
+        if (site == null) return null;
+        if (SIDE_ASIS.equals(side)) return site.getAsisDbType();
+        if (SIDE_TOBE.equals(side)) {
             // scope='project' 면 Project.tobeDbByEnv 우선, 아니면 Site.tobeDbByEnv.
             Map<String, Object> byEnv = "project".equals(site.getTobeDbScope())
                     ? project.getTobeDbByEnv()
@@ -333,24 +340,11 @@ public class DdlImportService {
                 Object envConn = byEnv.get(site.getEnvironment());
                 if (envConn instanceof Map<?, ?> conn) {
                     Object t = conn.get("type");
-                    if (t != null) raw = t.toString();
+                    if (t != null) return t.toString();
                 }
             }
         }
-        return normalizeDialect(raw);
-    }
-
-    /** UI 표시명을 dialect 코드로 정규화. 알려지지 않은 값은 "oracle" 폴백. */
-    private String normalizeDialect(String raw) {
-        if (raw == null) return "oracle";
-        String s = raw.trim().toLowerCase();
-        if (s.isEmpty()) return "oracle";
-        if (s.contains("postgres")) return "postgresql";
-        if (s.contains("sql server") || s.equals("mssql") || s.contains("microsoft")) return "mssql";
-        if (s.contains("mysql") || s.contains("mariadb")) return "mysql";
-        if (s.contains("db2")) return "db2";
-        if (s.contains("oracle")) return "oracle";
-        return "oracle";  // 모르면 폴백
+        return null;
     }
 
     public record DdlSchema(DdlImport latestImport, List<DdlTableWithColumns> tables) {}

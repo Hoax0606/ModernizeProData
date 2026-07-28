@@ -245,28 +245,9 @@ public class PgCopyManager {
      *       {@code BigDecimal}→plain decimal. No locale/format massaging is applied here.</li>
      * </ul>
      * Package-private (not private) so {@code PgCopyManagerCsvFieldTest} can lock this contract.
+     * 실제 규칙은 {@link CsvFieldSerializer#append} 에 있다 (PG COPY / Oracle sqlldr 공유 — drift 방지).
      */
     static void appendCsvField(StringBuilder sb, Object v) {
-        if (v == null) return;
-        String s = v.toString();
-        if (s.isEmpty()) {
-            sb.append("\"\"");
-            return;
-        }
-        boolean needQuote = false;
-        for (int i = 0, n = s.length(); i < n; i++) {
-            char c = s.charAt(i);
-            if (c == ',' || c == '"' || c == '\n' || c == '\r') {
-                needQuote = true;
-                break;
-            }
-        }
-        if (needQuote) {
-            sb.append('"');
-            sb.append(s.replace("\"", "\"\""));
-            sb.append('"');
-        } else {
-            sb.append(s);
-        }
+        CsvFieldSerializer.append(sb, v);
     }
 }
