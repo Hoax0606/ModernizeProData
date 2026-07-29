@@ -59,16 +59,32 @@ class StageCatalogTest {
     }
 
     @Test
+    void delta_excludesVerifyValidationAudit() {
+        // 델타(CDC 증분)는 병합 적재만 — 전량 verify/validation 및 audit 를 의도적으로 제외.
+        assertThat(StageCatalog.forRunType(RunType.delta))
+                .containsExactly("check", "extract", "reconcile", "transform", "load");
+        assertThat(StageCatalog.DELTA_STAGES).doesNotContain("audit", "verify", "validation");
+    }
+
+    @Test
     void orderingInvariants_extractTransformLoadVerifyValidation() {
+        // canonical 전체 순서. 각 runType 의 스테이지 목록은 이 순서의 부분수열이어야 한다
+        // (delta 처럼 뒤쪽 verify/validation 이 없어도 상대 순서만 지키면 OK).
+        List<String> canonical = List.of(
+                "check", "extract", "reconcile", "transform", "audit", "load", "verify", "validation");
         for (RunType rt : RunType.values()) {
             List<String> s = StageCatalog.forRunType(rt);
+            int prev = -1;
+            for (String stg : s) {
+                int idx = canonical.indexOf(stg);
+                assertThat(idx).as(rt + ": '" + stg + "' is a known stage").isGreaterThanOrEqualTo(0);
+                assertThat(idx).as(rt + ": " + stg + " keeps canonical relative order").isGreaterThan(prev);
+                prev = idx;
+            }
+            // 공통 필수 순서 — 모든 runType 이 가진 스테이지.
             assertThat(s.indexOf("extract")).as(rt + ": extract<transform").isLessThan(s.indexOf("transform"));
-            assertThat(s.indexOf("transform")).as(rt + ": transform<load").isLessThan(s.indexOf("load"));
-            assertThat(s.indexOf("load")).as(rt + ": load<verify").isLessThan(s.indexOf("verify"));
-            assertThat(s.indexOf("verify")).as(rt + ": verify<validation").isLessThan(s.indexOf("validation"));
             assertThat(s.indexOf("reconcile")).as(rt + ": reconcile<transform").isLessThan(s.indexOf("transform"));
-            // validation 은 항상 마지막
-            assertThat(s.get(s.size() - 1)).as(rt + ": validation last").isEqualTo("validation");
+            assertThat(s.indexOf("transform")).as(rt + ": transform<load").isLessThan(s.indexOf("load"));
         }
     }
 

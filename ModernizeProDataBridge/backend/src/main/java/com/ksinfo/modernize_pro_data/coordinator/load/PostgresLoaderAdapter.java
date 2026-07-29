@@ -4,6 +4,7 @@ import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlColumn;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DialectUtil;
 import com.ksinfo.modernize_pro_data.coordinator.load.spi.LoadRequest;
 import com.ksinfo.modernize_pro_data.coordinator.load.spi.LoaderAdapter;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.MergeRequest;
 import com.ksinfo.modernize_pro_data.coordinator.load.spi.TobeSqlDialect;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
@@ -105,6 +106,14 @@ public class PostgresLoaderAdapter implements LoaderAdapter {
     public long load(LoadRequest req) throws Exception {
         return pgCopyManager.copyInFromResultSet(
                 req.connection(), req.qualifiedTable(), req.columns(), req.resultSet(), req.cancelled());
+    }
+
+    @Override
+    public long merge(MergeRequest req) throws Exception {
+        // PG 는 ON CONFLICT 네이티브 — staging COPY 후 upsert + delete (PgCopyManager 캡슐화).
+        return pgCopyManager.mergeFromResultSet(
+                req.connection(), req.qualifiedTable(), req.columns(), req.opColumn(),
+                req.pkColumns(), req.resultSet(), req.cancelled());
     }
 
     @Override

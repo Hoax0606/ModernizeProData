@@ -58,6 +58,14 @@ public interface LoaderAdapter {
     /** 실제 적재. 반환 = 적재 row 수. 하드 실패 시 throw. */
     long load(LoadRequest req) throws Exception;
 
+    /**
+     * CDC 델타 병합 — PK 기준 upsert(op=I/U) + delete(op=D). 타깃 <b>TRUNCATE 없음</b>.
+     * 반환 = 처리한 델타 row 수. 기본 미지원(엔진별 opt-in) — 현재 PostgreSQL 만 구현.
+     */
+    default long merge(MergeRequest req) throws Exception {
+        throw new UnsupportedOperationException("delta merge not supported for dialect: " + dialect());
+    }
+
     // ── 읽기 방언 ─────────────────────────────────────────────────────────
     TobeSqlDialect sql();
 }

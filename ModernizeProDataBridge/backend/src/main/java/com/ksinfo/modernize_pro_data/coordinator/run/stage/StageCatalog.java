@@ -18,9 +18,22 @@ public final class StageCatalog {
     public static final List<String> CUTOVER_STAGES = List.of(
             "check", "extract", "reconcile", "transform", "load", "verify", "validation");
 
+    /**
+     * 델타(CDC 증분 catch-up) stage 순서. 전량 verify/validation 은 생략 —
+     * 변경분만 병합한 뒤 11TB 전수 검증은 비현실적이라 정합성 증빙은 컷오버 시점 reconciliation
+     * 로 미룬다. load stage-key 를 그대로 재사용하되 LoadStage 가 runType=delta 면 내부에서
+     * 병합(upsert+delete) 모드로 분기한다 (stage_instances CHECK 무변경).
+     */
+    public static final List<String> DELTA_STAGES = List.of(
+            "check", "extract", "reconcile", "transform", "load");
+
     private StageCatalog() {}
 
     public static List<String> forRunType(RunType runType) {
-        return runType == RunType.cutover ? CUTOVER_STAGES : TEST_STAGES;
+        return switch (runType) {
+            case delta   -> DELTA_STAGES;
+            case cutover -> CUTOVER_STAGES;
+            default      -> TEST_STAGES;   // test / rehearsal
+        };
     }
 }

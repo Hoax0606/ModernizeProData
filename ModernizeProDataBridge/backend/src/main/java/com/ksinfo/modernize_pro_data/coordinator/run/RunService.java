@@ -178,6 +178,9 @@ public class RunService {
                         projectId, project.getPhase());
                 return RunResult.rejected("cutover requires phase='ready' (current: " + project.getPhase() + ")");
             }
+        } else if (runType == RunType.delta) {
+            // 델타(CDC 증분 catch-up)는 초기 컷오버 이후 production 에서 매일 반복 실행되는
+            // 정상 운영 흐름이므로 prod 허용 + phase 제한 없음. (non-prod 리허설도 허용.)
         } else {
             if (isProd) {
                 log.warn("startRun rejected: runType={} on prod environment", runType);
@@ -562,6 +565,8 @@ public class RunService {
             case test -> "test";
             case rehearsal -> "rehearsal";
             case cutover -> "cutover";
+            // 델타는 초기 컷오버 이후 반복 실행 — phase 를 건드리지 않음(현재 phase 유지 → 전진 없음).
+            case delta -> project.getPhase();
         };
         int curIdx = PHASE_ORDER.indexOf(project.getPhase());
         int desIdx = PHASE_ORDER.indexOf(desired);
@@ -646,6 +651,10 @@ public class RunService {
         // 2) 없으면 runType 별 fallback.
         return switch (runType) {
             case cutover -> snapshotRepo.findLatestApprovedByProjectIdAndType(projectId, "cutover")
+                    .map(Snapshot::getId).orElse(null);
+            // 델타는 컷오버와 동일한 승인 매핑으로 변환해야 하므로 cutover snapshot 을 재사용.
+            // 없으면 null 허용(bindings 는 라이브에 존재 — cutover 처럼 필수는 아님).
+            case delta -> snapshotRepo.findLatestApprovedByProjectIdAndType(projectId, "cutover")
                     .map(Snapshot::getId).orElse(null);
             case rehearsal -> snapshotRepo.findLatestApprovedByProjectIdAndType(projectId, "mapping")
                     .map(Snapshot::getId).orElse(null);

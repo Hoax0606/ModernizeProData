@@ -16,8 +16,14 @@ import com.ksinfo.modernize_pro_data.coordinator.load.spi.ForeignKeyMeta;
 import com.ksinfo.modernize_pro_data.coordinator.load.spi.LoadRequest;
 import com.ksinfo.modernize_pro_data.coordinator.load.spi.LoaderAdapter;
 import com.ksinfo.modernize_pro_data.coordinator.load.spi.LoaderAdapterRegistry;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.MergeRequest;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunType;
+import com.ksinfo.modernize_pro_data.coordinator.run.delta.DeltaConstants;
 import com.ksinfo.modernize_pro_data.coordinator.load.spi.UniqueConstraintMeta;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingSource;
+import com.ksinfo.modernize_pro_data.coordinator.run.delta.DeltaWatermark;
+import com.ksinfo.modernize_pro_data.coordinator.run.delta.DeltaWatermarkRepository;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
@@ -96,6 +102,7 @@ public class LoadStage implements StageRunner {
     private final RunLogIngestService runLogIngest;
     private final StageProgressBroadcaster broadcaster;
     private final com.ksinfo.modernize_pro_data.coordinator.run.RunControlRegistry runControlRegistry;
+    private final DeltaWatermarkRepository deltaWatermarkRepo;
 
     @Override
     public String stageKey() {
@@ -305,36 +312,64 @@ public class LoadStage implements StageRunner {
             // Oracle 은 TargetFileEncoder(.dat 인코딩) + CTL CHARACTERSET + VARCHAR2(n CHAR) 구동.
             String targetCharset = ctx.getSite().getTobeEncoding();
             long rows;
-            // cutover = production 전환 → synchronous_commit 절대 끄지 않음 (durability 우선).
-            boolean cutover = ctx.getRunHistory().getRunType()
-                    == com.ksinfo.modernize_pro_data.coordinator.run.RunType.cutover;
-            try (Connection conn = adapter.openConnection(dbConfig, !cutover)) {
+            RunType runType = ctx.getRunHistory().getRunType();
+            // cutover/delta = production durability 중요 → synchronous_commit 끄지 않음.
+            boolean delta = runType == RunType.delta;
+            boolean durabilityCritical = runType == RunType.cutover || delta;
+            // 델타 run 에서도 병합 vs 전량은 테이블별로 결정: Transform 이 __op 를 실은 tobe_ 만 병합.
+            // (join/union·full 스냅샷 = tobe_ 에 __op 없음 → else 분기 = 기존 full 재적재 경로.)
+            boolean mergeMode = delta && tobeColumns.contains(DeltaConstants.OP_COLUMN);
+            String runIdForCancel = ctx.getRunHistory().getId();
+            try (Connection conn = adapter.openConnection(dbConfig, !durabilityCritical)) {
                 ensureTable(ctx, adapter, conn, tobeSchema, tobeTable, columnsByTable, targetCharset);
-                boolean fkDisabled = adapter.tryDisableConstraints(conn);
-                try {
-                    adapter.truncate(conn, pgQualified);
-                    String runIdForCancel = ctx.getRunHistory().getId();
+                if (mergeMode) {
+                    /* 델타(CDC 증분): TRUNCATE 없이 PK 기준 upsert(op=I/U)+delete(op=D) 병합 —
+                       타깃 기존 데이터 보존. ON CONFLICT 는 PK 인덱스 사전 존재가 필요하므로
+                       초기 전량적재가 만들어 둔 PK 를 병합 전에 멱등 보장(이미 있으면 no-op). */
+                    ensurePrimaryKey(ctx, adapter, conn, tobeSchema, tobeTable, columnsByTable.get(tobeTable));
+                    List<String> pkCols = adapter.primaryKeyColumns(columnsByTable.get(tobeTable));
+                    if (pkCols == null || pkCols.isEmpty()) {
+                        throw new IllegalStateException("delta merge 는 PK 가 필요합니다 — " + tableLabel);
+                    }
                     try (Connection duck = duckDbService.duplicateOf(ctx.getDuckConnection());
                          Statement duckSt = duck.createStatement();
                          ResultSet rs = duckSt.executeQuery("SELECT * FROM " + fqTobeDuck)) {
-                        // cancel supplier — 적재 도중 Stop 누르면 행 루프가 중단 throw → 적재 abort.
-                        LoadRequest req = new LoadRequest(dbConfig, conn, tobeSchema, tobeTable, pgQualified,
-                                tobeColumns, rs, targetCharset, ctx.getOutputDir(),
+                        MergeRequest mreq = new MergeRequest(conn, tobeSchema, tobeTable, pgQualified,
+                                tobeColumns, rs,
                                 () -> runControlRegistry.isCancelled(runIdForCancel),
-                                columnsByTable.get(tobeTable));
-                        rows = adapter.load(req);
+                                pkCols, DeltaConstants.OP_COLUMN);
+                        rows = adapter.merge(mreq);
                     }
-                } finally {
-                    if (fkDisabled) adapter.restoreConstraints(conn);
+                } else {
+                    boolean fkDisabled = adapter.tryDisableConstraints(conn);
+                    try {
+                        adapter.truncate(conn, pgQualified);
+                        try (Connection duck = duckDbService.duplicateOf(ctx.getDuckConnection());
+                             Statement duckSt = duck.createStatement();
+                             ResultSet rs = duckSt.executeQuery("SELECT * FROM " + fqTobeDuck)) {
+                            // cancel supplier — 적재 도중 Stop 누르면 행 루프가 중단 throw → 적재 abort.
+                            LoadRequest req = new LoadRequest(dbConfig, conn, tobeSchema, tobeTable, pgQualified,
+                                    tobeColumns, rs, targetCharset, ctx.getOutputDir(),
+                                    () -> runControlRegistry.isCancelled(runIdForCancel),
+                                    columnsByTable.get(tobeTable));
+                            rows = adapter.load(req);
+                        }
+                    } finally {
+                        if (fkDisabled) adapter.restoreConstraints(conn);
+                    }
+                    /* 적재 후 UK 부착 (테이블 단위, cross-table 의존 없음). PG PRIMARY KEY 는
+                       createTableIfNotExists 에 inline — PG 가 <table>_pkey unique index 자동 생성.
+                       FK / CHECK 는 모든 테이블 적재 후 final pass(applyDeferredConstraints)에서 부착·검증.
+                       per-binding 이면 자식이 부모보다 먼저 적재돼 가짜 orphan 이 날 수 있어서. */
+                    // PK 후행 — bare 테이블에 COPY 끝난 뒤 ADD PRIMARY KEY 로 인덱스 일괄 빌드
+                    // (createTableIfNotExists 가 inline PK 를 안 넣음 → COPY 중 PK 인덱스 미유지 = 빠름).
+                    ensurePrimaryKey(ctx, adapter, conn, tobeSchema, tobeTable, columnsByTable.get(tobeTable));
+                    ensureUniqueConstraints(ctx, adapter, conn, tobeSchema, tobeTable, uniqueByTable);
                 }
-                /* 적재 후 UK 부착 (테이블 단위, cross-table 의존 없음). PG PRIMARY KEY 는
-                   createTableIfNotExists 에 inline — PG 가 <table>_pkey unique index 자동 생성.
-                   FK / CHECK 는 모든 테이블 적재 후 final pass(applyDeferredConstraints)에서 부착·검증.
-                   per-binding 이면 자식이 부모보다 먼저 적재돼 가짜 orphan 이 날 수 있어서. */
-                // PK 후행 — bare 테이블에 COPY 끝난 뒤 ADD PRIMARY KEY 로 인덱스 일괄 빌드
-                // (createTableIfNotExists 가 inline PK 를 안 넣음 → COPY 중 PK 인덱스 미유지 = 빠름).
-                ensurePrimaryKey(ctx, adapter, conn, tobeSchema, tobeTable, columnsByTable.get(tobeTable));
-                ensureUniqueConstraints(ctx, adapter, conn, tobeSchema, tobeTable, uniqueByTable);
+            }
+
+            if (delta) {
+                recordDeltaWatermarkBestEffort(ctx, binding, tobeSchema, tobeTable);
             }
 
             result.setStatus(StageTableStatus.success);
@@ -394,6 +429,51 @@ public class LoadStage implements StageRunner {
             if (failed) return true;
         }
         return false;
+    }
+
+    /**
+     * 델타 병합 성공 후 {@code delta_watermark} 갱신 — per-(project, TO-BE table) 커서.
+     * 델타 CSV 의 선택 {@code __scn} 최대값을 기록(없으면 SCN 없이 run/시각만). best-effort —
+     * 실패해도 적재 자체는 성공 처리(감사 보조 정보라 run 을 깨지 않음).
+     */
+    private void recordDeltaWatermarkBestEffort(StageContext ctx, MappingTableBinding binding,
+                                                String tobeSchema, String tobeTable) {
+        try {
+            String projectId = ctx.getRunHistory().getProjectId();
+            String runId = ctx.getRunHistory().getId();
+            Long maxScn = readMaxDeltaScn(ctx, binding);
+            DeltaWatermark wm = deltaWatermarkRepo
+                    .findByProjectIdAndTobeSchemaAndTobeTable(projectId, tobeSchema, tobeTable)
+                    .orElseGet(() -> DeltaWatermark.create(projectId, tobeSchema, tobeTable));
+            if (maxScn != null) wm.setLastAppliedScn(maxScn);
+            wm.setLastRunId(runId);
+            wm.setUpdatedAt(OffsetDateTime.now());
+            deltaWatermarkRepo.save(wm);
+        } catch (Exception e) {
+            log.warn("delta watermark 갱신 skip {}.{}: {}", tobeSchema, tobeTable, e.getMessage());
+        }
+    }
+
+    /** asis_{table} 에서 {@code __scn} 최대값(BIGINT). 컬럼 부재/미제공이면 null. */
+    private Long readMaxDeltaScn(StageContext ctx, MappingTableBinding binding) {
+        List<MappingTableBindingSource> sources = binding.getSources();
+        if (sources == null || sources.isEmpty()) return null;
+        String asisTable = sources.get(0).getAsisTable();
+        if (asisTable == null || asisTable.isBlank()) return null;
+        String fq = quoteIdent(ctx.getDuckdbSchema()) + "." + quoteIdent("asis_" + asisTable);
+        String scnCol = quoteIdent(DeltaConstants.SCN_COLUMN);
+        try (Connection duck = duckDbService.duplicateOf(ctx.getDuckConnection());
+             Statement st = duck.createStatement();
+             ResultSet rs = st.executeQuery("SELECT MAX(CAST(" + scnCol + " AS BIGINT)) FROM " + fq)) {
+            if (rs.next()) {
+                long v = rs.getLong(1);
+                return rs.wasNull() ? null : v;
+            }
+        } catch (Exception e) {
+            // __scn 컬럼 없음(선택 항목) 등 — SCN 없이 워터마크 기록.
+            log.debug("no {} for {}: {}", DeltaConstants.SCN_COLUMN, asisTable, e.getMessage());
+        }
+        return null;
     }
 
     /**

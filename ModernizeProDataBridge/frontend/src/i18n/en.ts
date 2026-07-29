@@ -669,6 +669,10 @@ export const en: Record<TranslationKey, string> = {
   'execution.run.startBlocked.phaseEnv':                   'Cannot start a run when env={env} and phase={phase}',
   'execution.run.startBtn.cutover':                        'Start cutover',
   'execution.run.startBtn.rehearsal':                      'Start rehearsal',
+  'execution.run.startBtn.delta':                          'Run delta',
+  'execution.run.deltaHint':                               'CDC delta — merge delta CSV (__op) into selected tables by PK. Repeatable after initial load (manual trigger for testing).',
+  'execution.run.deltaConfirm':                            'Run delta — merge delta CSV (__op: I/U/D) into the target by PK (not a full reload). The initial full load must already be complete. Continue?',
+  'execution.run.deltaBlocked':                            'CDC delta — available only after the initial full load (full run) has succeeded at least once.',
 
   /* Overall progress */
   'execution.progress.title':         'Overall progress',

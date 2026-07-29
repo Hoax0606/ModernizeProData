@@ -126,18 +126,20 @@ export function countDoneStages(stages: Stage[]): number {
  * - rate 는 성공한 테이블 수 / 전체 카운트 표기 (예: "12/24 tables"). 실패한 테이블은 분자에서 제외.
  * - eta 는 durationMs / finishedAt 가 분かれば 산출, 없으면 '—'.
  *
- * BE response 에 포함되지 않는 stage 는 idle/0 으로 채움 (=미실행. 하이브리드 표시의 "pending" = 회색).
+ * 렌더 대상은 stageViews 에 있는 stage 만 (= 이 run 의 실제 stage 목록. BE 가 runType 별로
+ * pre-create). 델타 run 은 5 개(check/extract/reconcile/transform/load)만 나와 진행률 분모도 5.
+ * 일반 run 은 8 개 전부 pre-create 되어 pending 부터 표시됨.
  */
 export function buildStagesFromStageViews(stageViews: StageProgressInput[]): Stage[] {
   const byKey = new Map<string, StageProgressInput>();
   for (const sv of stageViews) byKey.set(sv.stageKey, sv);
 
-  return BASE_STAGES.map((base) => {
-    const sv = byKey.get(base.id);
-    if (!sv) {
-      // BE response 에 해당 stage 없음 = 미실행 / pending.
-      return { ...base, pct: 0, tone: 'idle' as StageTone };
-    }
+  // 이 run 에 실제 포함된 stage 만 렌더한다 (BE 가 runType 별로 stage 를 pre-create — 델타=5,
+  // 일반=8). stageViews 에 없는 stage 는 제외 → 델타 run 의 진행률 분모가 5 가 되어 100% 로
+  // 표시되고, 패널에도 안 도는 audit/verify/validation 행이 안 뜬다. 일반 run 은 BE 가 8 개를
+  // 전부 pending 으로 pre-create 하므로 종전과 동일하게 8 개가 그대로 나온다.
+  return BASE_STAGES.filter((base) => byKey.has(base.id)).map((base) => {
+    const sv = byKey.get(base.id)!;
     const tone: StageTone =
       sv.status === 'success' ? 'ok'
       : sv.status === 'failed_with_pending_warnings' ? 'warn'

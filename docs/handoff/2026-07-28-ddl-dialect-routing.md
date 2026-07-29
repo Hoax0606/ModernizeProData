@@ -7,8 +7,6 @@
 - **UI 실물 4조합 검증 완료** — `C:\KSINFO\testfolder\{oracle to oracle, oracle to postgres, postgres to postgres, postgres to oracle}` 각 폴더에 DDL(asis/tobe)·CSV·매핑 정의서 세트 생성해 Trial→Run 통과 확인.
 - 회귀: 유닛 + `*IT` 10개 = **232 tests 0F/0E**. `DdlImportServiceIT` 6/6(4조합 라우팅).
 
-## 다음 사람이 할 일
-- 전체 **미커밋**(`feature/mapping`) — PR 로.
 
 ## 함정 / 결정 이력
 - **매핑 `tobe_type` 은 DuckDB CAST 타깃**(메타 아님) — `MappingImportService:437` 이 `CAST(src AS <tobe_type>)` 생성. Oracle 타입(`NUMBER`/`VARCHAR2`)을 넣으면 DuckDB 가 몰라 Trial 실패 → **DuckDB 타입(INTEGER/NUMERIC/VARCHAR)으로 써야 함**. 실제 Oracle 컬럼 타입은 TO-BE DDL 이 결정.

@@ -675,6 +675,10 @@ export const ja: Record<TranslationKey, string> = {
   'execution.run.startBlocked.phaseEnv':                   '{env} 環境 + {phase} フェーズでは run を起動できません',
   'execution.run.startBtn.cutover':                        'Start cutover',
   'execution.run.startBtn.rehearsal':                      'Start rehearsal',
+  'execution.run.startBtn.delta':                          'Run delta',
+  'execution.run.deltaHint':                               'CDC 差分 — 選択テーブルにデルタCSV(__op)をPK基準でマージ。初回ロード後に繰り返し実行(テスト用の手動トリガー)。',
+  'execution.run.deltaConfirm':                            'デルタ(差分)実行 — デルタCSV(__op: I/U/D)をPK基準でターゲットにマージします(全件再ロードではありません)。初回の全件ロードが先に完了している必要があります。続行しますか?',
+  'execution.run.deltaBlocked':                            'CDC 差分 — 初回の全件ロード(full run)が一度でも成功した後にのみ実行できます。',
 
   /* Overall progress */
   'execution.progress.title':         'Overall progress',

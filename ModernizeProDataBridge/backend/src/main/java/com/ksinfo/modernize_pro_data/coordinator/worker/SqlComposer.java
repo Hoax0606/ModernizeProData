@@ -106,6 +106,16 @@ public final class SqlComposer {
     }
 
     /**
+     * single/primary source 의 alias — 델타 {@code __op} 제어 컬럼 passthrough 등 rule 없이
+     * source 를 참조할 때 사용. FROM 절이 붙이는 alias 와 동일해야 한다.
+     */
+    public static String primaryAlias(MappingTableBinding binding) {
+        List<MappingTableBindingSource> sources = binding.getSources();
+        if (sources != null && !sources.isEmpty()) return aliasOf(sources.get(0));
+        return SINGLE_ALIAS_FALLBACK;
+    }
+
+    /**
      * union binding 방어 가드 (B6) — 각 source 의 컬럼 시그니처(이름+순서)가 모두 동일한지 강제.
      * fromClause 의 union 은 {@code (SELECT * FROM asis_a UNION ALL SELECT * FROM asis_b) AS u} 라
      * UNION ALL 이 컬럼을 **위치**로 붙인다. source 들의 컬럼 순서가 다르면 값이 조용히 뒤섞임

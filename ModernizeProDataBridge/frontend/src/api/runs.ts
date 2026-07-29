@@ -10,7 +10,7 @@ import { api, unwrap, type ApiResponse } from './client';
  * - devComplete/devFail : Worker callback シミュレーション (master/admin/worker)
  */
 
-export type RunTypeStr = 'test' | 'rehearsal' | 'cutover';
+export type RunTypeStr = 'test' | 'rehearsal' | 'cutover' | 'delta';
 /**
  * Trigger source 의 가능한 값.
  *   - 新 (Phase 5+): internal / cli / external / manual — 앞으로 모든 새 row 가 이 중 하나
