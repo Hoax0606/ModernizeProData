@@ -4,6 +4,7 @@ import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRule;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingSource;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -79,18 +80,78 @@ public final class SqlComposer {
         if ("union".equals(kind)) return UNION_ALIAS;
         if ("join".equals(kind)) {
             List<MappingTableBindingSource> sources = binding.getSources();
-            if (sources != null && rule.getAsisTable() != null) {
-                for (MappingTableBindingSource s : sources) {
-                    if (rule.getAsisTable().equals(s.getAsisTable())) return aliasOf(s);
+            if (sources != null && !sources.isEmpty()) {
+                String want = rule.getAsisTable();
+                if (want != null && !want.isBlank()) {
+                    for (MappingTableBindingSource s : sources) {
+                        if (want.equals(s.getAsisTable())) return aliasOf(s);
+                    }
+                    // 지정된 AS-IS 테이블이 어느 join source 와도 매칭 안 됨.
+                    // 조용히 primary alias 로 떨어뜨리면 엉뚱한 테이블에서 컬럼을 읽어
+                    // 에러 없이 틀린 데이터가 나온다(silent corruption). → fail-fast 로 표면화.
+                    // TransformStage 가 per-table catch → 해당 테이블 failed + Quarantine 카드.
+                    throw new IllegalStateException(
+                            "join binding 의 mapping_rule 이 참조하는 AS-IS 테이블 '" + want
+                            + "' 이 join source 목록에 없습니다 (tobe_table=" + binding.getTobeTable()
+                            + ", sources=" + sourceTableNames(sources) + "). 매핑 정의를 확인하세요.");
                 }
+                // asisTable 미지정 rule — 어느 테이블인지 특정 불가 → primary alias 로 (기존 동작 유지).
+                return aliasOf(primaryOf(sources));
             }
-            // 매칭 실패 → primary alias fallback
-            if (sources != null && !sources.isEmpty()) return aliasOf(primaryOf(sources));
         }
         // single — binding source 의 alias 로 통일 (transform_rule 안의 'c.col' 같은 auto-alias 와 매칭)
         List<MappingTableBindingSource> sources = binding.getSources();
         if (sources != null && !sources.isEmpty()) return aliasOf(sources.get(0));
         return SINGLE_ALIAS_FALLBACK;
+    }
+
+    /**
+     * single/primary source 의 alias — 델타 {@code __op} 제어 컬럼 passthrough 등 rule 없이
+     * source 를 참조할 때 사용. FROM 절이 붙이는 alias 와 동일해야 한다.
+     */
+    public static String primaryAlias(MappingTableBinding binding) {
+        List<MappingTableBindingSource> sources = binding.getSources();
+        if (sources != null && !sources.isEmpty()) return aliasOf(sources.get(0));
+        return SINGLE_ALIAS_FALLBACK;
+    }
+
+    /**
+     * union binding 방어 가드 (B6) — 각 source 의 컬럼 시그니처(이름+순서)가 모두 동일한지 강제.
+     * fromClause 의 union 은 {@code (SELECT * FROM asis_a UNION ALL SELECT * FROM asis_b) AS u} 라
+     * UNION ALL 이 컬럼을 **위치**로 붙인다. source 들의 컬럼 순서가 다르면 값이 조용히 뒤섞임
+     * (silent corruption). 여기서 시그니처 불일치를 {@link IllegalStateException} 으로 표면화한다
+     * (TransformStage 가 per-table catch → 해당 테이블 failed + Quarantine).
+     *
+     * <p>완전 해결(명시적 컬럼 투영)은 union 매핑이 실제 설계되는 시점 과제. 지금은 "union source 는
+     * 동일 컬럼 구조" 라는 문서화된 가정을 런타임에 강제하는 것.
+     *
+     * @param sourceTables    source AS-IS 테이블명 (메시지용)
+     * @param signatures      각 source 의 컬럼명 리스트 (선언 순서). sourceTables 와 같은 순서·길이.
+     *                        이름 비교는 대소문자 무시(순서는 유지).
+     */
+    public static void assertUnionColumnsAligned(List<String> sourceTables, List<List<String>> signatures) {
+        if (signatures == null || signatures.size() < 2) return;   // 0/1 source → 정렬 이슈 없음
+        List<String> base = lowerAll(signatures.get(0));
+        for (int i = 1; i < signatures.size(); i++) {
+            if (!base.equals(lowerAll(signatures.get(i)))) {
+                throw new IllegalStateException(
+                        "union binding 의 source 컬럼 구조가 서로 다릅니다 — SELECT * UNION ALL 이 컬럼을 "
+                        + "위치 기준으로 붙여 값이 뒤섞일 수 있습니다(silent corruption). source '"
+                        + safeName(sourceTables, 0) + "' 컬럼=" + signatures.get(0)
+                        + " vs source '" + safeName(sourceTables, i) + "' 컬럼=" + signatures.get(i)
+                        + ". 컬럼 이름/순서를 일치시키거나 명시적 컬럼 투영 매핑이 필요합니다.");
+            }
+        }
+    }
+
+    private static List<String> lowerAll(List<String> xs) {
+        List<String> r = new ArrayList<>(xs.size());
+        for (String x : xs) r.add(x == null ? null : x.toLowerCase());
+        return r;
+    }
+
+    private static String safeName(List<String> names, int i) {
+        return (names != null && i < names.size()) ? names.get(i) : ("#" + i);
     }
 
     private static String kindOf(MappingTableBinding b) {
@@ -102,6 +163,16 @@ public final class SqlComposer {
         return sources.stream()
                 .filter(s -> "primary".equals(s.getRole()))
                 .findFirst().orElse(sources.get(0));
+    }
+
+    /** 예외 메시지용 — join source 들의 AS-IS 테이블명 목록. */
+    private static String sourceTableNames(List<MappingTableBindingSource> sources) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < sources.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(sources.get(i).getAsisTable());
+        }
+        return sb.append("]").toString();
     }
 
     private static String aliasOf(MappingTableBindingSource s) {

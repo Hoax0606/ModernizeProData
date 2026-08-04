@@ -62,6 +62,7 @@ public class ExtractStage implements StageRunner {
     private final QuarantineService quarantineService;
     private final RunLogIngestService runLogIngest;
     private final StageProgressBroadcaster broadcaster;
+    private final com.ksinfo.modernize_pro_data.coordinator.worker.source.SourceReaderRegistry sourceReaderRegistry;
 
     @Override
     public String stageKey() {
@@ -157,7 +158,37 @@ public class ExtractStage implements StageRunner {
                     } catch (java.io.IOException ignore) {
                         /* fingerprint 수집 실패 — 추출은 그대로 진행, carry-over 만 비활성(안전). */
                     }
-                    String escapedPath = csv.toString().replace("'", "''");
+
+                    // 인코딩 변환 seam (계획서 A4) — site.asisEncoding 이 비-UTF-8 이면 SourceReader 가
+                    // UTF-8 임시 파일로 변환. UTF-8 이면 원본 그대로(no-op). 이후 가드·read_csv 는 UTF-8 대상.
+                    Path utf8Csv;
+                    try {
+                        Path workDir = ctx.getOutputDir().resolve("source-utf8");
+                        utf8Csv = sourceReaderRegistry.toUtf8(csv, site.getAsisEncoding(), workDir);
+                    } catch (java.io.IOException e) {
+                        throw new IllegalStateException("AS-IS CSV 인코딩 변환 실패 (" + asisTable
+                                + ".csv): " + e.getMessage(), e);
+                    }
+
+                    // 입력 가드 (2026-07-08 UTF-8 계약) — read_csv 로 넘기기 전에 파일을 1 회 스캔.
+                    // NUL(0x00) / 깨진 UTF-8 은 fail-fast (그냥 넘기면 U+FFFD silent 치환 또는 PG 적재 시
+                    // cryptic error). BOM 은 감지만 (DuckDB read_csv 가 strip).
+                    try {
+                        com.ksinfo.modernize_pro_data.common.util.CsvInputGuard.Result guard =
+                                com.ksinfo.modernize_pro_data.common.util.CsvInputGuard.inspect(utf8Csv);
+                        if (!guard.ok()) {
+                            throw new IllegalStateException("AS-IS CSV 입력 가드 위반 (" + asisTable
+                                    + ".csv, byte offset " + guard.offset() + "): " + guard.reason()
+                                    + " — 입력은 UTF-8 이어야 합니다");
+                        }
+                        if (guard.bom()) {
+                            log.warn("[extract] {}.csv 에 UTF-8 BOM 감지 — read_csv 가 strip (첫 컬럼명 확인 권장)", asisTable);
+                        }
+                    } catch (java.io.IOException e) {
+                        throw new IllegalStateException("AS-IS CSV 읽기 실패 (" + asisTable + ".csv): " + e.getMessage(), e);
+                    }
+
+                    String escapedPath = utf8Csv.toString().replace("'", "''");
                     String fqTable = quoteIdent(schema) + "." + quoteIdent("asis_" + asisTable);
 
                     try (Statement st = duckDbService.statement()) {
@@ -365,32 +396,11 @@ public class ExtractStage implements StageRunner {
     }
 
     /**
-     * site.asisEncoding → read_csv 의 encoding 절 (앞에 ", " 포함, 없으면 빈 문자열).
-     *   - utf-8 / blank → "" (DuckDB native, 확장 불필요)
-     *   - shift_jis → ", encoding='shift_jis'" (encodings 확장)
-     *   - euc-jp    → ", encoding='EUC_JP'"   (encodings 확장 — 이름 형식 주의: 대문자+언더스코어)
-     *   - ebcdic    → 미지원 (UI 안내대로 Java 전처리는 추후 Source Reader) → 예외
-     *   - 그 외      → 그대로 시도 (확장이 인식하면 동작)
+     * read_csv 의 encoding 절 — 항상 빈 문자열(파이프라인 입력 계약 = UTF-8, 2026-07-08).
+     * DuckDB encodings 확장 제거로 encoding= 을 쓰지 않는다. 비-UTF-8 입력은 {@link CsvInputGuard}
+     * 가 reject 한다. (asisEncoding 파라미터는 호환용으로 남기되 무시.)
      */
     private static String encodingClause(String asisEncoding) {
-        if (asisEncoding == null || asisEncoding.isBlank()) return "";
-        switch (asisEncoding.trim().toLowerCase()) {
-            case "utf-8":
-            case "utf8":
-                return "";
-            case "shift_jis":
-            case "shift-jis":
-            case "sjis":
-                return ", encoding='shift_jis'";
-            case "euc-jp":
-            case "euc_jp":
-            case "eucjp":
-                return ", encoding='EUC_JP'";
-            case "ebcdic":
-                throw new IllegalStateException(
-                        "EBCDIC 는 DuckDB extract 경로 미지원 — Java 전처리(추후 Source Reader) 필요");
-            default:
-                return ", encoding='" + asisEncoding.trim().replace("'", "''") + "'";
-        }
+        return "";
     }
 }

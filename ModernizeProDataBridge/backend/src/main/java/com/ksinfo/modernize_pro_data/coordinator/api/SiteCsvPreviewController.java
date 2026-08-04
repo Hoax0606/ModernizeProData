@@ -48,6 +48,7 @@ public class SiteCsvPreviewController {
 
     private final SiteRepository siteRepository;
     private final DuckDbService duckDbService;
+    private final com.ksinfo.modernize_pro_data.coordinator.worker.source.SourceReaderRegistry sourceReaderRegistry;
 
     /**
      * csv-row-count caching — 10M+ CSV 의 full line scan (~10-15s) 이 매 호출
@@ -275,9 +276,14 @@ public class SiteCsvPreviewController {
 
     /**
      * Resolve a CSV under {baseDir}. {tableName} 은 schema 한정(HR_PAYROLL.EMPLOYEES)
-     * 또는 bare(employees) 둘 다 허용. 다음 순서로 시도 (둘 다 case-insensitive):
+     * 또는 bare(employees) 둘 다 허용. 다음 순서로 시도 (모두 case-insensitive):
      *   1) {tableName}.csv               (예: HR_PAYROLL.EMPLOYEES.csv)
      *   2) {첫 점 이후 부분}.csv          (예: EMPLOYEES.csv → customers.csv)
+     *   3) bare 이름일 때 {schema}.{tableName}.csv (유일할 때만)
+     *      — DDL 이 스키마 없이(CONTACT_INFO) import 됐는데 추출 파일은 스키마 포함
+     *        (BANKSYS.CONTACT_INFO.csv)인 경우. run 은 binding 의 schema 로 이미 찾지만
+     *        preview/Trial 게이트는 bare DDL 이름으로 조회하므로 여기서 보강한다.
+     *        여러 스키마에 같은 table 명이 있으면(EMPLOYEES 등) 모호 → 매칭 안 함.
      * stages/preflight 의 StageHelpers.resolveCsvFile 와 동일 규칙 — preview 와 run 이
      * 같은 파일을 찾도록 일치시킨다. 없으면 null.
      */
@@ -286,9 +292,28 @@ public class SiteCsvPreviewController {
         if (direct != null) return direct;
         int dot = tableName.indexOf('.');
         if (dot > 0 && dot < tableName.length() - 1) {
-            return tryResolve(baseDir, tableName.substring(dot + 1));
+            Path afterDot = tryResolve(baseDir, tableName.substring(dot + 1));
+            if (afterDot != null) return afterDot;
+        } else if (dot < 0) {
+            return tryResolveSchemaPrefixed(baseDir, tableName);
         }
         return null;
+    }
+
+    /** bare 테이블명 {name} → {anySchema}.{name}.csv 파일. 정확히 하나일 때만 반환, 아니면 null. */
+    private Path tryResolveSchemaPrefixed(Path baseDir, String name) {
+        String suffix = ("." + name + ".csv").toLowerCase();
+        try (Stream<Path> stream = Files.list(baseDir)) {
+            List<Path> matches = stream
+                    .filter(Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().toLowerCase().endsWith(suffix))
+                    .limit(2)
+                    .toList();
+            return matches.size() == 1 ? matches.get(0) : null;
+        } catch (IOException e) {
+            log.warn("Directory listing failed: {}", baseDir, e);
+            return null;
+        }
     }
 
     /** Exact then case-insensitive match for {name}.csv under {baseDir}. */
@@ -322,51 +347,68 @@ public class SiteCsvPreviewController {
     private CsvPreview readWithDuckDb(Path csvFile, String tableName, int limit, String asisEncoding) {
         // csvFile is already validated to live under the site's csvPath; only the
         // single-quote needs escaping for the SQL string literal.
-        String escapedPath = csvFile.toString().replace("'", "''");
-        // sample_size=1024 — schema detection 용. limit 가 작아 전체 scan 안 함.
-        // 옛 -1 은 1GB+ file 에서 schema detect 시간/메모리 폭주 (preflight csv-arrived 호출이
-        // 그것 못 견뎌 csv 미도착으로 잘못 판정). all_varchar=true 라 type 추론 무관 — 작은 sample 충분.
-        // encoding= : site.asisEncoding 적용 (Shift-JIS 등). 누락 시 UTF-8 로 읽혀 비 UTF-8 CSV 의
-        // 헤더가 깨지거나 read 가 실패 → Mapping 소스 컬럼 드롭다운/자동매핑이 빈다.
-        String sql = "SELECT * FROM read_csv_auto('" + escapedPath
-                + "', header=true, sample_size=1024, all_varchar=true"
-                + CsvEncoding.clause(asisEncoding) + ") LIMIT " + (limit + 1);
-
-        List<String> headers = new ArrayList<>();
-        List<List<String>> rows = new ArrayList<>();
-        boolean truncated = false;
-
-        // 요청별 격리 connection — 공유 connection 동시 사용 시 pending result 무효화 회피.
-        try (java.sql.Connection conn = duckDbService.requestConnection();
-             Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery(sql)) {
-            ResultSetMetaData md = rs.getMetaData();
-            int colCount = md.getColumnCount();
-            for (int i = 1; i <= colCount; i++) {
-                headers.add(md.getColumnLabel(i));
-            }
-            int count = 0;
-            while (rs.next()) {
-                if (count >= limit) {
-                    truncated = true;
-                    break;
-                }
-                List<String> row = new ArrayList<>(colCount);
-                for (int i = 1; i <= colCount; i++) {
-                    String v = rs.getString(i);
-                    row.add(v != null ? v : "");
-                }
-                rows.add(row);
-                count++;
-            }
-        } catch (SQLException e) {
-            log.warn("DuckDB CSV read failed: {}", csvFile, e);
-            throw new ApiException(
-                    "CSV_READ_FAILED",
-                    "CSV 읽기 실패 (DuckDB): " + e.getMessage(),
-                    HttpStatus.INTERNAL_SERVER_ERROR);
+        // 인코딩 변환 seam (계획서 A4) — 비-UTF-8(Shift-JIS 등)이면 SourceReader SPI 가 앞부분만
+        // UTF-8 로 변환(bounded — 미리보기/pre-flight 는 소량이라 대용량 파일 통째 변환 회피).
+        // UTF-8 이면 passthrough(원본 그대로). 인코딩 로직은 SPI 한 곳에만 — 여기선 호출만.
+        Path utf8;
+        Path tempDir = null;
+        try {
+            tempDir = java.nio.file.Files.createTempDirectory("csv-prev-");
+            utf8 = sourceReaderRegistry.toUtf8Preview(csvFile, asisEncoding, tempDir, 8L << 20);
+        } catch (java.io.IOException e) {
+            throw new ApiException("CSV_ENCODING_FAILED",
+                    "CSV 인코딩 변환 실패 (" + tableName + "): " + e.getMessage(), HttpStatus.BAD_REQUEST);
         }
 
-        return new CsvPreview(tableName, csvFile.toString(), headers, rows, rows.size(), truncated);
+        try {
+            String escapedPath = utf8.toString().replace("'", "''");
+            // sample_size=1024 — schema detection 용. limit 가 작아 전체 scan 안 함. all_varchar=true.
+            // SPI 가 이미 UTF-8 보장 → encoding 절 불필요.
+            String sql = "SELECT * FROM read_csv_auto('" + escapedPath
+                    + "', header=true, sample_size=1024, all_varchar=true) LIMIT " + (limit + 1);
+
+            List<String> headers = new ArrayList<>();
+            List<List<String>> rows = new ArrayList<>();
+            boolean truncated = false;
+
+            // 요청별 격리 connection — 공유 connection 동시 사용 시 pending result 무효화 회피.
+            try (java.sql.Connection conn = duckDbService.requestConnection();
+                 Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery(sql)) {
+                ResultSetMetaData md = rs.getMetaData();
+                int colCount = md.getColumnCount();
+                for (int i = 1; i <= colCount; i++) {
+                    headers.add(md.getColumnLabel(i));
+                }
+                int count = 0;
+                while (rs.next()) {
+                    if (count >= limit) {
+                        truncated = true;
+                        break;
+                    }
+                    List<String> row = new ArrayList<>(colCount);
+                    for (int i = 1; i <= colCount; i++) {
+                        String v = rs.getString(i);
+                        row.add(v != null ? v : "");
+                    }
+                    rows.add(row);
+                    count++;
+                }
+            } catch (SQLException e) {
+                log.warn("DuckDB CSV read failed: {}", csvFile, e);
+                throw new ApiException(
+                        "CSV_READ_FAILED",
+                        "CSV 읽기 실패 (DuckDB): " + e.getMessage(),
+                        HttpStatus.INTERNAL_SERVER_ERROR);
+            }
+
+            return new CsvPreview(tableName, csvFile.toString(), headers, rows, rows.size(), truncated);
+        } finally {
+            // bounded 변환 임시파일 정리 (passthrough 면 utf8==csvFile 이라 삭제 안 함).
+            try {
+                if (!utf8.equals(csvFile)) java.nio.file.Files.deleteIfExists(utf8);
+                if (tempDir != null) java.nio.file.Files.deleteIfExists(tempDir);
+            } catch (java.io.IOException ignore) { /* temp 정리 실패는 무시 */ }
+        }
     }
 }

@@ -107,6 +107,8 @@ public class QuarantineAckService {
             case test       -> List.of(RunType.test.name());
             case rehearsal  -> List.of(RunType.rehearsal.name());
             case cutover    -> List.of(RunType.rehearsal.name(), RunType.cutover.name());
+            // 델타는 컷오버 이후 흐름 — cutover/delta ack 을 carry-over 스코프로.
+            case delta      -> List.of(RunType.cutover.name(), RunType.delta.name());
         };
     }
 

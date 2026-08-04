@@ -36,4 +36,11 @@ public interface RunHistoryRepository extends JpaRepository<RunHistory, String> 
 
     /** 현재 coordinator 가 코디네이트 중인 in-flight run 수 (status 별). in-flight 게이트용. */
     long countByStatus(RunStatus status);
+
+    /**
+     * 초기 전량적재(= non-delta full run) 성공 이력이 있는지 — 델타 실행 게이트용.
+     * true 면 이 project 에 status·runType 조건을 만족하는 run 이 1건 이상 존재.
+     * 예: {@code existsByProjectIdAndStatusAndRunTypeNot(pid, success, delta)}.
+     */
+    boolean existsByProjectIdAndStatusAndRunTypeNot(String projectId, RunStatus status, RunType runType);
 }

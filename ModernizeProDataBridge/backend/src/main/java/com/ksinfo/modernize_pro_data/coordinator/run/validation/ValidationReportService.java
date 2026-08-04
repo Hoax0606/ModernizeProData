@@ -5,7 +5,10 @@ import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlColumn;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlColumnRepository;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTable;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository;
-import com.ksinfo.modernize_pro_data.coordinator.load.PgCopyManager;
+import com.ksinfo.modernize_pro_data.coordinator.load.DuckDbSqlDialect;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.LoaderAdapter;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.LoaderAdapterRegistry;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.TobeSqlDialect;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineAckService;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineAcknowledgment;
@@ -72,7 +75,7 @@ public class ValidationReportService implements StageRunner {
     private final DdlTableRepository ddlTableRepo;
     private final DdlColumnRepository ddlColumnRepo;
     private final DuckDbService duckDbService;
-    private final PgCopyManager pgCopyManager;
+    private final LoaderAdapterRegistry loaderAdapterRegistry;
     private final RunLogIngestService runLogIngest;
     private final StageInstanceRepository stageInstanceRepo;
     private final StageTableResultRepository stageTableResultRepo;
@@ -102,6 +105,14 @@ public class ValidationReportService implements StageRunner {
         if (dbConfig == null) {
             failStage(stage, startedAt, 0, ctx.getBindings().size(), "tobe DB config not set");
             ingest(ctx, "Validation skipped — tobe DB config not set", false);
+            return;
+        }
+        final LoaderAdapter adapter;
+        try {
+            adapter = loaderAdapterRegistry.select(dbConfig);
+        } catch (RuntimeException e) {
+            failStage(stage, startedAt, 0, ctx.getBindings().size(), e.getMessage());
+            ingest(ctx, "Validation skipped — " + e.getMessage(), false);
             return;
         }
 
@@ -134,7 +145,7 @@ public class ValidationReportService implements StageRunner {
             try {
                 ctx.throwIfCancelled();   // (D) sub-step — 6 검증 실행 직전 cancel 체크 (checksum/sumRecon/nullParity/typeValid/rowCount/min_max).
                 Map<String, Object> data = computeOne(ctx, stage, binding, tableLabel,
-                        schema, tobeSchema, tobeTable, cols, dbConfig);
+                        schema, tobeSchema, tobeTable, cols, dbConfig, adapter);
                 report.setReportData(data);
                 report.setTotalChecks(asInt(data.get("totalChecks")));
                 report.setPassedChecks(asInt(data.get("passedChecks")));
@@ -474,9 +485,13 @@ public class ValidationReportService implements StageRunner {
                                            String duckSchema,
                                            String tobeSchema, String tobeTable,
                                            List<DdlColumn> cols,
-                                           Map<String, Object> dbConfig) throws Exception {
+                                           Map<String, Object> dbConfig,
+                                           LoaderAdapter adapter) throws Exception {
         String fqDuck = quote(duckSchema) + "." + quote("tobe_" + tobeTable);
-        String fqPg   = pgQualified(tobeSchema, tobeTable);
+        String fqPg   = adapter.sql().qualifiedTable(tobeSchema, tobeTable);
+        // ASIS(DuckDB)와 TOBE(PG/Oracle) 각각의 SQL 방언 — 읽기 경로 SQL 을 엔진별로 생성.
+        TobeSqlDialect duck = DuckDbSqlDialect.INSTANCE;
+        TobeSqlDialect tobe = adapter.sql();
 
         List<DdlColumn> numericCols  = cols.stream().filter(ValidationReportService::isNumeric).toList();
         List<DdlColumn> dateCols     = cols.stream().filter(ValidationReportService::isDate).toList();
@@ -502,7 +517,7 @@ public class ValidationReportService implements StageRunner {
         String pgChecksumCanon   = null;
 
         try (Statement duckSt = duckDbService.statement();
-             Connection pgConn = pgCopyManager.openConnection(dbConfig);
+             Connection pgConn = adapter.openConnection(dbConfig, true);
              Statement pgSt = pgConn.createStatement()) {
 
             /* 2026-05-31 P1-4 — column 별 풀스캔을 1 query 로 통합.
@@ -511,8 +526,8 @@ public class ValidationReportService implements StageRunner {
                이후: 1 query 에 모두 묶음 = 2 풀스캔 (DuckDB + PG 각 1).
                select index 매핑: [0]=COUNT, [1..3]=SUM/MIN/MAX col0, [4..6]=col1, ...
                                   [1+3N + i] = nullableCols[i] 의 NULL COUNT. */
-            String duckAggQ = buildAggregateQuery(fqDuck, numericCols, nullableCols);
-            String pgAggQ   = buildAggregateQuery(fqPg,   numericCols, nullableCols);
+            String duckAggQ = buildAggregateQuery(fqDuck, numericCols, nullableCols, duck);
+            String pgAggQ   = buildAggregateQuery(fqPg,   numericCols, nullableCols, tobe);
             int aggTotal = 1 + 3 * numericCols.size() + nullableCols.size();
             String[] duckAgg = scalarN(duckSt, duckAggQ, aggTotal);
             String[] pgAgg   = scalarN(pgSt,   pgAggQ,   aggTotal);
@@ -582,16 +597,18 @@ public class ValidationReportService implements StageRunner {
                    WARN = canonical (TIMESTAMP type) 비교는 일치, raw 만 다름 — 표현 차이뿐 값은 동일
                    FAIL = canonical 도 다름 — 실 데이터 차이
                    양쪽 4 컬럼 한 query 로 가져옴: raw Min, raw Max, canonical Min, canonical Max. */
-                String col = quote(c.getPhysicalName());
-                String duckRaw   = col;
-                String pgRaw     = col;
-                String duckCanon = canonicalDateSql(c, false);
-                String pgCanon   = canonicalDateSql(c, true);
+                String upperType = c.getDataType() == null ? "" : c.getDataType().toUpperCase();
+                String duckRawMin = duck.textExpr("MIN(" + duck.quoteIdent(c.getPhysicalName()) + ")");
+                String duckRawMax = duck.textExpr("MAX(" + duck.quoteIdent(c.getPhysicalName()) + ")");
+                String pgRawMin   = tobe.textExpr("MIN(" + tobe.quoteIdent(c.getPhysicalName()) + ")");
+                String pgRawMax   = tobe.textExpr("MAX(" + tobe.quoteIdent(c.getPhysicalName()) + ")");
+                String duckCanon = duck.canonicalDate(c.getPhysicalName(), upperType);
+                String pgCanon   = tobe.canonicalDate(c.getPhysicalName(), upperType);
 
-                String duckQ = "SELECT MIN(" + duckRaw + ")::text, MAX(" + duckRaw + ")::text, "
+                String duckQ = "SELECT " + duckRawMin + ", " + duckRawMax + ", "
                              + "MIN(" + duckCanon + "), MAX(" + duckCanon + ") FROM " + fqDuck;
-                String pgQ   = "SELECT MIN(" + pgRaw   + ")::text, MAX(" + pgRaw   + ")::text, "
-                             + "MIN(" + pgCanon   + "), MAX(" + pgCanon   + ") FROM " + fqPg;
+                String pgQ   = "SELECT " + pgRawMin + ", " + pgRawMax + ", "
+                             + "MIN(" + pgCanon + "), MAX(" + pgCanon + ") FROM " + fqPg;
                 String[] duckQuad;
                 String[] pgQuad;
                 String tzWarnNote = null;
@@ -604,9 +621,9 @@ public class ValidationReportService implements StageRunner {
                     log.warn("Date canonical compare failed for {} — falling back to raw only: {}",
                             c.getPhysicalName(), tzEx.getMessage());
                     String[] duckRawPair = scalarPair(duckSt,
-                            "SELECT MIN(" + duckRaw + ")::text, MAX(" + duckRaw + ")::text FROM " + fqDuck);
+                            "SELECT " + duckRawMin + ", " + duckRawMax + " FROM " + fqDuck);
                     String[] pgRawPair = scalarPair(pgSt,
-                            "SELECT MIN(" + pgRaw + ")::text, MAX(" + pgRaw + ")::text FROM " + fqPg);
+                            "SELECT " + pgRawMin + ", " + pgRawMax + " FROM " + fqPg);
                     duckQuad = new String[]{duckRawPair[0], duckRawPair[1], duckRawPair[0], duckRawPair[1]};
                     pgQuad   = new String[]{pgRawPair[0],   pgRawPair[1],   pgRawPair[0],   pgRawPair[1]};
                     tzWarnNote = "TZ canonical compare unavailable (ICU extension may be missing) — raw comparison only";
@@ -693,43 +710,30 @@ public class ValidationReportService implements StageRunner {
             }
 
             if (!pkCols.isEmpty() && !cols.isEmpty()) {
-                /* Raw concat (양쪽 동일 expression — col::text) */
-                String rawConcat = cols.stream()
-                        .map(c -> "COALESCE(" + quote(c.getPhysicalName()) + "::text, '')")
-                        .collect(Collectors.joining(", '|', "));
-                /* Canonical concat — timestamp/date 는 통일 포맷, boolean 은 LOWER(::text), 나머지는 raw. */
-                String duckCanonConcat = cols.stream()
-                        .map(c -> {
-                            if (isDate(c))    return "COALESCE(" + canonicalDateSql(c, false) + ", '')";
-                            if (isBoolean(c)) return "COALESCE(" + canonicalBooleanSql(c)     + ", '')";
-                            if (isText(c))    return "COALESCE(" + canonicalTextSql(c, false) + ", '')";
-                            return "COALESCE(" + quote(c.getPhysicalName()) + "::text, '')";
-                        })
-                        .collect(Collectors.joining(", '|', "));
-                String pgCanonConcat = cols.stream()
-                        .map(c -> {
-                            if (isDate(c))    return "COALESCE(" + canonicalDateSql(c, true) + ", '')";
-                            if (isBoolean(c)) return "COALESCE(" + canonicalBooleanSql(c)    + ", '')";
-                            if (isText(c))    return "COALESCE(" + canonicalTextSql(c, true) + ", '')";
-                            return "COALESCE(" + quote(c.getPhysicalName()) + "::text, '')";
-                        })
-                        .collect(Collectors.joining(", '|', "));
+                /* Raw concat — 각 방언의 텍스트 캐스트(PG/Duck: col::text). 엔진별로 따로 만든다
+                   (Oracle 은 ::text 없음). PG 타깃이면 duck/tobe 문자열 동일 → 기존 동작 불변. */
+                List<String> duckRawItems = cols.stream().map(c -> rawConcatItem(duck, c)).toList();
+                List<String> tobeRawItems = cols.stream().map(c -> rawConcatItem(tobe, c)).toList();
+                /* Canonical concat — timestamp/date 는 통일 포맷, boolean 은 LOWER, text 는 NFKC, 나머지는 raw. */
+                List<String> duckCanonItems = cols.stream().map(c -> canonConcatItem(duck, c)).toList();
+                List<String> tobeCanonItems = cols.stream().map(c -> canonConcatItem(tobe, c)).toList();
 
-                /* count + min(md5) + max(md5) fingerprint — 순서 무관 + 메모리 cheap.
+                /* count + min(sha256) + max(sha256) fingerprint — 순서 무관 + 메모리 cheap.
                    기존 md5(string_agg(md5(...), '' ORDER BY pk)) 의 정렬·거대 string(N×32B) 둘 다 제거.
-                   PG / DuckDB 양쪽 동일 결과 (검증됨). Collision ≈ 2^-128 — 정상 운영 무관. */
-                duckChecksumRaw = scalarString(duckSt, checksumQuery(fqDuck, rawConcat, false));
-                pgChecksumRaw   = scalarString(pgSt,   checksumQuery(fqPg,   rawConcat, true));
+                   PG / DuckDB / Oracle 이 같은 UTF-8 바이트를 SHA-256 → 동일 결과. Collision ≈ 2^-128. */
+                duckChecksumRaw = scalarString(duckSt, duck.checksumQuery(fqDuck, duckRawItems));
+                pgChecksumRaw   = scalarString(pgSt,   tobe.checksumQuery(fqPg,   tobeRawItems));
 
-                /* canonical == raw (date/boolean 컬럼 없음) 이면 풀스캔 2 절약 — raw 결과 재사용. */
-                boolean canonSameAsRaw = duckCanonConcat.equals(rawConcat) && pgCanonConcat.equals(rawConcat);
+                /* canonical == raw (date/boolean/text 정규화 대상 컬럼 없음) 이면 풀스캔 2 절약 — raw 재사용. */
+                boolean canonSameAsRaw = duckCanonItems.equals(duckRawItems)
+                                      && tobeCanonItems.equals(tobeRawItems);
                 if (canonSameAsRaw) {
                     duckChecksumCanon = duckChecksumRaw;
                     pgChecksumCanon   = pgChecksumRaw;
                 } else {
                     try {
-                        duckChecksumCanon = scalarString(duckSt, checksumQuery(fqDuck, duckCanonConcat, false));
-                        pgChecksumCanon   = scalarString(pgSt,   checksumQuery(fqPg,   pgCanonConcat, true));
+                        duckChecksumCanon = scalarString(duckSt, duck.checksumQuery(fqDuck, duckCanonItems));
+                        pgChecksumCanon   = scalarString(pgSt,   tobe.checksumQuery(fqPg,   tobeCanonItems));
                     } catch (Exception tzEx) {
                         /* ICU 미설치 등으로 TIMESTAMPTZ 처리 실패 — canonical 비교 skip. */
                         log.warn("Checksum canonical compare failed for {} — raw only: {}",
@@ -1051,14 +1055,6 @@ public class ValidationReportService implements StageRunner {
         return dt.equals("boolean") || dt.equals("bool") || dt.equals("bit");
     }
 
-    /** Boolean canonical — 양쪽 LOWER(::text) 로 통일. 'TRUE'/'FALSE'/'true'/'false'/'t'/'f' 등 변종 흡수.
-     *  단 BOOLEAN type 이 아니면서 VARCHAR 에 'TRUE'/'FALSE' 가 들어있는 경우도 cover (Transform CASE
-     *  WHEN 결과가 string 인 경우 — TO-BE DDL 은 BOOLEAN 인데 DuckDB tobe_ 는 VARCHAR 일 수 있음). */
-    private static String canonicalBooleanSql(DdlColumn c) {
-        String col = quote(c.getPhysicalName());
-        return "LOWER(NULLIF(" + col + "::text, ''))";
-    }
-
     /** 텍스트(char/varchar/text/clob) 컬럼 — 유니코드 정규화 비교 대상. */
     private static boolean isText(DdlColumn c) {
         if (c.getDataType() == null) return false;
@@ -1066,16 +1062,24 @@ public class ValidationReportService implements StageRunner {
         return dt.contains("char") || dt.contains("text") || dt.contains("clob") || dt.contains("string");
     }
 
-    /**
-     * 텍스트 canonical — 양쪽 NFKC 로 통일. AS-IS(DuckDB)와 TO-BE(PG) 가 화면상 같지만 코드포인트가
-     * 다른 경우(NFD vs NFC, ① vs 1, ㈱ vs (株))를 흡수해 checksum 이 FAIL 대신 WARN 으로 떨어지게.
-     * DuckDB: nfkc_normalize UDF(NfkcNormalizeUdf), PG: native normalize(text, NFKC).
-     */
-    private static String canonicalTextSql(DdlColumn c, boolean pg) {
-        String col = quote(c.getPhysicalName());
-        return pg
-                ? "normalize(" + col + "::text, NFKC)"
-                : "nfkc_normalize(" + col + "::text)";
+    /** checksum 의 raw concat 한 컬럼 — 숫자는 scale 고정 canonical(엔진 간 trailing-zero 일치),
+     *  그 외는 방언별 텍스트 캐스트(PG/Duck: col::text). null → 빈 문자열. */
+    private static String rawConcatItem(TobeSqlDialect d, DdlColumn c) {
+        if (isNumeric(c)) {
+            return "COALESCE(" + d.canonicalNumber(c.getPhysicalName(), c.getScale()) + ", '')";
+        }
+        return "COALESCE(" + d.textExpr(d.quoteIdent(c.getPhysicalName())) + ", '')";
+    }
+
+    /** checksum 의 canonical concat 한 컬럼 — date/boolean/text 는 정규화, 나머지는 raw. */
+    private static String canonConcatItem(TobeSqlDialect d, DdlColumn c) {
+        if (isDate(c)) {
+            String upper = c.getDataType() == null ? "" : c.getDataType().toUpperCase();
+            return "COALESCE(" + d.canonicalDate(c.getPhysicalName(), upper) + ", '')";
+        }
+        if (isBoolean(c)) return "COALESCE(" + d.canonicalBoolean(c.getPhysicalName()) + ", '')";
+        if (isText(c))    return "COALESCE(" + d.canonicalText(c.getPhysicalName()) + ", '')";
+        return rawConcatItem(d, c);
     }
 
     private static String displayType(DdlColumn c) {
@@ -1107,46 +1111,23 @@ public class ValidationReportService implements StageRunner {
         return hasWarn ? "WARN" : "PASS";
     }
 
-    /** TO-BE DDL 의 date/timestamp/timestamptz 컬럼을 양쪽 dialect 에서 동일 string 으로 정규화.
-     *  DATE → 'YYYY-MM-DD'
-     *  TIMESTAMP → 'YYYY-MM-DD HH:MM:SS.uuuuuu' (6-digit microseconds, both DBMS)
-     *  TIMESTAMPTZ → UTC 변환 후 위와 동일 포맷 (양쪽 동일 wall-clock UTC)
-     *
-     *  Min/Max 비교 + Checksum hash input 둘 다 같은 helper 사용 — 일관성 보장. */
-    private static String canonicalDateSql(DdlColumn c, boolean pg) {
-        String t = c.getDataType() == null ? "" : c.getDataType().toUpperCase();
-        String col = quote(c.getPhysicalName());
-        if (pg) {
-            if (t.equals("DATE")) return "TO_CHAR(" + col + ", 'YYYY-MM-DD')";
-            if (t.contains("TIMESTAMPTZ") || t.contains("TIME ZONE")) {
-                return "TO_CHAR((" + col + ") AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US')";
-            }
-            return "TO_CHAR(CAST(" + col + " AS TIMESTAMP), 'YYYY-MM-DD HH24:MI:SS.US')";
-        }
-        // DuckDB
-        if (t.equals("DATE")) return "STRFTIME(" + col + ", '%Y-%m-%d')";
-        if (t.contains("TIMESTAMPTZ") || t.contains("TIME ZONE")) {
-            return "STRFTIME(CAST(" + col + " AS TIMESTAMP WITH TIME ZONE) AT TIME ZONE 'UTC', '%Y-%m-%d %H:%M:%S.%f')";
-        }
-        return "STRFTIME(TRY_CAST(" + col + " AS TIMESTAMP), '%Y-%m-%d %H:%M:%S.%f')";
-    }
-
-    /** 2026-05-31 P1-4 — COUNT + numericCols 의 SUM/MIN/MAX + nullableCols 의 NULL COUNT FILTER
-     *  를 한 query 에 통합. column 별 풀스캔 N+M+1 회 → 1 회.
+    /** 2026-05-31 P1-4 — COUNT + numericCols 의 SUM/MIN/MAX + nullableCols 의 NULL COUNT
+     *  를 한 query 에 통합. column 별 풀스캔 N+M+1 회 → 1 회. null-count 집계식은 방언별
+     *  (PG/Duck: FILTER, Oracle: CASE WHEN) — {@code d.nullCountExpr}.
      *  순서: [0] = COUNT(*), [1..1+3N] = numericCol i 의 SUM/MIN/MAX, [1+3N+i] = nullableCol i 의 NULL COUNT. */
     private static String buildAggregateQuery(String fqTable,
                                               List<DdlColumn> numericCols,
-                                              List<DdlColumn> nullableCols) {
+                                              List<DdlColumn> nullableCols,
+                                              TobeSqlDialect d) {
         StringBuilder sb = new StringBuilder("SELECT COUNT(*)");
         for (DdlColumn c : numericCols) {
-            String col = quote(c.getPhysicalName());
+            String col = d.quoteIdent(c.getPhysicalName());
             sb.append(", SUM(").append(col).append(")")
               .append(", MIN(").append(col).append(")")
               .append(", MAX(").append(col).append(")");
         }
         for (DdlColumn c : nullableCols) {
-            String col = quote(c.getPhysicalName());
-            sb.append(", COUNT(*) FILTER (WHERE ").append(col).append(" IS NULL)");
+            sb.append(", ").append(d.nullCountExpr(c.getPhysicalName()));
         }
         sb.append(" FROM ").append(fqTable);
         return sb.toString();
@@ -1249,40 +1230,6 @@ public class ValidationReportService implements StageRunner {
 
     private static String quote(String name) {
         return "\"" + name.replace("\"", "\"\"") + "\"";
-    }
-
-    private static String pgQualified(String tobeSchema, String tobeTable) {
-        if (tobeSchema == null || tobeSchema.isBlank()) return quote(tobeTable);
-        return quote(tobeSchema) + "." + quote(tobeTable);
-    }
-
-    /**
-     * Set checksum via count + min(md5) + max(md5) fingerprint.
-     *
-     * 기존 md5(string_agg(md5(...), '' ORDER BY pk)) 의 정렬 cost + N×32B 거대 string 둘 다 제거.
-     * 순서 무관 aggregate (count/min/max) 라 ORDER BY 불요. PG / DuckDB 양쪽 동일 결과 (검증됨).
-     *
-     * Inline subquery (CTE X) — CTE materialization 회피 + PG/DuckDB 양쪽 optimizer 가
-     * 단일 sequential scan + 3 aggregate (count/min/max) 로 plan 생성 보장.
-     *
-     * Collision prob ≈ 2^-128 (같은 row count + 같은 min md5 + 같은 max md5 인데 set 다를 확률).
-     * 정상 운영 무관 — 1000만 row 의 random subset 비교 시 false positive ≈ 0.
-     */
-    private static String checksumQuery(String fq, String concat, boolean pg) {
-        // 2026-06-11: md5 → SHA-256 (감사 신뢰도 — Artifacts 라벨 'SHA-256 Check' 와 구현 일치).
-        // 행별 해시 + (count|min|max) fingerprint. 순서 무관. PG/DuckDB 가 같은 UTF-8 바이트를
-        // SHA-256 → 같은 hex 라 양쪽 결과 일치.
-        if (pg) {
-            // PostgreSQL 11+ : sha256(bytea)→bytea. text 를 UTF8 bytea(convert_to)로 변환 후 해시 → hex.
-            String row = "encode(sha256(convert_to(concat(" + concat + "), 'UTF8')), 'hex')";
-            return "SELECT encode(sha256(convert_to("
-                 + "count(*)::text || '|' || coalesce(min(_v), '') || '|' || coalesce(max(_v), '')"
-                 + ", 'UTF8')), 'hex') FROM (SELECT " + row + " AS _v FROM " + fq + ") _h";
-        }
-        // DuckDB : sha256(varchar)→hex varchar.
-        return "SELECT sha256("
-             + "count(*)::text || '|' || coalesce(min(_v), '') || '|' || coalesce(max(_v), '')"
-             + ") FROM (SELECT sha256(concat(" + concat + ")) AS _v FROM " + fq + ") _h";
     }
 
     private void ingest(StageContext ctx, String message, boolean info) {

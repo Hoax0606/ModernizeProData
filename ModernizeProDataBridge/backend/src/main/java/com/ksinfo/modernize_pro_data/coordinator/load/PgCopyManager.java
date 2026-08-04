@@ -218,6 +218,78 @@ public class PgCopyManager {
         return rows;
     }
 
+    /**
+     * CDC 델타 병합 — ResultSet(변환된 델타, op-type 컬럼 포함)을 TEMP staging 으로 COPY 한 뒤
+     * PK 기준 <b>upsert(op=I/U) + delete(op=D)</b>. 타깃을 TRUNCATE 하지 않는다.
+     *
+     * <p>원자성: {@code autoCommit=off} → staging COPY + upsert + delete 를 한 트랜잭션으로 commit,
+     * 실패 시 rollback. staging 은 TEMP(세션 격리) 이며 명시 DROP + 연결 종료 시 자동 소멸.
+     *
+     * <p>전제: 타깃 테이블과 <b>PK 인덱스가 사전 존재</b>해야 함(ON CONFLICT 요구) — 초기 전량적재가
+     * 만들어 둔다. {@code allColumns} 는 델타 행의 전체 컬럼 이미지라는 계약 위에서 정확하다.
+     *
+     * @return staging 으로 들어온 델타 row 수.
+     */
+    public long mergeFromResultSet(Connection conn, String qualifiedTarget,
+                                   List<String> allColumns, String opColumn, List<String> pkColumns,
+                                   ResultSet rs, java.util.function.BooleanSupplier cancelled) throws Exception {
+        if (pkColumns == null || pkColumns.isEmpty()) {
+            throw new IllegalStateException("delta merge requires a primary key: " + qualifiedTarget);
+        }
+        List<String> dataCols = allColumns.stream().filter(c -> !c.equals(opColumn)).collect(Collectors.toList());
+        List<String> nonPk = dataCols.stream().filter(c -> !pkColumns.contains(c)).collect(Collectors.toList());
+        String staging = "\"__delta_staging\"";   // TEMP (세션 격리) — 연결당 1 테이블 병합
+
+        boolean prevAuto = conn.getAutoCommit();
+        conn.setAutoCommit(false);
+        long rows;
+        try {
+            try (var st = conn.createStatement()) {
+                st.execute("DROP TABLE IF EXISTS " + staging);
+                // 타깃 구조 복제(데이터 컬럼·타입) + op-type 제어 컬럼. 제약/인덱스는 복제 안 함.
+                st.execute("CREATE TEMP TABLE " + staging + " (LIKE " + qualifiedTarget + " INCLUDING DEFAULTS)");
+                st.execute("ALTER TABLE " + staging + " ADD COLUMN " + q(opColumn) + " text");
+            }
+            // staging 으로 COPY (데이터 컬럼 + op 컬럼, ResultSet 순서 그대로). COPY 스트림 재사용.
+            rows = copyInFromResultSet(conn, staging, allColumns, rs, cancelled);
+
+            String cols = dataCols.stream().map(PgCopyManager::q).collect(Collectors.joining(", "));
+            String conflict = pkColumns.stream().map(PgCopyManager::q).collect(Collectors.joining(", "));
+            String upsert = "INSERT INTO " + qualifiedTarget + " (" + cols + ") "
+                    + "SELECT " + cols + " FROM " + staging + " WHERE " + q(opColumn) + " IN ('I','U') "
+                    + "ON CONFLICT (" + conflict + ") "
+                    + (nonPk.isEmpty()
+                        ? "DO NOTHING"
+                        : "DO UPDATE SET " + nonPk.stream()
+                            .map(c -> q(c) + " = EXCLUDED." + q(c))
+                            .collect(Collectors.joining(", ")));
+            String joinCond = pkColumns.stream()
+                    .map(c -> "t." + q(c) + " = s." + q(c))
+                    .collect(Collectors.joining(" AND "));
+            String delete = "DELETE FROM " + qualifiedTarget + " t USING " + staging + " s "
+                    + "WHERE s." + q(opColumn) + " = 'D' AND " + joinCond;
+            try (var st = conn.createStatement()) {
+                int upserted = st.executeUpdate(upsert);
+                int deleted = st.executeUpdate(delete);
+                st.execute("DROP TABLE IF EXISTS " + staging);
+                log.info("PG delta merge {} : {} delta rows (upsert~{}, delete {})",
+                        qualifiedTarget, rows, upserted, deleted);
+            }
+            conn.commit();
+        } catch (Exception e) {
+            try { conn.rollback(); } catch (Exception ignore) { /* best-effort */ }
+            throw e;
+        } finally {
+            try { conn.setAutoCommit(prevAuto); } catch (Exception ignore) { /* best-effort */ }
+        }
+        return rows;
+    }
+
+    /** Quote a single identifier for SQL (double-quote, inner {@code "} doubled). */
+    private static String q(String ident) {
+        return "\"" + ident.replace("\"", "\"\"") + "\"";
+    }
+
     /** Build the quoted column list suffix, or empty string when no columns specified. */
     private static String buildColumnList(List<String> columns) {
         if (columns == null || columns.isEmpty()) return "";
@@ -227,35 +299,27 @@ public class PgCopyManager {
     }
 
     /**
-     * Append one value to a CSV line.
+     * Append one value to a CSV line — the tool's load-time type serialization contract.
+     * The text produced here is what PG COPY {@code (FORMAT csv)} parses back into the
+     * target column type, so the rules below define the empty↔NULL / bool / date contract:
      * <ul>
-     *   <li>{@code null} → empty unquoted field. PG CSV default NULL representation.</li>
-     *   <li>empty String → {@code ""} (quoted empty). Distinguishes empty string from NULL.</li>
-     *   <li>otherwise → quote only when the value contains {@code , " \r \n}.
-     *       Inner {@code "} doubled per RFC 4180.</li>
+     *   <li>{@code null} → empty unquoted field → PG interprets as <b>NULL</b>
+     *       (PG CSV default NULL representation, an unquoted empty string).</li>
+     *   <li>empty {@code String} → {@code ""} (quoted empty) → PG interprets as an
+     *       <b>empty string</b>, NOT NULL. This is the one case that distinguishes the two.
+     *       Consequence: a Java empty string into a non-text column (numeric/date/bool)
+     *       makes COPY fail ("invalid input syntax") — the Transform stage must emit NULL
+     *       (e.g. {@code NULLIF(col,'')}) for such columns, not an empty string.</li>
+     *   <li>otherwise → {@code v.toString()}, quoted only when it contains {@code , " \r \n}
+     *       (inner {@code "} doubled per RFC 4180). Type text comes straight from the JDBC
+     *       driver's object rendering: {@code Boolean}→{@code "true"/"false"} (PG bool also
+     *       accepts y/n/1/0/t/f), {@code java.sql.Date}/{@code LocalDate}→{@code "yyyy-MM-dd"},
+     *       {@code BigDecimal}→plain decimal. No locale/format massaging is applied here.</li>
      * </ul>
+     * Package-private (not private) so {@code PgCopyManagerCsvFieldTest} can lock this contract.
+     * 실제 규칙은 {@link CsvFieldSerializer#append} 에 있다 (PG COPY / Oracle sqlldr 공유 — drift 방지).
      */
-    private static void appendCsvField(StringBuilder sb, Object v) {
-        if (v == null) return;
-        String s = v.toString();
-        if (s.isEmpty()) {
-            sb.append("\"\"");
-            return;
-        }
-        boolean needQuote = false;
-        for (int i = 0, n = s.length(); i < n; i++) {
-            char c = s.charAt(i);
-            if (c == ',' || c == '"' || c == '\n' || c == '\r') {
-                needQuote = true;
-                break;
-            }
-        }
-        if (needQuote) {
-            sb.append('"');
-            sb.append(s.replace("\"", "\"\""));
-            sb.append('"');
-        } else {
-            sb.append(s);
-        }
+    static void appendCsvField(StringBuilder sb, Object v) {
+        CsvFieldSerializer.append(sb, v);
     }
 }

@@ -6,10 +6,12 @@ import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingCodeMapRepositor
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRule;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingRuleRepository;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingSource;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingRepository;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity;
 import com.ksinfo.modernize_pro_data.coordinator.run.RunType;
+import com.ksinfo.modernize_pro_data.coordinator.run.delta.DeltaConstants;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstanceRepository;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageStatus;
@@ -32,9 +34,11 @@ import org.springframework.stereotype.Service;
 
 import java.nio.file.Path;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -154,7 +158,18 @@ public class TransformStage implements StageRunner {
                     throw new IllegalStateException("no mapping rules for " + tobeTable);
                 }
 
-                String sql = buildTransformSql(schema, tobeTable, rules, binding, codeMapsByDomain);
+                // B6 방어 — union binding 은 SELECT * UNION ALL 이 위치로 붙어 소스 컬럼 순서가
+                // 다르면 silent 오정렬. source 컬럼 시그니처 불일치를 여기서 fail-fast 로 표면화.
+                if ("union".equals(binding.getCompositionKind())) {
+                    assertUnionSourcesAligned(schema, binding);
+                }
+
+                // 델타 run 에서 이 binding 을 증분 merge 로 처리할지 결정 → 그럴 때만 __op passthrough.
+                // (단일 소스 + 소스 CSV 에 __op 있음 = 증분. join/union 또는 full 스냅샷 = tobe_ 에 __op 없음
+                //  → Load 가 full 재적재.) join/union 인데 소스가 델타(__op)면 조인 델타 불가라 fail-fast.
+                boolean deltaMode = ctx.getRunHistory().getRunType() == RunType.delta;
+                boolean addOpColumn = deltaMode && resolveDeltaOpPassthrough(schema, tobeTable, binding);
+                String sql = buildTransformSql(schema, tobeTable, rules, binding, codeMapsByDomain, addOpColumn);
                 // run 시점의 SQL 을 result 에 박제 (성공/실패 무관하게 디버깅에 도움).
                 // Artifacts 가 보여주는 건 frontend 가 성공 테이블만 필터하므로 여기선 무조건 set.
                 result.setCompiledSql(sql);
@@ -172,8 +187,8 @@ public class TransformStage implements StageRunner {
                     }
 
                     // CP2 체크포인트 parquet2 — test/rehearsal 만 생성 (반복 실행 재사용).
-                    // cutover 는 1회성이라 skip — Load/Verify 가 DuckDB tobe_ 테이블을 직접 읽으므로 안전.
-                    if (ctx.getRunHistory().getRunType() != RunType.cutover) {
+                    // cutover/delta 는 skip — Load/Verify 가 DuckDB tobe_ 테이블을 직접 읽으므로 안전.
+                    if (ctx.getRunHistory().getRunType() != RunType.cutover && !deltaMode) {
                         Path parquet = ctx.parquet2Dir().resolve(tobeTable + ".parquet");
                         String escapedParquet = parquet.toString().replace("\\", "/").replace("'", "''");
                         ctx.runCancellable(st, () -> st.execute("COPY " + fqTobe + " TO '" + escapedParquet + "' (FORMAT PARQUET)"));
@@ -249,9 +264,81 @@ public class TransformStage implements StageRunner {
      * Mapping rules → CREATE OR REPLACE TABLE schema.tobe_xxx AS SELECT ... FROM {composition}
      * FROM 절은 SqlComposer 가 composition_kind (single/join/union) 별로 생성.
      */
+    /**
+     * union binding 의 각 AS-IS source 테이블 컬럼 시그니처(이름+순서)를 DuckDB 에서 읽어
+     * {@link SqlComposer#assertUnionColumnsAligned} 로 일치 검사. 불일치 시 IllegalStateException
+     * → per-table catch → 해당 테이블 failed + Quarantine (silent 오정렬 대신 visible failure).
+     * source 는 extract stage 가 만든 {@code {schema}.asis_{table}} 로 이미 존재.
+     */
+    private void assertUnionSourcesAligned(String schema, MappingTableBinding binding) throws Exception {
+        List<MappingTableBindingSource> sources = binding.getSources();
+        if (sources == null || sources.size() < 2) return;
+        List<String> tables = new ArrayList<>();
+        List<List<String>> signatures = new ArrayList<>();
+        try (Statement st = duckDbService.statement()) {
+            for (MappingTableBindingSource s : sources) {
+                String fq = quoteIdent(schema) + "." + quoteIdent("asis_" + s.getAsisTable());
+                List<String> cols = new ArrayList<>();
+                try (ResultSet rs = st.executeQuery("SELECT * FROM " + fq + " LIMIT 0")) {
+                    ResultSetMetaData md = rs.getMetaData();
+                    for (int i = 1; i <= md.getColumnCount(); i++) cols.add(md.getColumnLabel(i));
+                }
+                tables.add(s.getAsisTable());
+                signatures.add(cols);
+            }
+        }
+        SqlComposer.assertUnionColumnsAligned(tables, signatures);
+    }
+
+    /**
+     * 델타 run 에서 이 binding 을 <b>증분 merge</b> 로 처리할지(=tobe_ 에 __op passthrough) 결정.
+     * <ul>
+     *   <li>단일 소스 + 소스 asis_ 에 {@code __op} 있음 → true (Load 가 PK 병합)</li>
+     *   <li>join/union + 소스에 {@code __op} 있음 → <b>fail-fast</b> (조인/유니온 델타는 소스 full
+     *       스냅샷이 필요 — 변경분만으로 재조인 불가)</li>
+     *   <li>그 외(소스에 __op 없음 = full 스냅샷) → false (Load 가 full 재적재)</li>
+     * </ul>
+     */
+    private boolean resolveDeltaOpPassthrough(String schema, String tobeTable, MappingTableBinding binding) {
+        String kind = binding.getCompositionKind();
+        boolean multiSource = "join".equals(kind) || "union".equals(kind);
+        boolean srcHasOp = anySourceHasOpColumn(schema, binding);
+        if (multiSource && srcHasOp) {
+            throw new IllegalStateException(
+                    "join/union 델타는 소스 full 스냅샷이 필요합니다 (__op 델타 불가) — tobe_table="
+                    + tobeTable + ", composition=" + kind);
+        }
+        return !multiSource && srcHasOp;
+    }
+
+    private boolean anySourceHasOpColumn(String schema, MappingTableBinding binding) {
+        List<MappingTableBindingSource> sources = binding.getSources();
+        if (sources == null) return false;
+        for (MappingTableBindingSource s : sources) {
+            if (duckTableHasColumn(schema, "asis_" + s.getAsisTable(), DeltaConstants.OP_COLUMN)) return true;
+        }
+        return false;
+    }
+
+    /** DuckDB {@code schema.table} 에 해당 컬럼이 있는지 (asis_ 델타 CSV 의 __op 존재 판정). */
+    private boolean duckTableHasColumn(String schema, String table, String column) {
+        String fq = quoteIdent(schema) + "." + quoteIdent(table);
+        try (Statement st = duckDbService.statement();
+             ResultSet rs = st.executeQuery("SELECT * FROM " + fq + " LIMIT 0")) {
+            ResultSetMetaData md = rs.getMetaData();
+            for (int i = 1; i <= md.getColumnCount(); i++) {
+                if (column.equals(md.getColumnLabel(i))) return true;
+            }
+        } catch (Exception e) {
+            log.debug("duckTableHasColumn {} check failed: {}", table, e.getMessage());
+        }
+        return false;
+    }
+
     private String buildTransformSql(String schema, String tobeTable, List<MappingRule> rules,
                                      MappingTableBinding binding,
-                                     Map<String, List<MappingCodeMap>> codeMapsByDomain) {
+                                     Map<String, List<MappingCodeMap>> codeMapsByDomain,
+                                     boolean addOpColumn) {
         String fqTobe = quoteIdent(schema) + "." + quoteIdent("tobe_" + tobeTable);
 
         // 가독성을 위해 여러 줄로 포맷팅 — DuckDB 는 whitespace 무관. ArtifactsPage 의 SQL view
@@ -270,6 +357,14 @@ public class TransformStage implements StageRunner {
         if (colLines.isEmpty()) {
             // 모든 rule 이 skip 이면 SELECT 가 비어 SQL 깨짐
             throw new IllegalStateException("all rules are 'skip' for " + tobeTable);
+        }
+        // 증분 merge 대상일 때만 op-type 제어 컬럼(__op)을 소스에서 tobe_ 로 passthrough.
+        // 병합 Load 가 이 컬럼으로 upsert/delete 분기. join/union·full 스냅샷은 addOpColumn=false
+        // → tobe_ 에 __op 없음 → Load 가 full 재적재(정상 join/union 변환 그대로).
+        if (addOpColumn) {
+            String alias = SqlComposer.primaryAlias(binding);
+            colLines.add("  " + quoteIdent(alias) + "." + quoteIdent(DeltaConstants.OP_COLUMN)
+                    + " AS " + quoteIdent(DeltaConstants.OP_COLUMN));
         }
         sb.append(String.join(",\n", colLines));
 

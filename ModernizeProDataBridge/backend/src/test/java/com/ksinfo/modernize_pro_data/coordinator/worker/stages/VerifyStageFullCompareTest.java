@@ -2,6 +2,7 @@ package com.ksinfo.modernize_pro_data.coordinator.worker.stages;
 
 import com.ksinfo.modernize_pro_data.TestcontainersConfiguration;
 import com.ksinfo.modernize_pro_data.common.duckdb.DuckDbService;
+import com.ksinfo.modernize_pro_data.coordinator.load.PostgresLoaderAdapter;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -44,6 +45,9 @@ class VerifyStageFullCompareTest {
 
     @Autowired
     private VerifyStage verifyStage;
+
+    @Autowired
+    private PostgresLoaderAdapter pgAdapter;
 
     @Autowired
     private DuckDbService duckDbService;
@@ -101,7 +105,7 @@ class VerifyStageFullCompareTest {
         seedPostgres();
         seedDuckDb(true);
 
-        String result = verifyStage.compareAllPkRows(DUCK_FQ, PG_FQ, List.of("id"), dbConfig());
+        String result = verifyStage.compareAllPkRows(pgAdapter, DUCK_FQ, PG_FQ, List.of("id"), dbConfig());
 
         // 전수 비교라야만 잡히는 불일치 — 옛 100-limit 이면 null 로 새어나갔을 케이스.
         assertNotNull(result, "130번째 행의 PK 불일치를 전수 비교가 잡아야 한다");
@@ -114,7 +118,7 @@ class VerifyStageFullCompareTest {
         seedPostgres();
         seedDuckDb(false);
 
-        String result = verifyStage.compareAllPkRows(DUCK_FQ, PG_FQ, List.of("id"), dbConfig());
+        String result = verifyStage.compareAllPkRows(pgAdapter, DUCK_FQ, PG_FQ, List.of("id"), dbConfig());
 
         assertNull(result, "150 행 전부 일치하면 전수 비교 결과는 null(통과) 이어야 한다");
     }

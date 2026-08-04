@@ -68,6 +68,7 @@ public class MappingImportService {
     private final MappingCodeMapRepository codeRepo;
     private final MappingTableBindingRepository bindingRepo;
     private final com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository ddlTableRepo;
+    private final com.ksinfo.modernize_pro_data.coordinator.ddl.DdlColumnRepository ddlColumnRepo;
     /** self proxy — CSV 파싱(트랜잭션 밖) 후 persistImport(@Transactional) 를 프록시 경유로
      *  호출해 트랜잭션 advice 가 적용되게 한다. 직접 this.persistImport 호출은 self-invocation
      *  이라 @Transactional 이 무시됨. ObjectProvider = lazy → 순환참조 없음. */
@@ -98,6 +99,12 @@ public class MappingImportService {
      * tobeTableFilter null = 프로젝트 전체 (기존 동작). 값이 있으면 그 TO-BE 테이블의
      * rule/binding 만 갱신하고(다른 테이블·수동 수정 보존), code 는 그 테이블이 참조하는
      * domain 만 갱신한다.
+     *
+     * <p>단일 프로젝트 import (컨트롤러 / reapply) 진입점 — AS-IS DDL 범위 필터를 <b>끈다</b>.
+     * 즉 CSV 의 asis_table 이 이 project 의 AS-IS DDL 에 없어도 row 를 버리지 않는다.
+     * (집계/join 매핑이 AS-IS DDL 에 아직 없는 소스 테이블 — 예: 아직 임포트 안 한 TRANSACTIONS
+     *  — 을 참조하는 경우, 예전엔 그 row 들이 조용히 drop 되어 "매핑정의서에 명세 안 됨" 으로
+     *  보였다. 프로젝트 소속 판정은 TO-BE DDL 만으로 충분하다.)
      */
     public MappingImport importFromCsv(
             String projectId,
@@ -107,6 +114,27 @@ public class MappingImportService {
             String codeFilename,
             String userName,
             String tobeTableFilter
+    ) {
+        return importFromCsv(projectId, columnCsv, columnFilename, codeCsv, codeFilename,
+                userName, tobeTableFilter, false);
+    }
+
+    /**
+     * @param enforceAsisDdlScope true 면 CSV 의 asis_table 이 이 project 의 AS-IS DDL 에 없는 row 를
+     *                            drop 한다. <b>사이트 통합 CSV import 전용</b> — 하나의 CSV 를 여러
+     *                            프로젝트에 분배할 때, TO-BE 테이블명이 겹치는 프로젝트 간 잘못된
+     *                            combine 을 막기 위한 보조 필터다. 단일 프로젝트 import 에선 항상
+     *                            false (정당한 cross-table 매핑을 보존).
+     */
+    public MappingImport importFromCsv(
+            String projectId,
+            byte[] columnCsv,
+            String columnFilename,
+            byte[] codeCsv,
+            String codeFilename,
+            String userName,
+            String tobeTableFilter,
+            boolean enforceAsisDdlScope
     ) {
         if ((columnCsv == null || columnCsv.length == 0) && (codeCsv == null || codeCsv.length == 0)) {
             throw new ApiException(
@@ -137,30 +165,38 @@ public class MappingImportService {
             ParsedRules parsed = new ParsedRules(List.of());
             if (hasColumn) {
                 columnTmp = writeTemp(columnCsv, "column_mapping");
-                // 이 project 의 AS-IS DDL 의 (schema, physical_name) set — site 통합 csv 에서
-                // 다른 project 용 row 가 잘못된 combine 으로 들어가는 사고 방지.
-                java.util.Set<String> projectAsisKeys = ddlTableRepo
-                        .findByProjectIdAndSideOrderByOrdinalAsc(projectId, "asis").stream()
-                        .map(t -> (t.getSchemaName() == null ? "" : t.getSchemaName().toLowerCase())
-                                + "|" + (t.getPhysicalName() == null ? "" : t.getPhysicalName().toLowerCase()))
-                        .collect(java.util.stream.Collectors.toSet());
-                // TO-BE 측도 같은 패턴으로 검증 — DDL 에 없는 tobe_table 행은 skip.
+                // AS-IS DDL 범위 필터 — site 통합 csv 에서만 켠다(enforceAsisDdlScope). 켜진 경우
+                // 이 project 의 AS-IS DDL 에 없는 asis_table 의 row 를 drop 해 다른 project 용 row 의
+                // 잘못된 combine 을 막는다. 단일 프로젝트 import 에선 null → AS-IS 필터 자체를 끈다
+                // (집계/join 매핑이 참조하는 소스 테이블이 AS-IS DDL 에 아직 없어도 row 를 보존).
+                java.util.Set<String> projectAsisKeys = null;
+                if (enforceAsisDdlScope) {
+                    projectAsisKeys = ddlTableRepo
+                            .findByProjectIdAndSideOrderByOrdinalAsc(projectId, "asis").stream()
+                            .map(t -> (t.getSchemaName() == null ? "" : t.getSchemaName().toLowerCase())
+                                    + "|" + (t.getPhysicalName() == null ? "" : t.getPhysicalName().toLowerCase()))
+                            .collect(java.util.stream.Collectors.toSet());
+                }
+                // TO-BE 측은 DDL(테이블+컬럼)로 정식 이름 resolver 를 만들어 검증 + 정규화한다.
                 // 旧仕様은 unmatched 行도 그대로 binding 化되어 orphan binding 의 主源이었다
                 // (2026-05-29 발견. e.g. CSV 内 `public.orders` / `public.employees` 等).
                 // 이 검증 없으면 Load stage 에서 PG 에 그 table 이 없어서 통째로 fail.
-                // 안 그러면 Load stage 에서 PG 에 그 table 이 없어서 통째로 fail
-                // (UI 가 "N 중 X 실패" 로 표시).
-                java.util.Set<String> projectTobeKeys = ddlTableRepo
-                        .findByProjectIdAndSideOrderByOrdinalAsc(projectId, "tobe").stream()
-                        .map(t -> (t.getSchemaName() == null ? "" : t.getSchemaName().toLowerCase())
-                                + "|" + (t.getPhysicalName() == null ? "" : t.getPhysicalName().toLowerCase()))
-                        .collect(java.util.stream.Collectors.toSet());
-                parsed = parseColumnCsv(columnTmp, projectAsisKeys, projectTobeKeys);
+                // 정규화 덕분에 CSV 의 tobe_schema/table/column 대소문자·스키마 유무가 달라도
+                // 저장되는 rule 의 tobe_* 가 항상 DDL 의 정식 이름과 一致 → per-table filter /
+                // delete / FE grid hydration / report / Load 가 모두 case 불일치 없이 매칭된다.
+                DdlResolver tobeResolver = buildTobeResolver(projectId);
+                parsed = parseColumnCsv(columnTmp, projectAsisKeys, tobeResolver);
                 // 테이블 단위 적용이면 그 TO-BE 테이블의 룰만 남긴다.
+                // tobeTableFilter 는 DDL 물리 테이블명(스키마 제외). CSV 의 tobe_table 은 스키마 포함/
+                // 대소문자가 다를 수 있으므로 파이프라인 他 지점과 동일하게 schema-무시 + case-무시로 비교.
+                // (case-sensitive .equals 였을 때: CSV 가 대문자/스키마 포함이면 全 row 가 걸러져
+                //  아무것도 임포트되지 않던 버그 — 화면상 "매핑정의서에 명세 안 됨" 경고로 표출.)
                 if (tobeTableFilter != null) {
+                    String want = stripSchema(tobeTableFilter).toLowerCase();
                     List<RuleRow> only = new ArrayList<>();
                     for (RuleRow r : parsed.rules) {
-                        if (tobeTableFilter.equals(r.tobeTable)) only.add(r);
+                        String have = r.tobeTable == null ? "" : stripSchema(r.tobeTable).toLowerCase();
+                        if (want.equals(have)) only.add(r);
                     }
                     parsed = new ParsedRules(only);
                 }
@@ -337,12 +373,24 @@ public class MappingImportService {
                 // alias 자동 할당 — (tobe_table 그룹 × asis_table) 마다 단일 alias.
                 Map<String, Map<String, String>> aliasMaps = buildAliasMaps(parsed.rules);
 
+                // expand binding 의 출력 컬럼 (notes 의 expand_expr 'AS u(a, b)') → tobe_table 별 집합.
+                Map<String, java.util.Set<String>> expandColsByTobe = buildExpandOutputCols(parsed.rules);
+
                 // expression 룰의 transform_sql 자동 생성
                 for (RuleRow row : parsed.rules) {
                     if (!"expression".equals(row.strategy)) continue;
                     if (row.transformSql != null && !row.transformSql.isBlank()) continue;
                     if (row.transformRule != null && !row.transformRule.isBlank()) {
                         row.transformSql = row.transformRule;
+                        continue;
+                    }
+                    // expand 출력 컬럼인데 명시 transform 이 없으면 → u.<col> (notes 에 태그 안 된 channel 등).
+                    String tobeKeyX = (row.tobeSchema == null ? "" : row.tobeSchema) + "|" + row.tobeTable;
+                    java.util.Set<String> expCols = expandColsByTobe.get(tobeKeyX);
+                    if (expCols != null && row.tobeColumn != null
+                            && expCols.contains(row.tobeColumn.toLowerCase())) {
+                        row.transformSql = "u." + row.tobeColumn;
+                        row.transformRule = row.transformSql;
                         continue;
                     }
                     if (row.asisColumn == null || row.asisColumn.length == 0 || row.asisTable == null) continue;
@@ -436,19 +484,53 @@ public class MappingImportService {
     }
 
     /**
+     * "schema.table" → "table"; 스키마 없으면 그대로. per-table filter 의 schema-무시 비교용.
+     */
+    private static String stripSchema(String tableRef) {
+        if (tableRef == null) return "";
+        String s = tableRef.trim();
+        int dot = s.indexOf('.');
+        return dot > 0 ? s.substring(dot + 1) : s;
+    }
+
+    /**
+     * 이 project 의 TO-BE DDL(테이블 + 컬럼)로 정식 이름 resolver 를 만든다. DDL 이 없으면 empty
+     * resolver 를 반환하고, 이 경우 parse 는 검증/정규화 없이 CSV 값을 그대로 통과시킨다.
+     */
+    private DdlResolver buildTobeResolver(String projectId) {
+        DdlResolver r = new DdlResolver();
+        List<com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTable> tables =
+                ddlTableRepo.findByProjectIdAndSideOrderByOrdinalAsc(projectId, "tobe");
+        if (tables.isEmpty()) return r;
+        List<String> ids = new ArrayList<>(tables.size());
+        for (var t : tables) ids.add(t.getId());
+        Map<String, List<String>> colsByTableId = new HashMap<>();
+        for (var c : ddlColumnRepo.findByTableIdInOrderByOrdinalAsc(ids)) {
+            colsByTableId.computeIfAbsent(c.getTableId(), k -> new ArrayList<>()).add(c.getPhysicalName());
+        }
+        for (var t : tables) {
+            r.addTable(t.getSchemaName(), t.getPhysicalName(),
+                    colsByTableId.getOrDefault(t.getId(), List.of()));
+        }
+        return r;
+    }
+
+    /**
      * @param projectAsisKeys 이 project 의 AS-IS DDL 에 등록된 (schema_lower|table_lower) set.
      *                       null 이면 검증 안 함 (모든 row 통과). 값 있으면 그 set 의 asis_table 만
      *                       parsed.rules 에 포함 — site 통합 csv 에서 다른 project row 의 잘못된
      *                       combine 방지.
-     * @param projectTobeKeys 이 project 의 TO-BE DDL 에 등록된 (schema_lower|table_lower) set.
-     *                       null 이면 검증 안 함. 값 있으면 그 set 에 없는 tobe_table 행은 skip + warn.
-     *                       2026-05-29 추가: CSV 内 DDL 不在 table 行이 orphan binding 의 주원인
-     *                       이었던 problem 의 대책. Load stage 통째 fail 방지도 부수효과.
-     *                       이었던 problem 의 대책 — Load 단계에서 통째로 fail 되는 케이스 방지.
+     * @param tobeResolver   이 project 의 TO-BE DDL(테이블+컬럼) 정식 이름 resolver.
+     *                       null 이거나 empty(=TO-BE DDL 없음)면 검증/정규화 안 함. 값 있으면
+     *                       DDL 에 없는 tobe_table 행은 skip + warn 하고, 매칭된 행은 tobe_schema/
+     *                       table/column 을 DDL 의 정식 이름(대소문자·스키마 포함)으로 교정한다.
+     *                       2026-05-29: CSV 内 DDL 不在 table 行이 orphan binding 의 주원인이었던
+     *                       problem 의 대책 (Load 단계 통째 fail 방지). 정규화는 대소문자·스키마 유무
+     *                       차이로 매핑이 어긋나던 문제의 근본 대책.
      */
     private ParsedRules parseColumnCsv(Path csv,
                                        java.util.Set<String> projectAsisKeys,
-                                       java.util.Set<String> projectTobeKeys) {
+                                       DdlResolver tobeResolver) {
         Map<String, Integer> headers = new HashMap<>();
         // LinkedHashMap — 입력 순서 보존 (셀결합 흉내가 의미 있으려면 순서가 중요).
         LinkedHashMap<String, RuleRow> grouped = new LinkedHashMap<>();
@@ -478,7 +560,7 @@ public class MappingImportService {
             // DDL 은 schema 없이(TRANSACTIONS) 임포트되면(또는 반대) exact "schema|table" 키가 안 맞아
             // 유효 row 가 통째로 silent drop 되던 버그(2026-06-11). 테이블명만으로도 매칭되게 fallback.
             java.util.Set<String> asisTableOnly = projectAsisKeys == null ? java.util.Set.of() : tableNamesOf(projectAsisKeys);
-            java.util.Set<String> tobeTableOnly = projectTobeKeys == null ? java.util.Set.of() : tableNamesOf(projectTobeKeys);
+            boolean validateTobe = tobeResolver != null && !tobeResolver.isEmpty();
 
             String lastTobeTableRaw = null;
             String lastTobeColumn   = null;
@@ -506,16 +588,35 @@ public class MappingImportService {
                     tobeTable  = tobeTableRaw;
                 }
 
-                // project TO-BE DDL 検証: DDL 에 없는 tobe_table 의 row 는 skip + warn.
-                // CSV 内의 余分 行 (다른 customer / 旧 PoC 의 fixture) 이 orphan binding 의
-                // 主源 이었던 problem 의 대책 (2026-05-29 추가).
-                if (projectTobeKeys != null) {
-                    String tobeCheckKey = tobeSchema.toLowerCase() + "|" + tobeTable.toLowerCase();
-                    if (!projectTobeKeys.contains(tobeCheckKey)
-                            && !tobeTableOnly.contains(tobeTable.toLowerCase())) {
+                // project TO-BE DDL 검증 + 정식 이름 정규화.
+                // DDL 에 없는 tobe_table 행은 skip + warn (CSV 内 余分 行 = orphan binding 방지,
+                // 2026-05-29). 매칭된 행은 tobe_schema/table/column 을 DDL 의 정식 이름으로 교정 —
+                // 이후 dedupKey / 저장 / per-table filter / FE hydration / report / Load 가 모두
+                // 대소문자·스키마 유무 차이 없이 일관되게 매칭된다.
+                if (validateTobe) {
+                    String[] canon = tobeResolver.resolveTable(tobeSchema, tobeTable);
+                    if (canon == null) {
                         log.warn("[mapping-import] skipping row — tobe_table '{}.{}' not in project's TO-BE DDL",
                                 tobeSchema, tobeTable);
                         continue;
+                    }
+                    tobeSchema = canon[0];
+                    tobeTable  = canon[1];
+                    // 컬럼 단위 게이트 — DDL 에 그 테이블의 컬럼 정보가 있으면, 그 안에 없는 tobe_column
+                    // 행은 skip. 하나의 공유 CSV 를 tobe_table 명이 같지만 컬럼 subset 이 다른 여러
+                    // project 에 나눠 임포트할 때(예: codemap 의 public.employees 14컬럼 vs
+                    // comprehensive_origin 의 public.employees 19컬럼), 각 project 가 자기 DDL 에 있는
+                    // 컬럼만 가져가게 한다. (컬럼 정보가 없으면 종전대로 통과.)
+                    if (tobeResolver.hasColumnData(tobeSchema, tobeTable)) {
+                        String canonCol = tobeResolver.canonicalColumn(tobeSchema, tobeTable, tobeColumn);
+                        if (canonCol == null) {
+                            log.warn("[mapping-import] skipping row — tobe_column '{}' not in TO-BE DDL of {}.{}",
+                                    tobeColumn, tobeSchema, tobeTable);
+                            continue;
+                        }
+                        tobeColumn = canonCol;
+                    } else {
+                        tobeColumn = tobeResolver.resolveColumn(tobeSchema, tobeTable, tobeColumn);
                     }
                 }
 
@@ -540,15 +641,7 @@ public class MappingImportService {
                         }
                     }
                 }
-                // project TO-BE DDL 검증: DDL 에 없는 TO-BE table 의 row 는 skip — 그렇지
-                // 않으면 mapping 만 만들어지고 Load 단계에서 PG 에 그 table 이 없어 통째로 fail.
-                if (projectTobeKeys != null) {
-                    String checkKey = tobeSchema.toLowerCase() + "|" + tobeTable.toLowerCase();
-                    if (!projectTobeKeys.contains(checkKey)
-                            && !tobeTableOnly.contains(tobeTable.toLowerCase())) {
-                        continue;
-                    }
-                }
+                // (TO-BE DDL 검증/정규화는 위에서 이미 수행 — dedupKey 계산 전에 정식 이름으로 교정됨.)
 
                 RuleRow existing = grouped.get(dedupKey);
                 if (existing != null) {
@@ -595,6 +688,18 @@ public class MappingImportService {
 
                 if (row.transformSql == null && "expression".equals(row.strategy)) {
                     row.transformSql = row.transformRule;
+                }
+
+                // 샘플 CSV 가 변환 로직을 notes 에 넣어둔 경우 대응 — 명시 transform 이 없으면
+                // notes 의 'transform_sql:' 를 실행 transform 으로 채택 (rule_sql/transform_sql 컬럼 우선).
+                // notesDirective 가 U+2001 마커·', where:'·'(GROUP BY …)' 주석을 정리.
+                if (row.transformRule == null || row.transformRule.isBlank()) {
+                    String fromNotes = notesDirective(row.notes, "transform_sql:");
+                    if (fromNotes != null && !fromNotes.isBlank()) {
+                        row.strategy = "expression";
+                        row.transformRule = fromNotes;
+                        row.transformSql = fromNotes;
+                    }
                 }
 
                 grouped.put(dedupKey, row);
@@ -1108,6 +1213,32 @@ public class MappingImportService {
                 // joinType / joinOn 은 null — UI 에서 사용자가 채움
                 b.addSource(s);
             }
+
+            // notes 기반 binding 지시자 (샘플 CSV 가 binding-level 설정을 notes 에 넣어둔 경우).
+            //  - expand_expr / where : 1:N 펼침 (CROSS JOIN LATERAL … , where: …)
+            for (RuleRow r : grp) {
+                String ee = notesDirective(r.notes, "expand_expr:");
+                if (ee != null && !ee.isBlank()) {
+                    b.setExpandExpr(ee);
+                    String wf = notesWhere(r.notes);
+                    if (wf != null && !wf.isBlank()) b.setWhereFilter(wf);
+                    break;
+                }
+            }
+            //  - 집계: aggregate 함수(SUM/COUNT/…) rule 이 있으면, 비집계 expression rule 들의
+            //    transform 을 GROUP BY 로 (SQL 상 비집계 select 컬럼은 GROUP BY 필수).
+            boolean hasAgg = grp.stream().anyMatch(r -> isAggregate(r.transformRule));
+            if (hasAgg) {
+                String gb = grp.stream()
+                        .filter(r -> "expression".equals(r.strategy))
+                        .filter(r -> r.transformRule != null && !r.transformRule.isBlank())
+                        .filter(r -> !isAggregate(r.transformRule))
+                        .map(r -> r.transformRule)
+                        .distinct()
+                        .collect(java.util.stream.Collectors.joining(", "));
+                if (!gb.isBlank()) b.setGroupByExpr(gb);
+            }
+
             result.add(b);
         }
         return result;
@@ -1314,6 +1445,68 @@ public class MappingImportService {
         return v == null ? "" : v.replace("'", "''");
     }
 
+    /* ─── notes 기반 지시자 파서 (샘플 CSV 가 transform/expand/집계 로직을 notes 에 넣어둔 경우) ─── */
+
+    /** notes 셀 안의 마커 문자 (U+2001 EM QUAD). '<U+2001>E<key>: <value>' 형태. */
+    private static final char NOTES_MARKER = ' ';
+    /** 집계 함수로 시작하는 transform 판별 (GROUP BY 도출용). */
+    private static final Pattern AGG_FN = Pattern.compile(
+            "(?i)^\\s*(SUM|COUNT|AVG|MIN|MAX|STRING_AGG|ARRAY_AGG|BOOL_AND|BOOL_OR|STDDEV|VARIANCE)\\s*\\(");
+    /** expand_expr 의 출력 컬럼 목록 추출 — 'AS u(channel, value)' → "channel, value". */
+    private static final Pattern EXPAND_OUT = Pattern.compile("(?i)AS\\s+\\w+\\s*\\(([^)]*)\\)");
+
+    /**
+     * notes 에서 {@code key}(예: "transform_sql:", "expand_expr:") 뒤의 값을 추출.
+     * 인라인 ", where:" 이후·"(GROUP BY …)" 주석·다음 U+2001 마커는 잘라낸다. 없으면 null.
+     */
+    static String notesDirective(String notes, String key) {
+        if (notes == null) return null;
+        int i = notes.indexOf(key);
+        if (i < 0) return null;
+        String v = notes.substring(i + key.length()).trim();
+        int w = v.indexOf(", where:");
+        if (w >= 0) v = v.substring(0, w).trim();
+        int gb = v.indexOf("(GROUP BY");
+        if (gb >= 0) v = v.substring(0, gb).trim();
+        int sep = v.indexOf(NOTES_MARKER);
+        if (sep >= 0) v = v.substring(0, sep).trim();
+        return v.isEmpty() ? null : v;
+    }
+
+    /** notes 안의 인라인 ", where:" 필터 값 추출 (expand_expr 와 같은 셀). 없으면 null. */
+    static String notesWhere(String notes) {
+        if (notes == null) return null;
+        int i = notes.indexOf(", where:");
+        if (i < 0) return null;
+        String v = notes.substring(i + ", where:".length()).trim();
+        int sep = v.indexOf(NOTES_MARKER);
+        if (sep >= 0) v = v.substring(0, sep).trim();
+        return v.isEmpty() ? null : v;
+    }
+
+    /** transform 이 집계 함수로 시작하는가 (SUM/COUNT/…). */
+    static boolean isAggregate(String sql) {
+        return sql != null && AGG_FN.matcher(sql).find();
+    }
+
+    /** tobe_table 별 expand 출력 컬럼 집합 (소문자) — notes 의 expand_expr 'AS u(a, b)' 파싱. */
+    private static Map<String, java.util.Set<String>> buildExpandOutputCols(List<RuleRow> rules) {
+        Map<String, java.util.Set<String>> out = new HashMap<>();
+        for (RuleRow r : rules) {
+            String ee = notesDirective(r.notes, "expand_expr:");
+            if (ee == null || ee.isBlank()) continue;
+            Matcher m = EXPAND_OUT.matcher(ee);
+            if (!m.find()) continue;
+            String tobeKey = (r.tobeSchema == null ? "" : r.tobeSchema) + "|" + r.tobeTable;
+            java.util.Set<String> set = out.computeIfAbsent(tobeKey, k -> new HashSet<>());
+            for (String c : m.group(1).split(",")) {
+                String cc = c.trim().toLowerCase();
+                if (!cc.isEmpty()) set.add(cc);
+            }
+        }
+        return out;
+    }
+
     private static Map<String, String> extractAliases(List<RuleRow> rules, Set<String> validTables) {
         // alias → first observed column referenced after that alias
         Map<String, String> aliasToColumn = new LinkedHashMap<>();
@@ -1507,6 +1700,77 @@ public class MappingImportService {
 
     private record ParsedRules(List<RuleRow> rules) {}
     private record ParsedCodes(List<CodeRow> codes) {}
+
+    /**
+     * 프로젝트 DDL 의 (schema, table, column) 정식 이름 resolver.
+     * CSV 가 대소문자·스키마 유무가 달라도 DDL 의 정식 이름으로 교정하기 위한 lookup.
+     * - table: exact "schema|table"(lowercase) 우선, 없으면 bare table(lowercase, 유일할 때만) fallback.
+     * - column: 대소문자 무시로 정식 physical name 반환 (못 찾으면 입력값 그대로 유지).
+     */
+    static final class DdlResolver {
+        private final Map<String, String[]> byKey = new HashMap<>();   // "s|t"(lower) → {schema, table}
+        private final Map<String, String[]> byBare = new HashMap<>();  // "t"(lower)   → {schema, table}
+        private final Set<String> ambiguousBare = new HashSet<>();
+        private final Map<String, Map<String, String>> colsByKey = new HashMap<>(); // "s|t"(lower) → (col lower → col)
+
+        void addTable(String schema, String table, List<String> columns) {
+            if (table == null) return;
+            String s = schema == null ? "" : schema;
+            String key = s.toLowerCase() + "|" + table.toLowerCase();
+            byKey.put(key, new String[] { s, table });
+            String bare = table.toLowerCase();
+            if (byBare.containsKey(bare)) ambiguousBare.add(bare);
+            else byBare.put(bare, new String[] { s, table });
+            Map<String, String> cmap = new HashMap<>();
+            if (columns != null) {
+                for (String c : columns) if (c != null) cmap.put(c.toLowerCase(), c);
+            }
+            colsByKey.put(key, cmap);
+        }
+
+        boolean isEmpty() { return byKey.isEmpty(); }
+
+        /** 정식 {schema, table} 반환. 못 찾으면 null. */
+        String[] resolveTable(String schema, String table) {
+            if (table == null) return null;
+            String s = schema == null ? "" : schema;
+            String[] hit = byKey.get(s.toLowerCase() + "|" + table.toLowerCase());
+            if (hit != null) return hit;
+            String bare = table.toLowerCase();
+            if (!ambiguousBare.contains(bare)) {
+                String[] b = byBare.get(bare);
+                if (b != null) return b;
+            }
+            return null;
+        }
+
+        /** 정식 column physical name 반환. 테이블/컬럼 못 찾으면 입력값 그대로. */
+        String resolveColumn(String schema, String table, String column) {
+            if (column == null) return null;
+            String[] canon = resolveTable(schema, table);
+            if (canon == null) return column;
+            Map<String, String> cmap = colsByKey.get(canon[0].toLowerCase() + "|" + canon[1].toLowerCase());
+            if (cmap == null) return column;
+            return cmap.getOrDefault(column.toLowerCase(), column);
+        }
+
+        /** 이 테이블의 DDL 컬럼 정보가 있으면 true (컬럼 단위 게이트 적용 가능). */
+        boolean hasColumnData(String schema, String table) {
+            String[] canon = resolveTable(schema, table);
+            if (canon == null) return false;
+            Map<String, String> cmap = colsByKey.get(canon[0].toLowerCase() + "|" + canon[1].toLowerCase());
+            return cmap != null && !cmap.isEmpty();
+        }
+
+        /** 정식 column physical name 반환. DDL 에 없으면 null (게이트용). hasColumnData=true 전제. */
+        String canonicalColumn(String schema, String table, String column) {
+            if (column == null) return null;
+            String[] canon = resolveTable(schema, table);
+            if (canon == null) return null;
+            Map<String, String> cmap = colsByKey.get(canon[0].toLowerCase() + "|" + canon[1].toLowerCase());
+            return cmap == null ? null : cmap.get(column.toLowerCase());
+        }
+    }
 
     private static class RuleRow {
         String tobeSchema = "";

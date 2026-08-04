@@ -171,6 +171,7 @@ export function ExecutionPage() {
     queryFn: () => quarantineApi.byRun(effectiveRunId!),
     refetchInterval: activeRunId ? 5_000 : false,
   });
+
   const quarantineByTable = useMemo(() => {
     const m = new Map<string, QuarantineGroup[]>();
     for (const g of execQuarantine ?? []) {
@@ -751,6 +752,9 @@ export function ExecutionPage() {
         onRetry={handleRetry}
         onDiscard={handleDiscard}
       />
+      {/* NOTE: 델타(CDC 증분)는 UI 버튼 없이 외부 스케줄러/스크립트가 POST /api/v1/runs
+          {runType:"delta"} 로 자동 트리거한다. "초기 full 적재 선행" 가드는 RunService.startRun
+          (백엔드)에 있어 자동 경로까지 강제됨. */}
       {/* TO-BE DB 실시간 단절 경고 — run 진행 중인데 target env 가 unreachable 이면 즉시 red 배너.
           (CheckStage 의 1회 ping 만으로는 중간 단절을 못 잡던 갭을 메움.) */}
       {(() => {
@@ -1350,7 +1354,10 @@ function PipelineStages({ t, stages, stageViews, quarantineByTable }: {
               : [];
             const isWarn = st.tone === 'warn' && !!sv?.tables?.length;
             const warnCount = warnTables.length;
-            const expandable = hasFailed || isWarn;
+            // warn stage 는 보여줄 warning quarantine 이 있을 때만 펼침 가능. validation 의
+            // checksum WARN 등은 quarantine 을 만들지 않으므로 클릭해도 열리지 않는다
+            // (상세는 Artifacts 의 Validation report). 빈 "상세 없음" 박스를 없앤다.
+            const expandable = hasFailed || (isWarn && warnCount > 0);
             const isOpen = expanded === st.id;
             return (
             <Fragment key={st.id}>

@@ -191,6 +191,13 @@
 			<artifactId>postgresql</artifactId>
 			<scope>test</scope>
 		</dependency>
+		<!-- Oracle Testcontainers — OracleEndToEndIT (gvenzl/oracle-free). NLS_CHARACTERSET 은
+		     컨테이너 생성 시 baked, sqlldr 은 execInContainer 로 컨테이너 내부 실행. -->
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>oracle-free</artifactId>
+			<scope>test</scope>
+		</dependency>
 	</dependencies>
 
 	<build>

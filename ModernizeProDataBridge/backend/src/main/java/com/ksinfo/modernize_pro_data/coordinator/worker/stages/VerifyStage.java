@@ -5,7 +5,8 @@ import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlColumn;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlColumnRepository;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTable;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository;
-import com.ksinfo.modernize_pro_data.coordinator.load.PgCopyManager;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.LoaderAdapter;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.LoaderAdapterRegistry;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity;
@@ -61,7 +62,7 @@ public class VerifyStage implements StageRunner {
     private final DdlTableRepository ddlTableRepo;
     private final DdlColumnRepository ddlColumnRepo;
     private final DuckDbService duckDbService;
-    private final PgCopyManager pgCopyManager;
+    private final LoaderAdapterRegistry loaderAdapterRegistry;
     private final QuarantineService quarantineService;
     private final RunLogIngestService runLogIngest;
     private final StageProgressBroadcaster broadcaster;
@@ -87,6 +88,14 @@ public class VerifyStage implements StageRunner {
         if (dbConfig == null) {
             failStage(stage, startedAt, 0, ctx.getBindings().size(), "tobe DB config not set");
             ingest(ctx, "Verify failed — tobe DB config not set", false);
+            return;
+        }
+        final LoaderAdapter adapter;
+        try {
+            adapter = loaderAdapterRegistry.select(dbConfig);
+        } catch (RuntimeException e) {
+            failStage(stage, startedAt, 0, ctx.getBindings().size(), e.getMessage());
+            ingest(ctx, "Verify failed — " + e.getMessage(), false);
             return;
         }
 
@@ -123,8 +132,8 @@ public class VerifyStage implements StageRunner {
                 }
 
                 long pgCount;
-                String pgQualified = pgTableName(tobeSchema, tobeTable);
-                try (Connection conn = pgCopyManager.openConnection(dbConfig);
+                String pgQualified = adapter.sql().qualifiedTable(tobeSchema, tobeTable);
+                try (Connection conn = adapter.openConnection(dbConfig, true);
                      Statement st = conn.createStatement();
                      ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + pgQualified)) {
                     rs.next();
@@ -169,7 +178,7 @@ public class VerifyStage implements StageRunner {
                     boolean noPk = pkCols.isEmpty();
                     List<String> compareCols = noPk ? allColumns(columnsByTable.get(tobeTable)) : pkCols;
                     String pkMismatch = compareCols.isEmpty() ? null
-                            : compareAllPkRows(fqDuck, pgQualified, compareCols, dbConfig);
+                            : compareAllPkRows(adapter, fqDuck, pgQualified, compareCols, dbConfig);
                     if (pkMismatch != null) {
                         Map<String, Object> sampleData = new HashMap<>();
                         sampleData.put("reason", noPk ? "Row mismatch (full-row compare, no PK)" : "PK row mismatch");
@@ -285,18 +294,20 @@ public class VerifyStage implements StageRunner {
      *
      * (가시성 package-private — VerifyStageFullCompareTest 가 전수 비교 동작을 직접 검증.)
      */
-    String compareAllPkRows(String fqDuck, String pgQualified,
+    String compareAllPkRows(LoaderAdapter adapter, String fqDuck, String pgQualified,
                             List<String> pkCols, Map<String, Object> dbConfig) throws Exception {
         if (pkCols.isEmpty()) return null;
-        String selCols = pkCols.stream().map(VerifyStage::quoteIdent).collect(Collectors.joining(", "));
-        String duckSql = "SELECT " + selCols + " FROM " + fqDuck + " ORDER BY " + selCols;
-        String pgSql   = "SELECT " + selCols + " FROM " + pgQualified + " ORDER BY " + selCols;
+        // DuckDB 는 항상 "x" quoting; TO-BE 는 엔진 방언(PG 는 동일, Oracle 은 다를 수 있음).
+        String duckSel = pkCols.stream().map(VerifyStage::quoteIdent).collect(Collectors.joining(", "));
+        String tobeSel = pkCols.stream().map(adapter.sql()::quoteIdent).collect(Collectors.joining(", "));
+        String duckSql = "SELECT " + duckSel + " FROM " + fqDuck + " ORDER BY " + duckSel;
+        String pgSql   = "SELECT " + tobeSel + " FROM " + pgQualified + " ORDER BY " + tobeSel;
 
         int colCount = pkCols.size();
         long row = 0;
         try (Statement duckSt = duckDbService.statement();
              ResultSet duckRs = duckSt.executeQuery(duckSql);
-             Connection conn = pgCopyManager.openConnection(dbConfig);
+             Connection conn = adapter.openConnection(dbConfig, true);
              Statement pgSt = conn.createStatement();
              ResultSet pgRs = pgSt.executeQuery(pgSql)) {
             while (true) {

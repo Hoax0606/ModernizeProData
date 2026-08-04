@@ -73,8 +73,11 @@ public class SiteMappingImportService {
         List<ProjectOutcome> outcomes = new ArrayList<>(targets.size());
         for (Project p : targets) {
             try {
+                // 사이트 통합 CSV 를 여러 프로젝트에 분배 — AS-IS DDL 범위 필터를 켠다(true).
+                // TO-BE 테이블명이 겹치는 프로젝트 간 잘못된 combine 방지용. (단일 프로젝트 import 는
+                // 이 필터를 끄고, TO-BE DDL 소속만으로 판정한다.)
                 MappingImport mi = importService.importFromCsv(
-                        p.getId(), columnCsv, columnFilename, codeCsv, codeFilename, userName, null);
+                        p.getId(), columnCsv, columnFilename, codeCsv, codeFilename, userName, null, true);
                 outcomes.add(new ProjectOutcome(
                         p.getId(), p.getName(), "success",
                         mi.getRuleCount(), mi.getCodeMapCount(), null));

@@ -29,7 +29,11 @@ class SiteCsvRowCountCacheTest {
         site.setCsvPath(csvPath);
         Mockito.when(siteRepo.findById("st-test")).thenReturn(Optional.of(site));
         // DuckDbService 는 row-count 경로에서 사용 안 함 (Files.lines) — mock 으로 충분.
-        return new SiteCsvPreviewController(siteRepo, Mockito.mock(com.ksinfo.modernize_pro_data.common.duckdb.DuckDbService.class));
+        // SourceReaderRegistry 도 row-count 경로에선 미사용 — UTF-8 passthrough 하나면 충분.
+        var registry = new com.ksinfo.modernize_pro_data.coordinator.worker.source.SourceReaderRegistry(
+                java.util.List.of(new com.ksinfo.modernize_pro_data.coordinator.worker.source.Utf8PassthroughSourceReader()));
+        return new SiteCsvPreviewController(siteRepo,
+                Mockito.mock(com.ksinfo.modernize_pro_data.common.duckdb.DuckDbService.class), registry);
     }
 
     private long rowCount(SiteCsvPreviewController c, String table) {

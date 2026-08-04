@@ -11,9 +11,19 @@ import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlForeignKey;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlForeignKeyRepository;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTable;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlTableRepository;
-import com.ksinfo.modernize_pro_data.coordinator.load.PgCopyManager;
-import com.ksinfo.modernize_pro_data.coordinator.load.PgDdlGenerator;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.CheckConstraintMeta;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.ForeignKeyMeta;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.LoadRequest;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.LoaderAdapter;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.LoaderAdapterRegistry;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.MergeRequest;
+import com.ksinfo.modernize_pro_data.coordinator.run.RunType;
+import com.ksinfo.modernize_pro_data.coordinator.run.delta.DeltaConstants;
+import com.ksinfo.modernize_pro_data.coordinator.load.spi.UniqueConstraintMeta;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
+import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBindingSource;
+import com.ksinfo.modernize_pro_data.coordinator.run.delta.DeltaWatermark;
+import com.ksinfo.modernize_pro_data.coordinator.run.delta.DeltaWatermarkRepository;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineSeverity;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
@@ -87,11 +97,12 @@ public class LoadStage implements StageRunner {
     private final DdlConstraintColumnRepository ddlConstraintColumnRepo;
     private final DdlForeignKeyRepository ddlForeignKeyRepo;
     private final DuckDbService duckDbService;
-    private final PgCopyManager pgCopyManager;
+    private final LoaderAdapterRegistry loaderAdapterRegistry;
     private final QuarantineService quarantineService;
     private final RunLogIngestService runLogIngest;
     private final StageProgressBroadcaster broadcaster;
     private final com.ksinfo.modernize_pro_data.coordinator.run.RunControlRegistry runControlRegistry;
+    private final DeltaWatermarkRepository deltaWatermarkRepo;
 
     @Override
     public String stageKey() {
@@ -113,6 +124,16 @@ public class LoadStage implements StageRunner {
         if (dbConfig == null) {
             failStage(stage, startedAt, 0, ctx.getBindings().size(), "tobe DB config not set");
             ingest(ctx, "Load failed — tobe DB config not set", false);
+            return;
+        }
+
+        // TO-BE 엔진(dbConfig.type)에 맞는 LoaderAdapter 선택. type 없음/빈값 → PostgreSQL(기존 동작).
+        final LoaderAdapter adapter;
+        try {
+            adapter = loaderAdapterRegistry.select(dbConfig);
+        } catch (RuntimeException e) {
+            failStage(stage, startedAt, 0, ctx.getBindings().size(), e.getMessage());
+            ingest(ctx, "Load failed — " + e.getMessage(), false);
             return;
         }
 
@@ -147,7 +168,7 @@ public class LoadStage implements StageRunner {
                     log.warn("Load cancelled — skipping remaining tables runId={}", runId);
                     break;
                 }
-                if (loadBinding(ctx, stage, b, dbConfig, columnsByTable, uniqueByTable, fksByTable, checksByTable)) success.incrementAndGet();
+                if (loadBinding(ctx, stage, adapter, b, dbConfig, columnsByTable, uniqueByTable, fksByTable, checksByTable)) success.incrementAndGet();
                 else failed.incrementAndGet();
                 stage.setTablesSuccess(success.get());
                 stage.setTablesFailed(failed.get());
@@ -165,7 +186,7 @@ public class LoadStage implements StageRunner {
                     futures.add(pool.submit(() -> {
                         // 병렬 task 도 시작 시 cancel 확인 — 이미 취소면 적재 skip.
                         if (runControlRegistry.isCancelled(runId)) { failed.incrementAndGet(); return; }
-                        if (loadBinding(ctx, stage, b, dbConfig, columnsByTable, uniqueByTable, fksByTable, checksByTable)) success.incrementAndGet();
+                        if (loadBinding(ctx, stage, adapter, b, dbConfig, columnsByTable, uniqueByTable, fksByTable, checksByTable)) success.incrementAndGet();
                         else failed.incrementAndGet();
                         // stage entity save 경합 회피용 동기화 — Load 끝 broadcast.
                         synchronized (stage) {
@@ -188,7 +209,7 @@ public class LoadStage implements StageRunner {
         // orphan(부모 없는 자식)·CHECK 위반은 삭제하지 않고 WARN quarantine 으로 표면화,
         // 깨끗하면 VALIDATE 로 제약 확정, 위반 있으면 NOT VALID 유지(운영자/비즈니스 판단).
         try {
-            applyDeferredConstraints(ctx, stage, dbConfig, bindings, fksByTable, checksByTable);
+            applyDeferredConstraints(ctx, stage, adapter, dbConfig, bindings, fksByTable, checksByTable);
         } catch (Exception e) {
             log.warn("applyDeferredConstraints failed runId={}: {}", runId, e.getMessage());
         }
@@ -227,7 +248,7 @@ public class LoadStage implements StageRunner {
      * 한 binding 적재. 성공=true / 실패·skip=false. 병렬 task 로도 호출되므로 task-local 자원만 사용:
      * DuckDB 는 duplicateConnection(공유 connection 동시 사용 회피), PG 는 per-binding openConnection.
      */
-    private boolean loadBinding(StageContext ctx, StageInstance stage, MappingTableBinding binding,
+    private boolean loadBinding(StageContext ctx, StageInstance stage, LoaderAdapter adapter, MappingTableBinding binding,
                                 Map<String, Object> dbConfig,
                                 Map<String, List<DdlColumn>> columnsByTable,
                                 Map<String, List<UniqueConstraintMeta>> uniqueByTable,
@@ -286,35 +307,74 @@ public class LoadStage implements StageRunner {
             /* 2. DuckDB SELECT * → PG COPY FROM STDIN streaming. 중간 CSV 파일 X.
                   PG connection 과 DuckDB connection 을 동시 열고, ResultSet 을 한 row 씩
                   CSV 직렬화 → PGCopyOutputStream. PgCopyManager.copyInFromResultSet 참고. */
-            String pgQualified = pgTableName(tobeSchema, tobeTable);
+            String pgQualified = adapter.sql().qualifiedTable(tobeSchema, tobeTable);
+            // Phase 6: site.tobeEncoding 을 타깃 문자셋으로 전달. PG 는 무시(UTF-8 고정),
+            // Oracle 은 TargetFileEncoder(.dat 인코딩) + CTL CHARACTERSET + VARCHAR2(n CHAR) 구동.
+            String targetCharset = ctx.getSite().getTobeEncoding();
             long rows;
-            // cutover = production 전환 → synchronous_commit 절대 끄지 않음 (durability 우선).
-            boolean cutover = ctx.getRunHistory().getRunType()
-                    == com.ksinfo.modernize_pro_data.coordinator.run.RunType.cutover;
-            try (Connection conn = pgCopyManager.openConnection(dbConfig, !cutover)) {
-                ensurePgTable(ctx, conn, tobeSchema, tobeTable, columnsByTable);
-                boolean fkDisabled = pgCopyManager.tryDisableConstraints(conn);
-                try {
-                    pgCopyManager.truncate(conn, pgQualified);
-                    String runIdForCancel = ctx.getRunHistory().getId();
+            RunType runType = ctx.getRunHistory().getRunType();
+            // cutover/delta = production durability 중요 → synchronous_commit 끄지 않음.
+            boolean delta = runType == RunType.delta;
+            boolean durabilityCritical = runType == RunType.cutover || delta;
+            // 델타 run 에서도 병합 vs 전량은 테이블별로 결정: Transform 이 __op 를 실은 tobe_ 만 병합.
+            // (join/union·full 스냅샷 = tobe_ 에 __op 없음 → else 분기 = 기존 full 재적재 경로.)
+            boolean mergeMode = delta && tobeColumns.contains(DeltaConstants.OP_COLUMN);
+            String runIdForCancel = ctx.getRunHistory().getId();
+            try (Connection conn = adapter.openConnection(dbConfig, !durabilityCritical)) {
+                ensureTable(ctx, adapter, conn, tobeSchema, tobeTable, columnsByTable, targetCharset);
+                if (mergeMode) {
+                    /* 델타(CDC 증분): TRUNCATE 없이 PK 기준 upsert(op=I/U)+delete(op=D) 병합 —
+                       타깃 기존 데이터 보존. ON CONFLICT 는 PK 인덱스 사전 존재가 필요하므로
+                       초기 전량적재가 만들어 둔 PK 를 병합 전에 멱등 보장(이미 있으면 no-op). */
+                    ensurePrimaryKey(ctx, adapter, conn, tobeSchema, tobeTable, columnsByTable.get(tobeTable));
+                    List<String> pkCols = adapter.primaryKeyColumns(columnsByTable.get(tobeTable));
+                    if (pkCols == null || pkCols.isEmpty()) {
+                        // PK 없는 테이블은 증분(__op) 델타 불가 — full 재적재로 폴백하면 델타 CSV(변경분만)
+                        // 로 truncate+load 가 되어 전체 데이터가 소실된다. 그래서 fail-fast 가 정답.
+                        // 이 테이블은 full 스냅샷(no __op)으로 보내면 전량 재적재 경로로 정상 처리된다.
+                        throw new IllegalStateException(
+                                "PK 없는 테이블은 증분(__op) 델타 불가 — " + tableLabel
+                                + " : full 스냅샷(no __op)으로 전송하면 전량 재적재됩니다.");
+                    }
                     try (Connection duck = duckDbService.duplicateOf(ctx.getDuckConnection());
                          Statement duckSt = duck.createStatement();
                          ResultSet rs = duckSt.executeQuery("SELECT * FROM " + fqTobeDuck)) {
-                        // cancel supplier — COPY 도중 Stop 누르면 행 루프가 중단 throw → conn close → COPY abort.
-                        rows = pgCopyManager.copyInFromResultSet(conn, pgQualified, tobeColumns, rs,
-                                () -> runControlRegistry.isCancelled(runIdForCancel));
+                        MergeRequest mreq = new MergeRequest(conn, tobeSchema, tobeTable, pgQualified,
+                                tobeColumns, rs,
+                                () -> runControlRegistry.isCancelled(runIdForCancel),
+                                pkCols, DeltaConstants.OP_COLUMN);
+                        rows = adapter.merge(mreq);
                     }
-                } finally {
-                    if (fkDisabled) pgCopyManager.restoreConstraints(conn);
+                } else {
+                    boolean fkDisabled = adapter.tryDisableConstraints(conn);
+                    try {
+                        adapter.truncate(conn, pgQualified);
+                        try (Connection duck = duckDbService.duplicateOf(ctx.getDuckConnection());
+                             Statement duckSt = duck.createStatement();
+                             ResultSet rs = duckSt.executeQuery("SELECT * FROM " + fqTobeDuck)) {
+                            // cancel supplier — 적재 도중 Stop 누르면 행 루프가 중단 throw → 적재 abort.
+                            LoadRequest req = new LoadRequest(dbConfig, conn, tobeSchema, tobeTable, pgQualified,
+                                    tobeColumns, rs, targetCharset, ctx.getOutputDir(),
+                                    () -> runControlRegistry.isCancelled(runIdForCancel),
+                                    columnsByTable.get(tobeTable));
+                            rows = adapter.load(req);
+                        }
+                    } finally {
+                        if (fkDisabled) adapter.restoreConstraints(conn);
+                    }
+                    /* 적재 후 UK 부착 (테이블 단위, cross-table 의존 없음). PG PRIMARY KEY 는
+                       createTableIfNotExists 에 inline — PG 가 <table>_pkey unique index 자동 생성.
+                       FK / CHECK 는 모든 테이블 적재 후 final pass(applyDeferredConstraints)에서 부착·검증.
+                       per-binding 이면 자식이 부모보다 먼저 적재돼 가짜 orphan 이 날 수 있어서. */
+                    // PK 후행 — bare 테이블에 COPY 끝난 뒤 ADD PRIMARY KEY 로 인덱스 일괄 빌드
+                    // (createTableIfNotExists 가 inline PK 를 안 넣음 → COPY 중 PK 인덱스 미유지 = 빠름).
+                    ensurePrimaryKey(ctx, adapter, conn, tobeSchema, tobeTable, columnsByTable.get(tobeTable));
+                    ensureUniqueConstraints(ctx, adapter, conn, tobeSchema, tobeTable, uniqueByTable);
                 }
-                /* 적재 후 UK 부착 (테이블 단위, cross-table 의존 없음). PG PRIMARY KEY 는
-                   createTableIfNotExists 에 inline — PG 가 <table>_pkey unique index 자동 생성.
-                   FK / CHECK 는 모든 테이블 적재 후 final pass(applyDeferredConstraints)에서 부착·검증.
-                   per-binding 이면 자식이 부모보다 먼저 적재돼 가짜 orphan 이 날 수 있어서. */
-                // PK 후행 — bare 테이블에 COPY 끝난 뒤 ADD PRIMARY KEY 로 인덱스 일괄 빌드
-                // (createTableIfNotExists 가 inline PK 를 안 넣음 → COPY 중 PK 인덱스 미유지 = 빠름).
-                ensurePrimaryKey(ctx, conn, tobeSchema, tobeTable, columnsByTable.get(tobeTable));
-                ensureUniqueConstraints(ctx, conn, tobeSchema, tobeTable, uniqueByTable);
+            }
+
+            if (delta) {
+                recordDeltaWatermarkBestEffort(ctx, binding, tobeSchema, tobeTable);
             }
 
             result.setStatus(StageTableStatus.success);
@@ -377,21 +437,66 @@ public class LoadStage implements StageRunner {
     }
 
     /**
+     * 델타 병합 성공 후 {@code delta_watermark} 갱신 — per-(project, TO-BE table) 커서.
+     * 델타 CSV 의 선택 {@code __scn} 최대값을 기록(없으면 SCN 없이 run/시각만). best-effort —
+     * 실패해도 적재 자체는 성공 처리(감사 보조 정보라 run 을 깨지 않음).
+     */
+    private void recordDeltaWatermarkBestEffort(StageContext ctx, MappingTableBinding binding,
+                                                String tobeSchema, String tobeTable) {
+        try {
+            String projectId = ctx.getRunHistory().getProjectId();
+            String runId = ctx.getRunHistory().getId();
+            Long maxScn = readMaxDeltaScn(ctx, binding);
+            DeltaWatermark wm = deltaWatermarkRepo
+                    .findByProjectIdAndTobeSchemaAndTobeTable(projectId, tobeSchema, tobeTable)
+                    .orElseGet(() -> DeltaWatermark.create(projectId, tobeSchema, tobeTable));
+            if (maxScn != null) wm.setLastAppliedScn(maxScn);
+            wm.setLastRunId(runId);
+            wm.setUpdatedAt(OffsetDateTime.now());
+            deltaWatermarkRepo.save(wm);
+        } catch (Exception e) {
+            log.warn("delta watermark 갱신 skip {}.{}: {}", tobeSchema, tobeTable, e.getMessage());
+        }
+    }
+
+    /** asis_{table} 에서 {@code __scn} 최대값(BIGINT). 컬럼 부재/미제공이면 null. */
+    private Long readMaxDeltaScn(StageContext ctx, MappingTableBinding binding) {
+        List<MappingTableBindingSource> sources = binding.getSources();
+        if (sources == null || sources.isEmpty()) return null;
+        String asisTable = sources.get(0).getAsisTable();
+        if (asisTable == null || asisTable.isBlank()) return null;
+        String fq = quoteIdent(ctx.getDuckdbSchema()) + "." + quoteIdent("asis_" + asisTable);
+        String scnCol = quoteIdent(DeltaConstants.SCN_COLUMN);
+        try (Connection duck = duckDbService.duplicateOf(ctx.getDuckConnection());
+             Statement st = duck.createStatement();
+             ResultSet rs = st.executeQuery("SELECT MAX(CAST(" + scnCol + " AS BIGINT)) FROM " + fq)) {
+            if (rs.next()) {
+                long v = rs.getLong(1);
+                return rs.wasNull() ? null : v;
+            }
+        } catch (Exception e) {
+            // __scn 컬럼 없음(선택 항목) 등 — SCN 없이 워터마크 기록.
+            log.debug("no {} for {}: {}", DeltaConstants.SCN_COLUMN, asisTable, e.getMessage());
+        }
+        return null;
+    }
+
+    /**
      * PoC1 부트스트랩 — target PG 에 TO-BE schema/table 이 없으면 자동 생성.
      * {@code IF NOT EXISTS} 라 DBA 가 미리 Migration SQL 적용해두면 NO-OP.
      * 컬럼 메타가 없으면 (DDL 미등록) skip — 기존 동작(테이블 부재 → COPY 실패) 그대로.
      */
-    private void ensurePgTable(StageContext ctx, Connection conn, String tobeSchema, String tobeTable,
-                               Map<String, List<DdlColumn>> columnsByTable) throws Exception {
+    private void ensureTable(StageContext ctx, LoaderAdapter adapter, Connection conn, String tobeSchema, String tobeTable,
+                             Map<String, List<DdlColumn>> columnsByTable, String targetCharset) throws Exception {
         List<DdlColumn> cols = columnsByTable.get(tobeTable);
         if (cols == null || cols.isEmpty()) return;
         try (Statement st = conn.createStatement()) {
             if (tobeSchema != null && !tobeSchema.isBlank()) {
-                st.executeUpdate(PgDdlGenerator.createSchemaIfNotExists(tobeSchema));
+                st.executeUpdate(adapter.createSchemaIfNotExists(tobeSchema));
             }
-            st.executeUpdate(PgDdlGenerator.createTableIfNotExists(tobeSchema, tobeTable, cols));
+            st.executeUpdate(adapter.createTableIfNotExists(tobeSchema, tobeTable, cols, targetCharset));
         }
-        ingest(ctx, "Ensured PG table " + (tobeSchema == null || tobeSchema.isBlank() ? "" : tobeSchema + ".") + tobeTable, true);
+        ingest(ctx, "Ensured table " + (tobeSchema == null || tobeSchema.isBlank() ? "" : tobeSchema + ".") + tobeTable, true);
     }
 
     /**
@@ -403,10 +508,10 @@ public class LoadStage implements StageRunner {
      * 이미 존재(DBA 사전생성/재실행) 또는 중복키 시 에러 → log 만 (멱등). 중복키는 AuditStage 의
      * pk_unique 검증이 적재 전 quarantine 했어야 하므로 정상 흐름에선 발생 안 함.
      */
-    void ensurePrimaryKey(StageContext ctx, Connection conn, String tobeSchema, String tobeTable,
+    void ensurePrimaryKey(StageContext ctx, LoaderAdapter adapter, Connection conn, String tobeSchema, String tobeTable,
                           List<DdlColumn> cols) {
         if (cols == null) return;
-        List<String> pkCols = PgDdlGenerator.primaryKeyColumns(cols);
+        List<String> pkCols = adapter.primaryKeyColumns(cols);
         if (pkCols.isEmpty()) return;
 
         boolean prevAutoCommit;
@@ -417,7 +522,7 @@ public class LoadStage implements StageRunner {
         }
         try {
             if (!prevAutoCommit) conn.setAutoCommit(true);
-            String sql = PgDdlGenerator.addPrimaryKeySql(tobeSchema, tobeTable, pkCols);
+            String sql = adapter.addPrimaryKeySql(tobeSchema, tobeTable, pkCols);
             try (Statement st = conn.createStatement()) {
                 st.execute(sql);
                 ingest(ctx, "Ensured PK on " + tobeTable + " (" + String.join(",", pkCols) + ")", true);
@@ -431,7 +536,7 @@ public class LoadStage implements StageRunner {
         }
     }
 
-    void ensureUniqueConstraints(StageContext ctx, Connection conn, String tobeSchema, String tobeTable,
+    void ensureUniqueConstraints(StageContext ctx, LoaderAdapter adapter, Connection conn, String tobeSchema, String tobeTable,
                                  Map<String, List<UniqueConstraintMeta>> uniqueByTable) {
         List<UniqueConstraintMeta> uks = uniqueByTable.getOrDefault(tobeTable, List.of());
         if (uks.isEmpty()) return;
@@ -445,7 +550,7 @@ public class LoadStage implements StageRunner {
         try {
             if (!prevAutoCommit) conn.setAutoCommit(true);
             for (UniqueConstraintMeta uk : uks) {
-                String sql = PgDdlGenerator.addUniqueConstraintSql(tobeSchema, tobeTable, uk.name(), uk.columns());
+                String sql = adapter.addUniqueConstraintSql(tobeSchema, tobeTable, uk.name(), uk.columns());
                 try (Statement st = conn.createStatement()) {
                     st.execute(sql);
                     ingest(ctx, "Ensured UK " + uk.name() + " on " + tobeTable
@@ -466,7 +571,7 @@ public class LoadStage implements StageRunner {
      * 같은 binding 안의 자식 테이블이 먼저 적재되고 부모는 아직일 수 있어 부모 row 부재 시 VALIDATE 실패 가능 —
      * 그 경우 log 만 남기고 적재 자체는 성공. 운영팀이 사후 VALIDATE 재시도.
      */
-    void ensureForeignKeys(StageContext ctx, Connection conn, String tobeSchema, String tobeTable,
+    void ensureForeignKeys(StageContext ctx, LoaderAdapter adapter, Connection conn, String tobeSchema, String tobeTable,
                            Map<String, List<ForeignKeyMeta>> fksByTable) {
         List<ForeignKeyMeta> fks = fksByTable.getOrDefault(tobeTable, List.of());
         if (fks.isEmpty()) return;
@@ -480,11 +585,11 @@ public class LoadStage implements StageRunner {
         try {
             if (!prevAutoCommit) conn.setAutoCommit(true);
             for (ForeignKeyMeta fk : fks) {
-                String addSql = PgDdlGenerator.addForeignKeyNotValidSql(
+                String addSql = adapter.addForeignKeyNotValidSql(
                         tobeSchema, tobeTable, fk.name(), fk.columns(),
                         fk.refSchema(), fk.refTable(), fk.refColumns(),
                         fk.onDelete(), fk.onUpdate(), fk.deferrableInfo());
-                String validateSql = PgDdlGenerator.validateForeignKeySql(tobeSchema, tobeTable, fk.name());
+                String validateSql = adapter.validateForeignKeySql(tobeSchema, tobeTable, fk.name());
                 try (Statement st = conn.createStatement()) {
                     st.execute(addSql);
                 } catch (Exception e) {
@@ -574,7 +679,7 @@ public class LoadStage implements StageRunner {
      * 적재 후 CHECK 부착 — TO-BE DDL 에 정의된 CHECK 만 (AS-IS Oracle 표현식은 자동 변환 위험으로 부착 X).
      * NOT VALID + VALIDATE 2단계 — 기존 데이터 위반 시 NOT VALID 상태로 남기고 운영팀 사후 정제.
      */
-    void ensureCheckConstraints(StageContext ctx, Connection conn, String tobeSchema, String tobeTable,
+    void ensureCheckConstraints(StageContext ctx, LoaderAdapter adapter, Connection conn, String tobeSchema, String tobeTable,
                                 Map<String, List<CheckConstraintMeta>> checksByTable) {
         List<CheckConstraintMeta> checks = checksByTable.getOrDefault(tobeTable, List.of());
         if (checks.isEmpty()) return;
@@ -588,9 +693,9 @@ public class LoadStage implements StageRunner {
         try {
             if (!prevAutoCommit) conn.setAutoCommit(true);
             for (CheckConstraintMeta ck : checks) {
-                String addSql = PgDdlGenerator.addCheckConstraintNotValidSql(
+                String addSql = adapter.addCheckConstraintNotValidSql(
                         tobeSchema, tobeTable, ck.name(), ck.checkExpression());
-                String validateSql = PgDdlGenerator.validateCheckConstraintSql(tobeSchema, tobeTable, ck.name());
+                String validateSql = adapter.validateCheckConstraintSql(tobeSchema, tobeTable, ck.name());
                 try (Statement st = conn.createStatement()) {
                     st.execute(addSql);
                 } catch (Exception e) {
@@ -620,7 +725,7 @@ public class LoadStage implements StageRunner {
      * WARN quarantine 으로 표면화. ensureForeignKeys/ensureCheckConstraints 가 ADD NOT VALID +
      * VALIDATE 를 수행 — 깨끗하면 제약 확정, 위반이면 VALIDATE 실패로 NOT VALID 유지(기존 동작).
      */
-    private void applyDeferredConstraints(StageContext ctx, StageInstance stage, Map<String, Object> dbConfig,
+    private void applyDeferredConstraints(StageContext ctx, StageInstance stage, LoaderAdapter adapter, Map<String, Object> dbConfig,
                                           List<MappingTableBinding> bindings,
                                           Map<String, List<ForeignKeyMeta>> fksByTable,
                                           Map<String, List<CheckConstraintMeta>> checksByTable) throws Exception {
@@ -632,7 +737,7 @@ public class LoadStage implements StageRunner {
 
         boolean cutover = ctx.getRunHistory().getRunType()
                 == com.ksinfo.modernize_pro_data.coordinator.run.RunType.cutover;
-        try (Connection conn = pgCopyManager.openConnection(dbConfig, !cutover)) {
+        try (Connection conn = adapter.openConnection(dbConfig, !cutover)) {
             try { conn.setAutoCommit(true); } catch (Exception ignore) { /* best effort */ }
             for (MappingTableBinding b : bindings) {
                 boolean loaded = stageTableResultRepo
@@ -659,7 +764,7 @@ public class LoadStage implements StageRunner {
                         log.warn("FK orphan probe failed {} ({}): {}", tobeTable, fk.name(), e.getMessage());
                     }
                 }
-                ensureForeignKeys(ctx, conn, tobeSchema, tobeTable, fksByTable);
+                ensureForeignKeys(ctx, adapter, conn, tobeSchema, tobeTable, fksByTable);
 
                 // CHECK — 부착 전에 위반 감지 → WARN. 그다음 ensureCheckConstraints 가 ADD+VALIDATE.
                 for (CheckConstraintMeta ck : checksByTable.getOrDefault(tobeTable, List.of())) {
@@ -674,7 +779,7 @@ public class LoadStage implements StageRunner {
                         log.warn("CHECK probe failed {} ({}): {}", tobeTable, ck.name(), e.getMessage());
                     }
                 }
-                ensureCheckConstraints(ctx, conn, tobeSchema, tobeTable, checksByTable);
+                ensureCheckConstraints(ctx, adapter, conn, tobeSchema, tobeTable, checksByTable);
             }
         }
     }
@@ -753,14 +858,6 @@ public class LoadStage implements StageRunner {
                 null, reason, QuarantineSeverity.warning, data, count, ctx.getLogLineSeqCursor());
         ingest(ctx, "Load WARN — " + reason + " (" + tableLabel + ")", true);
     }
-
-    record UniqueConstraintMeta(String name, List<String> columns) {}
-
-    record ForeignKeyMeta(String name, List<String> columns,
-                          String refSchema, String refTable, List<String> refColumns,
-                          String onDelete, String onUpdate, String deferrableInfo) {}
-
-    record CheckConstraintMeta(String name, String checkExpression) {}
 
     /** PostgreSQL 의 qualified table 명. schema 가 비면 unquoted (default search_path). */
     /**

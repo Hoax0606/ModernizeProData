@@ -1,6 +1,7 @@
 package com.ksinfo.modernize_pro_data.coordinator.site;
 
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.coordinator.load.TobeJdbcConnect;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -116,31 +117,16 @@ public class TobeDbHealthService {
         return h;
     }
 
-    /** 실제 JDBC 연결 시도 (PostgreSQL). CheckStage.pingTobeDb 와 동일 config 키. */
+    /** 실제 JDBC 연결 시도 (PostgreSQL / Oracle). CheckStage.pingTobeDb 와 동일 config 키·빌더. */
     private EnvHealth probe(String env, Map<String, Object> cfg) {
         OffsetDateTime now = OffsetDateTime.now();
-        String type = str(cfg.get("type"));
-        if (type != null && !type.isBlank() && !"PostgreSQL".equalsIgnoreCase(type)) {
+        String dialect = TobeJdbcConnect.dialect(cfg);
+        if (!TobeJdbcConnect.isSupported(dialect)) {
             return new EnvHealth(env, true, false,
-                    "Only PostgreSQL is supported for now (type=" + type + ")", now);
+                    "Unsupported TO-BE type: " + str(cfg.get("type")) + " (supported: PostgreSQL, Oracle)", now);
         }
-        String host = str(cfg.get("host"));
-        String database = str(cfg.get("database"));
-        String username = str(cfg.get("username"));
-        String password = str(cfg.get("password"));
-        Object portObj = cfg.get("port");
-        int port = portObj instanceof Number ? ((Number) portObj).intValue()
-                : portObj instanceof String && !((String) portObj).isBlank()
-                    ? Integer.parseInt((String) portObj) : 5432;
-
-        String url = "jdbc:postgresql://" + host + ":" + port + "/" + database;
-        Properties props = new Properties();
-        if (username != null) props.setProperty("user", username);
-        if (password != null) props.setProperty("password", password);
-        props.setProperty("connectTimeout", String.valueOf(PROBE_TIMEOUT_SEC));
-        props.setProperty("loginTimeout", String.valueOf(PROBE_TIMEOUT_SEC));
-        props.setProperty("socketTimeout", String.valueOf(PROBE_TIMEOUT_SEC + 1));
-
+        String url = TobeJdbcConnect.url(cfg);
+        Properties props = TobeJdbcConnect.props(cfg, PROBE_TIMEOUT_SEC);
         try (Connection conn = DriverManager.getConnection(url, props)) {
             boolean valid = conn.isValid(PROBE_TIMEOUT_SEC);
             return new EnvHealth(env, true, valid,

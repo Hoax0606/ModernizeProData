@@ -2,6 +2,7 @@ package com.ksinfo.modernize_pro_data.coordinator.worker.stages;
 
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlImport;
 import com.ksinfo.modernize_pro_data.coordinator.ddl.DdlImportRepository;
+import com.ksinfo.modernize_pro_data.coordinator.load.TobeJdbcConnect;
 import com.ksinfo.modernize_pro_data.coordinator.mapping.MappingTableBinding;
 import com.ksinfo.modernize_pro_data.coordinator.quarantine.QuarantineService;
 import com.ksinfo.modernize_pro_data.coordinator.run.stage.StageInstance;
@@ -195,21 +196,15 @@ public class CheckStage implements StageRunner {
         if (byEnv == null) return "tobe_db_by_env not set";
         Map<String, Object> cfg = site.getActiveTobeDbConfig();
         if (cfg == null) return "tobe DB config not set for env=" + site.getEnvironment();
-        String host = (String) cfg.get("host");
-        Object portObj = cfg.get("port");
-        String database = (String) cfg.get("database");
-        String username = (String) cfg.get("username");
-        String password = (String) cfg.get("password");
-        if (host == null || database == null) return "host or database missing in tobe DB config";
-        int port = portObj instanceof Number ? ((Number) portObj).intValue()
-                : portObj instanceof String ? Integer.parseInt((String) portObj) : 5432;
-
-        String url = "jdbc:postgresql://" + host + ":" + port + "/" + database;
-        Properties props = new Properties();
-        if (username != null) props.setProperty("user", username);
-        if (password != null) props.setProperty("password", password);
-        props.setProperty("loginTimeout", String.valueOf(DB_CONNECT_TIMEOUT_SEC));
-        props.setProperty("connectTimeout", String.valueOf(DB_CONNECT_TIMEOUT_SEC));
+        if (cfg.get("host") == null || cfg.get("database") == null) {
+            return "host or database missing in tobe DB config";
+        }
+        String dialect = TobeJdbcConnect.dialect(cfg);
+        if (!TobeJdbcConnect.isSupported(dialect)) {
+            return "Unsupported TO-BE type: " + cfg.get("type") + " (supported: PostgreSQL, Oracle)";
+        }
+        String url = TobeJdbcConnect.url(cfg);
+        Properties props = TobeJdbcConnect.props(cfg, DB_CONNECT_TIMEOUT_SEC);
         try (Connection ignored = DriverManager.getConnection(url, props)) {
             return null;
         } catch (Exception e) {
@@ -227,6 +222,9 @@ public class CheckStage implements StageRunner {
     private String probeBindingEncoding(StageContext ctx, Site site,
                                         MappingTableBinding binding, String tableLabel) {
         if (site.getCsvPath() == null || site.getCsvPath().isBlank()) return null;
+        // 비-UTF-8 사이트는 원본을 UTF-8 로 직접 못 읽으므로 이 probe 를 skip — 인코딩 검증은
+        // ExtractStage 의 SourceReader SPI(디코드) + CsvInputGuard(fail-fast) 가 담당 (계획서 A4).
+        if (isNonUtf8Encoding(site.getAsisEncoding())) return null;
         Path baseDir = Paths.get(site.getCsvPath()).toAbsolutePath().normalize();
         String encodingClause = encodingClauseFor(site.getAsisEncoding());
 
@@ -250,21 +248,18 @@ public class CheckStage implements StageRunner {
     }
 
     /**
-     * ExtractStage 의 encodingClause 와 동일 규칙. site.asisEncoding → read_csv 의 encoding 절.
-     * UTF-8 / null / blank → 빈 문자열 (DuckDB native).
+     * read_csv 의 encoding 절 — 항상 빈 문자열(파이프라인 입력 계약 = UTF-8, 2026-07-08).
+     * encodings 확장 제거로 encoding= 을 쓰지 않는다. 비-UTF-8 입력은 ExtractStage 의 CsvInputGuard 가 reject.
      */
     private static String encodingClauseFor(String asisEncoding) {
-        if (asisEncoding == null || asisEncoding.isBlank()) return "";
-        String enc = asisEncoding.trim().toLowerCase();
-        if (enc.equals("utf-8") || enc.equals("utf8")) return "";
-        if (enc.equals("shift_jis") || enc.equals("shiftjis") || enc.equals("sjis")) {
-            return ", encoding='shift_jis'";
-        }
-        if (enc.equals("euc-jp") || enc.equals("euc_jp") || enc.equals("eucjp")) {
-            return ", encoding='EUC_JP'";
-        }
-        // pass-through — DuckDB encodings 확장이 인식 가능하면 통과, 아니면 read 시 throw.
-        return ", encoding='" + asisEncoding.trim().replace("'", "''") + "'";
+        return "";
+    }
+
+    /** UTF-8(또는 미지정)이 아닌 인코딩인가 — 비-UTF-8 이면 CheckStage probe skip (SPI 가 extract 에서 변환). */
+    private static boolean isNonUtf8Encoding(String enc) {
+        if (enc == null || enc.isBlank()) return false;
+        String e = enc.trim().toUpperCase();
+        return !(e.equals("UTF-8") || e.equals("UTF8"));
     }
 
     private void ingest(StageContext ctx, String message) {

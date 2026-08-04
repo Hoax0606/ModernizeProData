@@ -2,6 +2,8 @@ package com.ksinfo.modernize_pro_data.coordinator.api;
 
 import com.ksinfo.modernize_pro_data.common.dto.ApiResponse;
 import com.ksinfo.modernize_pro_data.common.exception.ApiException;
+import com.ksinfo.modernize_pro_data.coordinator.ddl.DialectUtil;
+import com.ksinfo.modernize_pro_data.coordinator.load.charset.TargetCharsetMapper;
 import com.ksinfo.modernize_pro_data.coordinator.site.Project;
 import com.ksinfo.modernize_pro_data.coordinator.site.ProjectRepository;
 import com.ksinfo.modernize_pro_data.coordinator.site.Site;
@@ -94,6 +96,7 @@ public class SiteController {
             throw new ApiException("SITE_NAME_DUPLICATE",
                     "같은 이름의 사이트가 이미 존재합니다", HttpStatus.CONFLICT);
         }
+        validateTobeEncoding(req.tobeEncoding(), req.tobeDbByEnv());
         Site site = Site.create(
                 req.name(), req.asisEnv(), req.tobeEnv(),
                 req.asisEncoding(), req.tobeEncoding(),
@@ -156,9 +159,44 @@ public class SiteController {
             }
         }
 
+        // 최종 상태(변경 반영 후)의 tobeEncoding × 엔진 조합 검증.
+        validateTobeEncoding(site.getTobeEncoding(), site.getTobeDbByEnv());
         siteRepository.save(site);
         log.info("Site updated: {} ({})", site.getName(), site.getId());
         return ApiResponse.ok(site);
+    }
+
+    /**
+     * tobeEncoding 이 tobeDbByEnv 의 각 엔진에 유효한지 검증 (Phase 6). PostgreSQL 은 UTF-8 만(도구 경로가
+     * UTF-8 고정), Oracle 은 {@link TargetCharsetMapper} 지원 집합(JA16SJIS/JA16EUC/AL32UTF8 + 별칭).
+     * 그 외 엔진(적재 미지원)은 검증 skip. 잘못된 조합은 400 으로 조기 차단 — 적재 시점 실패보다 낫다.
+     */
+    private void validateTobeEncoding(String tobeEncoding, Map<String, Object> tobeDbByEnv) {
+        if (tobeEncoding == null || tobeEncoding.isBlank() || tobeDbByEnv == null) return;
+        for (Map.Entry<String, Object> e : tobeDbByEnv.entrySet()) {
+            if (!(e.getValue() instanceof Map<?, ?> cfg)) continue;
+            Object type = cfg.get("type");
+            String raw = type == null ? null : type.toString();
+            String dialect = (raw == null || raw.isBlank())
+                    ? DialectUtil.POSTGRESQL : DialectUtil.normalize(raw);
+            if (DialectUtil.ORACLE.equals(dialect)) {
+                if (TargetCharsetMapper.find(tobeEncoding).isEmpty()) {
+                    throw new ApiException("TOBE_ENCODING_UNSUPPORTED",
+                            "Oracle TO-BE(env=" + e.getKey() + ")는 tobeEncoding=" + tobeEncoding
+                                    + " 를 지원하지 않습니다. 지원: AL32UTF8/UTF-8, JA16SJIS/Shift_JIS, JA16EUC/EUC-JP",
+                            HttpStatus.BAD_REQUEST);
+                }
+            } else if (DialectUtil.POSTGRESQL.equals(dialect)) {
+                String u = tobeEncoding.trim().toUpperCase();
+                if (!(u.equals("UTF-8") || u.equals("UTF8"))) {
+                    throw new ApiException("TOBE_ENCODING_UNSUPPORTED",
+                            "PostgreSQL TO-BE(env=" + e.getKey() + ")는 UTF-8 만 지원합니다 (tobeEncoding="
+                                    + tobeEncoding + ")",
+                            HttpStatus.BAD_REQUEST);
+                }
+            }
+            // 그 외 엔진(mssql/mysql/db2)은 적재 미지원 — 인코딩 검증 skip.
+        }
     }
 
     @DeleteMapping("/{id}")
