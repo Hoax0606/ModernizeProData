@@ -329,7 +329,12 @@ public class LoadStage implements StageRunner {
                     ensurePrimaryKey(ctx, adapter, conn, tobeSchema, tobeTable, columnsByTable.get(tobeTable));
                     List<String> pkCols = adapter.primaryKeyColumns(columnsByTable.get(tobeTable));
                     if (pkCols == null || pkCols.isEmpty()) {
-                        throw new IllegalStateException("delta merge 는 PK 가 필요합니다 — " + tableLabel);
+                        // PK 없는 테이블은 증분(__op) 델타 불가 — full 재적재로 폴백하면 델타 CSV(변경분만)
+                        // 로 truncate+load 가 되어 전체 데이터가 소실된다. 그래서 fail-fast 가 정답.
+                        // 이 테이블은 full 스냅샷(no __op)으로 보내면 전량 재적재 경로로 정상 처리된다.
+                        throw new IllegalStateException(
+                                "PK 없는 테이블은 증분(__op) 델타 불가 — " + tableLabel
+                                + " : full 스냅샷(no __op)으로 전송하면 전량 재적재됩니다.");
                     }
                     try (Connection duck = duckDbService.duplicateOf(ctx.getDuckConnection());
                          Statement duckSt = duck.createStatement();

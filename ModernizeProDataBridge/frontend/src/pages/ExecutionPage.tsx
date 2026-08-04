@@ -302,14 +302,6 @@ export function ExecutionPage() {
   });
   const runHistoryData = runHistoryQuery.data;
 
-  /* 델타 버튼 게이트 — "초기 전량적재가 한 번이라도 성공했나"(불변 사실)로 판정한다.
-     ※ '전 테이블 최신 run success(run-readiness)' 로 걸면, 델타 run 이 한 번 실패한 순간
-     최신 run 이 failed 가 되어 버튼이 잠기고, 다시 열려면 초기적재를 재실행해야 하는 문제가 있었음.
-     초기적재(=non-delta full run) 성공 이력은 사라지지 않으므로, 델타가 실패해도 재시도 가능. */
-  const initialLoadDone = (runHistoryData ?? []).some(
-    (r) => r.runType !== 'delta' && r.status === 'success',
-  );
-
   /* pin 切替 effect: pin の id が actually 変わったら新 pin の executionContext.runId に同期.
      ・新 pin に박제あり → その run を ACTIVE RUN として描画 (= pin 中心メンタルモデル)
      ・新 pin に박제なし → null = NO ACTIVE RUN
@@ -738,29 +730,6 @@ export function ExecutionPage() {
     }
   };
 
-  /* CDC 델타(증분) 수동 트리거 — 운영은 외부 스케줄러가 API 로 자동 실행하지만, 테스트·시연용
-     수동 버튼. phase/preflight/runMode 게이트를 타지 않는다(델타는 컷오버 이후 lifecycle).
-     선택 테이블이 있으면 그 테이블만, 없으면 전체. BE 가 runType=delta 로 병합 적재. */
-  const handleStartDelta = async () => {
-    if (!canControl) return;
-    if (!initialLoadDone) return;   // 초기 전량적재(전 테이블 최신 run success) 후에만
-    if (activeRunId && run && !isTerminal(run.status)) return;   // 진행 중이면 차단
-    const tables = selectedTables.size > 0 ? Array.from(selectedTables) : undefined;
-    if (!window.confirm(t('execution.run.deltaConfirm'))) return;
-    try {
-      const result = await runsApi.start(project.id, 'delta', tables);
-      if (result.status === 'STARTED' && result.runId) {
-        if (activeRunId) setActiveRunId(null);
-        setActiveRunId(result.runId);
-        void queryClient.invalidateQueries({ queryKey: ['run-history', project.id] });
-      } else {
-        alert(`Delta start rejected: ${result.status}\n${result.reason ?? ''}`);
-      }
-    } catch (e) {
-      alert(`Delta start failed: ${e instanceof Error ? e.message : 'unknown error'}`);
-    }
-  };
-
   return (
     <div style={styles.page}>
       <RunHeader
@@ -783,36 +752,9 @@ export function ExecutionPage() {
         onRetry={handleRetry}
         onDiscard={handleDiscard}
       />
-      {/* CDC 델타(증분) 수동 트리거 — 테스트·시연용. 운영은 외부 스케줄러가 API 로 자동 실행.
-          phase/preflight 게이트 밖의 별도 버튼(델타는 컷오버 이후 lifecycle). */}
-      {canControl && (
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
-          margin: '8px 0', padding: '8px 12px', borderRadius: 4,
-          border: '1px dashed var(--border-strong)', background: 'var(--panel-2)',
-        }}>
-          <span style={{ fontSize: 11.5, color: 'var(--text-3)', fontFamily: 'var(--mono)' }}>
-            {initialLoadDone ? t('execution.run.deltaHint') : t('execution.run.deltaBlocked')}
-          </span>
-          <button
-            type="button"
-            onClick={() => { if (initialLoadDone) handleStartDelta(); }}
-            disabled={!initialLoadDone}
-            title={initialLoadDone ? t('execution.run.deltaHint') : t('execution.run.deltaBlocked')}
-            style={initialLoadDone ? {
-              padding: '6px 14px', background: 'var(--navy)', color: '#fff',
-              border: '1px solid var(--navy)', borderRadius: 4, fontSize: 12.5, fontWeight: 600,
-              cursor: 'pointer', whiteSpace: 'nowrap',
-            } : {
-              padding: '6px 14px', background: 'var(--panel)', color: 'var(--text-3)',
-              border: '1px solid var(--border-strong)', borderRadius: 4, fontSize: 12.5, fontWeight: 600,
-              cursor: 'not-allowed', whiteSpace: 'nowrap', opacity: 0.6,
-            }}
-          >
-            ▶ {t('execution.run.startBtn.delta')}
-          </button>
-        </div>
-      )}
+      {/* NOTE: 델타(CDC 증분)는 UI 버튼 없이 외부 스케줄러/스크립트가 POST /api/v1/runs
+          {runType:"delta"} 로 자동 트리거한다. "초기 full 적재 선행" 가드는 RunService.startRun
+          (백엔드)에 있어 자동 경로까지 강제됨. */}
       {/* TO-BE DB 실시간 단절 경고 — run 진행 중인데 target env 가 unreachable 이면 즉시 red 배너.
           (CheckStage 의 1회 ping 만으로는 중간 단절을 못 잡던 갭을 메움.) */}
       {(() => {

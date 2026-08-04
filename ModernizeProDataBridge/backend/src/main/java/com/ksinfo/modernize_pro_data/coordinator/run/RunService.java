@@ -181,6 +181,14 @@ public class RunService {
         } else if (runType == RunType.delta) {
             // 델타(CDC 증분 catch-up)는 초기 컷오버 이후 production 에서 매일 반복 실행되는
             // 정상 운영 흐름이므로 prod 허용 + phase 제한 없음. (non-prod 리허설도 허용.)
+            // 단 초기 전량적재(= non-delta full run 성공)가 선행돼야 함 — 안 그러면 델타가
+            // 빈/반쪽 타깃에 적용됨. FE 버튼 게이트를 백엔드로 이관해 자동(API) 경로까지 강제.
+            if (!runHistoryRepo.existsByProjectIdAndStatusAndRunTypeNot(
+                    projectId, RunStatus.success, RunType.delta)) {
+                log.warn("startRun rejected: delta before any successful initial full load projectId={}", projectId);
+                return RunResult.rejected(
+                        "delta requires a successful initial full load (non-delta run) first");
+            }
         } else {
             if (isProd) {
                 log.warn("startRun rejected: runType={} on prod environment", runType);
@@ -436,7 +444,11 @@ public class RunService {
         // Snapshot 박제 — run 이 snapshot_id 와 함께 시작됐다면 그 snapshot 의 execution_context
         // 를 이 run 결과로 덮어쓴다. 성공/실패/abort/timeout 어떤 경로든 동일 hook.
         // 사용자 결정: 같은 snapshot 으로 여러 번 run 시 매번 덮어쓰기.
-        snapshotExecutionContextService.recordExecutionContext(rh);
+        // 단 델타(증분)는 매일 반복 실행 → snapshot 의 execution_context 를 덮어쓰면 그 snapshot 의
+        // 대표 run(컷오버/리허설) 컨텍스트가 델타로 오염된다. 델타 이력은 run_history 에 남으므로 skip.
+        if (rh.getRunType() != RunType.delta) {
+            snapshotExecutionContextService.recordExecutionContext(rh);
+        }
 
         // project.run_status を idle へ戻す (ロック解放)
         Project project = projectRepo.findByIdForUpdate(rh.getProjectId())

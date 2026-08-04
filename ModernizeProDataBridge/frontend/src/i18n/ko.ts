@@ -673,10 +673,6 @@ export const ko = {
   'execution.run.startBlocked.phaseEnv':                   '{env} 환경 + {phase} 단계에서는 run 을 시작할 수 없습니다',
   'execution.run.startBtn.cutover':                        'Start cutover',
   'execution.run.startBtn.rehearsal':                      'Start rehearsal',
-  'execution.run.startBtn.delta':                          'Run delta',
-  'execution.run.deltaHint':                               'CDC 증분 — 선택 테이블에 델타 CSV(__op)를 PK 기준 병합. 초기 적재 후 반복 실행(테스트용 수동 트리거).',
-  'execution.run.deltaConfirm':                            '델타(증분) 실행 — 델타 CSV(__op: I/U/D)를 PK 기준으로 타깃에 병합합니다(전체 재적재 아님). 초기 전량적재가 먼저 완료돼 있어야 합니다. 계속할까요?',
-  'execution.run.deltaBlocked':                            'CDC 증분 — 초기 전량적재(full run)가 한 번 이상 성공한 뒤에만 실행할 수 있습니다.',
 
   /* Overall progress */
   'execution.progress.title':         'Overall progress',
