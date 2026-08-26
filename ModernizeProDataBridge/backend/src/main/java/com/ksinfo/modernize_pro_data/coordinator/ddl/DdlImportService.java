@@ -81,18 +81,21 @@ public class DdlImportService {
         // DDL 파싱을 선언된 엔진 dialect 로 분기 (AS-IS/TO-BE 대칭). 저장용 dialect 도 이 값을 재사용.
         //   postgresql → PgSchemaExtractor(staging apply), 그 외(oracle 등) → OracleDdlParser(정규식, DB 불필요).
         String dialect = resolveDialect(project, side);
+        // 오류 메시지에 실제로 실패한 쪽을 표기하기 위한 라벨 (AS-IS 실패에 "TO-BE 를 고치라"고
+        // 안내하던 문제 — 원인 파악을 크게 늦춘다).
+        String sideLabel = SIDE_ASIS.equals(side) ? "AS-IS" : "TO-BE";
         ParsedDdl parsed;
         try {
             if (DialectUtil.POSTGRESQL.equals(dialect)) {
                 // PostgreSQL — staging schema 에 적용해 pg_catalog 로 메타 추출. 비-PG 문법이면 PG 가 거부
                 // → TobeDdlApplyException → 400.
-                parsed = pgSchemaExtractor.extract(content);
+                parsed = pgSchemaExtractor.extract(content, sideLabel);
             } else {
                 // Oracle(및 load 미지원 엔진 fallback) — 정규식 파서.
                 parsed = parser.parse(new String(content, StandardCharsets.UTF_8));
             }
         } catch (PgSchemaExtractor.TobeDdlApplyException e) {
-            log.error("TO-BE DDL apply failed for project {}: {}", projectId, e.getMessage());
+            log.error("{} DDL apply failed for project {}: {}", sideLabel, projectId, e.getMessage());
             throw new ApiException("TOBE_DDL_APPLY_FAILED",
                     e.getMessage(), HttpStatus.BAD_REQUEST);
         } catch (RuntimeException e) {
@@ -205,7 +208,7 @@ public class DdlImportService {
         projectRepo.save(project);
 
         // DDL import 알림 — toast 대신 audit_log 에 기록해서 알림 벨(Notification)로 노출.
-        String sideLabel = SIDE_ASIS.equals(side) ? "AS-IS" : "TO-BE";
+        // (sideLabel 은 위 파싱 블록에서 이미 선언 — 오류 메시지와 같은 라벨을 재사용한다.)
         auditLogService.record(project, importedBy, "DDL imported")
                 .target(side)
                 .details(sideLabel + " · " + filename + " · " + parsed.getTables().size() + " tables")

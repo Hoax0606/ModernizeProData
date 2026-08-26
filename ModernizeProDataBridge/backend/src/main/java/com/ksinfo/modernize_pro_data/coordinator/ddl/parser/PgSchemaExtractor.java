@@ -40,7 +40,16 @@ public class PgSchemaExtractor {
 
     private final DataSource dataSource;
 
+    /** side 미지정 — 기존 호출부/테스트 호환. 오류 메시지는 TO-BE 기준으로 표기된다. */
     public ParsedDdl extract(byte[] content) {
+        return extract(content, "TO-BE");
+    }
+
+    /**
+     * @param sideLabel 사용자에게 보여줄 측 이름 ("AS-IS" / "TO-BE"). 오류 메시지에만 쓰인다 —
+     *     AS-IS 를 PG 로 파싱하다 실패했는데 "TO-BE 를 고치라"고 안내하면 원인 파악이 크게 늦어진다.
+     */
+    public ParsedDdl extract(byte[] content, String sideLabel) {
         String raw = new String(content, StandardCharsets.UTF_8);
         // self-healing — 적용 중 "schema X does not exist"(SQLState 3F000) 가 나오면 그 X 를
         // strip 대상에 추가하고 재시도. dump 이 schema 를 어떤 형태로 참조하든(CREATE SCHEMA 유무
@@ -67,7 +76,7 @@ public class PgSchemaExtractor {
                             lastError = e;
                             retry = true;   // 미식별 schema 발견 → strip 후 재시도
                         } else {
-                            throw new TobeDdlApplyException(friendlyApplyError(e, sql), e);
+                            throw new TobeDdlApplyException(friendlyApplyError(e, sql, sideLabel), e);
                         }
                     }
                     if (!retry) {
@@ -89,7 +98,7 @@ public class PgSchemaExtractor {
             }
         }
         throw new TobeDdlApplyException(
-                "TO-BE DDL 적용 실패 — schema 참조를 해소하지 못했습니다. 원인: "
+                sideLabel + " DDL 적용 실패 — schema 참조를 해소하지 못했습니다. 원인: "
                         + (lastError != null ? lastError.getMessage() : ""), lastError);
     }
 
@@ -97,7 +106,7 @@ public class PgSchemaExtractor {
      * 적용 실패 SQLException 을 사용자가 "무엇이 문제인지" 알 수 있는 메시지로 분류.
      * PG 원문(위치 포함)도 끝에 붙여 정확한 지점을 보게 한다.
      */
-    private static String friendlyApplyError(SQLException e, String sql) {
+    private static String friendlyApplyError(SQLException e, String sql, String sideLabel) {
         String state = sqlState(e);
         String raw = e.getMessage() == null ? "" : e.getMessage().trim();
         String low = sql.toLowerCase(Locale.ROOT);
@@ -110,17 +119,21 @@ public class PgSchemaExtractor {
                     : "DDL 파일 안에 중복 정의된 객체가 있습니다.")
                     + " (원인: " + raw + ")";
         }
-        // Oracle/MySQL 문법을 TO-BE(PostgreSQL)에 넣은 경우.
+        /* Oracle/MySQL 문법인데 PG 파서로 들어온 경우. 대개 DDL 파일이 아니라 **사이트 설정**이
+           틀린 것이다 — 파서는 site 의 AS-IS/TO-BE DB 종류로 정해지므로, 종류를 Oracle 로
+           바꾸면 정규식 파서로 가서 그대로 통과한다. 그 사실을 메시지에 넣는다. */
         if (low.contains("varchar2") || low.contains("nvarchar2") || low.contains("number(")
                 || low.contains(" clob") || low.contains("auto_increment") || low.contains("engine=")) {
-            return "이 DDL 은 PostgreSQL 문법이 아닌 것 같습니다 (Oracle/MySQL?). "
-                    + "TO-BE 는 PostgreSQL DDL 이어야 합니다. (원인: " + raw + ")";
+            return "이 " + sideLabel + " DDL 은 Oracle/MySQL 문법으로 보이는데, 사이트의 "
+                    + sideLabel + " DB 종류가 PostgreSQL 로 설정돼 있어 PostgreSQL 로 파싱했습니다. "
+                    + "사이트 설정에서 " + sideLabel + " DB 종류를 Oracle 로 바꾸거나, DDL 을 "
+                    + "PostgreSQL 문법으로 바꾸세요. (원인: " + raw + ")";
         }
         // 순수 문법 오류.
         if ("42601".equals(state)) {
             return "SQL 문법 오류입니다. 표시된 위치를 확인하세요. (원인: " + raw + ")";
         }
-        return "TO-BE DDL 적용 실패. (원인: " + raw + ")";
+        return sideLabel + " DDL 적용 실패. (원인: " + raw + ")";
     }
 
     /**

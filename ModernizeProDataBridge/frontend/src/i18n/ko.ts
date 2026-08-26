@@ -811,7 +811,7 @@ export const ko = {
   'siteSettings.tobeEnv': 'TO-BE environment',
   'siteSettings.asisEncoding': 'AS-IS encoding',
   'siteSettings.tobeEncoding': 'TO-BE encoding',
-  'siteSettings.encodingHint': '비표준 인코딩(EBCDIC 등)은 Java 전처리로 별도 처리',
+  'siteSettings.encodingHint': '텍스트 전용 EBCDIC(IBM930/939/037)은 내장 Source Reader 가 UTF-8 로 변환. COMP-3 등 바이너리·고정폭·JEF/KEIS 는 미지원',
   'siteSettings.csvPath': 'AS-IS CSV path',
   'siteSettings.asisDbType':            'AS-IS DB type',
   'siteSettings.asisDbTypePlaceholder': '선택',
@@ -887,6 +887,9 @@ export const ko = {
   'encoding.eucjp': 'EUC-JP',
   'encoding.utf8': 'UTF-8',
   'encoding.ebcdic': 'EBCDIC',
+  'encoding.ebcdicIbm930': 'EBCDIC (IBM930 · Katakana-Kanji)',
+  'encoding.ebcdicIbm939': 'EBCDIC (IBM939 · Latin-Kanji)',
+  'encoding.ebcdicIbm037': 'EBCDIC (IBM037 · US/Latin)',
 
   'dashboard.empty.title': 'No mapping targets yet',
   'dashboard.empty.hint': 'TO-BE DDL 을 임포트하면 여기에 테이블 목록과 매핑 상태가 표시됩니다.',

@@ -49,12 +49,46 @@ const ENV_OPTIONS: Array<{ value: SiteEnv; key: TranslationKey }> = [
   { value: 'other',     key: 'siteEnv.other'     },
 ];
 
-const ENCODING_OPTIONS: Array<{ value: SourceEncoding; key: TranslationKey }> = [
+/** AS-IS(소스) 인코딩 — 우리가 읽어들이는 쪽. SourceReader SPI 가 UTF-8 로 변환한다. */
+const ASIS_ENCODING_OPTIONS: Array<{ value: SourceEncoding; key: TranslationKey }> = [
   { value: 'shift_jis', key: 'encoding.shiftjis' },
   { value: 'euc-jp',    key: 'encoding.eucjp'    },
   { value: 'utf-8',     key: 'encoding.utf8'     },
-  { value: 'ebcdic',    key: 'encoding.ebcdic'   },
+  // EBCDIC 은 코드페이지마다 바이트 배치가 달라 잘못 고르면 오류 없이 값이 손상된다.
+  // 모호한 'ebcdic' 대신 변형을 명시하게 한다.
+  //
+  // IBM037(US/Latin)은 백엔드(EbcdicSourceReader)는 계속 지원하지만 선택지에선 뺐다:
+  //   (1) 일본어가 없어 이 제품 대상 시장과 안 맞고,
+  //   (2) 256 바이트가 전부 매핑돼 디코드 오류가 절대 안 난다 = REPORT 안전망이 무력.
+  // 필요해지면 아래 한 줄을 되살리면 된다.
+  { value: 'ebcdic-ibm930', key: 'encoding.ebcdicIbm930' },
+  { value: 'ebcdic-ibm939', key: 'encoding.ebcdicIbm939' },
 ];
+
+/**
+ * TO-BE(타깃) 인코딩 — 우리가 써넣는 쪽. AS-IS 목록과 의도적으로 분리한다.
+ *
+ * EBCDIC 타깃 DB 에 적재하는 일은 없고, 백엔드 `TargetCharset` 도 3 종
+ * (AL32UTF8 / JA16SJIS / JA16EUC) 만 허용해 EBCDIC 을 fail-fast 로 거부한다.
+ * 같은 배열을 재사용하면 고를 수 없는 값이 목록에 뜬다.
+ */
+const TOBE_ENCODING_OPTIONS: Array<{ value: SourceEncoding; key: TranslationKey }> = [
+  { value: 'shift_jis', key: 'encoding.shiftjis' },
+  { value: 'euc-jp',    key: 'encoding.eucjp'    },
+  { value: 'utf-8',     key: 'encoding.utf8'     },
+];
+
+
+/**
+ * 저장된 값이 선택지에 없으면(예: 백엔드만 지원하는 ebcdic-ibm037) 그 항목을 되살려 붙인다.
+ * 안 그러면 select 가 빈 채로 보이고, 사용자가 다른 필드만 고쳐 저장해도 인코딩이 조용히
+ * 바뀌어 다음 run 이 통째로 깨진다.
+ */
+function encodingOptionsFor(current: SourceEncoding) {
+  if (ASIS_ENCODING_OPTIONS.some((o) => o.value === current)) return ASIS_ENCODING_OPTIONS;
+  const key = (`encoding.${current.replace(/-/g, '')}` as TranslationKey);
+  return [...ASIS_ENCODING_OPTIONS, { value: current, key }];
+}
 
 const PROJECT_ENV_LABEL: Record<ProjectEnvironment, TranslationKey> = {
   test:       'projectEnv.test',
@@ -133,7 +167,9 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
     setName(site.name);
     setAsisEnv(site.asisEnv);
     setTobeEnv(site.tobeEnv);
-    setAsisEncoding(site.asisEncoding);
+    // 옛 'ebcdic'(코드페이지 미상)은 드롭다운에 없어 빈 select 가 된다.
+    // 가장 흔한 일본 메인프레임 변형으로 표시해두고, 저장하면 값이 승격된다.
+    setAsisEncoding(site.asisEncoding === 'ebcdic' ? 'ebcdic-ibm930' : site.asisEncoding);
     setTobeEncoding(site.tobeEncoding);
     setCsvPath(site.csvPath ?? '');
     setAsisDbType(site.asisDbType ?? '');
@@ -396,7 +432,7 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
 
       <Field label={t('siteSettings.asisEncoding')}>
         <select value={asisEncoding} onChange={(e) => setAsisEncoding(e.target.value as SourceEncoding)} style={styles.input}>
-          {ENCODING_OPTIONS.map((o) => (
+          {encodingOptionsFor(asisEncoding).map((o) => (
             <option key={o.value} value={o.value}>{t(o.key)}</option>
           ))}
         </select>
@@ -404,7 +440,7 @@ export function SiteSettingsModal({ open, focus, onClose }: Props) {
 
       <Field label={t('siteSettings.tobeEncoding')}>
         <select value={tobeEncoding} onChange={(e) => setTobeEncoding(e.target.value as SourceEncoding)} style={styles.input}>
-          {ENCODING_OPTIONS.map((o) => (
+          {TOBE_ENCODING_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>{t(o.key)}</option>
           ))}
         </select>

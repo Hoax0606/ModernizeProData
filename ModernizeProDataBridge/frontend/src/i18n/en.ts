@@ -807,7 +807,7 @@ export const en: Record<TranslationKey, string> = {
   'siteSettings.tobeEnv': 'TO-BE environment',
   'siteSettings.asisEncoding': 'AS-IS encoding',
   'siteSettings.tobeEncoding': 'TO-BE encoding',
-  'siteSettings.encodingHint': 'Non-standard encodings (EBCDIC etc.) are handled by Java pre-processing.',
+  'siteSettings.encodingHint': 'Text-only EBCDIC (IBM930/939/037) is converted to UTF-8 by the built-in Source Reader. Binary (COMP-3), fixed-width, and JEF/KEIS are not supported.',
   'siteSettings.csvPath': 'AS-IS CSV path',
   'siteSettings.asisDbType':            'AS-IS DB type',
   'siteSettings.asisDbTypePlaceholder': 'Select',
@@ -883,6 +883,9 @@ export const en: Record<TranslationKey, string> = {
   'encoding.eucjp': 'EUC-JP',
   'encoding.utf8': 'UTF-8',
   'encoding.ebcdic': 'EBCDIC',
+  'encoding.ebcdicIbm930': 'EBCDIC (IBM930 · Katakana-Kanji)',
+  'encoding.ebcdicIbm939': 'EBCDIC (IBM939 · Latin-Kanji)',
+  'encoding.ebcdicIbm037': 'EBCDIC (IBM037 · US/Latin)',
 
   'dashboard.empty.title': 'No mapping targets yet',
   'dashboard.empty.hint': 'Import a TO-BE DDL and the table list and mapping status will appear here.',

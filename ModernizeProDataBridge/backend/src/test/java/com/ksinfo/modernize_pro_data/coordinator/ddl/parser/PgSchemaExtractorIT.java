@@ -216,7 +216,20 @@ class PgSchemaExtractorIT {
         String oracleDdl = "CREATE TABLE t (id NUMBER(10) PRIMARY KEY, name VARCHAR2(50));";
         assertThatThrownBy(() -> extractor.extract(oracleDdl.getBytes()))
                 .isInstanceOf(PgSchemaExtractor.TobeDdlApplyException.class)
-                .hasMessageContaining("PostgreSQL DDL 이어야 합니다");
+                .hasMessageContaining("Oracle/MySQL 문법")
+                // 진짜 원인은 DDL 파일이 아니라 사이트의 DB 종류 설정이다 — 그걸 안내해야 한다.
+                .hasMessageContaining("DB 종류");
+    }
+
+    @Test
+    void oracleSyntaxOnAsisSide_errorNamesAsisNotTobe() {
+        /* AS-IS 를 PG 파서로 돌리다 실패했는데 "TO-BE 를 고치라"고 안내하면 엉뚱한 곳을 보게 된다.
+           실제로 이 메시지 때문에 원인 파악이 두 번 지연됐다 — 라벨이 실패한 쪽을 가리키는지 고정. */
+        String oracleDdl = "CREATE TABLE t (id NUMBER(10) PRIMARY KEY, name VARCHAR2(50));";
+        assertThatThrownBy(() -> extractor.extract(oracleDdl.getBytes(), "AS-IS"))
+                .isInstanceOf(PgSchemaExtractor.TobeDdlApplyException.class)
+                .hasMessageContaining("AS-IS")
+                .hasMessageNotContaining("TO-BE");
     }
 
     @Test

@@ -31,12 +31,35 @@ const ENV_OPTIONS: Array<{ value: SiteEnv; key: TranslationKey }> = [
   { value: 'other',     key: 'siteEnv.other'     },
 ];
 
-const ENCODING_OPTIONS: Array<{ value: SourceEncoding; key: TranslationKey }> = [
+/** AS-IS(소스) 인코딩 — 우리가 읽어들이는 쪽. SourceReader SPI 가 UTF-8 로 변환한다. */
+const ASIS_ENCODING_OPTIONS: Array<{ value: SourceEncoding; key: TranslationKey }> = [
   { value: 'shift_jis', key: 'encoding.shiftjis' },
   { value: 'euc-jp',    key: 'encoding.eucjp'    },
   { value: 'utf-8',     key: 'encoding.utf8'     },
-  { value: 'ebcdic',    key: 'encoding.ebcdic'   },
+  // EBCDIC 은 코드페이지마다 바이트 배치가 달라 잘못 고르면 오류 없이 값이 손상된다.
+  // 모호한 'ebcdic' 대신 변형을 명시하게 한다.
+  //
+  // IBM037(US/Latin)은 백엔드(EbcdicSourceReader)는 계속 지원하지만 선택지에선 뺐다:
+  //   (1) 일본어가 없어 이 제품 대상 시장과 안 맞고,
+  //   (2) 256 바이트가 전부 매핑돼 디코드 오류가 절대 안 난다 = REPORT 안전망이 무력.
+  // 필요해지면 아래 한 줄을 되살리면 된다.
+  { value: 'ebcdic-ibm930', key: 'encoding.ebcdicIbm930' },
+  { value: 'ebcdic-ibm939', key: 'encoding.ebcdicIbm939' },
 ];
+
+/**
+ * TO-BE(타깃) 인코딩 — 우리가 써넣는 쪽. AS-IS 목록과 의도적으로 분리한다.
+ *
+ * EBCDIC 타깃 DB 에 적재하는 일은 없고, 백엔드 `TargetCharset` 도 3 종
+ * (AL32UTF8 / JA16SJIS / JA16EUC) 만 허용해 EBCDIC 을 fail-fast 로 거부한다.
+ * 같은 배열을 재사용하면 고를 수 없는 값이 목록에 뜬다.
+ */
+const TOBE_ENCODING_OPTIONS: Array<{ value: SourceEncoding; key: TranslationKey }> = [
+  { value: 'shift_jis', key: 'encoding.shiftjis' },
+  { value: 'euc-jp',    key: 'encoding.eucjp'    },
+  { value: 'utf-8',     key: 'encoding.utf8'     },
+];
+
 
 const PROJECT_ENV_LABEL: Record<ProjectEnvironment, TranslationKey> = {
   test:       'projectEnv.test',
@@ -211,7 +234,7 @@ export function CreateSiteModal({ open, onClose }: Props) {
 
         <Field label={t('siteSettings.asisEncoding')}>
           <select value={asisEncoding} onChange={(e) => setAsisEncoding(e.target.value as SourceEncoding)} style={styles.input}>
-            {ENCODING_OPTIONS.map((o) => (
+            {ASIS_ENCODING_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>{t(o.key)}</option>
             ))}
           </select>
@@ -219,7 +242,7 @@ export function CreateSiteModal({ open, onClose }: Props) {
 
         <Field label={t('siteSettings.tobeEncoding')}>
           <select value={tobeEncoding} onChange={(e) => setTobeEncoding(e.target.value as SourceEncoding)} style={styles.input}>
-            {ENCODING_OPTIONS.map((o) => (
+            {TOBE_ENCODING_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>{t(o.key)}</option>
             ))}
           </select>

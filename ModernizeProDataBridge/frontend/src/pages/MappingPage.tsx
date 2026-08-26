@@ -5115,8 +5115,12 @@ function transformPreview(r: MappingRow, combineHint?: string): string[] {
   if (!r.src || r.src === '—') return [cmt(combineHint ?? '-- combine: enter your own expression (e.g. MAKE_DATE / CONCAT)')];
   if (r.srcType.includes('YYYYMMDD'))                                       return [cmt('-- date parse'), `${kw('TO_DATE')}(${r.src}, ${str("'YYYYMMDD'")})`];
   if (r.srcType.includes('CHAR(14)') && r.tgtType.includes('TIMESTAMP'))    return [cmt('-- timestamp parse'), `${kw('TO_TIMESTAMP')}(${r.src}, ${str("'YYYYMMDDHH24MISS'")})`];
-  if (r.srcType.includes('COMP-3'))                                         return [cmt('-- COMP-3 → NUMERIC'), `${kw('unpack_comp3')}(${r.src})`];
-  if (r.srcType.includes('EBCDIC'))                                         return [cmt('-- iconv'), `${kw('iconv')}(${str("'ebcdic-kanji'")}, ${str("'utf-8'")}, ${r.src})`];
+  // 아래 두 제안은 실제 등록된 UDF/함수여야 한다 — 예전엔 존재하지 않는 unpack_comp3 / iconv 를
+  // 제안해서 그대로 쓰면 Transform 단계에서 "함수 없음" 으로 깨졌다.
+  if (r.srcType.includes('COMP-3'))                                         return [cmt('-- COMP-3 → NUMERIC'), `${kw('CAST')}(${kw('apply_scale')}(${r.src}, 2) ${kw('AS')} ${r.tgtType})`];
+  // EBCDIC → UTF-8 은 site.asisEncoding 을 보고 extract 단계에서 이미 끝난다 (SourceReader SPI).
+  // 컬럼별로 다시 변환할 일은 없고, 남는 실제 문제는 EBCDIC 익스포트의 0x40 공백 패딩이다.
+  if (r.srcType.includes('EBCDIC'))                                         return [cmt('-- EBCDIC 는 extract 에서 UTF-8 변환 완료 · 남은 건 패딩 제거'), `${kw('TRIM')}(${r.src})`];
   if (r.rule === 'rule')                                                    return [cmt('-- cast'), `${kw('CAST')}(${r.src} ${kw('AS')} ${r.tgtType})`];
   return [cmt('-- direct pass-through'), `${r.src} ${kw('AS')} ${r.tgt}`];
 }

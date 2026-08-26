@@ -8,7 +8,8 @@ import java.nio.file.Path;
  *
  * <p>파이프라인 자체는 "입력은 UTF-8" 을 전제로 동작하고, 비-UTF-8(Shift_JIS 등) → UTF-8 변환은
  * 이 SPI 구현체 안에서 처리한다. 기본 구현({@code Utf8PassthroughSourceReader})은 no-op(원본 그대로).
- * 나중에 EBCDIC 등 다른 인코딩이 필요하면 구현체를 하나 추가하면 되고, 파이프라인은 불변.
+ * 구현체를 하나 추가하면 파이프라인은 불변인 채로 인코딩이 늘어난다 — Shift_JIS / EUC-JP 에
+ * 이어 EBCDIC(IBM930 · IBM939 · IBM037, 텍스트 전용)이 같은 방식으로 붙었다.
  */
 public interface SourceReader {
 
@@ -34,6 +35,21 @@ public interface SourceReader {
     default Path toUtf8Preview(Path source, String declaredEncoding, Path workDir, long maxSourceBytes)
             throws IOException {
         return toUtf8(source, declaredEncoding, workDir);
+    }
+
+    /**
+     * 이 인코딩의 <b>원본 파일</b>에서 레코드를 나누는 바이트들.
+     *
+     * <p>행 수 카운트는 변환 없이 원본을 바이트 스캔하는 경로라(대용량 파일을 카운트마다 통째
+     * 변환할 수 없다) 어떤 바이트가 개행인지 알아야 한다. Shift_JIS/EUC-JP/UTF-8 은 멀티바이트
+     * 안에 bare {@code 0x0A} 가 나오지 않아 기본값으로 충분하지만, EBCDIC 은 {@code 0x0A} 가
+     * 아예 없고 NL {@code 0x15} / LF {@code 0x25} 를 쓴다 → override 필요.
+     *
+     * <p>여러 개를 반환하면 호출측이 <b>각각 세어 최댓값</b>을 취한다(합산하면 두 종류가 섞인
+     * 파일에서 중복 계산).
+     */
+    default byte[] sourceLineTerminators() {
+        return new byte[]{'\n'};
     }
 }
 
