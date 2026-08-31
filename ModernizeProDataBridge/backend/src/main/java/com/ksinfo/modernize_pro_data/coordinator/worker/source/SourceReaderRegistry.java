@@ -49,4 +49,17 @@ public class SourceReaderRegistry {
         }
         return source;
     }
+
+    /**
+     * 이 인코딩의 원본 파일에서 레코드를 나누는 바이트들 (행 수 카운트용).
+     * 지원 reader 가 없으면 ASCII 개행. 상세는 {@link SourceReader#sourceLineTerminators()}.
+     */
+    public byte[] lineTerminators(String encoding) {
+        for (SourceReader r : readers) {
+            if (r.supports(encoding)) {
+                return r.sourceLineTerminators();
+            }
+        }
+        return new byte[]{'\n'};
+    }
 }

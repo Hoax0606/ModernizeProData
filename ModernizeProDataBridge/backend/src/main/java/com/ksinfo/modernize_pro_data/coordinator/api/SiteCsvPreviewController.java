@@ -163,7 +163,7 @@ public class SiteCsvPreviewController {
             throw new ApiException("CSV_FILE_NOT_FOUND", "CSV 파일을 찾을 수 없음: " + tableName + ".csv", HttpStatus.NOT_FOUND);
         }
         // mtime+size 캐시 공유 line count (header 제외). 1.4GB 도 byte-stream 으로 ~10-15초.
-        return ApiResponse.ok(new CsvRowCount(tableName, countDataRowsCached(csvFile)));
+        return ApiResponse.ok(new CsvRowCount(tableName, countDataRowsCached(csvFile, site.getAsisEncoding())));
     }
 
     /** Site Overview 'Rows' KPI 용 — csvPath 내 모든 CSV 의 data row 수 합 (AS-IS 기준). */
@@ -196,7 +196,7 @@ public class SiteCsvPreviewController {
                     .filter(p -> p.getFileName().toString().toLowerCase().endsWith(".csv"))
                     .toList();
             for (Path f : csvFiles) {
-                total += countDataRowsCached(f);
+                total += countDataRowsCached(f, site.getAsisEncoding());
                 files++;
             }
         } catch (IOException e) {
@@ -206,9 +206,18 @@ public class SiteCsvPreviewController {
         return ApiResponse.ok(new SiteCsvRowTotal(total, files));
     }
 
+    /**
+     * 캐시 키 — 경로 + AS-IS 인코딩. 인코딩이 키에 들어가는 이유: 두 사이트가 같은 csvPath 를
+     * 공유할 수 있고, 개행 바이트가 인코딩마다 달라 같은 파일이라도 결과가 달라진다.
+     * <b>키 생성은 여기 한 곳에서만</b> — 다른 곳에서 만들면 같은 파일을 두 번 스캔한다.
+     */
+    private static String rowCountCacheKey(Path csvFile, String asisEncoding) {
+        return csvFile.toString() + "|" + (asisEncoding == null ? "" : asisEncoding.trim().toUpperCase());
+    }
+
     /** per-table rowCount endpoint 와 동일한 mtime+size 캐시를 공유하는 line count. */
-    private long countDataRowsCached(Path csvFile) {
-        String cacheKey = csvFile.toString();
+    private long countDataRowsCached(Path csvFile, String asisEncoding) {
+        String cacheKey = rowCountCacheKey(csvFile, asisEncoding);
         long fMtime, fSize;
         try {
             fMtime = Files.getLastModifiedTime(csvFile).toMillis();
@@ -236,7 +245,7 @@ public class SiteCsvPreviewController {
                 mine.complete(v);
                 return v;
             }
-            long v = scanDataRows(csvFile, fMtime, fSize, cacheKey);
+            long v = scanDataRows(csvFile, fMtime, fSize, cacheKey, asisEncoding);
             mine.complete(v);
             return v;
         } catch (Throwable t) {
@@ -251,24 +260,51 @@ public class SiteCsvPreviewController {
         return e != null && e.mtime() == mtime && e.size() == size;
     }
 
-    /** 실제 byte-stream line count + 캐시 적재. */
-    private long scanDataRows(Path csvFile, long fMtime, long fSize, String cacheKey) {
+    /**
+     * 실제 byte-stream line count + 캐시 적재.
+     *
+     * <p>원본을 변환 없이 스캔한다(대용량 파일을 카운트마다 통째 변환할 수 없다). 그래서 어떤
+     * 바이트가 개행인지 인코딩별로 알아야 하고, 그 지식은 {@code SourceReader} SPI 가 갖는다
+     * ({@link com.ksinfo.modernize_pro_data.coordinator.worker.source.SourceReader#sourceLineTerminators()}).
+     * EBCDIC 은 ASCII {@code 0x0A} 가 아예 없어 {@code 0x15}/{@code 0x25} 를 세야 한다.
+     */
+    private long scanDataRows(Path csvFile, long fMtime, long fSize, String cacheKey, String asisEncoding) {
+        byte[] terminators = sourceReaderRegistry.lineTerminators(asisEncoding);
+        boolean asciiNewline = terminators.length == 1 && terminators[0] == '\n';
         long lines = 0;
-        try (Stream<String> stream = Files.lines(csvFile, java.nio.charset.StandardCharsets.UTF_8)) {
-            lines = stream.count();
-        } catch (IOException | java.io.UncheckedIOException e) {
-            try (java.io.InputStream is = Files.newInputStream(csvFile);
-                 java.io.BufferedInputStream bis = new java.io.BufferedInputStream(is, 1 << 20)) {
-                byte[] buf = new byte[1 << 16];
-                int n;
-                while ((n = bis.read(buf)) > 0) {
-                    for (int i = 0; i < n; i++) if (buf[i] == '\n') lines++;
-                }
-            } catch (IOException ex) {
-                log.warn("CSV row count failed: {}", csvFile, ex);
-                return 0;
+
+        // ASCII 개행일 때만 문자 스트림 경로 — 비-ASCII 개행이면 UTF-8 디코드가 애초에 무의미하다.
+        if (asciiNewline) {
+            try (Stream<String> stream = Files.lines(csvFile, java.nio.charset.StandardCharsets.UTF_8)) {
+                lines = stream.count();
+                long ascii = Math.max(0, lines - 1);
+                ROW_COUNT_CACHE.put(cacheKey, new RowCountCacheEntry(fMtime, fSize, ascii));
+                return ascii;
+            } catch (IOException | java.io.UncheckedIOException e) {
+                lines = 0;   // byte-scan fallback 으로
             }
         }
+
+        /* terminator 별로 따로 세고 최댓값을 취한다 — 합산하면 두 종류가 섞인 파일에서
+           같은 행을 두 번 센다. */
+        long[] counts = new long[terminators.length];
+        try (java.io.InputStream is = Files.newInputStream(csvFile);
+             java.io.BufferedInputStream bis = new java.io.BufferedInputStream(is, 1 << 20)) {
+            byte[] buf = new byte[1 << 16];
+            int n;
+            while ((n = bis.read(buf)) > 0) {
+                for (int i = 0; i < n; i++) {
+                    for (int t = 0; t < terminators.length; t++) {
+                        if (buf[i] == terminators[t]) counts[t]++;
+                    }
+                }
+            }
+        } catch (IOException ex) {
+            log.warn("CSV row count failed: {}", csvFile, ex);
+            return 0;
+        }
+        for (long c : counts) lines = Math.max(lines, c);
+
         long rowCount = Math.max(0, lines - 1);
         ROW_COUNT_CACHE.put(cacheKey, new RowCountCacheEntry(fMtime, fSize, rowCount));
         return rowCount;

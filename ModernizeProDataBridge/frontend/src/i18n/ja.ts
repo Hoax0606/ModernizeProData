@@ -813,7 +813,7 @@ export const ja: Record<TranslationKey, string> = {
   'siteSettings.tobeEnv': 'TO-BE environment',
   'siteSettings.asisEncoding': 'AS-IS encoding',
   'siteSettings.tobeEncoding': 'TO-BE encoding',
-  'siteSettings.encodingHint': '非標準エンコーディング(EBCDIC 等)は Java 前処理で別途対応',
+  'siteSettings.encodingHint': 'テキスト専用 EBCDIC(IBM930/939/037)は内蔵 Source Reader が UTF-8 に変換。COMP-3 等のバイナリ・固定長・JEF/KEIS は未対応',
   'siteSettings.csvPath': 'AS-IS CSV path',
   'siteSettings.asisDbType':            'AS-IS DB type',
   'siteSettings.asisDbTypePlaceholder': '選択',
@@ -889,6 +889,9 @@ export const ja: Record<TranslationKey, string> = {
   'encoding.eucjp': 'EUC-JP',
   'encoding.utf8': 'UTF-8',
   'encoding.ebcdic': 'EBCDIC',
+  'encoding.ebcdicIbm930': 'EBCDIC (IBM930 · Katakana-Kanji)',
+  'encoding.ebcdicIbm939': 'EBCDIC (IBM939 · Latin-Kanji)',
+  'encoding.ebcdicIbm037': 'EBCDIC (IBM037 · US/Latin)',
 
   'dashboard.empty.title': 'No mapping targets yet',
   'dashboard.empty.hint': 'TO-BE DDL をインポートすると、テーブル一覧とマッピング状態がここに表示されます。',

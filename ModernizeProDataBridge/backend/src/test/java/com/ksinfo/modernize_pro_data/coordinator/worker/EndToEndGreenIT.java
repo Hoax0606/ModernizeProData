@@ -284,6 +284,48 @@ class EndToEndGreenIT {
         assertNoValidationFail(runId, "accounts_sj");
     }
 
+    @Test
+    void scenario_ebcdic_input_decodedToUtf8(@TempDir Path csvDir, @TempDir Path outDir) throws Exception {
+        /* CSV 를 EBCDIC(x-IBM930) 로 인코딩 + site.asisEncoding=ebcdic-ibm930 → ExtractStage 의
+           SourceReader SPI 가 UTF-8 로 변환한 뒤 파이프라인 진행.
+           EBCDIC 은 ASCII 0x0A 가 없고 NL 0x15 를 쓴다 — charset 이 LF 로 매핑해줘서
+           read_csv 가 행을 정상 분리하는지까지 확인하는 것이 이 시나리오의 핵심. */
+        String csv = "ACCOUNT_ID,OWNER\n1,田中太郎\n2,東京\n";
+        byte[] ebcdic = csv.getBytes(Charset.forName("x-IBM930"));
+        assertThat(ebcdic).as("EBCDIC 원본에 ASCII 개행이 없어야 시나리오가 의미 있음")
+                .doesNotContain((byte) '\n');
+        Files.write(csvDir.resolve("ACCOUNTS.csv"), ebcdic);
+
+        Project project = newProject(csvDir, "e2e-ebcdic", "ebcdic-ibm930");
+        String pid = project.getId();
+        ddlImport.importDdl(pid, "asis", "asis.sql",
+                ("CREATE TABLE ACCOUNTS (ACCOUNT_ID NUMBER(10) NOT NULL, OWNER VARCHAR2(50));\n")
+                        .getBytes(StandardCharsets.UTF_8), "test");
+        ddlImport.importDdl(pid, "tobe", "tobe.sql",
+                ("CREATE TABLE accounts_eb (account_id BIGINT PRIMARY KEY, owner VARCHAR(50));\n")
+                        .getBytes(StandardCharsets.UTF_8), "test");
+        String columnCsv =
+                "asis_table,asis_column,asis_type,tobe_table,tobe_column,tobe_type,code_domain,default_value,transform_sql,notes\n" +
+                "ACCOUNTS,ACCOUNT_ID,NUMBER(10),accounts_eb,account_id,BIGINT,,,,\n" +
+                "ACCOUNTS,OWNER,VARCHAR2(50),accounts_eb,owner,\"VARCHAR(50)\",,,,\n";
+        importMapping(pid, columnCsv);
+
+        String runId = driveRun(project, outDir);
+        assertStagesGreen(runId);
+
+        try (Connection c = pgConn(); Statement st = c.createStatement()) {
+            assertRowCount(st, "accounts_eb", 2);
+            try (ResultSet rs = st.executeQuery(
+                    "SELECT account_id, owner FROM accounts_eb ORDER BY account_id")) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getString("owner")).isEqualTo("田中太郎");   // DBCS (SO/SI) 보존
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getString("owner")).isEqualTo("東京");
+            }
+        }
+        assertNoValidationFail(runId, "accounts_eb");
+    }
+
     // ────────────────────────── 헬퍼 ──────────────────────────
 
     private Project newProject(Path csvDir, String name) {

@@ -16,7 +16,11 @@ export type ProjectPhase =
 export type RunStatus = 'idle' | 'running' | 'paused' | 'completed' | 'failed' | 'aborted';
 
 export type SiteEnv = 'mainframe' | 'midrange' | 'cloud' | 'on-prem' | 'other';
-export type SourceEncoding = 'shift_jis' | 'euc-jp' | 'utf-8' | 'ebcdic';
+// 'ebcdic' 는 코드페이지가 모호해 신규 선택지에서 뺐지만, 기존에 저장된 값이 있어 타입에는 남긴다
+// (SiteSettingsModal 이 표시할 때 ebcdic-ibm930 으로 정규화 → 다음 저장 시 자동 업그레이드).
+export type SourceEncoding =
+  | 'shift_jis' | 'euc-jp' | 'utf-8'
+  | 'ebcdic' | 'ebcdic-ibm930' | 'ebcdic-ibm939' | 'ebcdic-ibm037';
 export type ProjectEnvironment = 'test' | 'dev' | 'staging' | 'production';
 
 export const PROJECT_ENVIRONMENTS: ProjectEnvironment[] = ['dev', 'test', 'staging', 'production'];

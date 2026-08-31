@@ -447,7 +447,10 @@ sockjs-client + stompjs          WebSocket (STOMP)
 - 운영팀이 AS-IS 시스템에서 추출한 데이터를 폐쇄망 안 디스크 (Worker 디스크 또는 공유 폴더) 에 둠. 도구는 운영 DB 직접 접속 안 함.
 - **Source Reader SPI** 로 입력 형식 추상화 — 자세한 구현은 ONBOARDING § 7 참조:
   - CSV — DuckDB `read_csv` 로 그 자리에서 쿼리. Shift-JIS / EUC-JP / UTF-8 은 `encodings` extension.
-  - EBCDIC (IBM037 / IBM930 / JEF / KEIS) — 직접 COMP-3 unpack.
+  - EBCDIC — **텍스트 전용**으로 IBM037 / IBM930 / IBM939 지원 (`EbcdicSourceReader`).
+    **JEF(후지쯔) / KEIS(히타치) 는 JDK 에 Charset 이 없어 미지원** — 외부 변환툴 필요.
+    COMP-3 등 바이너리 필드는 추출 단계에서 hex 문자열로 풀려 오는 계약이며 UDF(`apply_scale` 등)가 처리한다.
+    주의: IBM037 은 256 바이트가 전부 매핑돼 디코드 오류가 나지 않는다 = 코드페이지 오선택 시 안전망 없음.
   - FixedWidth — column offset 기반 파싱.
 - Site 의 `asisDbType` / `asisDbVersion` 으로 어느 운영 DB 에서 나온 CSV 인지 메타정보 표시.
 
@@ -458,7 +461,8 @@ sockjs-client + stompjs          WebSocket (STOMP)
 | 케이스 | 처리 |
 |---|---|
 | 표준 텍스트 인코딩 (UTF-8/SJIS/EUC-JP 등) | 생략 — DuckDB 가 `encodings` extension 으로 직접 처리 |
-| 비표준 인코딩 (EBCDIC variant — IBM037/IBM930/JEF/KEIS) | Java Charset 으로 변환 |
+| 비표준 인코딩 (EBCDIC — IBM037/IBM930/IBM939) | Java Charset 으로 변환 (`EbcdicSourceReader`, 텍스트 전용) |
+| EBCDIC JEF / KEIS | **미지원** — JDK Charset 부재. 외부 변환툴 |
 | Binary 필드 (COMP/PACKED/ZONED) | Java parser 로 numeric 변환 |
 
 #### 5.3.3 변환 (DuckDB SQL + Rule Engine)
